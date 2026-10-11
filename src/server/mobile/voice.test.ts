@@ -5,8 +5,9 @@ import { authorizeNativeOffer, nativeVoiceDeps, requireNativeLease, requireNativ
 import { disconnectDevice, touchDevice } from "@/server/telephony/operator-devices";
 import { TelnyxCommandError } from "@/server/telephony/telnyx/client";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
-import { callColleague, createRateLimiter } from "@/server/telephony/call-actions";
+import { callColleague, createRateLimiter, hangupCall } from "@/server/telephony/call-actions";
 import { toEligibilityDevices } from "@/server/telephony/routing/ring-plan";
+import { loadActiveCalls, readActiveCallRows } from "@/server/telephony/active-calls";
 
 const mocks = vi.hoisted(() => ({ deps: vi.fn() }));
 vi.mock("@/server/telephony/runtime", () => ({ createTelephonyDeps: mocks.deps }));
@@ -61,6 +62,64 @@ describe("native voice boundaries", () => {
     await expect(authorizeNativeOffer(deps, actor, offer)).rejects.toMatchObject({ status: 409 });
     h.setPresence(actor.profileId, { offer_token: "old-reservation" }); expect(await authorizeNativeOffer(deps, actor, offer)).toMatchObject({ sessionId });
   });
+  it("permits a bounded retry when an SDK invite precedes the persisted dial response", async () => {
+    const { deps, h, offer } = fixture(); const leg = h.rows("motorist_call_legs")[0];
+    h.db.delete("motorist_call_legs", () => true);
+    await expect(authorizeNativeOffer(deps, actor, offer)).rejects.toMatchObject({ status: 409, code: "native_offer_pending" });
+    h.db.seed("motorist_call_legs", [leg]);
+    h.db.update("motorist_call_sessions", { direction: "outbound", answered_by_profile_id: actor.profileId }, () => true);
+    expect(await authorizeNativeOffer(deps, actor, offer)).toMatchObject({ sessionId, callControlId: "exact-native-leg" });
+  });
+  it.each(["error", "unregistered"])("allows the current owner to recover from %s without reviving a revoked lease", async registration_state => {
+    const { deps, h } = fixture(); h.db.update("motorist_operator_mobile_devices", { registration_state }, () => true);
+    await expect(requireNativeLease(deps, actor, lease)).rejects.toMatchObject({ status: 409 });
+    expect(await requireNativeLease(deps, actor, lease, { heartbeat: true })).toMatchObject({ device_session_id: lease });
+    await expect(requireNativeLease(deps, actor, sessionId, { heartbeat: true })).rejects.toMatchObject({ status: 409 });
+    h.db.update("motorist_operator_mobile_devices", { device_session_id: "revoked:old", metadata: { native_revocation_session_id: lease } }, () => true);
+    await expect(requireNativeLease(deps, actor, lease, { heartbeat: true })).rejects.toMatchObject({ status: 409 });
+  });
+  it("denies controlling a browser-only call even when the mobile actor owns the session", async () => {
+    const { deps, h } = fixture();
+    h.db.update("motorist_call_sessions", { direction: "outbound", answered_by_profile_id: actor.profileId }, () => true);
+    h.db.update("motorist_call_legs", { to_number: "sip:web-test@sip.telnyx.com" }, () => true);
+    await expect(requireNativeSession(deps, actor, sessionId)).rejects.toMatchObject({ status: 403 });
+    await expect(requireNativeSession(deps, actor, sessionId, { readOffer: true })).rejects.toMatchObject({ status: 403 });
+  });
+  it.each(["inbound", "internal"])("ends the losing %s mobile offer when this operator answers on web", async direction => {
+    const { deps, h, offer } = fixture();
+    h.db.update("motorist_call_sessions", { direction, state: "talking", answered_by_profile_id: actor.profileId,
+      answered_at: h.now().toISOString(), metadata: { environment: "development", accepted_device_legs: { [actor.profileId]: "browser-winner" } } }, () => true);
+    h.db.update("motorist_call_legs", { answered_at: h.now().toISOString() }, () => true);
+    await expect(requireNativeSession(deps, actor, sessionId)).rejects.toMatchObject({ status: 403 });
+    expect(await requireNativeSession(deps, actor, sessionId, { readOffer: true })).toMatchObject({ nativeConnected: false, nativeEnded: true });
+    await expect(authorizeNativeOffer(deps, actor, offer)).rejects.toMatchObject({ status: 409 });
+  });
+  it("authorizes the mobile caller before answer and the winning mobile leg after answer", async () => {
+    const { deps, h } = fixture();
+    h.db.update("motorist_call_sessions", { direction: "outbound", answered_by_profile_id: actor.profileId }, () => true);
+    expect(await requireNativeSession(deps, actor, sessionId)).toMatchObject({ nativeConnected: false, nativeEnded: false });
+    h.db.update("motorist_call_sessions", { direction: "inbound", state: "talking", answered_at: h.now().toISOString(),
+      metadata: { environment: "development", answered_leg_call_control_id: "exact-native-leg" } }, () => true);
+    h.db.update("motorist_call_legs", { answered_at: h.now().toISOString() }, () => true);
+    expect(await requireNativeSession(deps, actor, sessionId)).toMatchObject({ nativeConnected: true, nativeEnded: false });
+    h.db.update("motorist_call_legs", { ended_at: h.now().toISOString() }, () => true);
+    expect(await requireNativeSession(deps, actor, sessionId, { readOffer: true })).toMatchObject({ nativeConnected: false, nativeEnded: true });
+    // The exact winner retains cleanup authority while the customer leg ends.
+    expect(await requireNativeSession(deps, actor, sessionId)).toMatchObject({ nativeEnded: true });
+  });
+  it("lets the mobile caller clean up after its leg ends before session finalization", async () => {
+    const { deps, h } = fixture();
+    h.db.update("motorist_call_sessions", { direction: "outbound", answered_by_profile_id: actor.profileId, termination_requested_at: h.now().toISOString() }, () => true);
+    h.db.update("motorist_call_legs", { ended_at: h.now().toISOString() }, () => true);
+    expect(await requireNativeSession(deps, actor, sessionId)).toMatchObject({ nativeConnected: false, nativeEnded: true });
+  });
+  it("lets the exact native callee end an internal call without owning the caller profile", async () => {
+    const { deps, h } = fixture();
+    h.db.update("motorist_call_sessions", { direction: "internal", answered_by_profile_id: PROFILES.o2,
+      metadata: { environment: "development", internal: { target_profile_id: actor.profileId }, accepted_device_legs: { [actor.profileId]: "exact-native-leg" } } }, () => true);
+    h.db.update("motorist_call_legs", { answered_at: h.now().toISOString() }, () => true);
+    expect(await requireNativeSession(deps, actor, sessionId)).toMatchObject({ nativeConnected: true });
+  });
   it("does not grant whole-session hangup to a losing offer, even to a manager", async () => {
     const { deps, h } = fixture(); h.db.update("motorist_call_sessions", { answered_by_profile_id: PROFILES.o2 }, () => true);
     await expect(requireNativeSession(deps, { ...actor, role: "manager" }, sessionId)).rejects.toMatchObject({ status: 403 });
@@ -102,5 +161,39 @@ describe("native voice boundaries", () => {
       { targetProfileId: actor.profileId, requestId: legId });
     expect(h.session(result.sessionId).called_number).toBe("sip:native-test@sip.telnyx.com");
     expect((h.session(result.sessionId).metadata as { internal: { target_sip: string } }).internal.target_sip).toBe("sip:native-test@sip.telnyx.com");
+  });
+  it("allows the ordinary native callee to finish internal-call cleanup after its leg ends", async () => {
+    const { deps, h } = fixture();
+    const result = await callColleague({ ...h.deps, rateLimiter: createRateLimiter() }, { profileId: PROFILES.o2, role: "dispatcher", displayName: "Web tester" },
+      { targetProfileId: actor.profileId, requestId: legId });
+    await h.legEvent(result.operatorLegCallControlId, "call.answered");
+    const callee = h.legs(result.sessionId).find(leg => leg.profile_id === actor.profileId)!;
+    await h.legEvent(String(callee.telnyx_call_control_id), "call.answered");
+    h.db.update("motorist_call_legs", { ended_at: h.now().toISOString(), state: "ended" }, row => row.id === callee.id);
+    expect(await requireNativeSession(deps, actor, result.sessionId)).toMatchObject({ nativeEnded: true });
+    await expect(hangupCall({ ...h.deps, deviceKind: "web" }, actor, result.sessionId)).rejects.toMatchObject({ status: 403 });
+    const ended = await hangupCall({ ...h.deps, deviceKind: "mobile" }, actor, result.sessionId);
+    expect(ended.state).toBe("wrap_up");
+    expect(h.telnyx.of("hangup").at(-1)?.params.callControlId).toBe(result.operatorLegCallControlId);
+  });
+  it.each([false, true])("shows a background native colleague as callable in the web presence snapshot (RPC: %s)", async rpc => {
+    const { deps, h } = fixture();
+    await touchDevice(deps, { organizationId: ORG, profileId: actor.profileId, deviceSessionId: lease, registrationState: "registered", nativeVoipRegistered: true });
+    h.advance(180_000);
+    const snapshotDeps = { ...h.deps, configured: true };
+    if (rpc) {
+      const rows = await readActiveCallRows(snapshotDeps);
+      const payload = JSON.parse(JSON.stringify({ ...rows, mobileDevices: undefined, callRows: [] }));
+      vi.spyOn(h.admin, "rpc").mockReturnValue({ abortSignal: () => Promise.resolve({ data: payload, error: null }) } as unknown as ReturnType<typeof h.admin.rpc>);
+      vi.stubEnv("TELEPHONY_ACTIVE_SNAPSHOT_V1_ENABLED", "true");
+    }
+    const viewer = { profileId: PROFILES.o2, canManageAssignments: false };
+    const snapshot = await loadActiveCalls(snapshotDeps, viewer);
+    expect(snapshot.presence.devices.filter(device => device.profileId === actor.profileId)).toEqual([
+      expect.objectContaining({ registered: true }),
+    ]);
+    vi.stubEnv("MOTORIST_NATIVE_VOICE_TEST_ENABLED", "false");
+    expect((await loadActiveCalls(snapshotDeps, viewer)).presence.devices.find(device => device.profileId === actor.profileId)?.registered).toBe(false);
+    expect(h.telnyx.calls).toHaveLength(0);
   });
 });

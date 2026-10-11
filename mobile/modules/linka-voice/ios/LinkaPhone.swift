@@ -11,29 +11,39 @@ private struct PhoneError: LocalizedError {
 /** Single native owner of signaling and audio. Credentials/push payloads stay
  * in memory. Every answer waits for the authenticated backend's exact offer.
  * No client-originated external dial exists; the server calls our operator leg. */
-final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, TxClientDelegate {
+final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   static let shared = LinkaPhone()
   static var enabled: Bool {
     Bundle.main.bundleIdentifier == "sk.linkapomoci.dispecing.test"
       && Bundle.main.object(forInfoDictionaryKey: "LinkaNativeVoiceEnabled") as? Bool == true
   }
-  var listener: (([String: Any]) -> Void)?
+  private var listener: (([String: Any]) -> Void)?
+  private var listenerOwner: UUID?
+  func listen(owner: UUID, callback: @escaping ([String: Any]) -> Void) { listenerOwner = owner; listener = callback }
+  func stopListening(owner: UUID) {
+    guard listenerOwner == owner else { return }
+    listenerOwner = nil; listener = nil
+  }
   private var provider: CXProvider?
   private let controller = CXCallController()
   private var registry: PKPushRegistry?
   private var client: TxClient?
-  private var config: TxConfig?
+  private var clientDelegate: ClientDelegate?
   private var pushToken: String?
+  private var registeredPushToken: String?
+  private var connectingPushToken: String?
   private var ready = false
   private var audioActive = false
   private var calls = [UUID: Call]()
   private var pushes = [UUID: [String: Any]]()
   private var sessions = [UUID: String]()
+  private var controls = [UUID: String]()
   private var reported = Set<UUID>()
   private var timers = [UUID: Timer]()
   private var pendingAnswers = [UUID: CXAnswerCallAction]()
   private var expected: (controlId: String, sessionId: String, number: String)?
   private var outbound = Set<UUID>()
+  private var connectedOutbound = Set<UUID>()
   private var outgoingTimer: Timer?
   private var finishedCalls = [UUID]()
   private var preparedPush: UUID?
@@ -63,37 +73,69 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
     let options = TxConfig(token: token, pushDeviceToken: pushToken,
       pushEnvironment: .production, logLevel: .none, reconnectClient: false,
       debug: false, enableCallReports: false)
-    config = options
     UserDefaults.standard.set(true, forKey: "linka.voice.enabled")
     if let pending = pushes.first {
-      if client == nil { client = TxClient(); client?.delegate = self }
-      if preparedPush != pending.key {
+      if preparedPush != pending.key && calls[pending.key] == nil {
+        ready = false; connectingPushToken = pushToken
+        replaceClient()
         try client?.processVoIPNotification(txConfig: options, serverConfiguration: TxServerConfiguration(), pushMetaData: pending.value)
         preparedPush = pending.key
       }
+      answerWhenAuthorized(pending.key)
       emit(["type": "push", "callId": pending.key.uuidString, "providerLegId": pending.value["telnyx_leg_id"] as? String ?? ""])
     } else if calls.isEmpty {
-      ready = false
-      client?.delegate = nil
-      client?.disconnect()
-      client = TxClient(); client?.delegate = self
+      ready = false; connectingPushToken = pushToken
+      replaceClient()
       try client?.connect(txConfig: options)
     }
+  }
+
+  private func replaceClient() {
+    clientDelegate = nil
+    client?.delegate = nil
+    client?.disconnect()
+    let next = TxClient()
+    let delegate = ClientDelegate(owner: self)
+    clientDelegate = delegate; next.delegate = delegate; client = next
+  }
+
+  // SDK callbacks may already be queued when an account disconnects or a
+  // connection is replaced. Only the current client's callbacks may reach UI.
+  private final class ClientDelegate: NSObject, TxClientDelegate {
+    weak var owner: LinkaPhone?
+    init(owner: LinkaPhone) { self.owner = owner; super.init() }
+    private func deliver(_ body: @escaping (LinkaPhone) -> Void) {
+      DispatchQueue.main.async { [weak self] in
+        guard let self, let owner = self.owner, owner.clientDelegate === self else { return }
+        body(owner)
+      }
+    }
+    func onClientReady() { deliver { $0.onClientReady() } }
+    func onSocketConnected() {}
+    func onSocketDisconnected() { deliver { $0.onSocketDisconnected() } }
+    func onClientError(error: Error) { deliver { $0.onClientError(error: error) } }
+    func onPushDisabled(success: Bool, message: String) {}
+    func onSessionUpdated(sessionId: String) {}
+    func onIncomingCall(call: Call) { deliver { $0.onIncomingCall(call: call) } }
+    func onPushCall(call: Call) { deliver { $0.onIncomingCall(call: call) } }
+    func onRemoteCallEnded(callId: UUID, reason: CallTerminationReason?) { deliver { $0.onRemoteCallEnded(callId: callId, reason: reason) } }
+    func onCallStateUpdated(callState: CallState, callId: UUID) { deliver { $0.onCallStateUpdated(callState: callState, callId: callId) } }
   }
 
   func disconnect() {
     UserDefaults.standard.set(false, forKey: "linka.voice.enabled")
     client?.disablePushNotifications()
+    clientDelegate = nil
     client?.delegate = nil
     client?.disconnect()
-    client = nil; config = nil; ready = false; expected = nil; outgoingTimer?.invalidate(); outgoingTimer = nil
+    client = nil; ready = false; registeredPushToken = nil; connectingPushToken = nil; expected = nil; outgoingTimer?.invalidate(); outgoingTimer = nil
     for id in Set(reported).union(calls.keys).union(pushes.keys) { finish(id, reason: .failed) }
     calls.removeAll(); pushes.removeAll(); sessions.removeAll(); preparedPush = nil; audioActive = false
     emit(["type": "registration", "state": "unregistered"])
   }
 
   func snapshot() -> [String: Any] {
-    ["ready": ready, "audioActive": audioActive, "pushRegistered": pushToken != nil && ready,
+    ["ready": ready, "audioActive": audioActive, "pushRegistered": pushToken != nil && pushToken == registeredPushToken && ready,
      "wasEnabled": UserDefaults.standard.bool(forKey: "linka.voice.enabled"), "calls": calls.compactMap { id, call -> [String: Any]? in
        guard let session = sessions[id] else { return nil }
        return ["type": "restored", "callId": id.uuidString, "sessionId": session, "number": call.callInfo?.callerNumber ?? "",
@@ -103,11 +145,11 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
     }]
   }
 
-  func authorize(callId: String, sessionId: String) throws {
-    guard let id = UUID(uuidString: callId), UUID(uuidString: sessionId) != nil,
-      calls[id] != nil || pushes[id] != nil else { throw PhoneError() }
-    sessions[id] = sessionId
-    if let action = pendingAnswers.removeValue(forKey: id) { client?.answerFromCallkit(answerAction: action) }
+  func authorize(callId: String, sessionId: String, controlId: String) throws {
+    guard let id = UUID(uuidString: callId), UUID(uuidString: sessionId) != nil, !controlId.isEmpty,
+      !finishedCalls.contains(id), calls[id] != nil || pushes[id] != nil else { throw PhoneError() }
+    sessions[id] = sessionId; controls[id] = controlId
+    answerWhenAuthorized(id)
     if let call = calls[id] { handleAuthorized(call, id: id) }
   }
 
@@ -121,16 +163,17 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
       self.emit(["type": "outgoingFailed", "sessionId": sessionId])
     }
     // The SIP invite can precede the HTTP response. Match only this returned leg.
-    for (id, call) in calls where call.telnyxCallControlId == controlId {
+    for (id, call) in calls where controls[id] == controlId {
       sessions[id] = sessionId
       handleAuthorized(call, id: id)
     }
   }
 
   private func handleAuthorized(_ call: Call, id: UUID) {
-    if let attempt = expected, call.telnyxCallControlId == attempt.controlId {
+    if let attempt = expected, controls[id] == attempt.controlId, sessions[id] == attempt.sessionId {
       guard !reported.contains(id) else { return }
       expected = nil; outgoingTimer?.invalidate(); outgoingTimer = nil; outbound.insert(id); reported.insert(id)
+      expireUnanswered(id)
       emit(["type": "outgoing", "callId": id.uuidString, "sessionId": attempt.sessionId, "number": attempt.number])
       let action = CXStartCallAction(call: id, handle: CXHandle(type: .phoneNumber, value: attempt.number))
       controller.request(CXTransaction(action: action)) { [weak self] error in
@@ -150,10 +193,23 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
   }
   func reject(callId: String) {
     guard let id = UUID(uuidString: callId) else { return }
-    calls[id]?.hangup()
+    if preparedPush == id, sessions[id] != nil, calls[id] == nil {
+      // Decline a verified push even before its actual INVITE arrives.
+      client?.endCallFromCallkit(endAction: CXEndCallAction(call: id))
+    } else { calls[id]?.hangup() }
     finish(id, reason: .failed)
   }
+  func confirmConnected(callId: String) {
+    guard let id = UUID(uuidString: callId), outbound.contains(id), sessions[id] != nil,
+      calls[id]?.callState == .ACTIVE, !connectedOutbound.contains(id) else { return }
+    connectedOutbound.insert(id)
+    provider?.reportOutgoingCall(with: id, connectedAt: Date())
+  }
   func end() {
+    if let attempt = expected {
+      expected = nil; outgoingTimer?.invalidate(); outgoingTimer = nil
+      emit(["type": "outgoingFailed", "sessionId": attempt.sessionId])
+    }
     guard let id = reported.first else { return }
     controller.request(CXTransaction(action: CXEndCallAction(call: id))) { [weak self] error in
       if error != nil { DispatchQueue.main.async { self?.reject(callId: id.uuidString) } }
@@ -186,6 +242,10 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
       completion()
       if error != nil { DispatchQueue.main.async { self?.reject(callId: id.uuidString) } }
     }
+    expireUnanswered(id)
+  }
+  private func expireUnanswered(_ id: UUID) {
+    guard timers[id] == nil else { return }
     timers[id] = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
       guard let self, self.calls[id]?.callState != .ACTIVE else { return }
       self.reject(callId: id.uuidString)
@@ -196,11 +256,12 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
     timers.removeValue(forKey: id)?.invalidate()
     pendingAnswers.removeValue(forKey: id)?.fail()
     provider?.reportCall(with: id, endedAt: Date(), reason: reason)
-    reported.remove(id); pushes.removeValue(forKey: id); calls.removeValue(forKey: id)
+    reported.remove(id); pushes.removeValue(forKey: id); calls.removeValue(forKey: id); controls.removeValue(forKey: id)
     if preparedPush == id { preparedPush = nil }
     finishedCalls.append(id); if finishedCalls.count > 50 { finishedCalls.removeFirst() }
     let session = sessions.removeValue(forKey: id)
     let wasOutgoing = outbound.remove(id) != nil
+    connectedOutbound.remove(id)
     emit(["type": "ended", "callId": id.uuidString, "sessionId": session ?? "", "outgoing": wasOutgoing])
   }
 
@@ -228,28 +289,47 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
       !finishedCalls.contains(id), reported.count == 1, calls.isEmpty || calls[id] != nil,
       UserDefaults.standard.bool(forKey: "linka.voice.enabled") else { reject(callId: id.uuidString); return }
     pushes[id] = metadata
-    if let config {
-      do { try client?.processVoIPNotification(txConfig: config, serverConfiguration: TxServerConfiguration(), pushMetaData: metadata); preparedPush = id }
-      catch { reject(callId: id.uuidString); return }
-    }
+    // JS refreshes the short-lived provider JWT before preparing the socket.
+    // Never reuse the token from before iOS suspended the application.
     emit(["type": "push", "callId": id.uuidString, "providerLegId": legId])
   }
 
   func providerDidReset(_ provider: CXProvider) { disconnect() }
   func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
     guard calls[action.callUUID] != nil || pushes[action.callUUID] != nil else { action.fail(); return }
-    if sessions[action.callUUID] != nil { client?.answerFromCallkit(answerAction: action) }
-    else { pendingAnswers[action.callUUID] = action; emit(["type": "answerRequested", "callId": action.callUUID.uuidString]) }
+    pendingAnswers[action.callUUID] = action
+    answerWhenAuthorized(action.callUUID)
+    if pendingAnswers[action.callUUID] != nil { emit(["type": "answerRequested", "callId": action.callUUID.uuidString]) }
+  }
+  private func answerWhenAuthorized(_ id: UUID) {
+    guard sessions[id] != nil, let action = pendingAnswers[id] else { return }
+    if let call = calls[id] {
+      pendingAnswers.removeValue(forKey: id)
+      // SDK answerFromCallkit uses its last currentCallId for foreground calls.
+      // Answer this exact backend-authorized Call, never an unrelated INVITE.
+      call.answer { [weak self] answered in
+        DispatchQueue.main.async {
+          if answered { action.fulfill() } else { action.fail(); self?.reject(callId: id.uuidString) }
+        }
+      }
+    }
+    // SDK 4.2.2 logs in and attaches after processVoIPNotification without
+    // an answer action. Keep CallKit pending until its actual INVITE can be
+    // checked; handing the action to the SDK would auto-answer its next INVITE.
   }
   func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
     guard outbound.contains(action.callUUID), let call = calls[action.callUUID], sessions[action.callUUID] != nil else { action.fail(); return }
     provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
-    call.answer(); action.fulfill()
+    call.answer { [weak self] answered in
+      DispatchQueue.main.async {
+        if answered { action.fulfill() } else { action.fail(); self?.reject(callId: action.callUUID.uuidString) }
+      }
+    }
   }
   func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
     let id = action.callUUID
     // Never let an unverified push initiate SDK login through a decline.
-    if pushes[id] != nil, sessions[id] != nil { client?.endCallFromCallkit(endAction: action) }
+    if preparedPush == id, sessions[id] != nil, calls[id] == nil { client?.endCallFromCallkit(endAction: action) }
     else { calls[id]?.hangup(); action.fulfill() }
     finish(id, reason: .remoteEnded)
   }
@@ -272,9 +352,8 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
 
   func onClientReady() {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onClientReady() }; return }
-    ready = true; emit(["type": "registration", "state": "registered"])
+    ready = true; registeredPushToken = connectingPushToken; emit(["type": "registration", "state": "registered"])
   }
-  func onSocketConnected() {}
   func onSocketDisconnected() {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onSocketDisconnected() }; return }
     ready = false; emit(["type": "registration", "state": "unregistered"])
@@ -283,25 +362,29 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onClientError(error: error) }; return }
     ready = false; emit(["type": "registration", "state": "error"])
   }
-  func onPushDisabled(success: Bool, message: String) {}
-  func onSessionUpdated(sessionId: String) {}
   func onIncomingCall(call: Call) {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onIncomingCall(call: call) }; return }
     guard let id = call.callInfo?.callId else { call.hangup(); return }
     guard !finishedCalls.contains(id) else { call.hangup(); return }
-    calls[id] = call
-    if let metadata = pushes[id], call.telnyxCallControlId?.isEmpty != false {
-      emit(["type": "push", "callId": id.uuidString, "providerLegId": metadata["telnyx_leg_id"] as? String ?? ""])
-      return
+    if let metadata = pushes[id] {
+      guard let pushedLeg = metadata["telnyx_leg_id"] as? String,
+        let expectedLeg = UUID(uuidString: pushedLeg), call.telnyxLegId == expectedLeg else {
+        call.hangup(); finish(id, reason: .failed); return
+      }
     }
-    if let expected, expected.controlId == call.telnyxCallControlId {
-      sessions[id] = expected.sessionId; handleAuthorized(call, id: id)
+    calls[id] = call
+    expireUnanswered(id)
+    if sessions[id] != nil {
+      handleAuthorized(call, id: id)
+      answerWhenAuthorized(id)
     } else {
-      emit(["type": "incoming", "callId": id.uuidString, "callControlId": call.telnyxCallControlId ?? "",
+      // 4.2.2 populates telnyxCallControlId only after ANSWER. The leg UUID is
+      // present on INVITE and is resolved to its control ID by our backend.
+      emit(["type": "incoming", "callId": id.uuidString,
+        "providerLegId": call.telnyxLegId?.uuidString ?? "",
         "number": call.callInfo?.callerNumber ?? "", "name": call.callInfo?.callerName ?? ""])
     }
   }
-  func onPushCall(call: Call) { onIncomingCall(call: call) }
   func onRemoteCallEnded(callId: UUID, reason: CallTerminationReason?) {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onRemoteCallEnded(callId: callId, reason: reason) }; return }
     finish(callId, reason: .remoteEnded)
@@ -312,7 +395,6 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
     if case .DROPPED = callState { finish(callId, reason: .failed); return }
     if callState == .ACTIVE {
       timers.removeValue(forKey: callId)?.invalidate()
-      if outbound.contains(callId) { provider?.reportOutgoingCall(with: callId, connectedAt: Date()) }
     }
     emit(["type": "callState", "callId": callId.uuidString, "state": stateName(callState),
       "sessionId": sessions[callId] ?? ""])

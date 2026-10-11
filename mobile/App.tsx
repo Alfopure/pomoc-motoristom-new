@@ -6,7 +6,7 @@ import { Phone, History as HistoryIcon, UserRound, type LucideIcon } from "lucid
 import { QueryClient, QueryClientProvider, focusManager, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import type { MobileMe } from "../src/lib/mobile-api";
-import { createMobileApi, MobileApiError, type MobileApi } from "./src/lib/api";
+import { createMobileApi, MobileApiError, usableMobileIdentity, type MobileApi } from "./src/lib/api";
 import { readMobileConfig, type MobileConfig } from "./src/lib/config";
 import { createMobileSupabase } from "./src/lib/supabase";
 import { callStatus, dialable, formatNumber, formatTime, presenceLabels } from "./src/lib/display";
@@ -77,7 +77,12 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
       const foreground = state === "active";
       setActive(foreground); focusManager.setFocused(foreground);
       if (foreground) client.auth.startAutoRefresh();
-      else { client.auth.stopAutoRefresh(); void queryClient.cancelQueries(); }
+      else {
+        client.auth.stopAutoRefresh();
+        // PushKit cold launch still needs its initial identity to construct the
+        // native phone. Let that one request finish even while iOS stays locked.
+        void queryClient.cancelQueries({ predicate: query => query.queryKey.at(-1) !== "me" || query.state.data !== undefined });
+      }
     };
     update(AppState.currentState ?? "active");
     const subscription = AppState.addEventListener("change", update);
@@ -148,7 +153,8 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
   // First authenticated snapshot must also load during a PushKit cold launch.
   // Periodic reads still stop when iOS suspends the app.
   const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), refetchInterval: active ? 30_000 : false });
-  const { phone, state: phoneState } = useDispatchPhone(config, client, userId, me.isError ? null : me.data?.profileId ?? null, active);
+  const identity = usableMobileIdentity(me.data, me.error);
+  const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   async function logout() {
     if (loggingOut) return;
     setLoggingOut(true); setLogoutError(null);
@@ -160,20 +166,21 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
     finally { setLoggingOut(false); }
   }
   if (me.isPending) return <Loading label="Overujem prístup do dispečingu…" />;
-  if (me.isError || !me.data) return <View style={styles.content}>
+  if (!identity) return <View style={styles.content}>
     <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />
     {logoutError && <ErrorNotice message={logoutError} />}
     <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={loggingOut} secondary />
   </View>;
   return <View style={{ flex: 1 }}>
     <CallPanel phone={phone} state={phoneState} />
-    {tab === "console" ? <Console api={api} me={me.data} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} />
-      : tab === "history" ? <History api={api} me={me.data} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
+    {me.isError && <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />}
+    {tab === "console" ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} />
+      : tab === "history" ? <History api={api} me={identity} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
         onSelect={value => { setNumber(value); setTab("console"); }} />
       : <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.heading}>Účet</Text><Card><Text style={styles.subheading}>{me.data.profile.displayName}</Text>
-          <Text style={styles.text}>{me.data.profile.email ?? ""}</Text>
-          <Text style={styles.muted}>{({ dispatcher: "Dispečer", senior_dispatcher: "Vedúci dispečer", manager: "Manažér", admin: "Administrátor" })[me.data.profile.role]}</Text>
+        <Text style={styles.heading}>Účet</Text><Card><Text style={styles.subheading}>{identity.profile.displayName}</Text>
+          <Text style={styles.text}>{identity.profile.email ?? ""}</Text>
+          <Text style={styles.muted}>{({ dispatcher: "Dispečer", senior_dispatcher: "Vedúci dispečer", manager: "Manažér", admin: "Administrátor" })[identity.profile.role]}</Text>
         </Card><Card><Text style={styles.label}>Prostredie</Text><Text style={styles.text}>{config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"}</Text>
           <Text style={styles.muted}>Verzia 0.1.0</Text></Card>
         {logoutError && <ErrorNotice message={logoutError} />}

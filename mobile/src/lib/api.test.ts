@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMobileApi, MobileApiError, type MobileTransport } from "./api";
+import { QueryClient } from "@tanstack/react-query";
+import { createMobileApi, MobileApiError, usableMobileIdentity, type MobileTransport } from "./api";
 
 const config = { environment: "test" as const, apiOrigin: "https://test.dispecing.linkapomoci.sk", supabaseUrl: "https://nzpnqdstvkfncflgqlny.supabase.co", publishableKey: "sb_publishable_fixture" };
 const scope = { ok: true, apiVersion: 1, environment: "test", profileId: "profile", checkedAt: "2026-10-11T12:00:00Z" };
@@ -40,5 +41,31 @@ describe("native API transport", () => {
     const controller = new AbortController();
     const transport = vi.fn<MobileTransport>().mockImplementation(async (_url, init) => { expect(init.signal?.aborted).toBe(true); throw new DOMException("Aborted", "AbortError"); });
     controller.abort(); await expect(createMobileApi(config, async () => "token", transport).me(controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+  });
+  it.each([
+    { status: 0, retained: true }, { status: 503, retained: true }, { status: 504, retained: true },
+    { status: 401, retained: false }, { status: 403, retained: false }, { status: 409, retained: false },
+    { status: 502, retained: false },
+  ])("keeps call identity only for a transient same-user refresh ($status)", async ({ status, retained }) => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = ["mobile", "test", "user", "me"];
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json(me));
+    const api = createMobileApi(config, async () => "token", transport);
+    try {
+      const identity = await client.fetchQuery({ queryKey: key, queryFn: () => api.me() });
+      if (status === 0) transport.mockRejectedValue(new TypeError("Network changed"));
+      else if (status === 502) transport.mockResolvedValue(Response.json({ ...me, environment: "production" }));
+      else transport.mockResolvedValue(Response.json({ ok: false, error: "Refresh failed" }, { status }));
+      await expect(client.fetchQuery({ queryKey: key, queryFn: () => api.me() })).rejects.toMatchObject({ status });
+      expect(client.getQueryData(key)).toBe(identity);
+      expect(usableMobileIdentity(client.getQueryData(key), client.getQueryState(key)?.error)).toBe(retained ? identity : null);
+      expect(usableMobileIdentity(client.getQueryData(["mobile", "test", "another-user", "me"]), client.getQueryState(key)?.error)).toBeNull();
+    } finally { client.clear(); }
+  });
+  it("cannot grant access on an initial failure or an unclassified error", async () => {
+    expect(usableMobileIdentity(undefined, new MobileApiError("Unavailable", 503))).toBeNull();
+    expect(usableMobileIdentity(undefined, null)).toBeNull();
+    const identity = await createMobileApi(config, async () => "token", async () => Response.json(me)).me();
+    expect(usableMobileIdentity(identity, new Error("Unexpected failure"))).toBeNull();
   });
 });

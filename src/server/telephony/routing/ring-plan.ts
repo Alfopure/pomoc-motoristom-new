@@ -797,6 +797,10 @@ async function idleRecordingCandidates(deps: SweepDeps, sessions: SessionRow[], 
 async function idleQueueCandidates(deps: SweepDeps, sessions: SessionRow[], now: Date): Promise<Set<string>> {
   const candidates = sessions.filter(session => {
     const meta = readMeta(session);
+    // This advisory snapshot contains browser devices only. Explicit mobile
+    // application endpoints must reach the reducer's full device snapshot.
+    const members = [...(meta.ring?.plan?.queueMembers ?? []), ...(meta.ring?.plan?.steps.flatMap(step => step.members) ?? [])];
+    if (members.some(member => member.application || member.applicationDevice === "mobile")) return false;
     return session.state === "waiting" && isQueueOfferDue(session, now) && !isWaitingTickStale(session, now) &&
       !isQueueExpired(session, now) && !isSessionStale(session, now) && !isGatherOverdue(session, now) &&
       !session.termination_requested_at && !session.cancellations_next_attempt_at && !readPendingEffects(session).entries.length &&

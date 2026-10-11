@@ -15,7 +15,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const actor = await requireMobileActor(request); const deps = await nativeVoiceDeps(actor, { cleanup: true });
     const body = await readJsonBody(request); const { id } = await context.params;
     await requireNativeLease(deps, actor, body.deviceSessionId, { cleanup: true });
-    await requireNativeSession(deps, actor, id);
+    const session = await requireNativeSession(deps, actor, id);
+    if (session.ended_at) return mobileJson({ ...mobileScope(actor), sessionId: id, terminationPending: false });
     const result = await hangupCall(deps, toCallActor(actor), id);
     if (result.terminationPending) {
       after(withBackgroundRequestMetrics(() => sessionOwnership.exit(async () => {

@@ -710,7 +710,7 @@ function appEvent(type: AppEventType, actor: CallActor | null, deps: CallActionD
   return { kind: "app", id: randomUUID(), type, actorProfileId: actor?.profileId ?? null, occurredAt: nowOf(deps).toISOString(), ...extra };
 }
 
-async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<SessionRow> {
+async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessionId: string, options: { nativeHangupCleanup?: boolean } = {}): Promise<SessionRow> {
   // The session and the legs that authorise the actor are independent reads,
   // and both stand between the click and the command.
   const [session, legs] = await Promise.all([
@@ -718,6 +718,22 @@ async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessio
     deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", sessionId).neq("role", "supervisor").is("ended_at", null),
   ]);
   if (!ACTIVE_SESSION_STATES.has(session.state)) throw new CallActionError("Hovor už nie je aktívny.", 409, "not_active");
+  const meta = readMeta(session);
+  const acceptedId = meta.accepted_device_legs?.[actor.profileId];
+  if (options.nativeHangupCleanup && deps.deviceKind === "mobile" && session.direction === "internal" &&
+    meta.internal?.target_profile_id === actor.profileId && acceptedId) {
+    // The callee's provider hangup can precede whole-session cleanup. Only
+    // their exact accepted mobile endpoint retains this termination right.
+    const device = await getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId: actor.profileId });
+    const sip = device && deviceSipUri(device);
+    if (sip) {
+      const accepted = await deps.admin.from("motorist_call_legs").select("id")
+        .eq("organization_id", deps.organizationId).eq("session_id", session.id).eq("profile_id", actor.profileId)
+        .eq("role", "operator").eq("to_number", sip).eq("telnyx_call_control_id", acceptedId).maybeSingle();
+      if (accepted.error) throw new CallActionError("Účastníka hovoru sa nepodarilo overiť.", 503);
+      if (accepted.data) return session;
+    }
+  }
   await assertOwnership(deps, session, actor, legs.error ? undefined : (legs.data ?? []).map((leg) => leg.profile_id).filter((id): id is string => Boolean(id)));
   return session;
 }
@@ -758,7 +774,7 @@ export async function deferRingingCall(deps: CallActionDeps, actor: CallActor, s
 }
 
 export async function hangupCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
-  const session = await ownedActiveSession(deps, actor, sessionId);
+  const session = await ownedActiveSession(deps, actor, sessionId, { nativeHangupCleanup: true });
   try {
     // Contract 2 commits termination before acquiring ownership. Do not keep
     // the browser waiting/retrying behind the handler already ending this call.

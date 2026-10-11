@@ -1429,6 +1429,7 @@ function offerQueuedCall(b: TransitionBuilder, customer: LegRow): boolean {
   const choose = (members: FrozenRingMember[]) => planQueueStep(plan, index, members,
     { ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
       sessionId: b.session.id, now: b.ctx.now, presence: toEligibilityPresence(b.ctx.presence), devices: toEligibilityDevices(b.ctx.devices),
+      mobileDevices: toEligibilityDevices(b.ctx.mobileDevices ?? [], b.ctx.now),
       openOffers: b.ctx.openOffers, attempted: new Set(), maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount });
 
   const planned = choose(escalating ? queueBackupMembers(b, plan) : queueOperatorMembers(plan, b.attemptsView(), b.ctx.now, true));

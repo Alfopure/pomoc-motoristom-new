@@ -12,9 +12,9 @@ export function nativePhone(): NativePhone | null {
   return {
     snapshot: () => module.snapshot(), requestMicrophone: () => module.requestMicrophone(),
     connect: token => module.connect(token), disconnect: () => module.disconnect(),
-    authorize: (callId, sessionId) => module.authorize(callId, sessionId), reject: callId => module.reject(callId),
+    authorize: (callId, sessionId, controlId) => module.authorize(callId, sessionId, controlId), reject: callId => module.reject(callId),
     expectOutgoing: (controlId, sessionId, number) => module.expectOutgoing(controlId, sessionId, number),
-    answer: callId => module.answer(callId), end: () => module.end(), mute: muted => module.mute(muted),
+    answer: callId => module.answer(callId), confirmConnected: callId => module.confirmConnected(callId), end: () => module.end(), mute: muted => module.mute(muted),
     speaker: enabled => module.speaker(enabled), dtmf: digits => module.dtmf(digits),
     subscribe: callback => { const subscription = module.addListener("onVoiceEvent", callback); return () => subscription.remove(); },
   };

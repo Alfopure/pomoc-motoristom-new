@@ -1,4 +1,6 @@
 import { readPauseReturn } from "@/lib/telephony/presence-policy";
+import { nativeVoiceTestEnabled } from "@/lib/app-environment";
+import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { telephonyStabilityEnabled } from "./stability";
 import { UNOWNED_READ_MS } from "./ownership";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -207,6 +209,7 @@ export type ActiveCallRows = {
   attempts: AttemptRow[];
   presence: PresenceRow[];
   devices: DeviceRow[];
+  mobileDevices?: DeviceRow[];
   lines: LineRow[];
   operatorSettings: Array<{ profile_id: string; delivery_mode?: string | null; default_mobile_number?: string | null }>;
   callIdBySession: Map<string, string>;
@@ -281,19 +284,22 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
     const keys = ["sessions", "legs", "attempts", "presence", "devices", "lines", "operatorSettings", "callRows"] as const;
     if (!keys.every(key => Array.isArray(data[key]))) throw new Error("incomplete active call snapshot");
     const rows = data as unknown as Omit<ActiveCallRows, "callIdBySession"> & { callRows: Array<{ id: string; session_id: string | null }> };
+    const mobileDevices = await readNativeDevices(deps);
     return {
       sessions: rows.sessions, legs: rows.legs, attempts: rows.attempts,
       presence: rows.presence, devices: rows.devices, lines: rows.lines, operatorSettings: rows.operatorSettings,
+      mobileDevices,
       callIdBySession: new Map(rows.callRows.flatMap(row => row.session_id ? [[row.session_id, row.id] as const] : [])),
     };
   }
 
-  const [sessionsResult, presenceResult, devicesResult, linesResult, operatorSettingsResult] = await Promise.all([
+  const [sessionsResult, presenceResult, devicesResult, linesResult, operatorSettingsResult, mobileDevices] = await Promise.all([
     admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).in("state", ACTIVE_STATES).order("started_at", { ascending: true }),
     admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId),
     admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment),
     admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId),
     admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId),
+    readNativeDevices(deps),
   ]);
   if (sessionsResult.error) throw new Error(`active sessions load failed: ${sessionsResult.error.message}`);
   if (presenceResult.error) throw new Error(`presence load failed: ${presenceResult.error.message}`);
@@ -328,12 +334,21 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
     attempts: (attemptsResult.data ?? []) as AttemptRow[],
     presence: (presenceResult.data ?? []) as PresenceRow[],
     devices: (devicesResult.data ?? []) as DeviceRow[],
+    mobileDevices,
     lines: (linesResult.data ?? []) as LineRow[],
     operatorSettings: operatorSettingsResult.data ?? [],
     callIdBySession: new Map(
       (callRowsResult.data ?? []).flatMap((row) => (row.session_id ? [[row.session_id, row.id] as const] : [])),
     ),
   };
+}
+
+async function readNativeDevices(deps: ActiveCallsDeps): Promise<DeviceRow[]> {
+  if (!nativeVoiceTestEnabled()) return [];
+  const result = await deps.admin.from("motorist_operator_mobile_devices").select("*")
+    .eq("organization_id", deps.organizationId).eq("environment", deps.environment);
+  if (result.error) throw new Error(`mobile devices load failed: ${result.error.message}`);
+  return result.data ?? [];
 }
 
 export async function loadActiveCalls(
@@ -442,7 +457,7 @@ function buildActiveCalls(
     actorProfileId: actor.profileId,
     calls,
     waiting: calls.filter((call) => WAITING_STATES.has(call.state)),
-    presence: buildPresenceSnapshot({ actor, now, presence: presenceRows, devices: deviceRows, personalMobileProfileIds: new Set(rows.operatorSettings.filter((row) => telephonyStabilityEnabled() && row.delivery_mode === "personal_mobile" && row.default_mobile_number).map((row) => row.profile_id)) }),
+    presence: buildPresenceSnapshot({ actor, now, presence: presenceRows, devices: deviceRows, mobileDevices: rows.mobileDevices, personalMobileProfileIds: new Set(rows.operatorSettings.filter((row) => telephonyStabilityEnabled() && row.delivery_mode === "personal_mobile" && row.default_mobile_number).map((row) => row.profile_id)) }),
     ownPresenceStale: Boolean(ownPresence?.current_session_id) &&
       ["ringing", "on_call"].includes(effectivePresenceStatus(ownPresence!, now)) &&
       !sessions.some((session) => session.id === ownPresence!.current_session_id),
@@ -462,17 +477,29 @@ export function buildPresenceSnapshot(input: {
   now: Date;
   presence: PresenceRow[];
   devices: DeviceRow[];
+  mobileDevices?: DeviceRow[];
   personalMobileProfileIds?: ReadonlySet<string>;
 }): TelephonyPresenceSnapshot {
+  const devices = new Map(input.devices.map(device => [device.profile_id, {
+    profileId: device.profile_id,
+    registered: deviceIsLive(device, input.now),
+    ...(device.device_seen_at ? { seenAt: device.device_seen_at } : {}),
+  }]));
+  // The web colleague-call button must use the same reachability as dialing.
+  // Keep browser freshness unchanged and merge the opted-in native endpoint.
+  if (nativeVoiceTestEnabled()) for (const device of input.mobileDevices ?? []) {
+    if (!device.sip_username || !device.telnyx_credential_id ||
+      !(deviceIsLive(device, input.now) || nativeMobilePushReachable(device, input.now))) continue;
+    const browser = devices.get(device.profile_id);
+    devices.set(device.profile_id, { profileId: device.profile_id, registered: true,
+      ...(browser?.seenAt || device.device_seen_at ? { seenAt: [browser?.seenAt, device.device_seen_at].filter((value): value is string => Boolean(value)).sort().at(-1)! } : {}),
+    });
+  }
   return {
     actorProfileId: input.actor.profileId,
     canManageAssignments: input.actor.canManageAssignments,
     checkedAt: input.now.toISOString(),
-    devices: input.devices.map((device) => ({
-      profileId: device.profile_id,
-      registered: deviceIsLive(device, input.now),
-      ...(device.device_seen_at ? { seenAt: device.device_seen_at } : {}),
-    })),
+    devices: [...devices.values()],
     presence: input.presence.map((row) => ({
       profileId: row.profile_id,
       status: effectivePresenceStatus(row, input.now),
