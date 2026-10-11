@@ -3,6 +3,10 @@
 # dependencies
 /node_modules
 **/node_modules/
+mobile/.expo/
+mobile/dist/
+mobile/ios/
+mobile/android/
 apps/**/.next/
 apps/**/test-results/
 apps/**/playwright-report/
