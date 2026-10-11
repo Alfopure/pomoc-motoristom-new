@@ -850,6 +850,7 @@ export function mapCallCenterCall({
 
   return {
     id: call.id,
+    sessionId: call.session_id ?? undefined,
     providerCallId: call.provider_call_id ?? undefined,
     providerSessionId: call.provider_session_id ?? undefined,
     status,

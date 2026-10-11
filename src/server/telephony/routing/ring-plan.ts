@@ -6,6 +6,7 @@ import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { SessionLeaseBusyError } from "../service-errors";
 import { readPendingEffects } from "../state/continuation";
+import { resolveSessionRecordingPolicy } from "../recording-policy-service";
 import type { PauseRoutingMode } from "@/lib/telephony/operator-settings";
 
 import {
@@ -712,7 +713,10 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
   const yieldable = [...overdue.ringing, ...overdue.waiting, ...overdue.media].filter((session) => session.customer_leg_id);
   const yieldTo = await pendingCustomerHangups(deps.admin, deps.organizationId, yieldable);
   const result: SweepResult = { checked: targets.length, swept: [], deferred: [], errors: [], yielded: [], drained: [] };
-  const noOffer = await idleQueueCandidates(deps, overdue.waiting.filter(session => !yieldTo.has(session.id)), now);
+  const [noOffer, unchangedRecording] = await Promise.all([
+    idleQueueCandidates(deps, overdue.waiting.filter(session => !yieldTo.has(session.id)), now),
+    idleRecordingCandidates(deps, overdue.media.filter(session => !yieldTo.has(session.id)), now),
+  ]);
   const limit = deps.limit ?? targets.length;
   let attempted = 0;
   for (const { session, stale } of targets) {
@@ -724,6 +728,7 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
       continue;
     }
     if (noOffer.has(session.id)) { result.deferred.push(session.id); continue; }
+    if (unchangedRecording.has(session.id)) continue;
     attempted += 1;
     if (yieldTo.has(session.id)) {
       // Never sweep over a pending customer hangup (every caller). The
@@ -751,6 +756,39 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
     }
   }
   return result;
+}
+
+/** Advisory only: a healthy recorder needs a live policy read, not a media lease.
+ * Uncertainty and any recovery obligation still take the normal fenced path. */
+async function idleRecordingCandidates(deps: SweepDeps, sessions: SessionRow[], now: Date): Promise<Set<string>> {
+  const candidates = sessions.filter(session => {
+    const meta = readMeta(session), recording = meta.recording;
+    const active = recording?.recorders.filter(item => item.observed !== "stopped") ?? [];
+    return ["talking", "conference"].includes(session.state) && !session.ended_at &&
+      !session.termination_requested_at && !session.cancellations_next_attempt_at &&
+      !readPendingEffects(session).entries.length && !meta.hangup && !meta.customer_gone_at &&
+      !meta.gather && !meta.announcement_sequence && !meta.party_pending && !meta.transfer && !meta.consult &&
+      !Object.keys(meta.supervise ?? {}).length &&
+      recording?.version === 1 && recording.policy.enabled && Boolean(recording.noticeCompletedAt) &&
+      !recording.noticeFailed && !recording.error && !recording.suppressionReason && !recording.coverageUnconfirmed &&
+      !recording.barrier && !recording.pendingAudio && active.length === 1 &&
+      active[0].observed === "recording" && active[0].desired === "recording" && !active[0].error &&
+      active[0].epoch === recording.epoch && Boolean(active[0].providerRecordingId) &&
+      (ms(active[0].startedAt) ?? Infinity) <= now.getTime() &&
+      now.getTime() < (ms(active[0].startedAt) ?? 0) + recording.policy.maxSegmentSeconds * 1000;
+  });
+  if (!candidates.length) return new Set();
+  // No cache: revocation or an unavailable policy still invokes the existing
+  // reducer, which stops capture. One read covers the entire bounded scan.
+  const policy = await resolveSessionRecordingPolicy(deps.admin, deps.organizationId);
+  if (!policy.enabled) return new Set();
+  return new Set(candidates.filter(session => {
+    const frozen = readMeta(session).recording!.policy;
+    return policy.policyId === frozen.policyId && policy.inbound === frozen.inbound && policy.outbound === frozen.outbound &&
+      policy.conferenceVerified === frozen.conferenceVerified && policy.transferVerified === frozen.transferVerified &&
+      policy.channelMappingVerified === frozen.channelMappingVerified && policy.maxSegmentSeconds === frozen.maxSegmentSeconds &&
+      (session.direction === "inbound" ? policy.inbound : session.direction === "outbound" && policy.outbound);
+  }).map(session => session.id));
 }
 
 /** Advisory only. A possible change always goes through the leased reducer. */

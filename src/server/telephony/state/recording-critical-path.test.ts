@@ -5,6 +5,7 @@ import { cancelConsult, holdCall, startConsult, unholdCall } from "../call-actio
 import { recoverSessionContactChecks } from "../session-runner";
 import { SessionLeaseBusyError, SessionLeaseLostError } from "../service-errors";
 import { runPendingEffectRecovery } from "../cron-jobs";
+import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { readPendingEffects } from "./continuation";
 import { readMeta, type SessionRow } from "./types";
 
@@ -40,6 +41,100 @@ async function talking(h: TelephonyHarness) {
 }
 
 describe.each([1, 2] as const)("recording critical path, writer contract %s", writerContract => {
+  it.each([180, 850])("counts %s ms of acknowledgement work inside the recorder's full 600 ms settle interval", async checkpointMs => {
+    const h = harness(writerContract), call = await ringing(h);
+    let acknowledgedAt = 0, connectingAt = 0, delayed = false;
+    const start = h.telnyx.client.recordingStart.bind(h.telnyx.client);
+    vi.spyOn(h.telnyx.client, "recordingStart").mockImplementation(async params => {
+      const result = await start(params);
+      acknowledgedAt = h.now().getTime();
+      return result;
+    });
+    const takeError = h.db.takeInjectedError.bind(h.db);
+    vi.spyOn(h.db, "takeInjectedError").mockImplementation((table, operation) => {
+      if (!delayed && acknowledgedAt && table === "motorist_call_sessions" && operation === "update") {
+        delayed = true;
+        h.advance(checkpointMs);
+      }
+      return takeError(table, operation);
+    });
+    const create = h.telnyx.client.createConference.bind(h.telnyx.client);
+    vi.spyOn(h.telnyx.client, "createConference").mockImplementation(async params => {
+      connectingAt = h.now().getTime();
+      expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.recorders[0].observed).toBe("recording");
+      return create(params);
+    });
+    expect((await h.legEvent(call.operator, "call.answered")).outcome).toBe("processed");
+    expect(delayed).toBe(true);
+    expect(connectingAt - acknowledgedAt).toBe(Math.max(600, checkpointMs));
+    expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.pendingAudio).toBeNull();
+  });
+
+  it("records connected legs only after both conference participants have been verified", async () => {
+    const h = harness(writerContract), call = await ringing(h);
+    const join = h.telnyx.client.conferenceAction.bind(h.telnyx.client);
+    vi.spyOn(h.telnyx.client, "conferenceAction").mockImplementation(async (...args) => {
+      if (args[1] === "join") expect(h.legs(call.sessionId).filter(leg => leg.bridged_at)).toEqual([]);
+      return join(...args);
+    });
+    await h.legEvent(call.operator, "call.answered");
+    const confirmed = readMeta(h.session(call.sessionId) as SessionRow).recording?.connection?.confirmedAt;
+    expect(confirmed).toBeTruthy();
+    expect(h.legs(call.sessionId).filter(leg => leg.bridged_at).map(leg => [leg.telnyx_call_control_id, leg.bridged_at]))
+      .toEqual(expect.arrayContaining([[call.callControlId, confirmed], [call.operator, confirmed]]));
+    expect(h.legs(call.sessionId).filter(leg => leg.bridged_at)).toHaveLength(2);
+  });
+
+  it("retains the full settle interval when the wall clock advances during the acknowledgement", async () => {
+    const h = harness(writerContract), call = await ringing(h);
+    let tick = 0, jumped = false;
+    h.deps.monotonicNow = () => tick;
+    h.deps.sleep = async ms => { tick += ms; h.advance(ms); };
+    const takeError = h.db.takeInjectedError.bind(h.db);
+    vi.spyOn(h.db, "takeInjectedError").mockImplementation((table, operation) => {
+      if (!jumped && h.telnyx.of("recordingStart").length && table === "motorist_call_sessions" && operation === "update") {
+        jumped = true;
+        h.advance(1000);
+      }
+      return takeError(table, operation);
+    });
+    const create = h.telnyx.client.createConference.bind(h.telnyx.client);
+    vi.spyOn(h.telnyx.client, "createConference").mockImplementation(async params => {
+      expect(tick).toBe(600);
+      return create(params);
+    });
+    expect((await h.legEvent(call.operator, "call.answered")).outcome).toBe("processed");
+    expect(jumped).toBe(true);
+    expect(h.telnyx.physical.connected(call.callControlId, call.operator)).toBe(true);
+  });
+
+  it("checks healthy recording policy without taking the call lease, but never skips revocation", async () => {
+    const h = harness(writerContract), call = await talking(h);
+    const run = vi.fn();
+    const deps = { admin: h.admin, organizationId: ORG, now: () => h.now(), runSessionEvent: run };
+    const before = h.db.log.length;
+    await sweepOverdueRingSteps(deps);
+    expect(run).not.toHaveBeenCalled();
+    expect(h.db.log.slice(before).filter(row => row.table === "motorist_call_recording_policies")).toHaveLength(1);
+    expect(h.db.log.slice(before).filter(row => row.table.includes("lease"))).toEqual([]);
+    h.db.update("motorist_call_recording_policies", { recording_enabled: false }, () => true);
+    await sweepOverdueRingSteps(deps);
+    expect(run).toHaveBeenCalledWith(call.sessionId, expect.objectContaining({ type: "sweep" }), expect.anything());
+  });
+
+  it.each(["unknown", "stopping", "objection", "barrier", "policy-read-error"])("retains normal recovery for %s", async reason => {
+    const h = harness(writerContract), call = await talking(h);
+    const session = h.session(call.sessionId) as SessionRow, meta = readMeta(session), recording = meta.recording!;
+    if (reason === "unknown" || reason === "stopping") recording.recorders[0].observed = reason;
+    if (reason === "objection") recording.suppressionReason = "objection";
+    if (reason === "barrier") recording.barrier = { epoch: recording.epoch, action: null, deadlineAt: h.now().toISOString() };
+    h.db.update("motorist_call_sessions", { metadata: meta }, row => row.id === call.sessionId);
+    if (reason === "policy-read-error") h.db.failNext("motorist_call_recording_policies", "select", "unavailable");
+    const run = vi.fn();
+    await sweepOverdueRingSteps({ admin: h.admin, organizationId: ORG, now: () => h.now(), runSessionEvent: run });
+    expect(run).toHaveBeenCalledWith(call.sessionId, expect.objectContaining({ type: "sweep" }), expect.anything());
+  });
+
   it.each(["motorist_calls", "motorist_ring_group_members"])("connects recorded audio despite a persistent %s projection failure", async table => {
     const h = harness(writerContract), call = await ringing(h);
     const original = h.db.takeInjectedError.bind(h.db);

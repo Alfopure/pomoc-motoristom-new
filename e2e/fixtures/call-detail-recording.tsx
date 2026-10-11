@@ -7,7 +7,7 @@ export const callId = (index: number) => `00000000-0000-4000-8000-${String(index
 
 function call(index: number): CallCenterCall {
   return {
-    id: callId(index), providerSessionId: callId(index + 100), status: "ended", direction: "inbound",
+    id: callId(index), sessionId: callId(index + 100), providerSessionId: callId(index + 900), status: "ended", direction: "inbound",
     callerNumber: `+42190000000${index}`, calledNumber: "+421900000000", lineLabel: "TEST linka",
     startedAt: "2026-10-07T10:00:00.000Z", endedAt: "2026-10-07T10:02:00.000Z", waitSeconds: 3,
     durationSeconds: 117, recordingStatus: "available", transcriptStatus: "not_requested", history: [],
