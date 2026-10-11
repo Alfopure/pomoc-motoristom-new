@@ -1,4 +1,4 @@
-# Mobilný dispečing — prvý základ
+# Mobilný dispečing
 
 Samostatná natívna aplikácia Expo 57 / React Native 0.86 pre iPhone a Android.
 Web a jeho telefonovanie zostávajú v koreňovom Next.js projekte. Mobil má vlastný
@@ -14,13 +14,17 @@ Z webu importuje iba vymazateľné TypeScript typy z `src/lib/mobile-api.ts`.
   obnova potiahnutím a každých 30 sekúnd v popredí, pole pre číslo.
 - **História:** existujúce autorizované serverové vyhľadávanie, filtre,
   stránkovanie a výber čísla do ústredne. Výber nevytvorí hovor.
+- **Prípady:** moje alebo všetky prípady organizácie, otvorené alebo všetky stavy,
+  vyhľadávanie, stránkovanie, detail a rýchle založenie prípadu. Používajú
+  rovnaké záznamy a pravidlá ako web; fungujú aj v Expo Go.
 - **Účet:** meno, e-mail, rola, prostredie a odhlásenie z tohto zariadenia.
 - Odobratý prístup alebo neoveriteľná odpoveď skryje obsah; rôzne účty nemajú
   spoločnú cache. Dočasná chyba siete pri obnove už overeného profilu ponechá
   ovládanie hovoru s upozornením. Periodický polling sa zastaví v pozadí;
   prvé overenie identity sa dokončí aj po PushKit prebudení.
 
-Expo Go a bežný M1 build zostávajú náhľadom prihlasovania, ústredne a histórie.
+Aktuálny Expo Go náhľad zahŕňa aj prípady; pôvodný M1 build ostáva pri
+prihlasovaní, ústredni a histórii.
 **iPhone voice TEST** pridáva lokálny Expo modul `modules/linka-voice` s natívnym
 Telnyx iOS SDK 4.2.2, CallKit a PushKit. Apple Developer členstvo majiteľa čaká
 na schválenie; majiteľ potvrdil spustenie Expo náhľadu na fyzickom iPhone.
@@ -36,6 +40,8 @@ pri zmene záložky. Prebiehajúci hovor sa zobrazí až po potvrdení spojenia
 Read-only kontrakt v1 nemení capabilities (`voice: false`, `presenceWrite:
 false`), aby starší M1 nedostal prísľub chýbajúceho native enginu. Hlas má
 samostatné POST routy pod `/api/mobile/v1/voice`. V Expo Go sa nepoužijú.
+Prípady majú samostatné routy `/api/mobile/v1/cases`; zápis neaktivuje telefón.
+Rozsah a overenie sú v [postupe pre mobilné prípady](../docs/mobile/cases.md).
 
 Nasledujúci krok a merateľná akceptácia sú v [stratégii](../docs/mobile/strategy.md).
 
@@ -49,8 +55,8 @@ cp .env.example .env.local
 npm run start:go
 ```
 
-Vlastný development build sa spúšťa cez `npm start`. Expo Go postačí na tento
-základ s prihlasovaním a čítaním; neskoršie systémové telefonovanie vyžaduje
+Vlastný development build sa spúšťa cez `npm start`. Expo Go postačí na
+prihlásenie, čítanie a zakladanie prípadov; systémové telefonovanie vyžaduje
 vlastný natívny build. Použite existujúci **TEST** účet, nie produkčné heslo.
 API `/api/mobile/v1/*` musí byť nasadené na kanonickom TEST.
 
@@ -94,7 +100,7 @@ Pred odovzdaním skontrolovať dokončený build, source commit, package
 
 ## iPhone TEST náhľad
 
-Majiteľ má na fyzické skúšky iPhone. M1 možno otvoriť v aktuálnom **Expo Go**
+Majiteľ má na fyzické skúšky iPhone. Aktuálny náhľad možno otvoriť v **Expo Go**
 pre SDK 57 a prihlásiť sa TEST operátorským účtom. Expo Go musí byť prihlásené
 do Expo účtu `alfopure`, ktorý vlastní organizáciu `linkapomoci`; tento Expo
 login je odlišný od následného operátorského prihlásenia v aplikácii.
@@ -110,8 +116,8 @@ APP_VARIANT=test EXPO_PUBLIC_APP_ENV=test MOBILE_EXPO_GO_PREVIEW=1 \
 `MOBILE_EXPO_GO_PREVIEW=1` nastavuje update URL a runtime iba pre tento TEST
 náhľad. Produkcia tento režim odmieta. Natívne buildy majú OTA aktualizácie
 vypnuté a tento náhľad neaktivuje telefonovanie v pôvodnom Android APK.
-Expo Go slúži na prihlásenie, ústredňu a históriu; CallKit/PushKit ani skutočné
-telefonovanie cez vlastné native moduly v ňom nie sú dostupné.
+Expo Go slúži na prihlásenie, ústredňu, históriu a prípady. CallKit/PushKit
+a telefonovanie cez vlastné native moduly vyžadujú samostatný natívny build.
 
 ## Natívny iPhone telefón
 
@@ -173,7 +179,7 @@ appku. Expo Go náhľad má vlastnú identitu; automatické store vydanie sa nen
 
 ## Mobilné API v1
 
-Všetky tri GET routy vyžadujú **overený Supabase user JWT** v `Authorization:
+Mobilné routy vyžadujú **overený Supabase user JWT** v `Authorization:
 Bearer …`, správne prostredie a aktívny ľudský profil v serverom odvodenej
 organizácii. Cookies, cron secret a dev bypass sa neprijímajú. JWT podpis,
 issuer, audience, rola authenticated a expirácia sa kontrolujú na serveri;
@@ -185,6 +191,8 @@ organizačná rola sa číta z profilu. Bez prihlásenia je odpoveď 401, bez pr
 | `/api/mobile/v1/me` | profil a capabilities tohto prvého vydania |
 | `/api/mobile/v1/console` | vlastná prezencia a vlastné aktívne hovory; iba čítanie |
 | `/api/mobile/v1/calls/history` | `category`, `q`, `cursor`, `limit`; existujúca autorizovaná história |
+| `/api/mobile/v1/cases` | GET prehľad/filtre/stránky, POST nový prípad |
+| `/api/mobile/v1/cases/[id]` | GET detail prípadu organizácie |
 
 História nevracia provider identifikátory, nahrávky, prepisy, interné udalosti
 ani poznámky prípadov. Pri chýbajúcom autorizovanom search RPC je 503 namiesto

@@ -101,11 +101,20 @@ const DEFAULT_ORGANIZATION_SLUG = "pomoc-motoristom";
 const CASE_ATTACHMENTS_BUCKET = "motorist-case-attachments";
 const CASE_TASK_PHASE0_COLUMNS = ["priority", "kind", "created_by", "completed_by", "completed_at"] as const;
 
-export async function createCase(input: CreateCaseInput, ownerProfileId?: string) {
+/** The case insert succeeded; retrying creation would create another case. */
+export class CaseCreationCommittedError extends MutationError {
+  constructor(readonly caseRow: CaseRow, readonly warnings: ReturnType<typeof collectCaseInputWarnings>,
+    readonly phase: "event" | "audit", cause: unknown) {
+    super("Prípad je uložený, ale jeho históriu sa nepodarilo dokončiť.", 503, "case_creation_committed");
+    this.cause = cause;
+  }
+}
+
+export async function createCase(input: CreateCaseInput, ownerProfileId?: string, actorOrganizationId?: string) {
   const warnings = collectCaseInputWarnings(input);
 
   const supabase = createSupabaseAdminClient();
-  const organization = await resolveOrganization(supabase);
+  const organization = await resolveOrganization(supabase, actorOrganizationId);
   const organizationId = organization.id;
   input = withVerifiedVehicleLookup(input, organizationId);
   const ownerId = ownerProfileId
@@ -151,29 +160,35 @@ export async function createCase(input: CreateCaseInput, ownerProfileId?: string
       .single(),
   );
 
-  await insertSingle<CaseEventRow>(
-    supabase
-      .from("motorist_case_events")
-      .insert({
-        organization_id: organizationId,
-        case_id: caseRow.id,
-        actor_profile_id: ownerId,
-        event_type: "case_created",
-        title: "Prípad vytvorený operátorom",
-        body: caseCreatedEventBody(pickup, destination),
-        payload: {
-          source: "manual_dispatch_form",
-          pickup_place_id: pickup?.place_id ?? null,
-          destination_place_id: destination?.place_id ?? null,
-        },
-      })
-      .select("*")
-      .single(),
-  );
-  await audit(supabase, organizationId, ownerId, "case.create", "motorist_cases", caseRow.id, {
-    case_number: caseRow.case_number,
-    source: "manual_dispatch_form",
-  });
+  let phase: "event" | "audit" = "event";
+  try {
+    await insertSingle<CaseEventRow>(
+      supabase
+        .from("motorist_case_events")
+        .insert({
+          organization_id: organizationId,
+          case_id: caseRow.id,
+          actor_profile_id: ownerId,
+          event_type: "case_created",
+          title: "Prípad vytvorený operátorom",
+          body: caseCreatedEventBody(pickup, destination),
+          payload: {
+            source: "manual_dispatch_form",
+            pickup_place_id: pickup?.place_id ?? null,
+            destination_place_id: destination?.place_id ?? null,
+          },
+        })
+        .select("*")
+        .single(),
+    );
+    phase = "audit";
+    await audit(supabase, organizationId, ownerId, "case.create", "motorist_cases", caseRow.id, {
+      case_number: caseRow.case_number,
+      source: "manual_dispatch_form",
+    });
+  } catch (error) {
+    throw new CaseCreationCommittedError(caseRow, warnings, phase, error);
+  }
 
   return { caseRow, warnings };
 }
@@ -2226,8 +2241,8 @@ export async function endAttendanceSession(id: string, input: EndAttendanceSessi
 }
 
 
-async function resolveOrganization(supabase: AdminClient): Promise<OrganizationRow> {
-  const organizationId = process.env.MOTORIST_ORGANIZATION_ID?.trim();
+async function resolveOrganization(supabase: AdminClient, actorOrganizationId?: string): Promise<OrganizationRow> {
+  const organizationId = actorOrganizationId ?? process.env.MOTORIST_ORGANIZATION_ID?.trim();
   const query = organizationId
     ? supabase.from("motorist_organizations").select("*").eq("id", organizationId).maybeSingle()
     : supabase

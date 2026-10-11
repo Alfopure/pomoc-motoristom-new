@@ -22,7 +22,7 @@ Health dokazuje nasadenie aplikácie, nie úspešný hovor alebo push.
 
 ## Rozsah mobilnej verzie 1
 
-Tri záložky: **Ústredňa — História — Účet**. Pred nimi obyčajné prihlásenie
+Pôvodné tri záložky: **Ústredňa — História — Účet**. Pred nimi obyčajné prihlásenie
 e-mailom a heslom. Zabudnuté heslo otvorí existujúcu obnovu na správnom webe.
 Operátor používa svoj aktuálny účet a serverové oprávnenia.
 
@@ -36,9 +36,11 @@ Odchádzajúce, vyhľadávanie a ďalšie stránky. Z čísla možno pripraviť 
 volanie; hovor začne až po výslovnom stlačení Zavolať. Účet zobrazí vlastnú
 identitu, prostredie a odhlásenie.
 
-Prvé vydanie nepotrebuje prípady, mapy, SMS, chat, konfiguráciu ústredne,
-manažérsky dozor ani archív nahrávok. Ďalšie agendy sa pridajú po stabilnom
-príjme a odchádzajúcom telefonovaní.
+Pôvodné prvé vydanie zahŕňalo ústredňu, históriu a účet. Počas čakania na
+Apple členstvo majiteľ 11. 10. 2026 požiadal aj o prehľad a zakladanie
+prípadov. Tento modul možno vyvíjať a skúšať v Expo Go nezávisle od podpisu
+a systémového telefonovania. SMS, konfigurácia ústredne, manažérsky dozor
+a archív nahrávok ostávajú samostatnými budúcimi rozhodnutiami.
 
 ## Poradie realizácie
 
@@ -50,9 +52,30 @@ príjme a odchádzajúcom telefonovaní.
 | **M4 — bežná služba** | natívny endpoint v ring pláne, pauza/obsadenosť, jeden víťaz, fallback, caller ID a história | príjem zo zákazníckej linky a volanie z mobilu pri bežnej službe; web a mobil majú zhodný stav |
 | **M5 — pilot a release** | identifikovaný TEST mobile build + backend commit; až potom schválený production rozsah | fyzické skúšky nižšie, odovzdanie majiteľovi, jeho explicitné schválenie; App Store/Play neskôr |
 
-Po M1 je priorita **M2/M3**, nie pridávanie ďalších obrazoviek. Tlačidlo
-Zavolať v M1 zostáva neaktívne a rozhranie to vysvetľuje. Žiadne úspešné
-čítanie, mock ani JS export sa neoznačuje ako funkčné telefonovanie.
+M2/M3 zostávajú otvorené pre fyzické skúšky po získaní Apple podpisu a push
+konfigurácie. Popri nich vzniká na pokyn majiteľa modul prípadov uvedený
+nižšie. Tlačidlo Zavolať v Expo Go zostáva neaktívne a rozhranie to
+vysvetľuje. Čítanie prípadov, mock ani JS export nepreukazujú telefonovanie.
+
+## Prípady počas čakania na Apple
+
+Poradie vychádza z bežnej práce mobilného dispečera:
+
+1. **Prehľad, detail a založenie:** nová záložka Prípady, predvolene moje
+   otvorené prípady, prepnutie na všetkých vlastníkov a všetky stavy,
+   vyhľadávanie a detail.
+   Krátky formulár uloží kontakt, vozidlo, miesto, popis, typ zákazky,
+   prioritu a poznámku do toho istého systému ako web.
+2. **Doplnenie a spolupráca:** úpravy prípadu, ďalšie poznámky a zmeny stavu
+   s kontrolou aktuálnej serverovej revízie, aby mobil neprepísal zmenu kolegu.
+3. **Práca v teréne:** fotografie, prílohy, poloha a otvorenie navigácie.
+4. **Organizácia služby:** úlohy, termíny a prevzatie/odovzdanie prípadu
+   podľa existujúcich oprávnení a pravidiel webu.
+
+Aktuálny rozsah je prvý bod. Ostatné body opisujú ďalšie rozšírenia.
+Zakladanie je výslovná online operácia; výpadok nesmie spustiť automatické
+opakované odoslanie. Úspešný zápis sa oddelí od následného načítania detailu.
+Podrobný kontrakt a TEST skúšky sú v [mobilných prípadoch](cases.md).
 
 ## Architektúra a rozhodnutia pred M2/M3
 

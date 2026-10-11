@@ -45,3 +45,58 @@ export type MobileHistory = MobileScope & {
   calls: MobileHistoryCall[];
   nextCursor: string | null;
 };
+
+export type MobileCasePriority = "urgent" | "high" | "normal" | "low";
+export type MobileCaseJobType = "tow" | "replacement_vehicle" | "onsite_assistance" | "vehicle_recovery";
+export type MobileCaseFilter = {
+  ownership: "mine" | "all";
+  category: "open" | "all";
+  q: string;
+  cursor?: string | null;
+};
+export type MobileCaseSummary = {
+  id: string;
+  caseNumber: string;
+  status: string;
+  statusLabel: string;
+  priority: MobileCasePriority;
+  priorityLabel: string;
+  owner: { id: string | null; name: string | null; mine: boolean };
+  contact: { name: string | null; phone: string | null };
+  vehicle: { licensePlate: string | null; description: string | null };
+  pickupAddress: string | null;
+  destinationAddress: string | null;
+  summary: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type MobileCases = MobileScope & {
+  cases: MobileCaseSummary[];
+  nextCursor: string | null;
+  selection: Pick<MobileCaseFilter, "ownership" | "category" | "q">;
+};
+export type MobileCaseDetailData = MobileCaseSummary & {
+  mainNote: string;
+  incidentDescription: string | null;
+  jobTypeLabels: string[];
+  timeline: { id: string; title: string; body: string | null; createdAt: string; actorName: string | null }[];
+};
+export type MobileCaseDetail = MobileScope & { case: MobileCaseDetailData };
+export type MobileCaseCreateInput = {
+  contactName?: string;
+  contactPhone?: string;
+  licensePlate?: string;
+  vehicleMake?: string;
+  vehicleModel?: string;
+  manualPickupAddress?: string;
+  manualDestinationAddress?: string;
+  incidentDescription?: string;
+  note?: string;
+  priority?: MobileCasePriority;
+  jobTypes?: MobileCaseJobType[];
+};
+export type MobileCaseCreated = MobileScope & {
+  caseId: string;
+  caseNumber: string;
+  warnings: { code: string; field: string; message: string }[];
+};
