@@ -1,0 +1,77 @@
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, View } from "react-native";
+import { Button, Card, ErrorNotice, styles } from "../ui";
+import { CaseEdit, changedFields } from "./edit";
+import { Choice, fields, jobTypes, priorities } from "./form";
+
+export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; active: boolean; onBack: () => void; onSaved: () => void }) {
+  const state = useSyncExternalStore(edit.subscribe, edit.snapshot, edit.snapshot);
+  const scroll = useRef<ScrollView>(null);
+  useEffect(() => {
+    if (active && (state.error || ["uncertain", "conflict", "blocked", "committed", "saved"].includes(state.status))) scroll.current?.scrollTo({ y: 0, animated: false });
+  }, [active, state.status, state.error]);
+  const [addressAcknowledged, setAddressAcknowledged] = useState("");
+  useEffect(() => { edit.setActive(active); return () => edit.setActive(false); }, [edit, active]);
+  useEffect(() => {
+    if (state.status === "committed") onSaved();
+  }, [state.status, onSaved]);
+  useEffect(() => {
+    if (active && state.status === "committed" && !state.error && !state.refreshing) void edit.refresh();
+  }, [active, state.status, state.error, state.refreshing, edit]);
+  const changes = changedFields(state.base.editable, state.input), keys = Object.keys(changes);
+  const editing = state.status === "editing";
+  const addressChange = "manualPickupAddress" in changes || "manualDestinationAddress" in changes;
+  const addressKey = JSON.stringify([state.base.updatedAt, state.input.manualPickupAddress, state.input.manualDestinationAddress]);
+  return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
+      <Button label="Späť na detail" secondary disabled={state.status === "saving"} onPress={onBack} /><Text style={styles.heading}>Upraviť {state.base.caseNumber}</Text>
+      <Text style={styles.muted}>Zmeny zostanú rozpracované, kým ich neuložíte. Poznámka tu upravuje hlavný text prípadu.</Text>
+      {state.receipt && <Card><Text accessibilityRole="alert" style={styles.subheading}>Zmeny sú uložené.</Text>
+        {state.receipt.warnings.map((item, i) => <Text key={item.code + i} style={styles.text}>{item.message}</Text>)}
+        {state.status === "committed" && <Text style={styles.muted}>Aktuálny detail ešte načítavame. Uloženie sa nebude opakovať.</Text>}</Card>}
+      {state.error && <ErrorNotice message={state.error} />}
+      {state.status === "uncertain" && <Button label="Overiť pôvodné uloženie" onPress={() => { void edit.save(); }} />}
+      {state.status === "committed" && state.error && <Button label="Obnoviť uložený detail" disabled={state.refreshing} onPress={() => { void edit.refresh(); }} secondary />}
+      {state.status === "conflict" && <Card>
+        <Button label={state.refreshing ? "Načítavam aktuálne údaje…" : "Načítať údaje na porovnanie"} secondary disabled={state.refreshing} onPress={() => { void edit.refresh(); }} />
+        {state.latest && <><Text style={styles.subheading}>Porovnanie vašich zmien</Text>
+          {keys.map(key => {
+            const field = key as keyof typeof state.input;
+            const label = fields.find(item => item.key === field)?.label ?? (field === "priority" ? "Priorita" : field === "jobTypes" ? "Služba" : "Stav prípadu");
+            const value = (input: typeof state.input) => field === "status" ? state.base.statusOptions.find(option => option.value === input.status)?.label ?? input.status
+              : field === "priority" ? priorities.find(option => option.value === input.priority)?.label ?? input.priority
+                : field === "jobTypes" ? jobTypes.filter(option => input.jobTypes.includes(option.value)).map(option => option.label).join(", ") : String(input[field] || "Prázdne");
+            return <View key={key}><Text style={styles.label}>{label}</Text><Text style={styles.text}>Moje: {value(state.input)}</Text><Text style={styles.muted}>Aktuálne: {value(state.latest!.editable)}</Text></View>;
+          })}
+          <Text style={styles.muted}>Použitie vašich zmien prepíše iba uvedené polia. Ostatné aktuálne údaje zostanú zachované.</Text>
+          <Button label="Použiť moje zmeny na aktuálne údaje" disabled={state.refreshing} onPress={() => edit.rebase()} />
+          <Button label="Zahodiť moje zmeny a načítať aktuálne" secondary disabled={state.refreshing} onPress={() => edit.reload()} />
+        </>}
+      </Card>}
+      {fields.map(field => <View key={field.key}><Text style={styles.label}>{field.label}</Text>
+        <TextInput accessibilityLabel={field.label} value={state.input[field.key]} onChangeText={value => edit.edit({ [field.key]: value })} editable={editing}
+          maxLength={field.max} multiline={field.multiline} keyboardType={field.key === "contactPhone" ? "phone-pad" : "default"}
+          autoCapitalize={field.key === "licensePlate" ? "characters" : "sentences"} autoCorrect={field.key !== "licensePlate" && field.key !== "contactPhone"}
+          style={[styles.input, field.multiline && { minHeight: 90, textAlignVertical: "top" }]} />
+      </View>)}
+      <Text style={styles.label}>Služba</Text><View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>{jobTypes.map(item => <Choice key={item.value} label={item.label}
+        selected={state.input.jobTypes.includes(item.value)} disabled={!editing} onPress={() => edit.edit({ jobTypes: state.input.jobTypes.includes(item.value)
+          ? state.input.jobTypes.filter(value => value !== item.value) : [...state.input.jobTypes, item.value] })} />)}</View>
+      <Text style={styles.label}>Priorita</Text><View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>{priorities.map(item => <Choice key={item.value} label={item.label}
+        selected={state.input.priority === item.value} disabled={!editing} onPress={() => edit.edit({ priority: item.value })} />)}</View>
+      <Text style={styles.label}>Stav prípadu</Text><Text style={styles.muted}>Aktuálne: {state.base.statusLabel}</Text>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+        <Choice label="Ponechať aktuálny" selected={state.input.status === state.base.editable.status} disabled={!editing} onPress={() => edit.edit({ status: state.base.editable.status })} />
+        {state.base.statusOptions.map(item => <Choice key={item.value} label={item.label}
+        selected={state.input.status === item.value && state.input.status !== state.base.editable.status} disabled={!editing} onPress={() => edit.edit({ status: item.value })} />)}</View>
+      {addressChange && <Card><Text style={styles.text}>Zmena adresy nahradí pôvodné miesto aj jeho uloženú polohu na mape. Prázdna adresa miesto odstráni.</Text>
+        <Choice label="Potvrdzujem nahradenie miesta" selected={addressAcknowledged === addressKey} disabled={!editing}
+          onPress={() => setAddressAcknowledged(addressAcknowledged === addressKey ? "" : addressKey)} /></Card>}
+      {changes.status && ["completed_assisted", "completed_no_assistance", "cancelled", "futile_trip"].includes(changes.status)
+        && <Text style={styles.muted}>Prípad zmizne z otvorených prípadov. Nájdete ho cez filter Aj uzavreté.</Text>}
+      {state.status === "saved" ? <Button label="Zobraziť uložený detail" onPress={onBack} />
+        : <Button label={state.status === "saving" ? "Ukladám zmeny…" : "Uložiť zmeny"} disabled={!editing || keys.length === 0 || addressChange && addressAcknowledged !== addressKey}
+          onPress={() => { Keyboard.dismiss(); void edit.save(); }} />}
+    </ScrollView>
+  </KeyboardAvoidingView>;
+}

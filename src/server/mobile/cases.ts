@@ -3,18 +3,19 @@ import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadCaseDetail } from "@/data/case-detail-repository";
 import { mapCase } from "@/data/dispatch-repository";
-import type { CaseDetailData } from "@/data/case-detail";
+import { compareCaseRevisions, type CaseDetailData } from "@/data/case-detail";
 import { jobTypeLabels } from "@/domain/case-card";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
-import type { MobileCaseCreateInput, MobileCaseCreated, MobileCaseDetailData, MobileCaseDispatcher, MobileCaseFilter, MobileCaseSummary } from "@/lib/mobile-api";
+import type { MobileCaseCreateInput, MobileCaseCreated, MobileCaseDetailData, MobileCaseDispatcher, MobileCaseFilter, MobileCaseSummary, MobileCaseUpdateInput, MobileCaseUpdated, MobileCaseUpdateStatus } from "@/lib/mobile-api";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/database.types";
 import { isHistoryTimestamp } from "@/lib/telephony/call-history-query";
 import { isUuid } from "@/lib/telephony/uuid";
 import type { MotoristActor } from "@/server/api-auth";
-import { CaseCreationCommittedError, createCase } from "@/server/motorist-mutations";
+import { CaseCreationCommittedError, createCase, updateCase } from "@/server/motorist-mutations";
 import { MutationError } from "@/server/mutation-error";
 import { humansOnly } from "@/server/profile-kind";
+import { readMobileJsonBody } from "./body";
 
 type Admin = SupabaseClient<Database>;
 type CaseRow = Database["public"]["Tables"]["motorist_cases"]["Row"];
@@ -22,10 +23,10 @@ type Selection = Pick<MobileCaseFilter, "ownership" | "category" | "q"> & { owne
 type Cursor = { createdAt: string; id: string; selection: string };
 export type MobileCaseQuery = Selection & { limit: number; cursor: Cursor | null };
 const CLOSED = ["completed_assisted", "completed_no_assistance", "rejected", "cancelled", "futile_trip"] as const;
+const UPDATE_STATUSES = ["open", "completed_assisted", "completed_no_assistance", "waiting_for_docs", "cancelled", "futile_trip"] as const satisfies readonly MobileCaseUpdateStatus[];
 const SEARCH_LIMIT = 100;
 const DISPATCHER_LIMIT = 200;
 const DISPATCHER_ROLES = ["dispatcher", "senior_dispatcher", "manager", "admin"] as const;
-const MAX_BODY_BYTES = 64_000;
 const STRING_LIMITS = { contactName: 200, contactPhone: 64, licensePlate: 32, vehicleMake: 80, vehicleModel: 120,
   manualPickupAddress: 500, manualDestinationAddress: 500, incidentDescription: 5000, note: 10000 } as const;
 
@@ -113,10 +114,11 @@ async function searchCaseIds(admin: Admin, actor: MotoristActor, query: Selectio
 }
 
 export function mobileCaseSummary(detail: CaseDetailData, actor: MotoristActor): MobileCaseSummary {
+  const primary = detail.customerDetails.contacts?.find(contact => contact.isPrimary) ?? detail.customerDetails.contacts?.[0];
   return { id: detail.id, caseNumber: detail.caseNumber, status: detail.status, statusLabel: caseStatusLabels[detail.status],
     priority: detail.priority, priorityLabel: casePriorityLabels[detail.priority],
     owner: { id: detail.ownerId === "unassigned" ? null : detail.ownerId, name: detail.ownerName ?? null, mine: detail.ownerId === actor.profileId },
-    contact: { name: detail.contact.name || null, phone: detail.contact.phone || null },
+    contact: { name: primary?.name || detail.contact.name || null, phone: primary?.phone || detail.contact.phone || null },
     vehicle: { licensePlate: detail.vehicle.licensePlate || null, description: [detail.vehicle.make, detail.vehicle.model].filter(Boolean).join(" ") || null },
     pickupAddress: detail.pickup?.address ?? detail.locationDetails.manualPickupAddress ?? null,
     destinationAddress: detail.destination?.address ?? detail.locationDetails.manualDestinationAddress ?? null,
@@ -171,7 +173,13 @@ export async function listMobileCases(actor: MotoristActor, query: MobileCaseQue
 export async function getMobileCase(actor: MotoristActor, id: string, signal?: AbortSignal, admin: Admin = createSupabaseAdminClient()): Promise<MobileCaseDetailData> {
   if (!isUuid(id)) badInput("Neplatný prípad.");
   const detail = await loadCaseDetail(id, actor, signal, admin);
-  return { ...mobileCaseSummary(detail, actor), mainNote: detail.mainNote, incidentDescription: detail.incidentDetails.description ?? null,
+  const summary = mobileCaseSummary(detail, actor);
+  return { ...summary, mainNote: detail.mainNote, incidentDescription: detail.incidentDetails.description ?? null,
+    editable: { contactName: summary.contact.name ?? "", contactPhone: summary.contact.phone ?? "", licensePlate: detail.vehicle.licensePlate,
+      vehicleMake: detail.vehicle.make, vehicleModel: detail.vehicle.model, manualPickupAddress: summary.pickupAddress ?? "",
+      manualDestinationAddress: summary.destinationAddress ?? "", incidentDescription: detail.incidentDetails.description ?? "",
+      note: detail.mainNote, priority: detail.priority, jobTypes: detail.jobTypes, status: detail.status },
+    statusOptions: UPDATE_STATUSES.map(value => ({ value, label: caseStatusLabels[value] })),
     jobTypeLabels: detail.jobTypes.map(type => jobTypeLabels[type]),
     timeline: detail.timeline.slice(0, 50).map(event => ({ id: event.id, title: event.title, body: event.body || null, createdAt: event.time, actorName: event.actor || null })) };
 }
@@ -195,24 +203,44 @@ export function parseMobileCaseCreate(value: unknown): MobileCaseCreateInput {
   return input;
 }
 
+export function parseMobileCaseUpdate(value: unknown): MobileCaseUpdateInput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) badInput();
+  const { expectedUpdatedAt, mutationId, status, ...fields } = value as Record<string, unknown>;
+  if (expectedUpdatedAt === undefined) throw new MutationError("Pred uložením načítajte aktuálnu revíziu prípadu.", 428, "CASE_REVISION_REQUIRED");
+  if (!isHistoryTimestamp(expectedUpdatedAt)) badInput("Neplatná revízia prípadu.");
+  if (typeof mutationId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(mutationId)) badInput("Neplatná identita uloženia.");
+  if (status !== undefined && !UPDATE_STATUSES.includes(status as MobileCaseUpdateStatus)) badInput("Neplatný stav prípadu.");
+  const changes = parseMobileCaseCreate(fields);
+  if (!Object.keys(changes).length && status === undefined) badInput("Vyberte údaje na úpravu.");
+  return { ...changes, expectedUpdatedAt, mutationId, ...(status !== undefined ? { status: status as MobileCaseUpdateStatus } : {}) };
+}
+
 export async function readMobileCaseCreate(request: Request): Promise<MobileCaseCreateInput> {
-  if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") badInput("Očakáva sa JSON formulár.");
-  const reader = request.body?.getReader();
-  if (!reader) badInput();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
+  return parseMobileCaseCreate(await readMobileJsonBody(request));
+}
+
+export async function readMobileCaseUpdate(request: Request): Promise<MobileCaseUpdateInput> {
+  return parseMobileCaseUpdate(await readMobileJsonBody(request));
+}
+
+export async function updateMobileCase(actor: MotoristActor, id: string, input: MobileCaseUpdateInput): Promise<Pick<MobileCaseUpdated, "caseId" | "mutationId" | "committedRevision" | "warnings" | "refreshRequired">> {
+  if (!isUuid(id)) badInput("Neplatný prípad.");
+  const parsed = parseMobileCaseUpdate(input);
+  // A manual address replaces the old mapped location. Presence, including clearing,
+  // produces the same payload on replay; omitted addresses keep their references.
+  const changes = { ...parsed, ...(parsed.manualPickupAddress !== undefined ? { pickup: null } : {}),
+    ...(parsed.manualDestinationAddress !== undefined ? { destination: null } : {}) };
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytes += value.byteLength;
-      if (bytes > MAX_BODY_BYTES) { await reader.cancel(); badInput("Formulár je príliš veľký."); }
-      chunks.push(value);
+    const { caseRow, warnings } = await updateCase(id, changes, actor.profileId, actor.organizationId, { synchronizePrimaryContact: true });
+    if (!caseRow || caseRow.id !== id || caseRow.organization_id !== actor.organizationId || !isHistoryTimestamp(caseRow.updated_at)
+      || compareCaseRevisions(caseRow.updated_at, parsed.expectedUpdatedAt) < 0) {
+      throw new MutationError("Výsledok uloženia sa nepodarilo overiť.", 503, "CASE_SAVE_UNCONFIRMED");
     }
-  } finally { reader.releaseLock(); }
-  let body: unknown;
-  try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { badInput("Neplatný JSON formulár."); }
-  return parseMobileCaseCreate(body);
+    return { caseId: id, mutationId: parsed.mutationId, committedRevision: caseRow.updated_at, warnings, refreshRequired: true };
+  } catch (error) {
+    if (error instanceof MutationError && (error.status < 500 || error.code === "CASE_SAVE_UNCONFIRMED")) throw error;
+    throw new MutationError("Výsledok uloženia sa nepodarilo overiť. Overte tú istú požiadavku znova.", 503, "CASE_SAVE_UNCONFIRMED");
+  }
 }
 
 export async function createMobileCase(actor: MotoristActor, input: MobileCaseCreateInput): Promise<Pick<MobileCaseCreated, "caseId" | "caseNumber" | "warnings">> {

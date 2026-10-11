@@ -48,6 +48,7 @@ export type MobileHistory = MobileScope & {
 
 export type MobileCasePriority = "urgent" | "high" | "normal" | "low";
 export type MobileCaseJobType = "tow" | "replacement_vehicle" | "onsite_assistance" | "vehicle_recovery";
+export type MobileCaseUpdateStatus = "open" | "completed_assisted" | "completed_no_assistance" | "waiting_for_docs" | "cancelled" | "futile_trip";
 export type MobileCaseFilter = {
   ownership: "mine" | "all";
   category: "open" | "all";
@@ -82,6 +83,8 @@ export type MobileCaseDetailData = MobileCaseSummary & {
   mainNote: string;
   incidentDescription: string | null;
   jobTypeLabels: string[];
+  editable: Required<MobileCaseCreateInput> & { status: string };
+  statusOptions: { value: MobileCaseUpdateStatus; label: string }[];
   timeline: { id: string; title: string; body: string | null; createdAt: string; actorName: string | null }[];
 };
 export type MobileCaseDetail = MobileScope & { case: MobileCaseDetailData };
@@ -102,4 +105,24 @@ export type MobileCaseCreated = MobileScope & {
   caseId: string;
   caseNumber: string;
   warnings: { code: string; field: string; message: string }[];
+};
+export type MobileCaseUpdateInput = MobileCaseCreateInput & {
+  expectedUpdatedAt: string;
+  mutationId: string;
+  status?: MobileCaseUpdateStatus;
+};
+export type MobileCaseUpdated = MobileScope & {
+  caseId: string;
+  mutationId: string;
+  committedRevision: string;
+  warnings: MobileCaseCreated["warnings"];
+  refreshRequired: true;
+};
+export type MobileCaseNoteInput = { mutationId: string; note: string };
+export type MobileCaseNoteAdded = MobileScope & {
+  caseId: string;
+  mutationId: string;
+  eventId: string;
+  warnings: MobileCaseCreated["warnings"];
+  refreshRequired: true;
 };

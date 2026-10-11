@@ -72,7 +72,8 @@ Poradie vychádza z bežnej práce mobilného dispečera:
 4. **Organizácia služby:** úlohy, termíny a prevzatie/odovzdanie prípadu
    podľa existujúcich oprávnení a pravidiel webu.
 
-Aktuálny rozsah je prvý bod. Ostatné body opisujú ďalšie rozšírenia.
+Aktuálny rozsah zahŕňa prvé dva body a otvorenie navigácie z detailu.
+Fotografie, prílohy, poloha a organizácia služby zostávajú ďalšími rozšíreniami.
 Zakladanie je výslovná online operácia; výpadok nesmie spustiť automatické
 opakované odoslanie. Úspešný zápis sa oddelí od následného načítania detailu.
 Podrobný kontrakt a TEST skúšky sú v [mobilných prípadoch](cases.md).

@@ -15,7 +15,8 @@ Z webu importuje iba vymazateľné TypeScript typy z `src/lib/mobile-api.ts`.
 - **História:** existujúce autorizované serverové vyhľadávanie, filtre,
   stránkovanie a výber čísla do ústredne. Výber nevytvorí hovor.
 - **Prípady:** moje alebo všetky prípady organizácie, otvorené alebo všetky stavy,
-  filter podľa dispečera, vyhľadávanie, stránkovanie, detail a založenie prípadu.
+  filter podľa dispečera, vyhľadávanie, stránkovanie, detail, založenie a úpravy prípadu,
+  hlavná poznámka, historické poznámky, zmeny stavu a otvorenie navigácie.
   Predvolene sa zobrazia všetky otvorené. Používajú
   rovnaké záznamy a pravidlá ako web; fungujú aj v Expo Go.
 - **Účet:** meno, e-mail, rola, prostredie a odhlásenie z tohto zariadenia.
@@ -193,7 +194,8 @@ organizačná rola sa číta z profilu. Bez prihlásenia je odpoveď 401, bez pr
 | `/api/mobile/v1/console` | vlastná prezencia a vlastné aktívne hovory; iba čítanie |
 | `/api/mobile/v1/calls/history` | `category`, `q`, `cursor`, `limit`; existujúca autorizovaná história |
 | `/api/mobile/v1/cases` | GET prehľad/filtre/stránky, POST nový prípad |
-| `/api/mobile/v1/cases/[id]` | GET detail prípadu organizácie |
+| `/api/mobile/v1/cases/[id]` | GET detail prípadu organizácie, PATCH s presnou revíziou a identitou uloženia |
+| `/api/mobile/v1/cases/[id]/notes` | POST historická poznámka s identitou proti duplicitnému zápisu |
 | `/api/mobile/v1/cases/dispatchers` | GET obmedzený organizačný výber dispečerov |
 
 História nevracia provider identifikátory, nahrávky, prepisy, interné udalosti
