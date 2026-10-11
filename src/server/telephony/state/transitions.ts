@@ -1054,7 +1054,7 @@ function planStep(b: TransitionBuilder, plan: FrozenRingPlan, index: number): Ri
     now: b.ctx.now,
     presence: toEligibilityPresence(b.ctx.presence),
     devices: toEligibilityDevices(b.ctx.devices),
-    mobileDevices: toEligibilityDevices(b.ctx.mobileDevices ?? []),
+    mobileDevices: toEligibilityDevices(b.ctx.mobileDevices ?? [], b.ctx.now),
     openOffers: b.ctx.openOffers,
     attempted,
     maxFanout: b.ctx.settings.maxRingFanout,

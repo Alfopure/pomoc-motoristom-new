@@ -11,6 +11,7 @@ import { deviceLastOnlineAt, LAST_ONLINE_METADATA_KEY, retainDeviceLastOnline } 
 import { OperatorDeviceError } from "./service-errors";
 import { telnyxSipUri, toJson, type DeviceRow, type TelephonyEnvironment } from "./state/types";
 import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
+import { nativeMobilePushReachable, nativePushLease } from "./native-mobile";
 
 export { OperatorDeviceError } from "./service-errors";
 
@@ -237,6 +238,7 @@ export async function issueWebphoneToken(
   input: { organizationId: string; profileId: string; userAgent?: string | null; takeover?: boolean; handoff?: boolean; deviceSessionId?: string | null },
 ): Promise<WebphoneToken> {
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
+  const reachable = (device: DeviceRow) => deviceIsLive(device, nowOf(deps)) || deps.deviceKind === "mobile" && nativeMobilePushReachable(device, nowOf(deps));
   if (input.takeover) {
     const presence = await deps.admin.from("motorist_operator_presence").select("status")
       .eq("organization_id", input.organizationId).eq("profile_id", input.profileId).maybeSingle();
@@ -248,11 +250,11 @@ export async function issueWebphoneToken(
   if (!input.takeover) {
     const current = await getOperatorDevice(deps, input);
     const sameTab = Boolean(input.deviceSessionId && current?.device_session_id === input.deviceSessionId);
-    if (current && !sameTab && deviceIsLive(current, nowOf(deps))) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+    if (current && !sameTab && reachable(current)) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
   }
   const device = await ensureOperatorCredential(deps, input);
   const sameTab = Boolean(input.deviceSessionId && device.device_session_id === input.deviceSessionId);
-  if (!input.takeover && !sameTab && deviceIsLive(device, nowOf(deps))) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+  if (!input.takeover && !sameTab && reachable(device)) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
   const credentialId = device.telnyx_credential_id;
   const sipUsername = device.sip_username;
   if (!credentialId || !sipUsername) throw new OperatorDeviceError("Zariadenie nemá prihlasovacie údaje.", 500);
@@ -299,7 +301,7 @@ export type TouchDeviceResult = { ok: true; device: DeviceRow } | { ok: false; r
 export async function touchDevice(
   deps: DeviceDeps,
   input: { organizationId: string; profileId: string; deviceSessionId: string; registrationState?: DeviceRow["registration_state"];
-    userAgent?: string | null; audio?: { blocked: boolean; remoteMedia: boolean } },
+    userAgent?: string | null; audio?: { blocked: boolean; remoteMedia: boolean }; nativeVoipRegistered?: boolean },
 ): Promise<TouchDeviceResult> {
   const device = await getOperatorDevice(deps, input);
   if (!device) return { ok: false, reason: "unknown_device" };
@@ -318,6 +320,10 @@ export async function touchDevice(
     }
     // Kept on the device, not on the call; retain other lifecycle metadata.
     if (input.audio) metadata.audio = { ...input.audio, at: now };
+    if (deps.deviceKind === "mobile" && input.nativeVoipRegistered !== undefined) {
+      metadata.native_voip = nativePushLease(current, snapshotNow,
+        input.nativeVoipRegistered && !leaving && (input.registrationState ?? current.registration_state) === "registered");
+    }
     return { device_seen_at: leaving ? null : now, metadata: toJson(metadata),
       ...(input.registrationState ? { registration_state: input.registrationState } : {}),
       ...(input.userAgent ? { user_agent: input.userAgent } : {}),
@@ -332,7 +338,10 @@ export async function touchDevice(
 async function revokeDeviceSession(deps: DeviceDeps, device: DeviceRow): Promise<DeviceRow> {
   const updated = await updateCurrentDevice(deps, device, (current) => ({
     device_session_id: `revoked:${randomUUID()}`, registration_state: "unregistered", device_seen_at: null,
-    metadata: toJson(retainDeviceLastOnline(current, nowOf(deps))),
+    metadata: toJson({ ...retainDeviceLastOnline(current, nowOf(deps)),
+      ...(deps.deviceKind === "mobile" ? { native_revocation_session_id: current.device_session_id?.startsWith("revoked:")
+        ? (current.metadata && typeof current.metadata === "object" && !Array.isArray(current.metadata) ? current.metadata.native_revocation_session_id ?? null : null)
+        : current.device_session_id } : {}) }),
   }));
   if (!updated) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
   recordDeviceTransition(deps, device, "ownership_release");
@@ -356,7 +365,7 @@ export type DisconnectResult = { device: DeviceRow; deletedCredentialId: string 
  */
 export async function disconnectDevice(
   deps: DeviceDeps,
-  input: { organizationId: string; profileId: string; keepCredential?: boolean },
+  input: { organizationId: string; profileId: string; keepCredential?: boolean; deviceSessionId?: string },
 ): Promise<DisconnectResult | null> {
   if (!deps.deviceKind && !input.keepCredential) {
     const web = await disconnectDevice({ ...deps, deviceKind: "web" }, input);
@@ -365,6 +374,8 @@ export async function disconnectDevice(
   }
   const device = await getOperatorDevice(deps, input);
   if (!device) return null;
+  // A delayed mobile logout may never revoke a newer device's lease.
+  if (input.deviceSessionId && device.device_session_id !== input.deviceSessionId) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
   const revoked = await revokeDeviceSession(deps, device);
   if (input.keepCredential || !revoked.telnyx_credential_id) return { device: revoked, deletedCredentialId: null };
 

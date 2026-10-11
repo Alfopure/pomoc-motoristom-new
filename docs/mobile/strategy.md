@@ -143,20 +143,26 @@ vlastný podpísaný iOS TEST s natívnym telefonovaním. Oba varianty zostávaj
 v rozsahu vývoja. Expo Go náhľad neaktivuje OTA v natívnych ani produkčných
 buildoch a nemení živé provider resources.
 
-V Expo účtoch `linkapomoci`/`alfopure` nie je pripravený Apple team; na Macu
-nie je Xcode, provisioning profile ani validný signing identity. iOS
-`voice-proof-simulator` preto preveruje kompiláciu nižšieho Telnyx SDK 1.1.0
-a WebRTC 124.0.8 bez Apple podpisu. Jeho boot probe iba kontroluje importy,
-nevytvára SIP klienta. `voice-test` pripravuje rovnaký proof na fyzický iPhone
-po doplnení signing; aktuálny M1 naďalej neprijíma ani nevytáča hovory.
+Majiteľ potvrdil otvorenie Expo Go náhľadu na fyzickom iPhone a oznámil,
+že **Apple Developer členstvo čaká na schválenie**. Na Macu aktuálne nie je
+Xcode ani pripravený podpis; cloudový simulator build nepotrebuje Apple
+podpis. Vlastný build na fyzický iPhone a VoIP push vyžadujú signing aj pred
+verejným App Store vydaním. Nepýtame sa opakovane na už oznámené členstvo.
 
-Nižší SDK má nevyhlásené imports `rxjs`/AsyncStorage a používa transport
-`react-native-websocket-self-signed`, development debug logs a persistenciu
-push payloadov. Tieto konkrétne body treba vyriešiť pred prvým SIP loginom;
-proof nevytvára klienta ani mu neodovzdáva credential. Native CallKit/PushKit,
-audio a secure cold start sa nedokazujú simulator buildom. Apple Developer
-a Firebase zatiaľ nie sú pripravené. Vlastný build na fyzický iPhone a jeho
-VoIP push vyžadujú Apple signing aj pred verejným App Store vydaním.
+Prvý RN SDK/WebRTC import proof sa nahrádza natívnym iOS SDK **4.2.2** cez
+lokálny Expo modul. CallKit/PushKit vznikajú pred JS; audio aktivuje systém.
+JWT, token PushKit a payload zostávajú v pamäti, SDK logs/call reports sú
+vypnuté. Bez JS bootstrapu sa nový provider token neprijíma; zabezpečená
+Supabase session a UUID device lease dovolia cold-start overenie operátora.
+
+JWT-auth serverové voice routy zdieľajú existujúce vytáčanie, rezerváciu,
+hangup a provider provenance guardy. Povolené sú iba v dedikovanom TEST
+pod samostatnými opt-in prepínačmi. Background dostupnosť je revokovateľná
+7-dňová pilotná lease v existujúcom mobile device metadata, bez falošného
+heartbeat. Zoznam potrebných krokov, prepínače, rollback a fyzické skúšky
+sú v [iPhone TEST runbooku](iphone-voice-test.md). Kompilácia nenahrádza
+obojstranné audio ani zvonenie zamknutého iPhone. Android voice/FCM zostáva
+nasledujúcim implementačným krokom po iPhone pilote.
 
 ## Akceptácia telefonujúcej verzie
 

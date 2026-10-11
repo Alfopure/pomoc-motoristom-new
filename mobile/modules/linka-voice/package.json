@@ -1,0 +1,7 @@
+{
+  "name": "linka-voice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "iPhone dispatch phone with native CallKit and PushKit",
+  "license": "UNLICENSED"
+}

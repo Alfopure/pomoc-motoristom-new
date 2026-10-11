@@ -18,13 +18,22 @@ Z webu importuje iba vymazateľné TypeScript typy z `src/lib/mobile-api.ts`.
 - Odobratý prístup alebo chyba čítania skryje obsah; rôzne účty nemajú
   spoločnú cache. Obnova a polling sa zastavia v pozadí.
 
-**Táto verzia ešte netelefonuje ani nezvoní.** Neobsahuje Telnyx native SDK,
-PushKit/CallKit, FCM ani Android call service. Tlačidlo Zavolať je neaktívne,
-capabilities sú pevne `voice: false`, `presenceWrite: false`. Stav Dostupný
-opisuje účet v existujúcej ústredni, nie pripojenie tohto mobilného telefónu.
-Mobil nevydáva SIP token, nerobí heartbeat ani nemení prezenciu/ring plán.
-Read-only kontrakt v1 ponechať dostupný starším buildom aj po pridaní hlasu;
-natívny hlas má dostať nový kontrakt pre build so skutočným voice enginom.
+Expo Go a bežný M1 build zostávajú náhľadom prihlasovania, ústredne a histórie.
+**iPhone voice TEST** pridáva lokálny Expo modul `modules/linka-voice` s natívnym
+Telnyx iOS SDK 4.2.2, CallKit a PushKit. Apple Developer členstvo majiteľa čaká
+na schválenie; majiteľ potvrdil spustenie Expo náhľadu na fyzickom iPhone.
+Skutočné audio, APNs a systémové zvonenie na zamknutom zariadení zatiaľ
+nie sú prijaté ako funkčné. Android hlas/FCM nasleduje po iPhone pilote.
+
+Rozhranie používa žltú `#FCD703`, čierne tlačidlá a zinc/sivé plochy webu.
+Natívny telefón má pripojenie, vytáčanie, prijatie/odmietnutie, ukončenie,
+mikrofón, reproduktor, DTMF a Dostupný/Pauza. Aktívny hovor zostáva viditeľný
+pri zmene záložky. Prebiehajúci hovor sa zobrazí až po potvrdení spojenia
+ústredňou; HTTP 202 ukončenie sa sleduje do potvrdenia serverom.
+
+Read-only kontrakt v1 nemení capabilities (`voice: false`, `presenceWrite:
+false`), aby starší M1 nedostal prísľub chýbajúceho native enginu. Hlas má
+samostatné POST routy pod `/api/mobile/v1/voice`. V Expo Go sa nepoužijú.
 
 Nasledujúci krok a merateľná akceptácia sú v [stratégii](../docs/mobile/strategy.md).
 
@@ -102,26 +111,57 @@ vypnuté a tento náhľad neaktivuje telefonovanie v pôvodnom Android APK.
 Expo Go slúži na prihlásenie, ústredňu a históriu; CallKit/PushKit ani skutočné
 telefonovanie cez vlastné native moduly v ňom nie sú dostupné.
 
-## Natívny iOS proof pre telefonovanie
+## Natívny iPhone telefón
 
-Profil `voice-proof-simulator` pridáva WebRTC plugin a pri štarte overí importy
-nižšieho Telnyx SDK 1.1.0 a WebRTC 124.0.8. Nevytvára klienta, socket ani
-provider hovor a neprijíma SIP credentials. Používa TEST backend a SDK 57
-image; simulator build nepotrebuje Apple podpis. Na fyzickom iPhone použiť
-profil `voice-test` až po príprave Apple Developer podpisovania a zariadenia.
+Profil `voice-proof-simulator` kompiluje Swift TelnyxRTC 4.2.2 a jeho WebRTC
+150 cez CocoaPods. Boot probe overí modul `LinkaVoice`; nevydáva provider
+hovor. Cloudová kompilácia nepreukazuje štart, audio, CallKit UI ani push.
+Profil `voice-test` je pre podpísaný fyzický iPhone po schválení Apple,
+registrácii TEST App ID/zariadenia a nastavení príslušného APNs VoIP certifikátu.
 
 ```sh
 npx eas-cli@24.12.1 build --platform ios --profile voice-proof-simulator
+# Až s Apple podpisom:
+npx eas-cli@24.12.1 build --platform ios --profile voice-test
 ```
 
-SDK má nevyhlásené runtime imports `rxjs` a AsyncStorage, preto sú explicitne
-pridané. Supabase session zostáva v SecureStore. Pred prvým skutočným SIP
-loginom treba preveriť/opraviť transport `react-native-websocket-self-signed`,
-vynútené debug logovanie SDK v development a ukladanie push payloadov. Proof
-nepoužíva tento transport ani jeho persistenciu. CallKit, PushKit, native cold
-start, secure SIP lifecycle a serverové call actions sú nasledujúca fáza;
-kompilácia ani import proof nedokazujú obojstranné audio alebo zvonenie.
+Natívny `ExpoAppDelegateSubscriber` spustí CallKit/PushKit pred JS. Každý
+VoIP push hlási systémový hovor bez čakania na JS alebo server a potom ukončí
+neplatnú/zrušenú ponuku. Prijatie čaká na JWT-auth overenie presnej mobilnej
+SIP identity, aktuálnej rezervácie a ponuky. CallKit aktivuje/deaktivuje audio.
+Vytáčanie prebieha cez existujúci serverový call service; klient len prijme
+**presný operator leg vrátený HTTP odpoveďou**. Nepoužíva priame SDK dial.
 
+Provider JWT, push token a payload zostávajú v natívnej/JS pamäti. V Keychain
+sa ukladá Supabase Auth session a revokovateľné UUID relácie zariadenia;
+nie SIP heslo či Telnyx account key. SDK logovanie aj odosielanie call reports
+sú vypnuté. Pôvodný React Native SDK proof a jeho self-signed transport sa
+odstránili; iPhone používa natívny SDK. Natívny modul je zapnutý len pre TEST
+bundle ID a explicitný voice profil. Produkčný variant ho nemôže aktivovať.
+
+Server vyžaduje presnú identitu dedikovaného TEST deploymentu a
+`MOTORIST_NATIVE_VOICE_TEST_ENABLED=true`; Preview ani produkcia mobilný
+pilot nespustia. APNs routing má ďalší samostatný prepínač
+`MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED=true`. **Oba zostávajú vypnuté**, kým
+sa neoverí podpis a provider konfigurácia. JWT auth platí aj pri vypnutej
+funkcii. Cleanup aktuálnej vlastnej TEST relácie ostáva možný po jej vypnutí;
+produkčné alebo cudzie zdroje sa neovládajú.
+
+Mobil má samostatný device row a provider credential, neprevezme webový
+telefón. Opačný mobil možno prevziať len explicitným potvrdením a bez
+prebiehajúceho hovoru. Logout najprv vypne native klienta a revokuje provider
+credential; provider chyba ponechá uloženú reláciu pre bezpečné opakovanie.
+
+Pozadie nemá JS keepalive. Po overenej APNs konfigurácii server uchová iba
+revokovateľnú dostupnosť zariadenia v existujúcom `metadata.native_voip`,
+s platnosťou najviac 7 dní a po dobu platnosti provider credential. Ide o
+pilotnú, ohraničenú dostupnosť, nie potvrdenie doručenia push. Registrácia
+sa obnovuje v popredí; cold start obnoví JWT zo zabezpečenej Auth session.
+Webový interný hovor zvolí pripojený natívny TEST telefón kolegu; zákaznícke
+hovory používajú existujúce application/mobile endpointy incoming flow.
+Žiadna migrácia, nový listener alebo cron sa kvôli tomu nezavádza.
+
+Pred zapnutím oboch prepínačov dokončiť [iPhone runbook](../docs/mobile/iphone-voice-test.md).
 EAS/Vercel sú odlišné vydania: Vercel nasadí mobilné API, nie inštalovateľnú
 appku. Expo Go náhľad má vlastnú identitu; automatické store vydanie sa nenastavuje.
 

@@ -21,9 +21,19 @@ const config: ExpoConfig = {
   orientation: "portrait",
   userInterfaceStyle: "light",
   scheme: "linkapomoci" + (suffix ? "-" + variant : ""),
-  ios: { bundleIdentifier: "sk.linkapomoci.dispecing" + suffix, supportsTablet: false },
+  ios: {
+    bundleIdentifier: "sk.linkapomoci.dispecing" + suffix, supportsTablet: false,
+    ...(voiceProof ? {
+      entitlements: { "aps-environment": "production" },
+      infoPlist: {
+        LinkaNativeVoiceEnabled: true,
+        UIBackgroundModes: ["audio", "voip"],
+        NSMicrophoneUsageDescription: "Linka pomoci potrebuje mikrofón na telefonovanie.",
+      },
+    } : {}),
+  },
   android: { package: "sk.linkapomoci.dispecing" + suffix, blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE", "android.permission.CAMERA"] },
-  plugins: ["expo-secure-store", ...(voiceProof ? [["@config-plugins/react-native-webrtc", { microphonePermission: "Linka pomoci potrebuje mikrofón na telefonovanie." }] as [string, Record<string, string>]] : [])],
+  plugins: ["expo-secure-store"],
   // Only the explicit Expo Go TEST preview is published. Native binaries do
   // not fetch OTA updates, and production cannot select this preview mode.
   updates: expoGoPreview ? { url: "https://u.expo.dev/" + projectId, checkAutomatically: "NEVER" } : { enabled: false },

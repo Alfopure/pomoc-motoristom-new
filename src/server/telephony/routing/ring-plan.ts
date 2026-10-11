@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { nativeMobilePushReachable } from "../native-mobile";
 
 import type { Database } from "@/lib/supabase/database.types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
@@ -267,8 +268,9 @@ export function toEligibilityPresence(rows: PresenceRow[]): EligibilityPresence[
   return rows.map((row) => ({ profileId: row.profile_id, status: row.status, currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until, pauseReturn: row.pause_return }));
 }
 
-export function toEligibilityDevices(rows: DeviceRow[]): EligibilityDevice[] {
-  return rows.map((row) => ({ profileId: row.profile_id, deviceSeenAt: row.device_seen_at, registrationState: row.registration_state, sipUsername: row.sip_username }));
+export function toEligibilityDevices(rows: DeviceRow[], nativeMobileNow?: Date): EligibilityDevice[] {
+  return rows.map((row) => ({ profileId: row.profile_id, deviceSeenAt: row.device_seen_at, registrationState: row.registration_state, sipUsername: row.sip_username,
+    ...(nativeMobileNow ? { nativePushReachable: nativeMobilePushReachable(row, nativeMobileNow) } : {}) }));
 }
 
 export type RingStepPlanInput = {

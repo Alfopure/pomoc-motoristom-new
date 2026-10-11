@@ -34,6 +34,8 @@ export type EligibilityDevice = {
   deviceSeenAt?: string | null;
   registrationState?: string | null;
   sipUsername?: string | null;
+  /** Server-verified mobile lease; never set for browser registrations. */
+  nativePushReachable?: boolean;
 };
 
 export type EligibilityInput = {
@@ -115,7 +117,7 @@ export function evaluateMemberEligibility(member: EligibilityMember, input: Elig
   if (member.kind === "external_number") return { eligible: true };
   const device = toMap(input.devices).get(profileId);
   if (!device || !device.sipUsername) return { eligible: false, reason: "no_device" };
-  if (!isDeviceLive(device, input.now, input.deviceWindowMs)) return { eligible: false, reason: "device_stale" };
+  if (!device.nativePushReachable && !isDeviceLive(device, input.now, input.deviceWindowMs)) return { eligible: false, reason: "device_stale" };
 
   return { eligible: true };
 }
