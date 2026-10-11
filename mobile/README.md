@@ -51,18 +51,35 @@ API `/api/mobile/v1/*` musí byť nasadené na kanonickom TEST.
 | test / test-simulator | `sk.linkapomoci.dispecing.test` | rovnaký TEST | rovnaký TEST |
 | production | `sk.linkapomoci.dispecing` | `https://dispecing.linkapomoci.sk` | `ifpaeegaesdmljfkdvcn` |
 
-Bundle/package IDs sú návrh pre túto aplikáciu; nie sú registrované u Apple,
-Google ani Expo. Variant bez konfigurácie používa development. Produkcia
+Bundle/package IDs sú návrh pre túto aplikáciu; nie sú registrované u Apple
+ani v Google Play. Variant bez konfigurácie používa development. Produkcia
 vyžaduje výslovne production variant aj kompletnú production konfiguráciu.
 URL, projekt a prostredie musia zodpovedať tabuľke; nemajú fallback ani prepínač.
 Mobil posiela `X-PM-App-Environment` a overuje prostredie, verziu aj profil
 každej odpovede. Service-role a `sb_secret_*` kľúče sú odmietnuté.
 
-`eas.json` pripravuje profily, ale žiadny build ani distribúcia neboli spustené.
-Najskôr prepojiť **samostatný** Expo projekt dispečingu a jeho ID uložiť do
-`EAS_PROJECT_ID`; nepoužívať ERP/Alfo project ID. API origin, Supabase URL a
-publishable key dať do príslušných EAS prostredí. Žiadny Telnyx account kľúč
-ani Supabase serverový kľúč nepatrí do mobilu.
+Mobil je prepojený na vlastnú Expo organizáciu **Linka pomoci**, kde má účet
+`alfopure` rolu Owner, a projekt
+[`@linkapomoci/linka-pomoci-dispecing`](https://expo.dev/accounts/linkapomoci/projects/linka-pomoci-dispecing).
+Project ID `c7363382-9b12-4e12-9f62-31ec7b8c5623` a owner sú verejné metadata
+uložené v `app.config.ts`. Voliteľné `EAS_PROJECT_ID` musí zodpovedať tomuto
+projektu; ERP/Alfo project ID sa odmietne.
+
+EAS prostredia `development` a `preview` majú iba TEST API origin, TEST
+Supabase URL a TEST publishable key. EAS production konfigurácia sa zatiaľ
+nenapĺňa. Žiadny Telnyx account kľúč ani Supabase serverový kľúč nepatrí do mobilu.
+
+Profil `test` vytvára samostatné podpísané APK s pribúdajúcim versionCode,
+Node 24.14.1 a Android image `sdk-57`. Nepotrebuje Metro ani Expo Go. Build
+spustiť z `mobile/` s bezpečne dostupným Expo prístupom:
+
+```sh
+npx eas-cli@24.12.1 build --platform android --profile test
+```
+
+Pred odovzdaním skontrolovať dokončený build, source commit, package
+`sk.linkapomoci.dispecing.test`, podpis a TEST konfiguráciu. APK testuje M1;
+úspešný build nedokazuje fyzické prihlásenie, audio ani zvonenie.
 
 EAS/Vercel sú odlišné vydania: Vercel nasadí mobilné API, nie inštalovateľnú
 appku. Táto verzia nemá EAS Update ani automatické store vydanie.

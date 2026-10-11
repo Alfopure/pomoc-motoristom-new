@@ -8,10 +8,12 @@
       "env": { "APP_VARIANT": "development", "EXPO_PUBLIC_APP_ENV": "test" }
     },
     "test": {
+      "node": "24.14.1",
       "distribution": "internal",
       "environment": "preview",
+      "autoIncrement": true,
       "env": { "APP_VARIANT": "test", "EXPO_PUBLIC_APP_ENV": "test" },
-      "android": { "buildType": "apk" }
+      "android": { "buildType": "apk", "image": "sdk-57" }
     },
     "test-simulator": {
       "extends": "test",
