@@ -61,8 +61,8 @@ vysvetľuje. Čítanie prípadov, mock ani JS export nepreukazujú telefonovanie
 
 Poradie vychádza z bežnej práce mobilného dispečera:
 
-1. **Prehľad, detail a založenie:** nová záložka Prípady, predvolene moje
-   otvorené prípady, prepnutie na všetkých vlastníkov a všetky stavy,
+1. **Prehľad, detail a založenie:** nová záložka Prípady,
+   predvolene všetky otvorené prípady, filter podľa dispečera a všetky stavy,
    vyhľadávanie a detail.
    Krátky formulár uloží kontakt, vozidlo, miesto, popis, typ zákazky,
    prioritu a poznámku do toho istého systému ako web.

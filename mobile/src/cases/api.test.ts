@@ -48,6 +48,40 @@ describe("mobile cases contract", () => {
     const f = fixture({ ...list, cases: [{ ...item, providerCredential: "must-not-reach-ui", contact: { ...item.contact, privateNote: "omit" } }] });
     expect((await f.api.list(selection)).cases).toEqual([item]);
   });
+  it("sends and verifies a specific dispatcher filter and projects only that owner's rows", async () => {
+    const filter = { ...selection, ownership: "all" as const, ownerId: otherId };
+    const f = fixture({ ...list, selection: filter, cases: [{ ...item, owner: { id: otherId, name: "Kolegyňa", mine: false } }] });
+    expect((await f.api.list(filter)).selection).toEqual(filter);
+    expect(new URL(f.transport.mock.calls[0][0]).searchParams.get("ownerId")).toBe(otherId);
+    await expect(fixture({ ...list, selection: filter }).api.list(filter)).rejects.toMatchObject({ status: 502 });
+  });
+  it.each([undefined, null, profileId, "invalid"])("rejects missing or mismatched selected dispatcher echo %j", async ownerId => {
+    await expect(fixture({ ...list, selection: { ...selection, ownership: "all", ownerId } }).api.list({ ...selection, ownership: "all", ownerId: otherId })).rejects.toMatchObject({ status: 502 });
+  });
+  it.each([undefined, null])("accepts legacy unselected owner echo %j without sending an empty filter", async ownerId => {
+    const f = fixture({ ...list, selection: { ...selection, ownerId } });
+    expect((await f.api.list(selection)).selection.ownerId).toBeNull();
+    expect(new URL(f.transport.mock.calls[0][0]).searchParams.has("ownerId")).toBe(false);
+  });
+  it.each([{ ownership: "mine" as const, ownerId: otherId }, { ownership: "all" as const, ownerId: "" }, { ownership: "all" as const, ownerId: "invalid" }])("rejects invalid outgoing dispatcher selection %j", async change => {
+    const f = fixture(); await expect(f.api.list({ ...selection, ...change })).rejects.toMatchObject({ status: 400 }); expect(f.transport).not.toHaveBeenCalled();
+  });
+  it("loads active and inactive organization dispatcher choices without extra fields", async () => {
+    const choices = [{ id: profileId, name: "Dispečer", active: true }, { id: otherId, name: "Kolegyňa", active: false }];
+    const f = fixture({ ...scope, dispatchers: choices.map(item => ({ ...item, privateField: "omit" })) });
+    expect(await f.api.dispatchers()).toEqual({ ...scope, dispatchers: choices });
+    expect(f.transport.mock.calls[0][0]).toBe(config.apiOrigin + "/api/mobile/v1/cases/dispatchers");
+  });
+  it.each([
+    [{ id: otherId, name: "", active: true }], [{ id: otherId, name: " ", active: true }], [{ id: "wrong", name: "Name", active: true }],
+    [{ id: otherId, name: "Name", active: "true" }], [{ id: otherId, name: "Name", active: true }, { id: otherId, name: "Other", active: false }],
+    Array.from({ length: 201 }, () => ({ id: otherId, name: "Name", active: true })),
+  ].map(dispatchers => ({ dispatchers })))("rejects malformed, duplicate or oversized dispatcher choices %#", async ({ dispatchers }) => {
+    await expect(fixture({ ...scope, dispatchers }).api.dispatchers()).rejects.toMatchObject({ status: 502 });
+  });
+  it.each([{ environment: "production" }, { profileId: otherId }, { ok: false }])("rejects foreign dispatcher scope %j", async change => {
+    await expect(fixture({ ...scope, ...change, dispatchers: [] }).api.dispatchers()).rejects.toMatchObject({ status: 502 });
+  });
   it("validates selected detail identity and nested timeline", async () => {
     expect(await fixture(detail).api.detail(caseId)).toEqual(detail);
     await expect(fixture(detail).api.detail(otherId)).rejects.toMatchObject({ status: 502 });

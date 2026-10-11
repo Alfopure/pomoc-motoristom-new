@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeSupabase } from "@/test/fake-supabase";
 import { CaseCreationCommittedError, createCase } from "@/server/motorist-mutations";
-import { createMobileCase, getMobileCase, listMobileCases, parseMobileCaseCreate, parseMobileCaseQuery, readMobileCaseCreate } from "./cases";
+import { createMobileCase, getMobileCase, listMobileCaseDispatchers, listMobileCases, parseMobileCaseCreate, parseMobileCaseQuery, readMobileCaseCreate } from "./cases";
 import { MutationError } from "@/server/mutation-error";
 import { GET as list, POST as create } from "@/app/api/mobile/v1/cases/route";
+import { GET as dispatchers } from "@/app/api/mobile/v1/cases/dispatchers/route";
 import { GET as detail } from "@/app/api/mobile/v1/cases/[id]/route";
 
 const mocks = vi.hoisted(() => ({ admin: vi.fn(), actor: vi.fn() }));
@@ -21,8 +23,8 @@ function row(n: number, overrides: Record<string, unknown> = {}) {
 function fixture(rows: ReturnType<typeof row>[] = []) {
   const f = createFakeSupabase();
   f.db.seed("motorist_organizations", [{ id: actor.organizationId, slug: "pomoc-motoristom", active: true }, { id: otherOrg, slug: "other", active: true }]);
-  f.db.seed("motorist_profiles", [{ id: actor.profileId, organization_id: actor.organizationId, display_name: "Jana", active: true },
-    { id: otherProfile, organization_id: otherOrg, display_name: "Foreign secret", active: true }]);
+  f.db.seed("motorist_profiles", [{ id: actor.profileId, organization_id: actor.organizationId, display_name: "Jana", active: true, role: "dispatcher", kind: "human" },
+    { id: otherProfile, organization_id: otherOrg, display_name: "Foreign secret", active: true, role: "dispatcher", kind: "human" }]);
   f.db.seed("motorist_cases", rows);
   mocks.admin.mockReturnValue(f.admin);
   return f;
@@ -35,11 +37,11 @@ beforeEach(() => { vi.clearAllMocks(); mocks.actor.mockResolvedValue(actor); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe("mobile case filters and input", () => {
-  it("defaults to own open cases and trims only the search edges", () => {
-    expect(query()).toEqual({ ownership: "mine", category: "open", q: "", limit: 25, cursor: null });
+  it("defaults to all open cases and trims only the search edges", () => {
+    expect(query()).toEqual({ ownership: "all", category: "open", q: "", ownerId: null, limit: 25, cursor: null });
     expect(query("q=++Ján++Novák++").q).toBe("Ján  Novák");
   });
-  it.each(["ownership=foreign", "category=closed", "limit=0", "limit=26", "limit=2.5", "limit=01", "q=x&q=y", "organizationId=forged", "cursor=nope", "cursor=" + "a".repeat(1025), "q=" + "x".repeat(121)])("rejects invalid filter %s", raw => {
+  it.each(["ownership=foreign", "ownerId=", "ownerId=invalid", `ownership=mine&ownerId=${actor.profileId}`, `ownerId=${actor.profileId}&ownerId=${actor.profileId}`, "category=closed", "limit=0", "limit=26", "limit=2.5", "limit=01", "q=x&q=y", "organizationId=forged", "cursor=nope", "cursor=" + "a".repeat(1025), "q=" + "x".repeat(121)])("rejects invalid filter %s", raw => {
     expect(() => query(raw)).toThrow(MutationError);
   });
   it("allows incomplete drafts and keeps field validation separate from business warnings", () => {
@@ -62,7 +64,8 @@ describe("mobile case filters and input", () => {
 describe("authorized bounded mobile case reads", () => {
   it("filters organization, ownership and terminal status before pagination", async () => {
     const f = fixture([row(10), row(11, { owner_id: uuid(9) }), row(12, { status: "cancelled" }), row(13, { organization_id: otherOrg }), row(14, { status: "waiting_for_docs" })]);
-    expect((await listMobileCases(actor, query(), undefined, f.admin)).cases.map(item => item.id)).toEqual([uuid(14), uuid(10)]);
+    expect((await listMobileCases(actor, query(), undefined, f.admin)).cases.map(item => item.id)).toEqual([uuid(14), uuid(11), uuid(10)]);
+    expect((await listMobileCases(actor, query("ownership=mine"), undefined, f.admin)).cases.map(item => item.id)).toEqual([uuid(14), uuid(10)]);
     expect((await listMobileCases(actor, query("ownership=all&category=all"), undefined, f.admin)).cases.map(item => item.id)).toEqual([uuid(14), uuid(12), uuid(11), uuid(10)]);
     expect(f.db.log.filter(entry => entry.operation === "select").every(entry => entry.filters?.includes("eq(organization_id)"))).toBe(true);
   });
@@ -74,8 +77,48 @@ describe("authorized bounded mobile case reads", () => {
     f.db.update("motorist_cases", { updated_at: "2026-10-12T12:00:00Z" }, item => item.id === uuid(10));
     const next = await listMobileCases(actor, query(`limit=2&cursor=${first.nextCursor}`), undefined, f.admin);
     expect(next.cases.map(item => item.id)).toEqual([uuid(10), uuid(13)]); expect(next.nextCursor).toBeNull();
-    await expect(listMobileCases(actor, query(`ownership=all&cursor=${first.nextCursor}`), undefined, f.admin)).rejects.toMatchObject({ status: 400 });
+    await expect(listMobileCases(actor, query(`ownership=mine&cursor=${first.nextCursor}`), undefined, f.admin)).rejects.toMatchObject({ status: 400 });
     await expect(listMobileCases({ ...actor, profileId: uuid(99) }, query(`cursor=${first.nextCursor}`), undefined, f.admin)).rejects.toMatchObject({ status: 400 });
+  });
+  it("filters an inactive eligible owner before searching and pagination", async () => {
+    const ownerId = uuid(9);
+    const f = fixture([row(10, { owner_id: ownerId, summary: "defekt" }), row(11, { owner_id: ownerId, summary: "defekt" }),
+      row(12, { owner_id: ownerId, status: "cancelled", summary: "defekt" }),
+      ...Array.from({ length: 110 }, (_, i) => row(100 + i, { summary: "defekt" }))]);
+    f.db.seed("motorist_profiles", [{ id: ownerId, organization_id: actor.organizationId, display_name: "Former dispatcher", role: "dispatcher", kind: "human", active: false }]);
+    const first = await listMobileCases(actor, query(`ownerId=${ownerId}&q=defekt&limit=1`), undefined, f.admin);
+    expect(first.cases.map(item => item.id)).toEqual([uuid(11)]);
+    expect(first.selection).toEqual({ ownership: "all", category: "open", q: "defekt", ownerId });
+    const next = await listMobileCases(actor, query(`ownerId=${ownerId}&q=defekt&limit=1&cursor=${first.nextCursor}`), undefined, f.admin);
+    expect(next.cases.map(item => item.id)).toEqual([uuid(10)]);
+    expect(next.nextCursor).toBeNull();
+    for (const filter of ["", `ownerId=${actor.profileId}&`]) {
+      await expect(listMobileCases(actor, query(`${filter}q=defekt&cursor=${first.nextCursor}`), undefined, f.admin)).rejects.toMatchObject({ status: 400 });
+    }
+  });
+  it.each([
+    { organization_id: otherOrg, role: "dispatcher", kind: "human" },
+    { organization_id: actor.organizationId, role: "dispatcher", kind: "ai" },
+    { organization_id: actor.organizationId, role: "partner", kind: "human" },
+    null,
+  ])("rejects an unavailable selected owner before any case/search reads: %j", async profile => {
+    const f = fixture([row(10)]);
+    if (profile) f.db.seed("motorist_profiles", [{ id: uuid(9), display_name: "Excluded", active: true, ...profile }]);
+    await expect(listMobileCases(actor, query(`ownerId=${uuid(9)}&q=secret`), undefined, f.admin)).rejects.toMatchObject({ status: 400 });
+    expect(f.db.log.map(entry => entry.table)).toEqual(["motorist_profiles"]);
+  });
+  it("does not fall back to all cases when selected-owner verification fails", async () => {
+    const f = fixture([row(10)]); f.db.failNext("motorist_profiles", "select", "private failure");
+    await expect(listMobileCases(actor, query(`ownerId=${actor.profileId}`), undefined, f.admin)).rejects.toMatchObject({ status: 503 });
+    expect(f.db.log.map(entry => entry.table)).toEqual(["motorist_profiles"]);
+  });
+  it.each(["mine", "all"])("accepts legacy unfiltered cursor fingerprints for explicit %s ownership", async ownership => {
+    const f = fixture([row(10), row(11)]);
+    const selection = createHash("sha256").update(JSON.stringify([actor.organizationId, actor.profileId, ownership, "open", ""])).digest("hex");
+    const cursor = Buffer.from(JSON.stringify({ v: 1, id: uuid(11), createdAt: when, selection })).toString("base64url");
+    const result = await listMobileCases(actor, query(`ownership=${ownership}&cursor=${cursor}`), undefined, f.admin);
+    expect(result.cases.map(item => item.id)).toEqual([uuid(10)]);
+    expect(result.selection.ownerId).toBeNull();
   });
   it.each(["Novák", "+421905", "BA123XY", "PM-2026-10", "defekt"])("searches scoped related rows before paging: %s", q => {
     const f = fixture([row(10, { contact_id: uuid(20), vehicle_id: uuid(21), summary: "defekt" }), row(11, { contact_id: uuid(22) })]);
@@ -119,6 +162,35 @@ describe("authorized bounded mobile case reads", () => {
   });
 });
 
+describe("mobile case dispatcher choices", () => {
+  it("lists only same-organization human dispatchers and includes inactive historical owners", async () => {
+    const f = fixture();
+    f.db.seed("motorist_profiles", [
+      ...["dispatcher", "senior_dispatcher", "manager", "admin"].map((role, i) => ({ id: uuid(10 + i), organization_id: actor.organizationId, display_name: `Person ${i}`, kind: "human", role, active: i !== 0, email: "private@example.test", telephony_settings: { secret: "token" } })),
+      { id: uuid(20), organization_id: actor.organizationId, display_name: "AI", kind: "ai", role: "dispatcher", active: true },
+      { id: uuid(21), organization_id: actor.organizationId, display_name: "Partner", kind: "human", role: "partner", active: true },
+      { id: uuid(22), organization_id: otherOrg, display_name: "Foreign", kind: "human", role: "dispatcher", active: true },
+    ]);
+    expect(await listMobileCaseDispatchers(actor, undefined, f.admin)).toEqual(
+      [{ id: actor.profileId, name: "Jana", active: true }, ...["dispatcher", "senior_dispatcher", "manager", "admin"].map((_, i) => ({ id: uuid(10 + i), name: `Person ${i}`, active: i !== 0 }))],
+    );
+    expect(f.db.log).toHaveLength(1);
+    expect(f.db.log[0].filters).toContain("eq(organization_id)");
+  });
+  it("accepts exactly 200 choices and fails explicitly instead of truncating 201", async () => {
+    const f = fixture();
+    const profiles = Array.from({ length: 200 }, (_, i) => ({ id: uuid(100 + i), organization_id: actor.organizationId, display_name: `Person ${i}`, kind: "human", role: "dispatcher", active: true }));
+    f.db.seed("motorist_profiles", profiles.slice(0, 199));
+    expect(await listMobileCaseDispatchers(actor, undefined, f.admin)).toHaveLength(200);
+    f.db.seed("motorist_profiles", [profiles[199]]);
+    await expect(listMobileCaseDispatchers(actor, undefined, f.admin)).rejects.toMatchObject({ status: 503, code: "case_dispatchers_limit" });
+  });
+  it("does not report read failure as an empty directory", async () => {
+    const f = fixture(); f.db.failNext("motorist_profiles", "select", "private failure");
+    await expect(listMobileCaseDispatchers(actor, undefined, f.admin)).rejects.toMatchObject({ status: 503 });
+  });
+});
+
 describe("mobile case creation and confirmed commit boundary", () => {
   it("uses the actor's explicit organization and owner while preserving draft warnings", async () => {
     const f = fixture(); vi.stubEnv("MOTORIST_ORGANIZATION_ID", otherOrg);
@@ -155,7 +227,7 @@ describe("mobile case creation and confirmed commit boundary", () => {
 });
 
 describe("mobile cases HTTP boundary", () => {
-  it.each([list, create, (r: Request) => detail(r, { params: Promise.resolve({ id: uuid(10) }) })])("authenticates before parsing or reading/writing", async route => {
+  it.each([list, create, dispatchers, (r: Request) => detail(r, { params: Promise.resolve({ id: uuid(10) }) })])("authenticates before parsing or reading/writing", async route => {
     fixture(); mocks.actor.mockRejectedValue(new MutationError("Prihláste sa.", 401));
     const response = await route(request({ ownerId: "forged" }, "?unknown=bad"));
     expect(response.status).toBe(401); expect(mocks.admin).not.toHaveBeenCalled();
@@ -168,6 +240,15 @@ describe("mobile cases HTTP boundary", () => {
     expect((await create(request({ ownerId: "forged" }))).status).toBe(400);
     expect((await list(request({}, "?limit=99"))).status).toBe(400);
     expect(f.db.log).toHaveLength(0);
+  });
+  it("returns private scoped dispatcher choices and the default all-open selection", async () => {
+    fixture([row(10)]);
+    const response = await dispatchers(new Request("https://app.test/api/mobile/v1/cases/dispatchers"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, apiVersion: 1, checkedAt: expect.any(String), environment: "test", profileId: actor.profileId, dispatchers: [{ id: actor.profileId, name: "Jana", active: true }] });
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(response.headers.get("Vary")).toBe("Authorization, X-PM-App-Environment");
+    expect(await (await list(new Request("https://app.test/api/mobile/v1/cases"))).json()).toMatchObject({ selection: { ownership: "all", category: "open", q: "", ownerId: null } });
   });
   it("returns a scoped 201 receipt without a full dispatch reload", async () => {
     const f = fixture(); const response = await create(request({ note: "Mobile" }));

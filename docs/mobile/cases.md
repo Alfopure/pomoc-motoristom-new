@@ -13,6 +13,11 @@ ukáže číslo, stav, prioritu, dispečera, kontakt, vozidlo, vyzdvihnutie,
 cieľ, problém, poznámku a nedávnu históriu. Výber telefónu pripraví číslo
 v ústredni; nezačne sám hovor.
 
+Predvolene sa zobrazia **všetky otvorené prípady** podľa výberu majiteľa.
+Zoznam možno filtrovať podľa konkrétneho dispečera alebo rýchlo prepnúť na
+moje prípady. Výber obsahuje aj neaktívnych ľudských dispečerov organizácie,
+aby sa dali nájsť staršie priradené prípady; označí ich ako neaktívnych.
+
 **Nový prípad** je krátky formulár pre meno a telefón kontaktu, EČV,
 značku/model, miesto vyzdvihnutia, cieľ, popis problému, typ zákazky,
 prioritu a poznámku. Neúplný prípad možno založiť a doplniť neskôr rovnako
@@ -32,7 +37,8 @@ a úlohy sú ďalšie navrhnuté kroky.
 
 | Route | Výsledok |
 | --- | --- |
-| `GET /api/mobile/v1/cases` | Stránka najviac 25 prípadov; `ownership=mine\|all`, `category=open\|all`, `q` a `cursor` |
+| `GET /api/mobile/v1/cases` | Stránka najviac 25 prípadov; `ownership=mine\|all`, `ownerId`, `category=open\|all`, `q` a `cursor` |
+| `GET /api/mobile/v1/cases/dispatchers` | Najviac 200 ľudských dispečerov tej istej organizácie; iba ID, meno a aktívnosť |
 | `GET /api/mobile/v1/cases/[id]` | Detail jedného prípadu organizácie |
 | `POST /api/mobile/v1/cases` | Založenie cez existujúcu mutáciu, ID/číslo potvrdeného prípadu a prípadné upozornenia |
 
@@ -46,6 +52,11 @@ verziou a časom; klient ho overí pred zobrazením.
 vyhľadávanie sa obmedzia na organizáciu actor-a. API nevracia provider ID,
 interný event payload ani odkazy/prístupové údaje príloh. Odpovede sú
 `private, no-store` s `Vary: Authorization, X-PM-App-Environment`.
+
+Konkrétny `ownerId` sa používa s `ownership=all`, server overí jeho členstvo
+v organizácii a oprávnenú ľudskú rolu. Filter sa viaže na cursor aj cache;
+neplatný alebo cudzí dispečer sa nesmie potichu nahradiť všetkými prípadmi.
+Zoznam dispečerov nevracia e-mail ani prihlasovacie údaje.
 
 POST povoľuje iba jednoduché polia `MobileCaseCreateInput` z
 `src/lib/mobile-api.ts`, kontroluje typy a dĺžky a používa warning pravidlá
