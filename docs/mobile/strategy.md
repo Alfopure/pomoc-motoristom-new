@@ -136,12 +136,27 @@ ID `c7363382-9b12-4e12-9f62-31ec7b8c5623`. Alfo projekt sa nepreberá.
 EAS development/preview majú iba TEST konfiguráciu; EAS production zatiaľ
 nemá konfigurované premenné. Credentials sa neukladajú do zdroja.
 
-Najbližšia distribúcia je samostatné **Android TEST APK pre M1**. Nevyžaduje
-Google Play listing ani Firebase a nepoužíva Metro/Expo Go. Až po natívnom
-proof builde nasleduje Telnyx M2 a potom FCM pre zvonenie v pozadí.
-Apple Developer a Firebase zatiaľ nie sú pripravené. Vývoj oboch platforiem
-pokračuje; vlastný EAS build na fyzický iPhone a jeho VoIP push vyžadujú
-Apple signing aj pred verejným App Store vydaním.
+Podpísané Android TEST APK M1 0.1.0 (versionCode 2) je dokončené a overené.
+Majiteľ následne spresnil, že má iba **iPhone**. Priorita pilotu je preto
+iPhone: M1 náhľad v Expo Go cez samostatnú EAS vetvu `iphone-m1-test`, potom
+vlastný podpísaný iOS TEST s natívnym telefonovaním. Oba varianty zostávajú
+v rozsahu vývoja. Expo Go náhľad neaktivuje OTA v natívnych ani produkčných
+buildoch a nemení živé provider resources.
+
+V Expo účtoch `linkapomoci`/`alfopure` nie je pripravený Apple team; na Macu
+nie je Xcode, provisioning profile ani validný signing identity. iOS
+`voice-proof-simulator` preto preveruje kompiláciu nižšieho Telnyx SDK 1.1.0
+a WebRTC 124.0.8 bez Apple podpisu. Jeho boot probe iba kontroluje importy,
+nevytvára SIP klienta. `voice-test` pripravuje rovnaký proof na fyzický iPhone
+po doplnení signing; aktuálny M1 naďalej neprijíma ani nevytáča hovory.
+
+Nižší SDK má nevyhlásené imports `rxjs`/AsyncStorage a používa transport
+`react-native-websocket-self-signed`, development debug logs a persistenciu
+push payloadov. Tieto konkrétne body treba vyriešiť pred prvým SIP loginom;
+proof nevytvára klienta ani mu neodovzdáva credential. Native CallKit/PushKit,
+audio a secure cold start sa nedokazujú simulator buildom. Apple Developer
+a Firebase zatiaľ nie sú pripravené. Vlastný build na fyzický iPhone a jeho
+VoIP push vyžadujú Apple signing aj pred verejným App Store vydaním.
 
 ## Akceptácia telefonujúcej verzie
 

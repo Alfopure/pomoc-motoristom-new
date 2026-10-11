@@ -81,8 +81,49 @@ Pred odovzdaním skontrolovať dokončený build, source commit, package
 `sk.linkapomoci.dispecing.test`, podpis a TEST konfiguráciu. APK testuje M1;
 úspešný build nedokazuje fyzické prihlásenie, audio ani zvonenie.
 
+## iPhone TEST náhľad
+
+Majiteľ má na fyzické skúšky iPhone. M1 možno otvoriť v aktuálnom **Expo Go**
+pre SDK 57 a prihlásiť sa TEST operátorským účtom. Expo Go musí byť prihlásené
+do Expo účtu `alfopure`, ktorý vlastní organizáciu `linkapomoci`; tento Expo
+login je odlišný od následného operátorského prihlásenia v aplikácii.
+
+Publikovanie používa iba EAS `preview` a samostatnú vetvu `iphone-m1-test`:
+
+```sh
+APP_VARIANT=test EXPO_PUBLIC_APP_ENV=test MOBILE_EXPO_GO_PREVIEW=1 \
+  npx eas-cli@24.12.1 update --branch iphone-m1-test --platform ios \
+  --environment preview --message "iPhone M1 TEST"
+```
+
+`MOBILE_EXPO_GO_PREVIEW=1` nastavuje update URL a runtime iba pre tento TEST
+náhľad. Produkcia tento režim odmieta. Natívne buildy majú OTA aktualizácie
+vypnuté a tento náhľad neaktivuje telefonovanie v pôvodnom Android APK.
+Expo Go slúži na prihlásenie, ústredňu a históriu; CallKit/PushKit ani skutočné
+telefonovanie cez vlastné native moduly v ňom nie sú dostupné.
+
+## Natívny iOS proof pre telefonovanie
+
+Profil `voice-proof-simulator` pridáva WebRTC plugin a pri štarte overí importy
+nižšieho Telnyx SDK 1.1.0 a WebRTC 124.0.8. Nevytvára klienta, socket ani
+provider hovor a neprijíma SIP credentials. Používa TEST backend a SDK 57
+image; simulator build nepotrebuje Apple podpis. Na fyzickom iPhone použiť
+profil `voice-test` až po príprave Apple Developer podpisovania a zariadenia.
+
+```sh
+npx eas-cli@24.12.1 build --platform ios --profile voice-proof-simulator
+```
+
+SDK má nevyhlásené runtime imports `rxjs` a AsyncStorage, preto sú explicitne
+pridané. Supabase session zostáva v SecureStore. Pred prvým skutočným SIP
+loginom treba preveriť/opraviť transport `react-native-websocket-self-signed`,
+vynútené debug logovanie SDK v development a ukladanie push payloadov. Proof
+nepoužíva tento transport ani jeho persistenciu. CallKit, PushKit, native cold
+start, secure SIP lifecycle a serverové call actions sú nasledujúca fáza;
+kompilácia ani import proof nedokazujú obojstranné audio alebo zvonenie.
+
 EAS/Vercel sú odlišné vydania: Vercel nasadí mobilné API, nie inštalovateľnú
-appku. Táto verzia nemá EAS Update ani automatické store vydanie.
+appku. Expo Go náhľad má vlastnú identitu; automatické store vydanie sa nenastavuje.
 
 ## Mobilné API v1
 

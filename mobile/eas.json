@@ -17,7 +17,16 @@
     },
     "test-simulator": {
       "extends": "test",
-      "ios": { "simulator": true }
+      "ios": { "simulator": true, "image": "sdk-57" }
+    },
+    "voice-proof-simulator": {
+      "extends": "test-simulator",
+      "env": { "EXPO_PUBLIC_VOICE_PROOF": "1" }
+    },
+    "voice-test": {
+      "extends": "test",
+      "ios": { "image": "sdk-57" },
+      "env": { "EXPO_PUBLIC_VOICE_PROOF": "1" }
     },
     "production": {
       "environment": "production",
