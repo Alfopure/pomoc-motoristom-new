@@ -30,6 +30,6 @@ export default defineConfig({
   test: {
     environment: "node",
     env: Object.fromEntries([...neutralEnvironmentKeys].map(key => [key, ""])),
-    exclude: ["tests/**/*.test.mjs", "e2e/**", ".context/**", "apps/**", "**/node_modules/**", "**/.next/**"],
+    exclude: ["tests/**/*.test.mjs", "e2e/**", ".context/**", "apps/**", "mobile/**", "**/node_modules/**", "**/.next/**"],
   },
 });

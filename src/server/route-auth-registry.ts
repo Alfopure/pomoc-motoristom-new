@@ -10,6 +10,7 @@
  *  - `bearer`  — chránené zdieľaným tajomstvom v `Authorization: Bearer …` (cron/stroj); anon bez tokenu → 401.
  *  - `dual`    — bearer (cron/stroj) ALEBO session; anon bez oboch → 401.
  *  - `session` — Supabase session guard (`requireDefaultMotorist*` / `motoristAccessGuard`); anon → 401/403.
+ *  - `user-bearer` — verified Supabase user JWT + active organization profile; no cookies or machine secrets.
  *
  * `role` je vyplnené LEN tam, kde route reálne používa role-gate (inak member-level prístup).
  *
@@ -17,7 +18,7 @@
  * musí byť importovateľný z testov (route-auth-registry.test.ts, route-auth.test.ts).
  */
 
-export type RouteAuthClass = "public" | "bearer" | "dual" | "session";
+export type RouteAuthClass = "public" | "bearer" | "dual" | "session" | "user-bearer";
 
 export type MotoristRole = "dispatcher" | "senior_dispatcher" | "manager" | "admin";
 
@@ -30,6 +31,9 @@ export type RouteAuthEntry = {
 };
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
+  "mobile/v1/me": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "mobile/v1/console": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only own-call DTO; no provider or presence operations." },
+  "mobile/v1/calls/history": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Uses existing actor-authorized search; excludes archive and provider fields." },
   diagnostics: {class: 'session', role: ['manager','admin']},
   'diagnostics/canary': {class: 'dual', role: ['admin'], note: 'Fixed synthetic error only: dedicated TEST + expiring deployment flag; temporary purpose-bound bearer or same-origin admin. Disabled deployments return 404. No application-session or provider access.'},
   'diagnostics/events': {class: 'session', role: ['dispatcher','senior_dispatcher','manager','admin'], note: 'Same-origin, authenticated account-bound diagnostic batch.'},
