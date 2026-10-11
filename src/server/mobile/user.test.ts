@@ -61,4 +61,55 @@ describe("verified mobile user database client", () => {
     expect(headers.get("Cookie")).toBeNull();
     expect(JSON.parse(init.body)).toEqual({ p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId });
   });
+  it("keeps the default unbounded response transport unchanged for existing clients", async () => {
+    const response = new Response("true"); mocks.fetch.mockResolvedValue(response);
+    await requireMobileUser(request());
+    const transport = mocks.client.mock.calls[0][2].global.fetch;
+    expect(await transport("https://nzpnqdstvkfncflgqlny.supabase.co/rest/v1/rpc/task")).toBe(response);
+    expect(response.bodyUsed).toBe(false);
+  });
+  it("accepts the exact decoded UTF8 byte bound through the installed RPC client", async () => {
+    const sdk = await vi.importActual<typeof import("@supabase/supabase-js")>("@supabase/supabase-js");
+    mocks.client.mockImplementation(sdk.createClient);
+    const data = { fixture: "é 🚗" }, body = JSON.stringify(data);
+    mocks.fetch.mockResolvedValue(new Response(body, { headers: { "content-type": "application/json" } }));
+    const { client } = await requireMobileUser(request(), { maxResponseBytes: Buffer.byteLength(body) });
+    const result = await client.rpc("motorist_case_handoff", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId,
+      p_case_id: "44444444-4444-4444-8444-444444444444", p_action: "context", p_input: {} });
+    expect(result).toMatchObject({ data, error: null, status: 200 });
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    expect(new Headers(mocks.fetch.mock.calls[0][1].headers).get("Authorization")).toBe("Bearer " + token);
+  });
+  it.each(["declared", "streamed", "misleading compressed length"])("bounds %s oversized RPC responses without parsing or repeating a possibly committed POST", async mode => {
+    const sdk = await vi.importActual<typeof import("@supabase/supabase-js")>("@supabase/supabase-js");
+    mocks.client.mockImplementation(sdk.createClient);
+    const cancelled = vi.fn();
+    const bytes = new TextEncoder().encode(JSON.stringify({ private: "PRIVATE_CUSTOMER_DATA_".repeat(20) }));
+    let part = 0;
+    const body = new ReadableStream<Uint8Array>({ pull(controller) {
+      if (part === 0) controller.enqueue(bytes.subarray(0, 70));
+      else if (part === 1) controller.enqueue(bytes.subarray(70));
+      else controller.close();
+      part++;
+    }, cancel: cancelled }, { highWaterMark: 0 });
+    const headers = { "content-type": "application/json", ...(mode === "declared" ? { "content-length": String(bytes.byteLength) }
+      : mode === "misleading compressed length" ? { "content-length": "1", "content-encoding": "gzip" } : {}) };
+    mocks.fetch.mockResolvedValue(new Response(body, { headers }));
+    const { client } = await requireMobileUser(request(), { maxResponseBytes: 100 });
+    const result = await client.rpc("motorist_case_handoff", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId,
+      p_case_id: "44444444-4444-4444-8444-444444444444", p_action: "issue", p_input: { commandId: "55555555-5555-4555-8555-555555555555" } });
+    expect(result).toMatchObject({ data: null, status: 503, error: { code: "MOBILE_RESPONSE_TOO_LARGE" } });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_CUSTOMER_DATA");
+    expect(mocks.fetch).toHaveBeenCalledTimes(1); expect(mocks.fetch.mock.calls[0][1].method).toBe("POST");
+    expect(cancelled).toHaveBeenCalledOnce();
+  });
+  it("preserves the size rejection when cancelling an oversized response itself fails", async () => {
+    await requireMobileUser(request(), { maxResponseBytes: 1 });
+    const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("too large")); }, cancel() { throw new Error("cancel failed"); } });
+    mocks.fetch.mockResolvedValue(new Response(body));
+    const transport = mocks.client.mock.calls[0][2].global.fetch;
+    const result = await transport("https://nzpnqdstvkfncflgqlny.supabase.co/rest/v1/rpc/task");
+    expect(result.status).toBe(503);
+    expect(await result.json()).toMatchObject({ code: "MOBILE_RESPONSE_TOO_LARGE" });
+  });
 });

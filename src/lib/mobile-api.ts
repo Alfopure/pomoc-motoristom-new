@@ -1,4 +1,6 @@
-/** Versioned, provider-neutral DTOs. Native imports these as types only. */
+import type { HandoffEvent, HandoffPublished, HandoffState } from "../domain/case-handoff";
+
+/** Versioned, provider-neutral DTOs shared with the native client. */
 export type MobileEnvironment = "test" | "production";
 export type MobileRole = "dispatcher" | "senior_dispatcher" | "manager" | "admin";
 export type MobilePresence = "available" | "ringing" | "on_call" | "after_call_work" | "paused" | "offline";
@@ -233,3 +235,79 @@ export type MobileTaskMessage = {
 export type MobileTaskMessages = MobileScope & { taskId: string; messages: MobileTaskMessage[]; nextCursor: string | null };
 export type MobileTaskMessageInput = { clientMessageId: string; body: string };
 export type MobileTaskMessageSent = MobileScope & { taskId: string; message: MobileTaskMessage; refreshRequired: true };
+
+export const MOBILE_HANDOFF_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+export const MOBILE_HANDOFF_MAX_GRANTS = 50;
+export const MOBILE_HANDOFF_MAX_EVENTS = 200;
+export type MobileHandoffSnapshot = HandoffPublished;
+export type MobileHandoffGrant = {
+  id: string;
+  status: HandoffState;
+  revision: number;
+  publishedVersion: number;
+  recipientName: string;
+  recipientPhone: string;
+  expiresAt: string;
+  createdAt: string;
+  openedAt: string | null;
+  eta: string | null;
+  createdBy: string | null;
+  publishedAt: string | null;
+  canRenew: boolean;
+  recoverable: boolean;
+  published: MobileHandoffSnapshot | null;
+  events: HandoffEvent[];
+};
+export type MobileCaseHandoffs = MobileScope & {
+  caseId: string;
+  preview: MobileHandoffSnapshot;
+  previewVersion: string;
+  handoffs: MobileHandoffGrant[];
+  enhanced: boolean;
+};
+type MobileHandoffTarget = { handoffId: string; expectedRevision: number };
+export type MobileHandoffInput = { commandId: string } & (
+  | {
+      action: "issue";
+      recipientName: string;
+      recipientPhone: string;
+      previewVersion: string;
+      instructions?: string;
+      scheduledAt?: string | null;
+      hours?: number;
+    }
+  | (MobileHandoffTarget & {
+      action: "publish";
+      previewVersion: string;
+      instructions?: string;
+      scheduledAt?: string | null;
+    })
+  | (MobileHandoffTarget & { action: "renew" | "extend"; hours?: number })
+  | (MobileHandoffTarget & { action: "revoke"; comment: string })
+  | (MobileHandoffTarget & { action: "recover" })
+);
+export type MobileHandoffLink =
+  | { status: "available"; url: string; expiresAt: string; currentRevision: number }
+  | { status: "unavailable"; warning: "link_unavailable" }
+  | { status: "not_requested" };
+export type MobileHandoffMutation = MobileScope & {
+  kind: "mutation";
+  caseId: string;
+  handoffId: string;
+  commandId: string;
+  action: Exclude<MobileHandoffInput["action"], "recover">;
+  committedRevision: number;
+  currentRevision: number;
+  refreshRequired: true;
+  link: MobileHandoffLink;
+};
+/** Current-link retrieval has no immutable mutation receipt in the existing RPC. */
+export type MobileHandoffRecovered = MobileScope & {
+  kind: "link";
+  caseId: string;
+  handoffId: string;
+  commandId: string;
+  currentRevision: number;
+  link: Extract<MobileHandoffLink, { status: "available" }>;
+};
+export type MobileHandoffResult = MobileHandoffMutation | MobileHandoffRecovered;
