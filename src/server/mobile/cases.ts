@@ -6,7 +6,7 @@ import { mapCase } from "@/data/dispatch-repository";
 import type { CaseDetailData } from "@/data/case-detail";
 import { jobTypeLabels } from "@/domain/case-card";
 import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
-import type { MobileCaseCreateInput, MobileCaseCreated, MobileCaseDetailData, MobileCaseFilter, MobileCaseSummary } from "@/lib/mobile-api";
+import type { MobileCaseCreateInput, MobileCaseCreated, MobileCaseDetailData, MobileCaseDispatcher, MobileCaseFilter, MobileCaseSummary } from "@/lib/mobile-api";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/database.types";
 import { isHistoryTimestamp } from "@/lib/telephony/call-history-query";
@@ -14,14 +14,17 @@ import { isUuid } from "@/lib/telephony/uuid";
 import type { MotoristActor } from "@/server/api-auth";
 import { CaseCreationCommittedError, createCase } from "@/server/motorist-mutations";
 import { MutationError } from "@/server/mutation-error";
+import { humansOnly } from "@/server/profile-kind";
 
 type Admin = SupabaseClient<Database>;
 type CaseRow = Database["public"]["Tables"]["motorist_cases"]["Row"];
-type Selection = Pick<MobileCaseFilter, "ownership" | "category" | "q">;
+type Selection = Pick<MobileCaseFilter, "ownership" | "category" | "q"> & { ownerId: string | null };
 type Cursor = { createdAt: string; id: string; selection: string };
 export type MobileCaseQuery = Selection & { limit: number; cursor: Cursor | null };
 const CLOSED = ["completed_assisted", "completed_no_assistance", "rejected", "cancelled", "futile_trip"] as const;
 const SEARCH_LIMIT = 100;
+const DISPATCHER_LIMIT = 200;
+const DISPATCHER_ROLES = ["dispatcher", "senior_dispatcher", "manager", "admin"] as const;
 const MAX_BODY_BYTES = 64_000;
 const STRING_LIMITS = { contactName: 200, contactPhone: 64, licensePlate: 32, vehicleMake: 80, vehicleModel: 120,
   manualPickupAddress: 500, manualDestinationAddress: 500, incidentDescription: 5000, note: 10000 } as const;
@@ -29,10 +32,12 @@ const STRING_LIMITS = { contactName: 200, contactPhone: 64, licensePlate: 32, ve
 function badInput(message = "Neplatné údaje prípadu."): never { throw new MutationError(message, 400); }
 
 export function parseMobileCaseQuery(params: URLSearchParams): MobileCaseQuery {
-  const allowed = new Set(["ownership", "category", "q", "cursor", "limit"]);
+  const allowed = new Set(["ownership", "category", "q", "cursor", "limit", "ownerId"]);
   for (const key of params.keys()) if (!allowed.has(key) || params.getAll(key).length !== 1) badInput("Neplatný filter prípadov.");
-  const ownership = params.get("ownership") ?? "mine", category = params.get("category") ?? "open";
+  const ownership = params.get("ownership") ?? "all", category = params.get("category") ?? "open";
   if (ownership !== "mine" && ownership !== "all" || category !== "open" && category !== "all") badInput("Neplatný filter prípadov.");
+  const ownerId = params.get("ownerId");
+  if (ownerId !== null && (ownership !== "all" || !isUuid(ownerId))) badInput("Neplatný filter dispečera.");
   const q = (params.get("q") ?? "").trim();
   if (q.length > 120 || /[\u0000-\u001f]/.test(q)) badInput("Vyhľadávanie môže mať najviac 120 znakov.");
   const rawLimit = params.get("limit") ?? "25";
@@ -48,16 +53,34 @@ export function parseMobileCaseQuery(params: URLSearchParams): MobileCaseQuery {
       cursor = { id: value.id, createdAt: value.createdAt, selection: value.selection };
     } catch { badInput("Stránka prípadov už nie je platná. Obnovte zoznam."); }
   }
-  return { ownership, category, q, limit: Number(rawLimit), cursor };
+  return { ownership, category, q, ownerId, limit: Number(rawLimit), cursor };
 }
 
 function selectionKey(actor: MotoristActor, query: Selection) {
-  return createHash("sha256").update(JSON.stringify([actor.organizationId, actor.profileId, query.ownership, query.category, query.q])).digest("hex");
+  const scope = [actor.organizationId, actor.profileId, query.ownership, query.category, query.q];
+  // Keep existing unfiltered cursors valid for clients that send explicit ownership.
+  if (query.ownerId) scope.push(query.ownerId);
+  return createHash("sha256").update(JSON.stringify(scope)).digest("hex");
+}
+
+function caseDispatchers(admin: Admin, actor: MotoristActor, signal: AbortSignal) {
+  return humansOnly(admin.from("motorist_profiles").select("id,display_name,active")
+    .eq("organization_id", actor.organizationId).in("role", DISPATCHER_ROLES)).abortSignal(signal);
+}
+
+export async function listMobileCaseDispatchers(actor: MotoristActor, signal?: AbortSignal, admin: Admin = createSupabaseAdminClient()): Promise<MobileCaseDispatcher[]> {
+  const deadline = AbortSignal.timeout(8_000), abort = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const { data, error } = await caseDispatchers(admin, actor, abort)
+    .order("display_name").order("id").limit(DISPATCHER_LIMIT + 1);
+  if (error) throw new MutationError("Dispečerov sa nepodarilo načítať.", 503);
+  if ((data?.length ?? 0) > DISPATCHER_LIMIT) throw new MutationError("Zoznam dispečerov je príliš veľký. Kontaktujte správcu.", 503, "case_dispatchers_limit");
+  return (data ?? []).map(profile => ({ id: profile.id, name: profile.display_name, active: profile.active }));
 }
 
 function filteredCases(admin: Admin, actor: MotoristActor, query: Selection, signal: AbortSignal) {
   let read = admin.from("motorist_cases").select("*").eq("organization_id", actor.organizationId).abortSignal(signal);
   if (query.ownership === "mine") read = read.eq("owner_id", actor.profileId);
+  else if (query.ownerId) read = read.eq("owner_id", query.ownerId);
   if (query.category === "open") for (const status of CLOSED) read = read.neq("status", status);
   return read;
 }
@@ -104,8 +127,13 @@ export async function listMobileCases(actor: MotoristActor, query: MobileCaseQue
   const deadline = AbortSignal.timeout(8_000), abort = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const key = selectionKey(actor, query);
   if (query.cursor && query.cursor.selection !== key) badInput("Stránka patrí inému filtru. Obnovte zoznam.");
+  if (query.ownerId) {
+    const { data, error } = await caseDispatchers(admin, actor, abort).eq("id", query.ownerId).maybeSingle();
+    if (error) throw new MutationError("Dispečera sa nepodarilo overiť.", 503);
+    if (!data) badInput("Vybraný dispečer sa nenašiel.");
+  }
   const ids = await searchCaseIds(admin, actor, query, abort);
-  const selection = { ownership: query.ownership, category: query.category, q: query.q };
+  const selection = { ownership: query.ownership, category: query.category, q: query.q, ownerId: query.ownerId };
   if (ids?.length === 0) return { cases: [], nextCursor: null, selection };
   const page = () => {
     let read = filteredCases(admin, actor, query, abort);

@@ -52,6 +52,7 @@ export type MobileCaseFilter = {
   ownership: "mine" | "all";
   category: "open" | "all";
   q: string;
+  ownerId?: string | null;
   cursor?: string | null;
 };
 export type MobileCaseSummary = {
@@ -73,8 +74,10 @@ export type MobileCaseSummary = {
 export type MobileCases = MobileScope & {
   cases: MobileCaseSummary[];
   nextCursor: string | null;
-  selection: Pick<MobileCaseFilter, "ownership" | "category" | "q">;
+  selection: Pick<MobileCaseFilter, "ownership" | "category" | "q"> & { ownerId: string | null };
 };
+export type MobileCaseDispatcher = { id: string; name: string; active: boolean };
+export type MobileCaseDispatchers = MobileScope & { dispatchers: MobileCaseDispatcher[] };
 export type MobileCaseDetailData = MobileCaseSummary & {
   mainNote: string;
   incidentDescription: string | null;

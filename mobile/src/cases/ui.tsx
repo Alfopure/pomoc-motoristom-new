@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { Keyboard, KeyboardAvoidingView, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { MobileCaseCreateInput, MobileCaseFilter, MobileCaseJobType, MobileCasePriority, MobileCaseSummary } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
@@ -28,8 +28,9 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
   const draft = useMemo(() => new CaseDraft(api), [api]);
   const state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot);
   const [page, setPage] = useState<Page>({ kind: "list" });
-  const [ownership, setOwnership] = useState<MobileCaseFilter["ownership"]>("mine");
+  const [ownership, setOwnership] = useState<MobileCaseFilter["ownership"]>("all");
   const [category, setCategory] = useState<MobileCaseFilter["category"]>("open");
+  const [ownerId, setOwnerId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   useEffect(() => () => draft.dispose(), [draft]);
   useEffect(() => { if (!active) void queryClient.cancelQueries({ queryKey: prefix }); }, [active, queryClient, prefix]);
@@ -52,15 +53,16 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
     setPage({ kind: "list" });
     if (state.status === "uncertain") {
       // A newly created draft belongs to this operator but may not match the
-      // previous search/archive filter. Review a fresh unfiltered list first.
-      setOwnership("mine"); setCategory("all"); setSearch("");
+      // previous owner, status or search filter. Review all of their cases first.
+      setOwnership("mine"); setOwnerId(null); setCategory("all"); setSearch("");
       void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     }
   }
   function showForm() { draft.newDraft(); setPage({ kind: "new" }); }
   return <View style={{ flex: 1 }}>
     {page.kind === "list" ? <CaseList api={api} queryKey={prefix} active={active} ownership={ownership} category={category}
-      search={search} onSearch={setSearch} onOwnership={setOwnership} onCategory={setCategory} onOpen={id => setPage({ kind: "detail", id })}
+      search={search} ownerId={ownerId} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
+      onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={setCategory} onOpen={id => setPage({ kind: "detail", id })}
       onNew={showForm} draftState={state} onReviewed={requestedAt => draft.reviewList(requestedAt)} />
       : page.kind === "new" ? <CaseForm draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} />
         : <CaseDetail api={api} queryKey={prefix} active={active} id={page.id} created={state.created?.caseId === page.id ? state.created : null}
@@ -74,25 +76,28 @@ function Choice({ label, selected, onPress, disabled }: { label: string; selecte
     <Text style={[styles.muted, selected && { color: colors.white }]}>{label}</Text>
   </Pressable>;
 }
-function CaseList({ api, queryKey, active, ownership, category, search, onSearch, onOwnership, onCategory, onOpen, onNew, draftState, onReviewed }: {
-  api: CasesApi; queryKey: string[]; active: boolean; ownership: MobileCaseFilter["ownership"]; category: MobileCaseFilter["category"]; search: string;
+function CaseList({ api, queryKey, active, ownership, category, search, ownerId, onOwner, onSearch, onOwnership, onCategory, onOpen, onNew, draftState, onReviewed }: {
+  api: CasesApi; queryKey: string[]; active: boolean; ownership: MobileCaseFilter["ownership"]; category: MobileCaseFilter["category"]; search: string; ownerId: string | null; onOwner: (id: string | null) => void;
   onSearch: (value: string) => void; onOwnership: (value: MobileCaseFilter["ownership"]) => void; onCategory: (value: MobileCaseFilter["category"]) => void;
   onOpen: (id: string) => void; onNew: () => void; draftState: DraftState; onReviewed: (requestedAt: number) => void;
 }) {
+  const [selectingOwner, setSelectingOwner] = useState(false);
+  const dispatchers = useQuery({ queryKey: [...queryKey, "dispatchers"], queryFn: ({ signal }) => api.dispatchers(signal), enabled: active && (selectingOwner || ownerId !== null) });
+  const selectedOwner = dispatchers.isError ? undefined : dispatchers.data?.dispatchers.find(item => item.id === ownerId);
   const [debounced, setDebounced] = useState(search.trim());
   useEffect(() => { const timer = setTimeout(() => setDebounced(search.trim()), 300); return () => clearTimeout(timer); }, [search]);
   const query = useInfiniteQuery({
-    queryKey: [...queryKey, "list", ownership, category, debounced], enabled: active,
+    queryKey: [...queryKey, "list", ownership, ownerId, category, debounced], enabled: active,
     initialPageParam: null as string | null,
-    queryFn: ({ pageParam, signal }) => api.list({ ownership, category, q: debounced, cursor: pageParam }, signal),
+    queryFn: ({ pageParam, signal }) => api.list({ ownership, ownerId, category, q: debounced, cursor: pageParam }, signal),
     getNextPageParam: page => page.nextCursor ?? undefined,
   });
   const pendingSearch = search.trim() !== debounced;
   const denied = query.error instanceof MobileApiError && [401, 403, 409, 502].includes(query.error.status);
   const canShow = !pendingSearch && !denied && !(query.isError && !query.isFetchNextPageError);
   useEffect(() => {
-    if (active && canShow && query.isSuccess && !query.isFetching && ownership === "mine" && category === "all" && !debounced) onReviewed(query.data?.pages[0]?.requestedAt ?? 0);
-  }, [active, canShow, query.isSuccess, query.isFetching, query.data, ownership, category, debounced, onReviewed]);
+    if (active && canShow && query.isSuccess && !query.isFetching && ownership === "mine" && !ownerId && category === "all" && !debounced) onReviewed(query.data?.pages[0]?.requestedAt ?? 0);
+  }, [active, canShow, query.isSuccess, query.isFetching, query.data, ownership, ownerId, category, debounced, onReviewed]);
   const cases = [...new Map(query.data?.pages.flatMap(page => page.cases).map(item => [item.id, item]) ?? []).values()];
   const hasDraft = draftState.status !== "saved" && Object.entries(draftState.input).some(([key, value]) =>
     key === "priority" ? value !== "normal" : Array.isArray(value) ? value.length > 0 : typeof value === "string" && value.trim().length > 0);
@@ -106,8 +111,22 @@ function CaseList({ api, queryKey, active, ownership, category, search, onSearch
       onChangeText={onSearch} maxLength={120} style={styles.input} autoCorrect={false} />
     <View style={s.choices}>
       <Choice label="Moje" selected={ownership === "mine"} onPress={() => onOwnership("mine")} />
-      <Choice label="Všetkých" selected={ownership === "all"} onPress={() => onOwnership("all")} />
+      <Choice label="Všetkých" selected={ownership === "all" && ownerId === null} onPress={() => onOwnership("all")} />
     </View>
+    <Button label={ownerId ? "Dispečer: " + (selectedOwner ? selectedOwner.name + (selectedOwner.active ? "" : " (neaktívny)") : "Vybraný dispečer") : "Vybrať dispečera"}
+      secondary onPress={() => { Keyboard.dismiss(); setSelectingOwner(true); }} />
+    <Modal visible={active && selectingOwner} transparent animationType="fade" onRequestClose={() => setSelectingOwner(false)}>
+      <View style={s.modalBackdrop}><View accessibilityViewIsModal style={s.modalCard}>
+        <Text style={styles.subheading}>Vybrať dispečera</Text>
+        <Button label="Zavrieť výber" secondary onPress={() => setSelectingOwner(false)} />
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ gap: 8 }}>
+          <Choice label="Všetci dispečeri" selected={ownership === "all" && ownerId === null} onPress={() => { onOwner(null); setSelectingOwner(false); }} />
+          {dispatchers.isPending ? <Loading /> : dispatchers.isError ? <ErrorNotice message={errorMessage(dispatchers.error)} onRetry={() => { void dispatchers.refetch(); }} />
+            : dispatchers.data?.dispatchers.map(item => <Choice key={item.id} label={item.name + (item.active ? "" : " (neaktívny)")} selected={ownerId === item.id}
+              onPress={() => { onOwner(item.id); setSelectingOwner(false); }} />)}
+        </ScrollView>
+      </View></View>
+    </Modal>
     <View style={s.choices}>
       <Choice label="Otvorené" selected={category === "open"} onPress={() => onCategory("open")} />
       <Choice label="Aj uzavreté" selected={category === "all"} onPress={() => onCategory("all")} />
@@ -189,6 +208,8 @@ function CaseForm({ draft, state, onBack, onSubmit }: { draft: CaseDraft; state:
   </KeyboardAvoidingView>;
 }
 const s = StyleSheet.create({
+  modalBackdrop: { flex: 1, justifyContent: "center", padding: 20, backgroundColor: "rgba(0,0,0,0.5)" },
+  modalCard: { maxHeight: "80%", backgroundColor: colors.white, borderRadius: 20, padding: 20, gap: 16 },
   choices: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   choice: { borderRadius: 16, paddingHorizontal: 14, paddingVertical: 12, minHeight: 44, backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
   selected: { backgroundColor: colors.ink, borderColor: colors.ink },

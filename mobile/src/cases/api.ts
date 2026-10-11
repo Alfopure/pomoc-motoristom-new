@@ -1,4 +1,4 @@
-import type { MobileCaseCreated, MobileCaseCreateInput, MobileCaseDetail, MobileCaseFilter, MobileCases, MobileCaseSummary, MobileScope } from "../../../src/lib/mobile-api";
+import type { MobileCaseCreated, MobileCaseCreateInput, MobileCaseDetail, MobileCaseDispatchers, MobileCaseFilter, MobileCases, MobileCaseSummary, MobileScope } from "../../../src/lib/mobile-api";
 import { MobileApiError, type MobileTransport } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 
@@ -59,16 +59,31 @@ export function createCasesApi(config: MobileConfig, profileId: string, getToken
   return {
     list: async (filter: MobileCaseFilter, signal?: AbortSignal): Promise<MobileCases & { requestedAt: number }> => {
       const requestedAt = Date.now();
-      const q = filter.q.trim();
+      const q = filter.q.trim(), ownerId = filter.ownerId ?? null;
+      if (ownerId !== null && (!isId(ownerId) || filter.ownership !== "all")) throw new MobileApiError("Vyberte platného dispečera.", 400);
       const params = new URLSearchParams({ ownership: filter.ownership, category: filter.category, q, limit: "25" });
+      if (ownerId) params.set("ownerId", ownerId);
       if (filter.cursor) params.set("cursor", filter.cursor);
       const body = await request("?" + params.toString(), undefined, signal), selection = object(body.selection);
-      if (selection.ownership !== filter.ownership || selection.category !== filter.category || selection.q !== q
+      // Older servers omit ownerId only for an unfiltered list; a selected
+      // dispatcher must always be echoed exactly before rows reach the UI.
+      if (selection.ownership !== filter.ownership || selection.category !== filter.category || selection.q !== q || (selection.ownerId ?? null) !== ownerId
         || !Array.isArray(body.cases) || body.cases.length > 25 || !isNullableText(body.nextCursor)
         || body.nextCursor === "" || (body.nextCursor !== null && body.nextCursor === filter.cursor)) throw invalid();
       const cases = body.cases.map(summary);
-      if (new Set(cases.map(item => item.id)).size !== cases.length) throw invalid();
-      return { ...scope(body), requestedAt, cases, nextCursor: body.nextCursor, selection: { ownership: filter.ownership, category: filter.category, q } };
+      if (new Set(cases.map(item => item.id)).size !== cases.length || (ownerId !== null && cases.some(item => item.owner.id !== ownerId))) throw invalid();
+      return { ...scope(body), requestedAt, cases, nextCursor: body.nextCursor, selection: { ownership: filter.ownership, category: filter.category, q, ownerId } };
+    },
+    dispatchers: async (signal?: AbortSignal): Promise<MobileCaseDispatchers> => {
+      const body = await request("/dispatchers", undefined, signal);
+      if (!Array.isArray(body.dispatchers) || body.dispatchers.length > 200) throw invalid();
+      const dispatchers = body.dispatchers.map(value => {
+        const dispatcher = object(value);
+        if (!isId(dispatcher.id) || !isText(dispatcher.name) || !dispatcher.name.trim() || typeof dispatcher.active !== "boolean") throw invalid();
+        return { id: dispatcher.id, name: dispatcher.name, active: dispatcher.active };
+      });
+      if (new Set(dispatchers.map(item => item.id)).size !== dispatchers.length) throw invalid();
+      return { ...scope(body), dispatchers };
     },
     detail: async (id: string, signal?: AbortSignal): Promise<MobileCaseDetail> => {
       if (!isId(id)) throw new MobileApiError("Prípad sa nenašiel.", 404);
