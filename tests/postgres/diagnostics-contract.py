@@ -333,7 +333,9 @@ class Contracts(unittest.TestCase):
     self.c.execute("select motorist_diagnostics_maintain(%s,'test',134217728,true)",(ORG,))
     self.assertEqual(self.c.execute('select classification from motorist_diagnostic_incidents where leg_id=%s',(operator,)).fetchone()[0],'interruption_observed')
     timeline=self.c.execute("select motorist_diagnostics_read(%s,%s,'test','timeline',p_id=>%s)",(ORG,MANAGER,CALL)).fetchone()[0]
-    self.assertEqual(sum(leg['bridgedAt'] is not None for leg in timeline['legs']),2)
+    connected=[leg for leg in timeline['legs'] if leg['id'] in (operator,customer)]
+    self.assertEqual(len(connected),2)
+    self.assertTrue(all(leg['bridgedAt'] is not None for leg in connected))
  def test_read_samples_and_status(self):
     ev=event(type='operation',outcome='failed',callSessionId=CALL);ingest(self.c,[ev,event(sampled=False,durationMs=80000)])
     payload=self.c.execute("select motorist_diagnostics_read(%s,%s,'test','overview')",(ORG,MANAGER)).fetchone()[0]
