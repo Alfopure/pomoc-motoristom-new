@@ -14,9 +14,12 @@ import { CaseNoteDraft } from "./notes";
 import { CaseNoteForm, CaseNoteSavedNotice } from "./note-editor";
 import { directionsUrl } from "./maps";
 import { Choice, fields, jobTypes, priorities } from "./form";
+import { WorkStore } from "../work/store";
+import { Attachments } from "../work/attachments-ui";
+import { Tasks } from "../work/tasks-ui";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Prípady sa nepodarilo načítať. Skúste znova.";
-type Page = { kind: "list" } | { kind: "new" } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
+type Page = { kind: "attachments"; id: string } | { kind: "tasks"; id: string } | { kind: "list" } | { kind: "new" } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
 
 /** Kept mounted under the authenticated workspace across tab changes. Reads
  * pause when hidden; unsaved input and a confirmed created ID stay in memory. */
@@ -25,6 +28,8 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
 }) {
   const queryClient = useQueryClient();
   const prefix = useMemo(() => ["mobile", environment, userId, "cases", profileId], [environment, userId, profileId]);
+  const work = useMemo(() => new WorkStore(api.work, () => { void queryClient.invalidateQueries({ queryKey: prefix }); }), [api.work, queryClient, prefix]);
+  useEffect(() => () => work.dispose(), [work]);
   const notes = useRef(new Map<string, CaseNoteDraft>());
   const edits = useRef(new Map<string, CaseEdit>());
   const draft = useMemo(() => new CaseDraft(api), [api]);
@@ -86,7 +91,9 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
   }
   function showForm() { draft.newDraft(); setPage({ kind: "new" }); }
   return <View style={{ flex: 1 }}>
-    {page.kind === "list" ? <CaseList api={api} queryKey={prefix} active={active} ownership={ownership} category={category}
+    {page.kind === "attachments" ? <Attachments store={work} caseId={page.id} queryKey={prefix} active={active} onBack={() => showDetail(page.id)} />
+      : page.kind === "tasks" ? <Tasks store={work} caseId={page.id} queryKey={prefix} profileId={profileId} active={active} onBack={() => showDetail(page.id)} />
+      : page.kind === "list" ? <CaseList api={api} queryKey={prefix} active={active} ownership={ownership} category={category}
       search={search} ownerId={ownerId} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
       onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={setCategory} onOpen={showDetail}
       onNew={showForm} draftState={state} onReviewed={requestedAt => draft.reviewList(requestedAt)} />
@@ -94,7 +101,7 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
         : page.kind === "edit" ? <CaseEditor edit={page.edit} active={active} onSaved={edited} onBack={() => showDetail(page.id)} />
         : page.kind === "note" ? <CaseNoteForm draft={page.draft} onSaved={noteSaved} onBack={() => showDetail(page.id)} />
         : <CaseDetail api={api} queryKey={prefix} active={active} id={page.id} created={state.created?.caseId === page.id ? state.created : null}
-          onBack={showList} onSelectNumber={onSelectNumber} onEdit={openEditor} onNote={openNote} savedNote={page.note} onNoteUpdated={noteUpdated} />}
+          onBack={showList} onAttachments={() => setPage({ kind: "attachments", id: page.id })} onTasks={() => setPage({ kind: "tasks", id: page.id })} onSelectNumber={onSelectNumber} onEdit={openEditor} onNote={openNote} savedNote={page.note} onNoteUpdated={noteUpdated} />}
   </View>;
 }
 
@@ -174,8 +181,8 @@ function CaseHeading({ item }: { item: MobileCaseSummary }) {
 function Info({ label, value }: { label: string; value: string | null }) {
   return <View><Text style={styles.label}>{label}</Text><Text selectable style={styles.text}>{value || "Nedoplnené"}</Text></View>;
 }
-function CaseDetail({ api, queryKey, active, id, created, onBack, onSelectNumber, onEdit, onNote, savedNote, onNoteUpdated }: {
-  api: CasesApi; queryKey: string[]; active: boolean; id: string; created: DraftState["created"]; onBack: () => void; onSelectNumber: (number: string) => void; onEdit: (item: MobileCaseDetailData) => void; onNote: (id: string) => void; savedNote?: CaseNoteDraft; onNoteUpdated: (receipt: MobileCaseNoteAdded) => void;
+function CaseDetail({ api, queryKey, active, id, created, onBack, onAttachments, onTasks, onSelectNumber, onEdit, onNote, savedNote, onNoteUpdated }: {
+  api: CasesApi; queryKey: string[]; active: boolean; id: string; created: DraftState["created"]; onBack: () => void; onAttachments: () => void; onTasks: () => void; onSelectNumber: (number: string) => void; onEdit: (item: MobileCaseDetailData) => void; onNote: (id: string) => void; savedNote?: CaseNoteDraft; onNoteUpdated: (receipt: MobileCaseNoteAdded) => void;
 }) {
   const query = useQuery({ queryKey: [...queryKey, "detail", id], queryFn: ({ signal }) => api.detail(id, signal), enabled: active });
   const item = query.isError ? null : query.data?.case;
@@ -185,7 +192,7 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onSelectNumber
     {created && <Card><Text accessibilityRole="alert" style={styles.subheading}>Prípad {created.caseNumber} je uložený.</Text>
       {created.warnings.map((warning, index) => <Text key={warning.code + index} style={styles.text}>{warning.message}</Text>)}</Card>}
     {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} />
-      : item && <><Button label="Upraviť prípad" onPress={() => onEdit(item)} /><Button label="Pridať poznámku" secondary onPress={() => onNote(item.id)} /><Card><CaseHeading item={item} /><Text style={styles.muted}>{item.owner.mine ? "Môj prípad" : item.owner.name || "Bez vlastníka"} · {formatTime(item.createdAt)}</Text></Card>
+      : item && <><Button label="Upraviť prípad" onPress={() => onEdit(item)} /><Button label="Pridať poznámku" secondary onPress={() => onNote(item.id)} /><Button label="Prílohy prípadu" secondary onPress={onAttachments} /><Button label="Úlohy prípadu" secondary onPress={onTasks} /><Card><CaseHeading item={item} /><Text style={styles.muted}>{item.owner.mine ? "Môj prípad" : item.owner.name || "Bez vlastníka"} · {formatTime(item.createdAt)}</Text></Card>
         <Card><Info label="Kontakt" value={item.contact.name} /><Info label="Telefón" value={item.contact.phone ? formatNumber(item.contact.phone) : null} />
           {dialable(item.contact.phone) && <Button label="Vybrať číslo v ústredni" onPress={() => { if (item.contact.phone) onSelectNumber(item.contact.phone); }} secondary />}</Card>
         <Card><Info label="EČV" value={item.vehicle.licensePlate} /><Info label="Vozidlo" value={item.vehicle.description} /><Info label="Služba" value={item.jobTypeLabels.join(", ")} /></Card>

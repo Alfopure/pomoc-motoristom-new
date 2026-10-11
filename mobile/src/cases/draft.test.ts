@@ -6,7 +6,7 @@ import { CaseDraft } from "./draft";
 const created: MobileCaseCreated = { ok: true, apiVersion: 1, environment: "test", profileId: "profile", checkedAt: "2026-10-11T12:00:00Z",
   caseId: "00000000-0000-4000-8000-000000000001", caseNumber: "2026-001", warnings: [{ code: "missing", field: "contactPhone", message: "Doplňte telefón." }] };
 function fixture() {
-  const api: CasesApi = { list: vi.fn(), addNote: vi.fn(), update: vi.fn(), dispatchers: vi.fn(), detail: vi.fn(), create: vi.fn().mockResolvedValue(created) };
+  const api: Pick<CasesApi, "create" | "detail"> = { detail: vi.fn(), create: vi.fn().mockResolvedValue(created) };
   return { api, draft: new CaseDraft(api) };
 }
 describe("case draft save lifecycle", () => {

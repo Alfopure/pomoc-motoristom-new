@@ -11,7 +11,7 @@ export class CaseDraft {
   private state: DraftState = { input: { priority: "normal", jobTypes: [] }, status: "editing", error: null, created: null, reviewAfter: 0, reviewedList: false };
   private listeners = new Set<() => void>();
   private disposed = false;
-  constructor(private api: CasesApi) {}
+  constructor(private api: Pick<CasesApi, "create">) {}
   snapshot = () => this.state;
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   private update(change: Partial<DraftState>) {

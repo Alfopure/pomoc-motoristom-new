@@ -1,5 +1,6 @@
 import type { MobileCaseCreated, MobileCaseCreateInput, MobileCaseDetail, MobileCaseDispatchers, MobileCaseFilter, MobileCaseNoteInput, MobileCaseNoteAdded, MobileCases, MobileCaseSummary, MobileCaseUpdateInput, MobileCaseUpdated, MobileScope } from "../../../src/lib/mobile-api";
 import { MobileApiError, type MobileTransport } from "../lib/api";
+import { createWorkApi } from "../work/api";
 import type { MobileConfig } from "../lib/config";
 
 const invalid = () => new MobileApiError("Odpoveď prípadov sa nepodarilo overiť. Obnovte údaje.", 502);
@@ -66,6 +67,7 @@ export function createCasesApi(config: MobileConfig, profileId: string, getToken
     } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
   }
   return {
+    work: createWorkApi(config, profileId, getToken, transport),
     list: async (filter: MobileCaseFilter, signal?: AbortSignal): Promise<MobileCases & { requestedAt: number }> => {
       const requestedAt = Date.now();
       const q = filter.q.trim(), ownerId = filter.ownerId ?? null;

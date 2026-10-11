@@ -32,8 +32,12 @@ const config: ExpoConfig = {
       },
     } : {}),
   },
-  android: { package: "sk.linkapomoci.dispecing" + suffix, blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE", "android.permission.CAMERA"] },
-  plugins: ["expo-secure-store"],
+  android: { package: "sk.linkapomoci.dispecing" + suffix, blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"] },
+  plugins: ["expo-secure-store", ["expo-image-picker", {
+    photosPermission: "Linka pomoci potrebuje prístup k vybranej fotografii na priloženie k prípadu.",
+    cameraPermission: "Linka pomoci potrebuje fotoaparát na odfotografovanie prílohy prípadu.",
+    microphonePermission: voiceProof ? "Linka pomoci potrebuje mikrofón na telefonovanie." : false,
+  }]],
   // Only the explicit Expo Go TEST preview is published. Native binaries do
   // not fetch OTA updates, and production cannot select this preview mode.
   updates: expoGoPreview ? { url: "https://u.expo.dev/" + projectId, checkAutomatically: "NEVER" } : { enabled: false },

@@ -1,4 +1,6 @@
 import "server-only";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/supabase/database.types";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { TASK_REVIEW_COMMENT_LIMIT, taskWorkflowActions, taskWorkflowStates, type TaskWorkflowCommand, type TaskWorkflowReceipt } from "@/domain/task-workflow";
 import { MutationError } from "./mutation-error";
@@ -30,17 +32,17 @@ function workflowError(error: { code?: string; message?: string }): MutationErro
   return new MutationError("Zmenu stavu úlohy sa nepodarilo overiť. Skúste tú istú požiadavku znova.", 503);
 }
 
-export async function taskWorkflowEnabled(actor: TaskWorkspaceActor): Promise<boolean> {
-  const client = await createSupabaseServerClient();
+export async function taskWorkflowEnabled(actor: TaskWorkspaceActor, userClient?: SupabaseClient<Database>): Promise<boolean> {
+  const client = userClient ?? await createSupabaseServerClient();
   const { data, error } = await client.rpc("motorist_task_workflow_enabled", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId });
   if (error?.code === "PGRST202" || error?.code === "42883") return false;
   if (error) throw workflowError(error);
   return data === true;
 }
 
-export async function transitionWorkspaceTask(actor: TaskWorkspaceActor, id: string, input: Record<string, unknown>): Promise<TaskWorkflowReceipt> {
+export async function transitionWorkspaceTask(actor: TaskWorkspaceActor, id: string, input: Record<string, unknown>, userClient?: SupabaseClient<Database>): Promise<TaskWorkflowReceipt> {
   const command = validateTaskWorkflowCommand(input), task = taskId(id);
-  const client = await createSupabaseServerClient();
+  const client = userClient ?? await createSupabaseServerClient();
   const { data, error } = await client.rpc("motorist_task_workflow", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId, p_task_id: task, p_input: { ...command } });
   if (error) throw workflowError(error);
   const receipt = data as unknown as TaskWorkflowReceipt;
