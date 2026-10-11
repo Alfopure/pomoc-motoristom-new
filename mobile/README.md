@@ -15,8 +15,10 @@ Z webu importuje iba vymazateľné TypeScript typy z `src/lib/mobile-api.ts`.
 - **História:** existujúce autorizované serverové vyhľadávanie, filtre,
   stránkovanie a výber čísla do ústredne. Výber nevytvorí hovor.
 - **Účet:** meno, e-mail, rola, prostredie a odhlásenie z tohto zariadenia.
-- Odobratý prístup alebo chyba čítania skryje obsah; rôzne účty nemajú
-  spoločnú cache. Obnova a polling sa zastavia v pozadí.
+- Odobratý prístup alebo neoveriteľná odpoveď skryje obsah; rôzne účty nemajú
+  spoločnú cache. Dočasná chyba siete pri obnove už overeného profilu ponechá
+  ovládanie hovoru s upozornením. Periodický polling sa zastaví v pozadí;
+  prvé overenie identity sa dokončí aj po PushKit prebudení.
 
 Expo Go a bežný M1 build zostávajú náhľadom prihlasovania, ústredne a histórie.
 **iPhone voice TEST** pridáva lokálny Expo modul `modules/linka-voice` s natívnym
@@ -121,6 +123,8 @@ registrácii TEST App ID/zariadenia a nastavení príslušného APNs VoIP certif
 
 ```sh
 npx eas-cli@24.12.1 build --platform ios --profile voice-proof-simulator
+# Manuálna kompilácia a skutočný štart v cloudovom simulátore:
+npx eas-cli@24.12.1 build --platform ios --profile voice-smoke-simulator --non-interactive
 # Až s Apple podpisom:
 npx eas-cli@24.12.1 build --platform ios --profile voice-test
 ```
@@ -130,7 +134,9 @@ VoIP push hlási systémový hovor bez čakania na JS alebo server a potom ukon�
 neplatnú/zrušenú ponuku. Prijatie čaká na JWT-auth overenie presnej mobilnej
 SIP identity, aktuálnej rezervácie a ponuky. CallKit aktivuje/deaktivuje audio.
 Vytáčanie prebieha cez existujúci serverový call service; klient len prijme
-**presný operator leg vrátený HTTP odpoveďou**. Nepoužíva priame SDK dial.
+**presný operator leg potvrdený serverom pre HTTP session**. iOS SDK poskytne
+call-control ID až po odpovedi, preto sa prvý INVITE autorizuje podľa jeho
+leg UUID. Nepoužíva priame SDK dial.
 
 Provider JWT, push token a payload zostávajú v natívnej/JS pamäti. V Keychain
 sa ukladá Supabase Auth session a revokovateľné UUID relácie zariadenia;

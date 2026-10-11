@@ -23,6 +23,10 @@
       "extends": "test-simulator",
       "env": { "EXPO_PUBLIC_VOICE_PROOF": "1" }
     },
+    "voice-smoke-simulator": {
+      "extends": "voice-proof-simulator",
+      "ios": { "config": "iphone-voice-smoke.yml" }
+    },
     "voice-test": {
       "extends": "test",
       "ios": { "image": "sdk-57" },

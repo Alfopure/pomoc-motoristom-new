@@ -10,7 +10,8 @@ export async function POST(request: Request) {
   try {
     const actor = await requireMobileActor(request); const deps = await nativeVoiceDeps(actor);
     const body = await readJsonBody<Record<string, unknown>>(request);
-    const device = await requireNativeLease(deps, actor, body.deviceSessionId);
+    // The same owner must be able to recover after a transient SDK error.
+    const device = await requireNativeLease(deps, actor, body.deviceSessionId, { heartbeat: true });
     if (!["registered", "registering", "unregistered", "error"].includes(String(body.registrationState))) throw new MutationError("Neplatný stav telefónu.", 400);
     const result = await touchDevice({ ...deps, deviceKind: "mobile" }, {
       organizationId: actor.organizationId, profileId: actor.profileId, deviceSessionId: device.device_session_id!,

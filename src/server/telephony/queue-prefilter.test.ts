@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, PROFILES } from "@/test/telephony-harness";
-import { loadRoutingContext, loadSessionSnapshot } from "./session-runner";
+import { loadRoutingContext, loadSessionSnapshot, runSessionEvent } from "./session-runner";
 import { sweepOverdueRingSteps } from "./routing/ring-plan";
 import { processTelnyxEvent } from "./telnyx/event-processor";
 import { reduce } from "./state/transitions";
@@ -18,6 +18,24 @@ async function fixture() {
 }
 
 describe("queue sweep advisory prefilter", () => {
+  it("rechecks a waiting caller when only an explicitly configured mobile application becomes reachable", async () => {
+    const { h, call } = await fixture();
+    const mobile = h.rows("motorist_operator_devices").find(device => device.profile_id === PROFILES.o1)!;
+    h.db.seed("motorist_operator_mobile_devices", [{ ...mobile, sip_username: "native-only", device_seen_at: h.now().toISOString() }]);
+    h.db.update("motorist_operator_devices", { device_seen_at: null, registration_state: "unregistered" }, () => true);
+    h.setPresence(PROFILES.o1, { status: "available" });
+    const meta = readMeta(h.session(call.sessionId) as SessionRow);
+    meta.ring = { ...meta.ring!, plan: { ...meta.ring!.plan!, source: "incoming_flow",
+      steps: [{ ...meta.ring!.plan!.steps[0], members: [{ ...meta.ring!.plan!.steps[0].members[0], kind: "operator", profileId: PROFILES.o1, externalNumber: null, position: 0, application: true }] }],
+    } };
+    h.db.update("motorist_call_sessions", { metadata: meta }, row => row.id === call.sessionId);
+    const run = vi.fn((id: string, event: Parameters<typeof runSessionEvent>[2]) => runSessionEvent(h.deps, id, event));
+    const result = await sweepOverdueRingSteps({ ...h.deps, runSessionEvent: run });
+    expect(result.errors).toEqual([]);
+    expect(run).toHaveBeenCalledOnce();
+    expect(h.legs(call.sessionId).find(leg => leg.to_number === "sip:native-only@sip.telnyx.com" && !leg.ended_at)).toBeDefined();
+    expect(h.session(call.sessionId).state).toBe("ringing");
+  });
   it("offers the oldest waiting caller after a ringing operator is released, in retained maintenance", async () => {
     const { h, call } = await fixture();
     h.setPresence(PROFILES.o1, { status: "available" });

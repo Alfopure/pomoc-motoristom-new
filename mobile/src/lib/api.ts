@@ -4,6 +4,16 @@ import type { MobileConfig } from "./config";
 export class MobileApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) { super(message); }
 }
+
+// The query cache is scoped to the authenticated user and environment. A
+// failed background refresh must not disconnect an already-authorized call.
+// Auth, scope and malformed-contract failures still revoke cached access.
+export function usableMobileIdentity(data: MobileMe | undefined, error: unknown): MobileMe | null {
+  if (!data) return null;
+  if (!error) return data;
+  return error instanceof MobileApiError && (error.status === 0
+    || error.status >= 500 && error.status <= 599 && error.status !== 502) ? data : null;
+}
 type TokenGetter = () => Promise<string | null>;
 export type MobileTransport = (url: string, init: RequestInit) => Promise<Response>;
 type HistoryFilter = { category: "all" | "missed" | "received" | "outbound"; q: string; cursor?: string | null };

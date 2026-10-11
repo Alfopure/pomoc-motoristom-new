@@ -13,6 +13,36 @@ unit testy ani verejný bundle nie sú dôkazom audia/APNs na fyzickom telefóne
 Príjem zákazníckych hovorov vyžaduje existujúci incoming flow s application
 endpointom a správnu prezenciu; samotné prihlásenie v mobile nemení ring plán.
 
+Mobilná dostupnosť sa zobrazuje aj pri kolegovi bez pripojeného webového
+telefónu a zapája sa do existujúcej zákazníckej fronty. Prebudenie cez push
+vždy pripraví SDK pre novú ponuku; prijatie aj ukončenie sú viazané na presný
+aktuálny mobilný endpoint. Stav SDK `ACTIVE` nepotvrdzuje odpoveď adresáta;
+systémový čas spojenia sa nastaví až po potvrdení ústredne.
+
+## Manuálny test natívneho spustenia
+
+Z adresára `mobile` spustiť:
+
+```sh
+npx eas-cli@24.12.1 build --platform ios --profile voice-smoke-simulator --non-interactive
+```
+
+Manuálny custom EAS build z aktuálnych lokálnych zdrojov zostaví
+TEST `voice-smoke-simulator`, nainštaluje ho do cloudového iOS simulátora
+a cez Maestro overí skutočné zobrazenie prihlásenia a TEST značky. V tomto
+profile JS ešte pred vykreslením vyžaduje načítaný natívny modul `LinkaVoice`.
+Výsledok teda preveruje aj spustenie natívneho bootstrapu; nevytvára hovor,
+neprihlasuje operátora a nedokazuje fyzické APNs ani audio. Zaznamenať build
+ID, source SHA a výsledok Maestro samostatne od fyzickej akceptácie.
+Používa dokumentované `eas/build` a `eas/maestro_test` kroky v jednom build
+procese. Samostatný EAS Workflows Maestro job pri pokuse vyžadoval platený
+Expo plán; nepoužíva sa a žiadne predplatné sa týmto postupom nezriaďuje.
+
+EAS simulátorový build môže mať inú `CFBundleVersion` než vzdialené EAS číslo:
+nepodpísaný simulator build preskočí credentialed Xcode configuration krok,
+ktorý aplikuje remote version. Pri podpísanom `voice-test` skontrolovať číslo
+priamo v artefakte, spolu s podpisom a entitlementmi.
+
 ## Zapojenie po schválení Apple
 
 1. V správnom Apple tíme registrovať `sk.linkapomoci.dispecing.test`, zapnúť
@@ -68,6 +98,7 @@ call/session identitou a výsledkom; neukladať JWT, push payload ani telefónne
 | Mikrofón/reproduktor/DTMF/ukončenie | Obojstranné audio; serverové 202 ostáva pending do potvrdenia |
 | Odhlásenie, odobratý prístup, prevzatie na inom mobile | Starý mobil sa neprihlási, credential je revokovaný; web ostáva oddelený |
 | Wi-Fi ↔ mobilné dáta, výpadok siete, Bluetooth | Stav nevydáva neexistujúce spojenie za funkčný hovor |
+| Dočasná chyba `/me` počas hovoru | Overený rovnaký účet aj ovládanie hovoru ostanú dostupné s upozornením; 401/403/409/neplatný kontrakt prístup odoberú |
 | Vypnutie native/push flagov | Nové native provider operácie/routing sú blokované; TEST cleanup dostupný |
 
 Ručné force-quit používateľom je samostatný fyzický scenár so správaním iOS;

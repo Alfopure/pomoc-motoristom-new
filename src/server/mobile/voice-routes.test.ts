@@ -24,7 +24,7 @@ const request = (body: object = {}) => new Request("https://test.dispecing.linka
 beforeEach(() => {
   vi.resetAllMocks(); mocks.actor.mockResolvedValue(actor); mocks.deps.mockResolvedValue({ deviceKind: "mobile" });
   mocks.lease.mockResolvedValue({ device_session_id: id, registration_state: "registered" });
-  mocks.session.mockResolvedValue({ id, answered_by_profile_id: actor.profileId, direction: "outbound", state: "talking", answered_at: "2026-10-11T12:00:00Z", ended_at: null });
+  mocks.session.mockResolvedValue({ id, answered_by_profile_id: actor.profileId, direction: "outbound", state: "talking", answered_at: "2026-10-11T12:00:00Z", ended_at: null, nativeConnected: true, nativeEnded: false });
 });
 describe("mobile voice HTTP contract", () => {
   const routes = [token, heartbeat, offers, calls, disconnect, presence, (r: Request) => end(r, context), (r: Request) => status(r, context)];
@@ -54,9 +54,27 @@ describe("mobile voice HTTP contract", () => {
     mocks.hangup.mockResolvedValue({ sessionId: id, terminationPending: true }); const response = await end(request({ deviceSessionId: id }), context);
     expect(response.status).toBe(202); expect(await response.json()).toMatchObject({ sessionId: id, terminationPending: true }); expect(mocks.after).toHaveBeenCalledOnce();
   });
+  it("acknowledges an already-ended owned native session without another provider hangup", async () => {
+    mocks.session.mockResolvedValue({ id, ended_at: "2026-10-11T12:01:00Z" });
+    const response = await end(request({ deviceSessionId: id }), context);
+    expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ terminationPending: false });
+    expect(mocks.hangup).not.toHaveBeenCalled();
+  });
   it("does not display another operator's winning call as connected", async () => {
-    mocks.session.mockResolvedValue({ id, answered_by_profile_id: "another", direction: "inbound", state: "talking", answered_at: "now", ended_at: null });
+    mocks.session.mockResolvedValue({ id, answered_by_profile_id: "another", direction: "inbound", state: "talking", answered_at: "now", ended_at: null, nativeConnected: false, nativeEnded: true });
     expect(await (await status(request({ deviceSessionId: id }), context)).json()).toMatchObject({ connected: false });
+  });
+  it("reports a losing mobile offer ended even when this operator answered on web", async () => {
+    mocks.session.mockResolvedValue({ id, answered_by_profile_id: actor.profileId, direction: "inbound", state: "talking", answered_at: "now", ended_at: null, nativeConnected: false, nativeEnded: true });
+    expect(await (await status(request({ deviceSessionId: id }), context)).json()).toMatchObject({ connected: false, ended: true });
+  });
+  it("reports the verified mobile participant connected", async () => {
+    expect(await (await status(request({ deviceSessionId: id }), context)).json()).toMatchObject({ connected: true, ended: false });
+  });
+  it("permits heartbeat recovery only through the current lease check", async () => {
+    mocks.touch.mockResolvedValue({ ok: true, device: { registration_state: "registered" } });
+    expect((await heartbeat(request({ deviceSessionId: id, registrationState: "registered" }))).status).toBe(200);
+    expect(mocks.lease).toHaveBeenCalledWith(expect.anything(), actor, id, { heartbeat: true });
   });
   it("uses cleanup permission and the exact current lease when disconnecting", async () => {
     expect((await disconnect(request({ deviceSessionId: id }))).status).toBe(200);
