@@ -1,0 +1,44 @@
+import { describe, expect, it, vi } from "vitest";
+import { createMobileApi, MobileApiError, type MobileTransport } from "./api";
+
+const config = { environment: "test" as const, apiOrigin: "https://test.dispecing.linkapomoci.sk", supabaseUrl: "https://nzpnqdstvkfncflgqlny.supabase.co", publishableKey: "sb_publishable_fixture" };
+const scope = { ok: true, apiVersion: 1, environment: "test", profileId: "profile", checkedAt: "2026-10-11T12:00:00Z" };
+const me = { ...scope, profile: { id: "profile", displayName: "Test", email: null, role: "dispatcher" }, capabilities: { voice: false, presenceWrite: false } };
+describe("native API transport", () => {
+  it("uses the fresh user token, explicit environment and no cookies", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json(me));
+    await createMobileApi(config, async () => "current-token", transport).me();
+    expect(transport).toHaveBeenCalledWith(config.apiOrigin + "/api/mobile/v1/me", expect.objectContaining({ method: "GET", credentials: "omit", headers: expect.objectContaining({ Authorization: "Bearer current-token", "X-PM-App-Environment": "test" }) }));
+  });
+  it("does not make anonymous data requests", async () => {
+    const transport = vi.fn<MobileTransport>();
+    await expect(createMobileApi(config, async () => null, transport).me()).rejects.toMatchObject({ status: 401 }); expect(transport).not.toHaveBeenCalled();
+  });
+  it.each([{ environment: "production" }, { apiVersion: 2 }, { profileId: "other-profile" }])("refuses mixed-scope console data %j", async changes => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, presence: { status: "available", since: null }, activeCalls: [], capabilities: { voice: false, presenceWrite: false }, ...changes }));
+    await expect(createMobileApi(config, async () => "token", transport).console("profile")).rejects.toMatchObject({ status: 502 });
+  });
+  it("cannot enable a missing native phone engine through a backend flag", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...me, capabilities: { voice: true, presenceWrite: true } }));
+    await expect(createMobileApi(config, async () => "token", transport).me()).rejects.toMatchObject({ status: 502 });
+  });
+  it("preserves the exact next-page cursor and applies filters on the server", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, calls: [], nextCursor: null }));
+    const cursor = "%7B%22id%22%3A%22test%22%7D";
+    await createMobileApi(config, async () => "token", transport).history("profile", { category: "missed", q: "+421", cursor });
+    const params = new URL(transport.mock.calls[0][0] as string).searchParams;
+    expect(params.get("cursor")).toBe(cursor); expect(params.get("q")).toBe("+421"); expect(params.get("category")).toBe("missed");
+  });
+  it("preserves denial and network errors without returning stale success", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ok: false, error: "Access removed" }, { status: 403 }));
+    const api = createMobileApi(config, async () => "token", transport);
+    await expect(api.me()).rejects.toMatchObject({ status: 403, message: "Access removed" });
+    transport.mockRejectedValue(new TypeError("Failed to fetch"));
+    await expect(api.me()).rejects.toBeInstanceOf(MobileApiError);
+  });
+  it("passes cancellation to the native request", async () => {
+    const controller = new AbortController();
+    const transport = vi.fn<MobileTransport>().mockImplementation(async (_url, init) => { expect(init.signal?.aborted).toBe(true); throw new DOMException("Aborted", "AbortError"); });
+    controller.abort(); await expect(createMobileApi(config, async () => "token", transport).me(controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+  });
+});

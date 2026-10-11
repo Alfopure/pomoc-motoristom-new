@@ -1,0 +1,46 @@
+name: Mobile checks
+
+on:
+  pull_request:
+    paths: ["mobile/**", "src/lib/mobile-api.ts", ".github/workflows/mobile.yml"]
+  push:
+    branches: [dev, main]
+    paths: ["mobile/**", "src/lib/mobile-api.ts", ".github/workflows/mobile.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      CI: "1"
+      APP_VARIANT: development
+      EXPO_PUBLIC_APP_ENV: test
+      EXPO_PUBLIC_API_URL: https://test.dispecing.linkapomoci.sk
+      EXPO_PUBLIC_SUPABASE_URL: https://nzpnqdstvkfncflgqlny.supabase.co
+      # Synthetic public config for offline bundle checks; never published.
+      EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_not_a_live_key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npx expo install --check
+      - run: npm run export:ios
+      - run: npm run export:android
