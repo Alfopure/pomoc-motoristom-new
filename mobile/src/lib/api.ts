@@ -23,7 +23,7 @@ function scope(value: unknown, config: MobileConfig, profileId?: string): Mobile
 }
 function capabilities(value: unknown) {
   const data = object(value);
-  // This binary contains no voice engine. A backend toggle cannot activate it.
+  // M1 exposes no calling actions. A backend toggle cannot activate them.
   if (data.voice !== false || data.presenceWrite !== false) throw contractError();
 }
 function callFields(value: unknown) {
