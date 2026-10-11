@@ -126,3 +126,110 @@ export type MobileCaseNoteAdded = MobileScope & {
   warnings: MobileCaseCreated["warnings"];
   refreshRequired: true;
 };
+
+export const MOBILE_CASE_ATTACHMENT_MAX_BYTES = 3 * 1024 * 1024;
+export type MobileCaseAttachmentInput = {
+  mutationId: string;
+  expectedUpdatedAt: string;
+  fileName: string;
+  category: "photo" | "document";
+  note?: string;
+};
+export type MobileCaseAttachment = {
+  id: string;
+  fileName: string;
+  category: "photo" | "video" | "document";
+  mimeType: string | null;
+  sizeBytes: number | null;
+  note: string | null;
+  createdAt: string | null;
+  downloadable: boolean;
+};
+export type MobileCaseAttachments = MobileScope & {
+  caseId: string;
+  caseRevision: string;
+  attachments: MobileCaseAttachment[];
+};
+export type MobileCaseAttachmentAdded = MobileScope & {
+  caseId: string;
+  mutationId: string;
+  attachment: MobileCaseAttachment;
+  committedRevision: string;
+  refreshRequired: true;
+};
+export type MobileCaseAttachmentDownload = MobileScope & {
+  caseId: string;
+  attachmentId: string;
+  url: string;
+  expiresAt: string;
+};
+
+export type MobileTaskWorkflowState = "todo" | "in_progress" | "in_review" | "done";
+export type MobileTaskWorkflowAction = "start" | "submit_review" | "approve" | "return" | "complete" | "reopen" | "to_todo";
+export type MobileTaskKind = "callback" | "sms" | "dispatch" | "documents" | "billing" | "handover" | "other";
+export type MobileTaskColleague = { id: string; name: string };
+export type MobileTaskCapabilities = { create: boolean; workflow: boolean; messages: boolean };
+export type MobileTask = {
+  id: string;
+  title: string;
+  status: "open" | "done" | "overdue";
+  priority: MobileCasePriority;
+  kind: MobileTaskKind;
+  revision: number;
+  workflowState: MobileTaskWorkflowState;
+  originLocked: boolean;
+  assignedTo: MobileTaskColleague | null;
+  reviewer: MobileTaskColleague | null;
+  dueAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdByMe: boolean;
+  reviewSubmission: string | null;
+  reviewReturnReason: string | null;
+};
+export type MobileCaseTasks = MobileScope & {
+  caseId: string;
+  tasks: MobileTask[];
+  nextCursor: string | null;
+  capabilities: MobileTaskCapabilities;
+};
+export type MobileTaskDetail = MobileScope & {
+  task: MobileTask;
+  linkedCases: { id: string; caseNumber: string; status: string }[];
+  capabilities: MobileTaskCapabilities;
+};
+export type MobileTaskColleagues = MobileScope & { colleagues: MobileTaskColleague[] };
+export type MobileTaskCreateInput = {
+  title: string;
+  assignedTo?: string | null;
+  dueAt?: string | null;
+  priority?: MobileCasePriority;
+  kind?: MobileTaskKind;
+};
+export type MobileTaskCreated = MobileScope & { caseId: string; taskId: string; refreshRequired: true };
+export type MobileTaskWorkflowInput = {
+  action: MobileTaskWorkflowAction;
+  expectedRevision: number;
+  commandId: string;
+  reviewerProfileId?: string;
+  comment?: string;
+};
+export type MobileTaskTransitioned = MobileScope & {
+  taskId: string;
+  commandId: string;
+  committedRevision: number;
+  currentRevision: number;
+  refreshRequired: true;
+};
+export type MobileTaskMessage = {
+  id: string;
+  taskId: string;
+  authorProfileId: string;
+  authorName: string;
+  body: string;
+  createdAt: string;
+  clientMessageId: string;
+};
+export type MobileTaskMessages = MobileScope & { taskId: string; messages: MobileTaskMessage[]; nextCursor: string | null };
+export type MobileTaskMessageInput = { clientMessageId: string; body: string };
+export type MobileTaskMessageSent = MobileScope & { taskId: string; message: MobileTaskMessage; refreshRequired: true };

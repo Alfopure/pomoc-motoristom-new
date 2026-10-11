@@ -1,4 +1,6 @@
 import "server-only";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database, Json } from "@/lib/supabase/database.types";
 import type { MotoristActor } from "./api-auth";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { MutationError } from "./mutation-error";
@@ -37,9 +39,9 @@ export function validateTaskInput(input: Record<string, unknown>, create = false
   }
   return result;
 }
-async function workspaceRpc<T>(actor: TaskWorkspaceActor, action: string, id?: string, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
-  const client = await createSupabaseServerClient();
-  const request = client.rpc("motorist_task_workspace", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId, p_action: action, p_task_id: id ? taskId(id) : null, p_input: input });
+async function workspaceRpc<T>(actor: TaskWorkspaceActor, action: string, id?: string, input: Record<string, unknown> = {}, signal?: AbortSignal, userClient?: SupabaseClient<Database>): Promise<T> {
+  const client = userClient ?? await createSupabaseServerClient();
+  const request = client.rpc("motorist_task_workspace", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId, p_action: action, p_task_id: id ? taskId(id) : null, p_input: input as Json });
   const { data, error } = await (signal ? request.abortSignal(signal) : request);
   if (error) {
     if (error.code === "22023" && error.message === "Task review required") throw new MutationError("Táto úloha vyžaduje kontrolu. Odovzdajte ju kontrolórovi; vybaviť ju môže až po schválení.", 400);
@@ -59,16 +61,16 @@ async function workspaceRpc<T>(actor: TaskWorkspaceActor, action: string, id?: s
   return data as T;
 }
 export function loadTaskWorkspace(actor: TaskWorkspaceActor, signal?: AbortSignal) { return workspaceRpc<WorkspaceTask[]>(actor, "list", undefined, {}, signal); }
-export function loadWorkspaceTask(actor: TaskWorkspaceActor, id: string) { return workspaceRpc<WorkspaceTask>(actor, "get", id); }
-export function createWorkspaceTask(actor: TaskWorkspaceActor, input: Record<string, unknown>) { return workspaceRpc<WorkspaceTask>(actor, "create", undefined, validateTaskInput(input, true)); }
+export function loadWorkspaceTask(actor: TaskWorkspaceActor, id: string, userClient?: SupabaseClient<Database>) { return workspaceRpc<WorkspaceTask>(actor, "get", id, {}, undefined, userClient); }
+export function createWorkspaceTask(actor: TaskWorkspaceActor, input: Record<string, unknown>, userClient?: SupabaseClient<Database>) { return workspaceRpc<WorkspaceTask>(actor, "create", undefined, validateTaskInput(input, true), undefined, userClient); }
 export function updateWorkspaceTask(actor: TaskWorkspaceActor, id: string, input: Record<string, unknown>) { return workspaceRpc<WorkspaceTask>(actor, "update", id, validateTaskInput(input)); }
 export function deleteWorkspaceTask(actor: TaskWorkspaceActor, id: string, expectedRevision: unknown, note?: string) { return workspaceRpc<{ deleted: true }>(actor, "delete", id, validateTaskInput({ expectedRevision, note })); }
 export function linkWorkspaceTask(actor: TaskWorkspaceActor, id: string, caseId: unknown, expectedRevision: unknown, unlink = false) { return workspaceRpc<WorkspaceTask>(actor, unlink ? "unlink" : "link", id, { caseId: taskId(caseId), expectedRevision: revision(expectedRevision) }); }
-export function loadTaskMessages(actor: TaskWorkspaceActor, id: string, cursor?: TaskMessageCursor) {
+export function loadTaskMessages(actor: TaskWorkspaceActor, id: string, cursor?: TaskMessageCursor, userClient?: SupabaseClient<Database>) {
   if (cursor && (!Number.isFinite(Date.parse(cursor.createdAt)) || !uuid.test(cursor.id))) throw new MutationError("Neplatná stránka správ.", 400);
-  return workspaceRpc<TaskMessagePage>(actor, "messages", id, cursor ? { beforeCreatedAt: cursor.createdAt, beforeId: cursor.id } : {});
+  return workspaceRpc<TaskMessagePage>(actor, "messages", id, cursor ? { beforeCreatedAt: cursor.createdAt, beforeId: cursor.id } : {}, undefined, userClient);
 }
-export function sendTaskMessage(actor: TaskWorkspaceActor, id: string, input: Record<string, unknown>) {
+export function sendTaskMessage(actor: TaskWorkspaceActor, id: string, input: Record<string, unknown>, userClient?: SupabaseClient<Database>) {
   if (typeof input.body !== "string" || !input.body.trim() || input.body.length > TASK_MESSAGE_LIMIT) throw new MutationError("Správa musí mať 1 až 10 000 znakov.", 400);
-  return workspaceRpc<TaskMessage>(actor, "send_message", id, { body: input.body.trim(), clientMessageId: taskId(input.clientMessageId) });
+  return workspaceRpc<TaskMessage>(actor, "send_message", id, { body: input.body.trim(), clientMessageId: taskId(input.clientMessageId) }, undefined, userClient);
 }

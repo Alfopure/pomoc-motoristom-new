@@ -52,7 +52,36 @@ poznámka označená ako uložená.
 
 **Navigovať** z detailu otvorí mapy pre zobrazené miesto zásahu alebo cieľ.
 Ide o výslovnú akciu; aplikácia si nežiada oprávnenie na polohu.
-Fotografie, prílohy, priraďovanie vozidiel a úlohy sú ďalšie rozšírenia.
+
+**Prílohy** zobrazia súbory prípadu a na výslovnú akciu otvoria krátkodobý
+odkaz na stiahnutie. Pridať možno fotografiu z knižnice alebo fotoaparátu
+a dokument JPEG, PNG alebo PDF do 3 MiB. Fotografie sa lokálne prevedú na
+JPEG, zmenšia najviac na 2048 px a overia podľa skutočných bajtov.
+Podpora HEIC a pamäťové nároky veľkých fotografií vyžadujú skúšku na iPhone.
+Fotoaparát aj knižnica si pýtajú oprávnenie až pri výbere používateľa.
+Staršie vlastné natívne zostavenie potrebuje novú binárnu verziu s pickermi;
+Expo Go má vlastné natívne moduly a oprávnenia.
+
+Upload zachová pôvodné bajty, metadáta, revíziu a UUID aj po strate odpovede.
+Overenie neistého výsledku odošle tú istú požiadavku; nikdy znovu nenačíta
+meniteľný pôvodný súbor. Súbor sa neprepisuje ani automaticky nemaže.
+Pripojenie metadát, história a audit používajú existujúcu atomickú mutáciu.
+Nepotvrdený súbor môže zostať v privátnom úložisku bez väzby na prípad;
+táto verzia nevytvára automatické čistenie úložiska.
+
+**Úlohy** v detaile prípadu ukážu pripojené úlohy, ich riešiteľov, termín
+a pracovný stav. Možno založiť úlohu priamo pre tento prípad, otvoriť detail,
+začať prácu, odovzdať výsledok kolegovi na kontrolu, schváliť alebo vrátiť
+prácu a pridať správu. Dostupnosť a oprávnenie na zmenu určuje existujúca
+aktivácia pracovných úloh a serverové pravidlá webu. Výber riešiteľov
+obsahuje iba aktívnych kolegov s prístupom; historické mená zostanú viditeľné.
+
+Nová úloha používa existujúci zápis bez identity pre opakovanie: po neistom
+výsledku treba výslovne obnoviť a skontrolovať zoznam pred ďalším pokusom.
+Pracovné zmeny a správy majú stabilné identity a overujú tú istú operáciu.
+Neskoršie vypnutie dostupnosti alebo konflikt nezruší už neistú požiadavku.
+Samotný obnovený detail nepotvrdzuje jej uloženie. Zmeny nepridávajú
+nového pracovníka, pripomienkový cron ani nové kanály doručovania.
 
 ## API a prístup
 
@@ -64,6 +93,13 @@ Fotografie, prílohy, priraďovanie vozidiel a úlohy sú ďalšie rozšírenia.
 | `POST /api/mobile/v1/cases` | Založenie cez existujúcu mutáciu, ID/číslo potvrdeného prípadu a prípadné upozornenia |
 | `PATCH /api/mobile/v1/cases/[id]` | Zmenené jednoduché polia, `expectedUpdatedAt` a `mutationId`; potvrdená revízia a upozornenia |
 | `POST /api/mobile/v1/cases/[id]/notes` | Nový historický záznam; iba `note` a `mutationId`, potvrdené ID udalosti a upozornenia |
+| `GET/POST /api/mobile/v1/cases/[id]/attachments` | Zoznam do 200 príloh; ohraničený upload jednej prílohy |
+| `GET /api/mobile/v1/cases/[id]/attachments/[attachmentId]/download` | Dočasný odkaz na presnú prílohu prípadu |
+| `GET/POST /api/mobile/v1/cases/[id]/tasks` | Stránka do 25 pripojených úloh; vytvorenie iba pre prípad v ceste |
+| `GET /api/mobile/v1/tasks/[id]` | Minimálny detail úlohy a pripojených prípadov |
+| `GET /api/mobile/v1/tasks/colleagues` | Do 200 aktívnych ľudských kolegov s prístupom |
+| `POST /api/mobile/v1/tasks/[id]/workflow` | Existujúci pracovný command/revision zápis, minimálne potvrdenie |
+| `GET/POST /api/mobile/v1/tasks/[id]/messages` | Stránka do 50 správ; potvrdenie presnej správy autora |
 
 Mobil posiela Supabase user JWT a `X-PM-App-Environment`. Server overí
 podpis, projekt, platnosť tokenu, aktívny ľudský profil a rolu
@@ -73,7 +109,8 @@ verziou a časom; klient ho overí pred zobrazením.
 
 Čítanie vracia iba polia potrebné pre obrazovku. Súvisiace záznamy aj
 vyhľadávanie sa obmedzia na organizáciu actor-a. API nevracia provider ID,
-interný event payload ani odkazy/prístupové údaje príloh. Odpovede sú
+interný event payload ani cesty/údaje úložiska príloh. Samostatná požiadavka
+na otvorenie prílohy vráti overený krátkodobý odkaz. Odpovede sú
 `private, no-store` s `Vary: Authorization, X-PM-App-Environment`.
 
 Konkrétny `ownerId` sa používa s `ownership=all`, server overí jeho členstvo
@@ -93,6 +130,21 @@ pôvodnú identitu a obsah. Záznam poznámky má vlastné UUID udalosti a marke
 opakovaný request musí mať rovnaký prípad, autora a text. Audit s rovnakou
 identitou sa overí alebo doplní, jeho porucha sa nikdy nezamení za neuloženú
 poznámku. Úspešné odpovede nevyžadujú úspech následného GET detailu.
+
+Multipart obsahuje presne binárne pole `file` s pevným ASCII názvom
+`attachment.bin` a JSON pole `command` s pôvodným UTF-8 názvom súboru,
+kategóriou, poznámkou, revíziou a UUID. Server pred dekódovaním ohraničí
+celú požiadavku a overí MIME aj podpis skutočných bajtov. Privátny bucket
+je `motorist-case-attachments`; cesta vždy obsahuje organizáciu a prípad.
+Opätovné použitie súboru overí úplné metadáta príkazu aj hash jeho obsahu.
+Chýbajúce alebo neočakávané metadáta úložiska nepredstierajú úspech.
+
+Úlohy používajú overený používateľský Supabase klient s verejným kľúčom
+a presným Bearer tokenom, takže existujúce RPC vidia `auth.uid()`.
+Samostatné serverové čítanie dostupnosti je potrebné preto, že tabuľka
+konfigurácie povoľuje SELECT iba serverovej role. Toto čítanie nedáva
+oprávnenie na úlohy ani ich zmeny. Stránkovanie vychádza z časov väzieb
+na prípad, zachová mikrosekundy a viaže cursor na účet, organizáciu a prípad.
 
 Nevzniká nová schéma, worker, cron, provider integrácia ani automatická SMS
 či e-mail. TEST používa iba `nzpnqdstvkfncflgqlny` a
@@ -120,6 +172,14 @@ explicitné schválenie identifikovaného TEST rozsahu.
 10. Pridať poznámku, prepnúť záložky počas konceptu a overiť jeden historický
     záznam aj po opakovanom overení neistého výsledku.
 11. Otvoriť navigáciu k zobrazenému miestu. Po úprave adresy overiť nový cieľ.
+12. Zobraziť a otvoriť skúšobnú prílohu; pridať fotografiu HEIC z iPhonu
+    aj PDF. Overiť jeden uložený súbor a zhodu s webom, prekročenie limitu,
+    zamietnuté oprávnenie, výpadok siete a súbežnú zmenu prípadu.
+13. Pri aktivovaných úlohách založiť skúšobnú úlohu prípadu a overiť
+    riešiteľa na webe. Dvoma TEST účtami prejsť odovzdanie na kontrolu,
+    vrátenie a schválenie. Pri strate odpovede overiť tú istú operáciu.
+14. Pridať správu a overiť jednu správu aj po opakovaní. Prepnúť záložky
+    s rozpracovanou prílohou, úlohou alebo správou; koncept ostane.
 
 Automatické kontraktové/UI testy, HTTP health/negative-auth checks a JS
 exporty nepreukazujú fyzické prihlásenie, skutočnú databázovú mutáciu ani
