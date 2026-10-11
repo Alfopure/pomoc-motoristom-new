@@ -65,8 +65,8 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
       debug: false, enableCallReports: false)
     config = options
     UserDefaults.standard.set(true, forKey: "linka.voice.enabled")
-    if client == nil { client = TxClient(); client?.delegate = self }
     if let pending = pushes.first {
+      if client == nil { client = TxClient(); client?.delegate = self }
       if preparedPush != pending.key {
         try client?.processVoIPNotification(txConfig: options, serverConfiguration: TxServerConfiguration(), pushMetaData: pending.value)
         preparedPush = pending.key
@@ -74,7 +74,9 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
       emit(["type": "push", "callId": pending.key.uuidString, "providerLegId": pending.value["telnyx_leg_id"] as? String ?? ""])
     } else if calls.isEmpty {
       ready = false
+      client?.delegate = nil
       client?.disconnect()
+      client = TxClient(); client?.delegate = self
       try client?.connect(txConfig: options)
     }
   }
@@ -82,6 +84,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate, Tx
   func disconnect() {
     UserDefaults.standard.set(false, forKey: "linka.voice.enabled")
     client?.disablePushNotifications()
+    client?.delegate = nil
     client?.disconnect()
     client = nil; config = nil; ready = false; expected = nil; outgoingTimer?.invalidate(); outgoingTimer = nil
     for id in Set(reported).union(calls.keys).union(pushes.keys) { finish(id, reason: .failed) }
