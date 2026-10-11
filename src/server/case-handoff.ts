@@ -3,9 +3,10 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { cookies } from "next/headers";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import type { Json } from "@/lib/supabase/database.types";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database, Json } from "@/lib/supabase/database.types";
 import { isHandoffReceipt, type HandoffCommand, type HandoffContext, type HandoffReceipt } from "@/domain/case-handoff";
-import { requireDefaultMotoristActor } from "./api-auth";
+import { requireDefaultMotoristActor, type MotoristActor } from "./api-auth";
 import { MutationError } from "./mutation-error";
 import { assertRateLimit, requestIp } from "./rate-limit";
 import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
@@ -21,6 +22,7 @@ export function handoffError(error: unknown) { return handoffResponse({ error: e
 function id(value: unknown) { if (typeof value !== "string" || !uuid.test(value)) throw new MutationError("Neplatná referencia požiadavky.", 400); return value; }
 function rpcError(error: { code?: string }): never {
   const code = error.code ?? "";
+  if (code === "MOBILE_RESPONSE_TOO_LARGE") throw new MutationError("Odovzdanie obsahuje príliš veľa údajov pre mobilnú aplikáciu. Otvorte webovú kartu.", 503, code);
   if (["PGRST202", "42883", "42P01"].includes(code)) throw new MutationError("Externé odovzdanie ešte nie je aktivované v databáze tejto aplikácie.", 503);
   if (code === "42501") throw new MutationError("Na toto odovzdanie nemáte oprávnenie.", 403);
   if (code === "P0002") throw new MutationError("Odkaz alebo prípad nie je dostupný. Vyžiadajte si aktuálny odkaz od dispečera.", 404);
@@ -75,30 +77,40 @@ export function validateHandoffCommand(input: Record<string, unknown>, external 
   }
   return command;
 }
-export async function getCaseHandoffContext(caseId: string): Promise<HandoffContext> {
+export type HandoffSession = { actor: MotoristActor; client: SupabaseClient<Database> };
+export type ResolvedHandoffLink = { handoff: HandoffReceipt["handoff"]; url: string };
+async function handoffSession(): Promise<HandoffSession> {
   const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
-  const client = await createSupabaseServerClient();
-  const { data, error } = await client.rpc("motorist_case_handoff", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId, p_case_id: id(caseId), p_action: "context", p_input: {} });
-  if (error) rpcError(error); return { ...data as unknown as HandoffContext, enhanced: enhancedHandoffEnabled() };
+  return { actor, client: await createSupabaseServerClient() };
 }
-export async function commandCaseHandoff(request: Request, caseId: string): Promise<HandoffReceipt> {
-  const input = await readHandoffBody(request);
-  const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
-  const command = validateHandoffCommand(input), token = randomBytes(32).toString("base64url"), enhanced = enhancedHandoffEnabled();
-  if (!enhanced && ["recover", "extend"].includes(command.action)) throw new MutationError("Rozšírené odovzdanie zatiaľ nie je zapnuté.", 503);
-  const client = await createSupabaseServerClient();
+export async function getCaseHandoffContext(caseId: string, session?: HandoffSession): Promise<HandoffContext> {
+  const { actor, client } = session ?? await handoffSession();
+  const { data, error } = await client.rpc("motorist_case_handoff", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId, p_case_id: id(caseId), p_action: "context", p_input: {} });
+  if (error) rpcError(error);
+  return { ...data as unknown as HandoffContext, enhanced: enhancedHandoffEnabled() };
+}
+export async function recoverCaseHandoffLink(caseId: string, handoffId: string, commandId: string, { actor, client }: HandoffSession, generation?: number): Promise<ResolvedHandoffLink> {
+  if (!enhancedHandoffEnabled()) throw new MutationError("Rozšírené odovzdanie zatiaľ nie je zapnuté.", 503);
+  const { data, error } = await client.rpc("motorist_case_handoff", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId, p_case_id: id(caseId),
+    p_action: "link", p_input: { handoffId: id(handoffId), ...(generation !== undefined ? { generation } : {}), commandId: id(commandId) } as Json });
+  if (error) rpcError(error);
+  const result = data as unknown as { handoff: HandoffReceipt["handoff"]; envelope: unknown; tokenHash: string; generation: number; origin: string };
+  if (!result?.handoff || result.handoff.id !== handoffId || !Number.isSafeInteger(result.generation) || result.generation < 1
+    || (generation !== undefined && result.generation !== generation)) throw new MutationError("Odkaz sa nepodarilo overiť.", 503);
+  const recovered = openHandoffToken(result.envelope, { organizationId: actor.organizationId, caseId, handoffId, generation: result.generation, tokenHash: result.tokenHash, origin: result.origin });
+  return { handoff: result.handoff, url: `${result.origin}/handoff#token=${recovered}` };
+}
+/** The mutation receipt exists before any optional link read/decryption occurs. */
+export async function prepareCaseHandoffCommand(request: Request, caseId: string, input: Record<string, unknown>, session: HandoffSession, legacyOrigin?: string): Promise<{
+  receipt: HandoffReceipt; resolveLink?: () => Promise<ResolvedHandoffLink>;
+}> {
+  const { actor, client } = session;
+  const command = validateHandoffCommand(input);
+  const token = randomBytes(32).toString("base64url");
+  const enhanced = enhancedHandoffEnabled();
+  if (command.action === "recover") throw new MutationError("Získanie odkazu je samostatná požiadavka.", 400);
+  if (!enhanced && command.action === "extend") throw new MutationError("Rozšírené odovzdanie zatiaľ nie je zapnuté.", 503);
   const scope = { p_organization_id: actor.organizationId, p_actor_id: actor.profileId, p_case_id: id(caseId) };
-  async function recover(handoffId: string, generation?: number) {
-    const { data, error } = await client.rpc("motorist_case_handoff", { ...scope, p_action: "link", p_input: { handoffId, ...(generation ? { generation } : {}), commandId: command.commandId } as Json });
-    if (error) rpcError(error);
-    const result = data as unknown as { handoff: HandoffReceipt["handoff"]; envelope: unknown; tokenHash: string; generation: number; origin: string };
-    const recovered = openHandoffToken(result.envelope, { organizationId: actor.organizationId, caseId, handoffId, generation: result.generation, tokenHash: result.tokenHash, origin: result.origin });
-    return { handoff: result.handoff, url: `${result.origin}/handoff#token=${recovered}` };
-  }
-  if (command.action === "recover") {
-    const recovered = await recover(String(command.handoffId));
-    return { ...recovered, commandId: command.commandId, committedRevision: recovered.handoff.revision };
-  }
   let secret: Record<string, Json> = {};
   if (enhanced && ["issue", "renew"].includes(command.action)) {
     let handoffId: string = randomUUID(), generation = 1;
@@ -107,23 +119,40 @@ export async function commandCaseHandoff(request: Request, caseId: string): Prom
       if (error) rpcError(error);
       const grant = (data as unknown as HandoffContext).handoffs.find(item => item.id === command.handoffId);
       if (!grant?.tokenGeneration) throw new MutationError("Najprv načítajte aktuálne odovzdanie.", 409);
-      handoffId = grant.id; generation = grant.tokenGeneration + 1;
+      handoffId = grant.id;
+      generation = grant.tokenGeneration + 1;
     }
-    const origin = handoffOrigin(request), tokenHash = handoffHash(token);
+    const origin = handoffOrigin(request);
+    const tokenHash = handoffHash(token);
     secret = { issuedId: handoffId, secretGeneration: generation, linkOrigin: origin, tokenEnvelope: sealHandoffToken(token, { organizationId: actor.organizationId, caseId, handoffId, generation, tokenHash, origin }) as unknown as Json };
   }
-  const { data, error } = await client.rpc("motorist_case_handoff", { p_organization_id: actor.organizationId, p_actor_id: actor.profileId, p_case_id: id(caseId), p_action: command.action,
+  const { data, error } = await client.rpc("motorist_case_handoff", { ...scope, p_action: command.action,
     p_input: { ...command, ...secret, ...(["issue", "renew"].includes(command.action) ? { tokenHash: handoffHash(token) } : {}) } as Json });
   if (error) rpcError(error);
   const receipt = data as unknown as HandoffReceipt;
   if (!isHandoffReceipt(receipt, command)) throw new MutationError("Potvrdenie sa nepodarilo overiť. Zopakujte tú istú požiadavku.", 503);
   if (enhanced && ["issue", "renew"].includes(command.action)) {
     const generation = (data as unknown as { linkGeneration?: number }).linkGeneration;
-    if (!generation) return receipt;
-    const recovered = await recover(receipt.handoff.id, generation);
-    return { handoff: recovered.handoff, commandId: receipt.commandId, committedRevision: receipt.committedRevision, url: recovered.url };
+    if (!generation) return { receipt };
+    return { receipt, resolveLink: () => recoverCaseHandoffLink(caseId, receipt.handoff.id, command.commandId, session, generation) };
   }
-  return { ...receipt, ...(receipt.tokenAccepted ? { url: `${new URL(request.url).origin}/handoff#token=${token}` } : {}) };
+  return { receipt, ...(receipt.tokenAccepted === true ? { resolveLink: async () => ({ handoff: receipt.handoff,
+    url: `${legacyOrigin ?? new URL(request.url).origin}/handoff#token=${token}` }) } : {}) };
+}
+export async function commandCaseHandoff(request: Request, caseId: string): Promise<HandoffReceipt> {
+  const input = await readHandoffBody(request);
+  const session = await handoffSession();
+  const command = validateHandoffCommand(input);
+  if (command.action === "recover") {
+    const recovered = await recoverCaseHandoffLink(caseId, String(command.handoffId), command.commandId, session);
+    return { ...recovered, commandId: command.commandId, committedRevision: recovered.handoff.revision };
+  }
+  const { receipt, resolveLink } = await prepareCaseHandoffCommand(request, caseId, command, session);
+  if (!resolveLink) return receipt;
+  const recovered = await resolveLink();
+  return enhancedHandoffEnabled() && ["issue", "renew"].includes(command.action)
+    ? { handoff: recovered.handoff, commandId: receipt.commandId, committedRevision: receipt.committedRevision, url: recovered.url }
+    : { ...receipt, url: recovered.url };
 }
 export async function publicHandoff(request: Request, action: "session" | "read" | "command") {
   const input = action === "read" ? { handoffId: id(new URL(request.url).searchParams.get("handoff")) } : await readHandoffBody(request);

@@ -83,6 +83,25 @@ Neskoršie vypnutie dostupnosti alebo konflikt nezruší už neistú požiadavku
 Samotný obnovený detail nepotvrdzuje jej uloženie. Zmeny nepridávajú
 nového pracovníka, pripomienkový cron ani nové kanály doručovania.
 
+**Odovzdať prípad** ukáže úplný náhľad údajov určených príjemcovi, príjemcu,
+pokyny, termín a platnosť odkazu. Možno vytvoriť odovzdanie, výslovne
+publikovať aktuálne údaje, obnoviť odkaz, predĺžiť platnosť alebo odovzdanie
+zrušiť s dôvodom. História obsahuje stav, zverejnenú verziu aj udalosti.
+Pokročilé akcie závisia od existujúcej aktivácie odovzdávania na serveri.
+Obnovenie odkazu mení prístupový odkaz, nepublikuje samo nové údaje prípadu.
+
+Rozpracované vytvorenie a publikovanie zachovajú presný náhľad a jeho verziu.
+Zmena prípadu na webe ich nenahradí bez vedomého rozhodnutia používateľa.
+Neistý zápis overuje iba pôvodnú operáciu. Potvrdené uloženie zostane
+potvrdené aj vtedy, keď sa odkaz nepodarí získať alebo sa nepodarí obnoviť
+históriu. Získanie aktuálneho odkazu je samostatná akcia; starý odkaz po
+obnovení nemusí byť možné znovu získať.
+
+**Zdieľať odkaz** otvorí systémové zdieľanie až po stlačení používateľom.
+Nevzniká automatická SMS ani e-mail. Odkaz sa drží iba v pamäti aktuálneho
+účtu a po známej zmene odovzdania, skončení platnosti alebo odhlásení sa
+prestane ponúkať. Výsledok systémového dialógu nepotvrdzuje doručenie.
+
 ## API a prístup
 
 | Route | Výsledok |
@@ -93,6 +112,7 @@ nového pracovníka, pripomienkový cron ani nové kanály doručovania.
 | `POST /api/mobile/v1/cases` | Založenie cez existujúcu mutáciu, ID/číslo potvrdeného prípadu a prípadné upozornenia |
 | `PATCH /api/mobile/v1/cases/[id]` | Zmenené jednoduché polia, `expectedUpdatedAt` a `mutationId`; potvrdená revízia a upozornenia |
 | `POST /api/mobile/v1/cases/[id]/notes` | Nový historický záznam; iba `note` a `mutationId`, potvrdené ID udalosti a upozornenia |
+| `GET/POST /api/mobile/v1/cases/[id]/handoffs` | Úplný náhľad a existujúce odovzdania; pôvodné atomické príkazy alebo samostatné získanie aktuálneho odkazu |
 | `GET/POST /api/mobile/v1/cases/[id]/attachments` | Zoznam do 200 príloh; ohraničený upload jednej prílohy |
 | `GET /api/mobile/v1/cases/[id]/attachments/[attachmentId]/download` | Dočasný odkaz na presnú prílohu prípadu |
 | `GET/POST /api/mobile/v1/cases/[id]/tasks` | Stránka do 25 pripojených úloh; vytvorenie iba pre prípad v ceste |
@@ -146,6 +166,16 @@ konfigurácie povoľuje SELECT iba serverovej role. Toto čítanie nedáva
 oprávnenie na úlohy ani ich zmeny. Stránkovanie vychádza z časov väzieb
 na prípad, zachová mikrosekundy a viaže cursor na účet, organizáciu a prípad.
 
+Odovzdanie používa ten istý overený používateľský klient a existujúce RPC
+s `auth.uid()`. Mobil rozlišuje pôvodné potvrdenie mutácie od následného
+získania odkazu. URL overí proti kanonickému prostrediu; nevracia tokenové
+obálky, hashe ani interné generácie. Existujúce RPC zhromažďuje všetky
+odovzdania a udalosti jedného prípadu bez databázového stránkovania.
+Mobilný adaptér ohraničí dekódovanú odpoveď na 2 MiB, do 50 odovzdaní
+a 200 udalostí na odovzdanie. Prekročenie vráti výslovnú chybu; nejde o
+ohraničenie databázovej práce. Údaje náhľadu sa neskracujú: neznáma verzia,
+pole alebo nadmerný obsah nemôžu viesť k publikovaniu neviditeľných údajov.
+
 Nevzniká nová schéma, worker, cron, provider integrácia ani automatická SMS
 či e-mail. TEST používa iba `nzpnqdstvkfncflgqlny` a
 https://test.dispecing.linkapomoci.sk. Produkcia potrebuje osobitné
@@ -180,6 +210,15 @@ explicitné schválenie identifikovaného TEST rozsahu.
     vrátenie a schválenie. Pri strate odpovede overiť tú istú operáciu.
 14. Pridať správu a overiť jednu správu aj po opakovaní. Prepnúť záložky
     s rozpracovanou prílohou, úlohou alebo správou; koncept ostane.
+15. Pri aktivovanom odovzdávaní otvoriť vlastný skúšobný prípad, skontrolovať
+    všetky údaje náhľadu, vytvoriť odovzdanie a až potom vedome otvoriť
+    systémové zdieľanie. Overiť stav a údaje na webe aj u skúšobného príjemcu.
+16. Zmeniť prípad počas rozpracovaného náhľadu. Obnoviť a vedome potvrdiť
+    nový náhľad; pri strate odpovede overiť pôvodnú identitu príkazu.
+    Potvrdené uloženie musí zostať potvrdené aj bez dostupného odkazu.
+17. Overiť samostatné získanie odkazu, obnovu, predĺženie a zrušenie.
+    Zmeniť odovzdanie na webe, vypršať platnosť a prepnúť účet; mobil nesmie
+    ponúknuť už známy neplatný odkaz ani zdieľať bez stlačenia používateľa.
 
 Automatické kontraktové/UI testy, HTTP health/negative-auth checks a JS
 exporty nepreukazujú fyzické prihlásenie, skutočnú databázovú mutáciu ani
