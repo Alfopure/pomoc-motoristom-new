@@ -248,6 +248,7 @@ export function createTelephonyHarness(options: HarnessOptions = {}): TelephonyH
     organizationId: ORG,
     environment,
     now: () => current,
+    monotonicNow: () => current.getTime(),
     sleep: async (ms) => {
       current = new Date(current.getTime() + ms);
     },

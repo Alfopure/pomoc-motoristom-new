@@ -97,6 +97,8 @@ export type CallerMatch = {
 
 export type CallCenterCall = {
   id: string;
+  /** Internal motorist_call_sessions.id; never a provider conversation ID. */
+  sessionId?: string;
   providerCallId?: string;
   /** Provider-side session/conversation id that groups the legs of one call. */
   providerSessionId?: string;

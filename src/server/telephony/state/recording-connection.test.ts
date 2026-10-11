@@ -132,6 +132,21 @@ describe("recorded customer conference connection", () => {
     expect(h.telnyx.of("conference:join")).toHaveLength(0);
     expect(pending(h, call.sessionId)?.commands).toHaveLength(1);
     expect(h.telnyx.client.request).toHaveBeenCalledTimes(8);
+    expect(h.legs(call.sessionId).filter(leg => leg.bridged_at)).toEqual([]);
+  });
+
+  it("does not confirm a connection when the customer leaves before the operator joins", async () => {
+    const h = harness(), call = await ringing(h), request = h.telnyx.client.request.bind(h.telnyx.client);
+    vi.spyOn(h.telnyx.client, "request").mockImplementation(async (method, path, options) => {
+      if (path.endsWith("/participants") && h.telnyx.of("conference:join").length) {
+        return { data: [{ call_control_id: call.operator, status: "joined" }] } as never;
+      }
+      return request(method, path, options);
+    });
+    await h.legEvent(call.operator, "call.answered");
+    expect(h.legs(call.sessionId).filter(leg => leg.bridged_at)).toEqual([]);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).recording?.connection?.confirmedAt).toBeNull();
+    expect(pending(h, call.sessionId)?.commands).toHaveLength(1);
   });
 
   it("leaves the previous conference when a blind transfer clears its stored id", async () => {

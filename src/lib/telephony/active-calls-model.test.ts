@@ -245,6 +245,7 @@ describe("call log rows", () => {
     );
 
     expect(row.id).toBe("call-row-1");
+    expect(row.sessionId).toBe("sess-1");
     expect(row.providerSessionId).toBe("sess-1");
     expect(row.lineLabel).toBe("Allianz Assistance");
     expect(row.queueLabel).toBe("Allianz");

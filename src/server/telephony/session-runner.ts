@@ -75,6 +75,8 @@ export type SessionRunnerDeps = {
   organizationId: string;
   environment: TelephonyEnvironment;
   now?: () => Date;
+  /** Elapsed-time clock; independent of corrections to the wall clock. */
+  monotonicNow?: () => number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
   logger?: (entry: Record<string, unknown>) => void;
@@ -628,6 +630,7 @@ export function effectsDeps(deps: SessionRunnerDeps): EffectsDeps {
     mediaBaseUrl: deps.config.configured ? deps.config.mediaBaseUrl : null,
     now,
     sleep: sleepOf(deps),
+    monotonicNow: deps.monotonicNow,
     logger: deps.logger,
     callIds: new Map(),
     wrapUpSecondsFor: async (profileId) => {
