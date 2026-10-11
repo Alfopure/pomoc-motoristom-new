@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { Phone, History as HistoryIcon, UserRound, type LucideIcon } from "lucide-react-native";
+import { Phone, History as HistoryIcon, UserRound, FolderOpen, type LucideIcon } from "lucide-react-native";
 import { QueryClient, QueryClientProvider, focusManager, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import type { MobileMe } from "../src/lib/mobile-api";
@@ -12,14 +12,17 @@ import { createMobileSupabase } from "./src/lib/supabase";
 import { callStatus, dialable, formatNumber, formatTime, presenceLabels } from "./src/lib/display";
 import { Button, Card, ErrorNotice, Loading, colors, styles } from "./src/ui";
 import { useDispatchPhone } from "./src/voice/use-phone";
+import { createCasesApi } from "./src/cases/api";
+import { Cases } from "./src/cases/ui";
 import { CallPanel } from "./src/voice/ui";
 import type { DispatchPhone, PhoneState } from "./src/voice/phone";
 
-type Tab = "console" | "history" | "account";
+type Tab = "console" | "history" | "cases" | "account";
 type Category = "all" | "missed" | "received" | "outbound";
 const tabs: { id: Tab; label: string; icon: LucideIcon }[] = [
   { id: "console", label: "Ústredňa", icon: Phone },
   { id: "history", label: "História", icon: HistoryIcon },
+  { id: "cases", label: "Prípady", icon: FolderOpen },
   { id: "account", label: "Účet", icon: UserRound },
 ];
 const categories: { id: Category; label: string }[] = [
@@ -154,6 +157,13 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
   // Periodic reads still stop when iOS suspends the app.
   const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), refetchInterval: active ? 30_000 : false });
   const identity = usableMobileIdentity(me.data, me.error);
+  const profileId = identity?.profileId;
+  const casesApi = useMemo(() => profileId ? createCasesApi(config, profileId, async () => {
+    const { data, error } = await client.auth.getSession();
+    if (error) throw new MobileApiError("Prihlásenie sa nepodarilo obnoviť. Skúste znova.", 0);
+    if (data.session?.user.id !== userId) throw new MobileApiError("Prihláste sa do aplikácie.", 401);
+    return data.session.access_token;
+  }) : null, [config, client, userId, profileId]);
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   async function logout() {
     if (loggingOut) return;
@@ -177,7 +187,7 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
     {tab === "console" ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} />
       : tab === "history" ? <History api={api} me={identity} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
         onSelect={value => { setNumber(value); setTab("console"); }} />
-      : <ScrollView contentContainerStyle={styles.content}>
+      : tab === "cases" ? null : <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.heading}>Účet</Text><Card><Text style={styles.subheading}>{identity.profile.displayName}</Text>
           <Text style={styles.text}>{identity.profile.email ?? ""}</Text>
           <Text style={styles.muted}>{({ dispatcher: "Dispečer", senior_dispatcher: "Vedúci dispečer", manager: "Manažér", admin: "Administrátor" })[identity.profile.role]}</Text>
@@ -187,6 +197,10 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
         {(phoneState.call || phoneState.termination) && <Text style={styles.muted}>Pred odhlásením ukončite hovor.</Text>}
         <Button label={loggingOut ? "Odhlasujem…" : "Odhlásiť sa"} disabled={loggingOut || Boolean(phoneState.call || phoneState.termination)} onPress={() => { void logout(); }} secondary />
       </ScrollView>}
+    {casesApi && <View style={tab === "cases" ? { flex: 1 } : { display: "none" }}>
+      <Cases key={identity.profileId} api={casesApi} environment={config.environment} userId={userId} profileId={identity.profileId}
+        active={active && tab === "cases"} onSelectNumber={value => { setNumber(value); setTab("console"); }} />
+    </View>}
     <View accessibilityRole="tablist" style={s.tabs}>{tabs.map(item => <Pressable key={item.id} accessibilityRole="tab" accessibilityLabel={item.label}
       accessibilityState={{ selected: tab === item.id }} onPress={() => setTab(item.id)} style={s.tab}>
       <View style={[s.tabIcon, tab === item.id && s.tabIconSelected]}><item.icon size={22} color={tab === item.id ? colors.ink : colors.muted} /></View><Text style={[s.tabLabel, tab === item.id && s.selected]}>{item.label}</Text>

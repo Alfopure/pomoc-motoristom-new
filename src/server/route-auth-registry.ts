@@ -32,6 +32,8 @@ export type RouteAuthEntry = {
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/me": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "mobile/v1/cases": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Scoped bounded case list and allowlisted draft creation owned by the authenticated actor." },
+  "mobile/v1/cases/[id]": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Organization-scoped case detail DTO; no attachment or event payloads." },
   "mobile/v1/console": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only own-call DTO; no provider or presence operations." },
   "mobile/v1/calls/history": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Uses existing actor-authorized search; excludes archive and provider fields." },
   "mobile/v1/voice/token": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },

@@ -1,0 +1,203 @@
+import "server-only";
+import { createHash } from "node:crypto";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { loadCaseDetail } from "@/data/case-detail-repository";
+import { mapCase } from "@/data/dispatch-repository";
+import type { CaseDetailData } from "@/data/case-detail";
+import { jobTypeLabels } from "@/domain/case-card";
+import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
+import type { MobileCaseCreateInput, MobileCaseCreated, MobileCaseDetailData, MobileCaseFilter, MobileCaseSummary } from "@/lib/mobile-api";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import type { Database } from "@/lib/supabase/database.types";
+import { isHistoryTimestamp } from "@/lib/telephony/call-history-query";
+import { isUuid } from "@/lib/telephony/uuid";
+import type { MotoristActor } from "@/server/api-auth";
+import { CaseCreationCommittedError, createCase } from "@/server/motorist-mutations";
+import { MutationError } from "@/server/mutation-error";
+
+type Admin = SupabaseClient<Database>;
+type CaseRow = Database["public"]["Tables"]["motorist_cases"]["Row"];
+type Selection = Pick<MobileCaseFilter, "ownership" | "category" | "q">;
+type Cursor = { createdAt: string; id: string; selection: string };
+export type MobileCaseQuery = Selection & { limit: number; cursor: Cursor | null };
+const CLOSED = ["completed_assisted", "completed_no_assistance", "rejected", "cancelled", "futile_trip"] as const;
+const SEARCH_LIMIT = 100;
+const MAX_BODY_BYTES = 64_000;
+const STRING_LIMITS = { contactName: 200, contactPhone: 64, licensePlate: 32, vehicleMake: 80, vehicleModel: 120,
+  manualPickupAddress: 500, manualDestinationAddress: 500, incidentDescription: 5000, note: 10000 } as const;
+
+function badInput(message = "Neplatné údaje prípadu."): never { throw new MutationError(message, 400); }
+
+export function parseMobileCaseQuery(params: URLSearchParams): MobileCaseQuery {
+  const allowed = new Set(["ownership", "category", "q", "cursor", "limit"]);
+  for (const key of params.keys()) if (!allowed.has(key) || params.getAll(key).length !== 1) badInput("Neplatný filter prípadov.");
+  const ownership = params.get("ownership") ?? "mine", category = params.get("category") ?? "open";
+  if (ownership !== "mine" && ownership !== "all" || category !== "open" && category !== "all") badInput("Neplatný filter prípadov.");
+  const q = (params.get("q") ?? "").trim();
+  if (q.length > 120 || /[\u0000-\u001f]/.test(q)) badInput("Vyhľadávanie môže mať najviac 120 znakov.");
+  const rawLimit = params.get("limit") ?? "25";
+  if (!/^[1-9]\d?$/.test(rawLimit) || Number(rawLimit) > 25) badInput("Neplatná veľkosť stránky.");
+  let cursor: Cursor | null = null;
+  const raw = params.get("cursor");
+  if (raw) {
+    try {
+      if (raw.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error();
+      const value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+      if (!value || value.v !== 1 || !isUuid(value.id) || !isHistoryTimestamp(value.createdAt) ||
+        typeof value.selection !== "string" || !/^[a-f0-9]{64}$/.test(value.selection)) throw new Error();
+      cursor = { id: value.id, createdAt: value.createdAt, selection: value.selection };
+    } catch { badInput("Stránka prípadov už nie je platná. Obnovte zoznam."); }
+  }
+  return { ownership, category, q, limit: Number(rawLimit), cursor };
+}
+
+function selectionKey(actor: MotoristActor, query: Selection) {
+  return createHash("sha256").update(JSON.stringify([actor.organizationId, actor.profileId, query.ownership, query.category, query.q])).digest("hex");
+}
+
+function filteredCases(admin: Admin, actor: MotoristActor, query: Selection, signal: AbortSignal) {
+  let read = admin.from("motorist_cases").select("*").eq("organization_id", actor.organizationId).abortSignal(signal);
+  if (query.ownership === "mine") read = read.eq("owner_id", actor.profileId);
+  if (query.category === "open") for (const status of CLOSED) read = read.neq("status", status);
+  return read;
+}
+
+/** Separate parameterized filters avoid interpolating user text in PostgREST OR grammar. */
+async function searchCaseIds(admin: Admin, actor: MotoristActor, query: Selection, signal: AbortSignal): Promise<string[] | null> {
+  if (!query.q) return null;
+  const pattern = `%${query.q.replace(/[\\%_]/g, character => `\\${character}`)}%`;
+  const [numbers, summaries, names, phones, plates] = await Promise.all([
+    filteredCases(admin, actor, query, signal).ilike("case_number", pattern).limit(SEARCH_LIMIT + 1).select("id"),
+    filteredCases(admin, actor, query, signal).ilike("summary", pattern).limit(SEARCH_LIMIT + 1).select("id"),
+    admin.from("motorist_contacts").select("id").eq("organization_id", actor.organizationId).ilike("name", pattern).limit(SEARCH_LIMIT + 1).abortSignal(signal),
+    admin.from("motorist_contacts").select("id").eq("organization_id", actor.organizationId).ilike("phone", pattern).limit(SEARCH_LIMIT + 1).abortSignal(signal),
+    admin.from("motorist_vehicles").select("id").eq("organization_id", actor.organizationId).ilike("license_plate", pattern).limit(SEARCH_LIMIT + 1).abortSignal(signal),
+  ]);
+  const results = [numbers, summaries, names, phones, plates];
+  if (results.some(result => result.error)) throw new MutationError("Prípady sa nepodarilo vyhľadať.", 503);
+  if (results.some(result => (result.data?.length ?? 0) > SEARCH_LIMIT)) badInput("Vyhľadávanie je príliš široké. Spresnite text.");
+  const contacts = [...new Set([...(names.data ?? []), ...(phones.data ?? [])].map(row => row.id))];
+  const vehicles = (plates.data ?? []).map(row => row.id);
+  if (contacts.length > SEARCH_LIMIT) badInput("Vyhľadávanie je príliš široké. Spresnite text.");
+  const [contactCases, vehicleCases] = await Promise.all([
+    contacts.length ? filteredCases(admin, actor, query, signal).in("contact_id", contacts).limit(SEARCH_LIMIT + 1).select("id") : { data: [], error: null },
+    vehicles.length ? filteredCases(admin, actor, query, signal).in("vehicle_id", vehicles).limit(SEARCH_LIMIT + 1).select("id") : { data: [], error: null },
+  ]);
+  if (contactCases.error || vehicleCases.error) throw new MutationError("Prípady sa nepodarilo vyhľadať.", 503);
+  const ids = [...new Set([...(numbers.data ?? []), ...(summaries.data ?? []), ...(contactCases.data ?? []), ...(vehicleCases.data ?? [])].map(row => row.id))];
+  if (ids.length > SEARCH_LIMIT) badInput("Vyhľadávanie je príliš široké. Spresnite text.");
+  return ids;
+}
+
+export function mobileCaseSummary(detail: CaseDetailData, actor: MotoristActor): MobileCaseSummary {
+  return { id: detail.id, caseNumber: detail.caseNumber, status: detail.status, statusLabel: caseStatusLabels[detail.status],
+    priority: detail.priority, priorityLabel: casePriorityLabels[detail.priority],
+    owner: { id: detail.ownerId === "unassigned" ? null : detail.ownerId, name: detail.ownerName ?? null, mine: detail.ownerId === actor.profileId },
+    contact: { name: detail.contact.name || null, phone: detail.contact.phone || null },
+    vehicle: { licensePlate: detail.vehicle.licensePlate || null, description: [detail.vehicle.make, detail.vehicle.model].filter(Boolean).join(" ") || null },
+    pickupAddress: detail.pickup?.address ?? detail.locationDetails.manualPickupAddress ?? null,
+    destinationAddress: detail.destination?.address ?? detail.locationDetails.manualDestinationAddress ?? null,
+    summary: detail.summary, createdAt: detail.createdAt, updatedAt: detail.updatedAt };
+}
+
+export async function listMobileCases(actor: MotoristActor, query: MobileCaseQuery, signal?: AbortSignal, admin: Admin = createSupabaseAdminClient()) {
+  const deadline = AbortSignal.timeout(8_000), abort = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const key = selectionKey(actor, query);
+  if (query.cursor && query.cursor.selection !== key) badInput("Stránka patrí inému filtru. Obnovte zoznam.");
+  const ids = await searchCaseIds(admin, actor, query, abort);
+  const selection = { ownership: query.ownership, category: query.category, q: query.q };
+  if (ids?.length === 0) return { cases: [], nextCursor: null, selection };
+  const page = () => {
+    let read = filteredCases(admin, actor, query, abort);
+    if (ids) read = read.in("id", ids);
+    return read.order("created_at", { ascending: false }).order("id", { ascending: false }).limit(query.limit + 1);
+  };
+  // Two bounded reads express the lexicographic cursor without raw OR syntax.
+  // Preserve database microseconds rather than round-tripping through Date.
+  const pages = query.cursor ? await Promise.all([
+    page().eq("created_at", query.cursor.createdAt).lt("id", query.cursor.id),
+    page().lt("created_at", query.cursor.createdAt),
+  ]) : [await page()];
+  if (pages.some(result => result.error)) throw new MutationError("Prípady sa nepodarilo načítať.", 503);
+  const rows = pages.flatMap(result => result.data ?? []).slice(0, query.limit + 1);
+  const selected = rows.slice(0, query.limit);
+  const unique = (field: "contact_id" | "vehicle_id" | "owner_id" | "pickup_location_id" | "destination_location_id") =>
+    [...new Set(selected.map(row => row[field]).filter((id): id is string => Boolean(id)))];
+  const contacts = unique("contact_id"), vehicles = unique("vehicle_id"), owners = unique("owner_id");
+  const locations = [...new Set([...unique("pickup_location_id"), ...unique("destination_location_id")])];
+  const [contactRows, vehicleRows, locationRows, profileRows] = await Promise.all([
+    contacts.length ? admin.from("motorist_contacts").select("*").eq("organization_id", actor.organizationId).in("id", contacts).abortSignal(abort) : { data: [], error: null },
+    vehicles.length ? admin.from("motorist_vehicles").select("*").eq("organization_id", actor.organizationId).in("id", vehicles).abortSignal(abort) : { data: [], error: null },
+    locations.length ? admin.from("motorist_locations").select("*").eq("organization_id", actor.organizationId).in("id", locations).abortSignal(abort) : { data: [], error: null },
+    owners.length ? admin.from("motorist_profiles").select("*").eq("organization_id", actor.organizationId).in("id", owners).abortSignal(abort) : { data: [], error: null },
+  ]);
+  if ([contactRows, vehicleRows, locationRows, profileRows].some(result => result.error)) throw new MutationError("Súvisiace údaje prípadov sa nepodarilo načítať.", 503);
+  const context = { contactsById: new Map((contactRows.data ?? []).map(row => [row.id, row])),
+    vehiclesById: new Map((vehicleRows.data ?? []).map(row => [row.id, row])), locationById: new Map((locationRows.data ?? []).map(row => [row.id, row])),
+    profilesById: new Map((profileRows.data ?? []).map(row => [row.id, row])), tasks: [], events: [] };
+  const last = selected.at(-1);
+  return { cases: selected.map(caseRow => mobileCaseSummary(mapCase({ ...context, caseRow }), actor)), selection,
+    nextCursor: rows.length > query.limit && last ? Buffer.from(JSON.stringify({ v: 1, id: last.id, createdAt: last.created_at, selection: key })).toString("base64url") : null };
+}
+
+export async function getMobileCase(actor: MotoristActor, id: string, signal?: AbortSignal, admin: Admin = createSupabaseAdminClient()): Promise<MobileCaseDetailData> {
+  if (!isUuid(id)) badInput("Neplatný prípad.");
+  const detail = await loadCaseDetail(id, actor, signal, admin);
+  return { ...mobileCaseSummary(detail, actor), mainNote: detail.mainNote, incidentDescription: detail.incidentDetails.description ?? null,
+    jobTypeLabels: detail.jobTypes.map(type => jobTypeLabels[type]),
+    timeline: detail.timeline.slice(0, 50).map(event => ({ id: event.id, title: event.title, body: event.body || null, createdAt: event.time, actorName: event.actor || null })) };
+}
+
+export function parseMobileCaseCreate(value: unknown): MobileCaseCreateInput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) badInput();
+  const input: MobileCaseCreateInput = {};
+  for (const [key, field] of Object.entries(value)) {
+    if (Object.hasOwn(STRING_LIMITS, key)) {
+      const name = key as keyof typeof STRING_LIMITS;
+      if (typeof field !== "string" || field.length > STRING_LIMITS[name] || field.includes("\0")) badInput(`Neplatné pole: ${name}.`);
+      input[name] = field.trim();
+    } else if (key === "priority") {
+      if (typeof field !== "string" || !Object.hasOwn(casePriorityLabels, field)) badInput("Neplatná priorita.");
+      input.priority = field as MobileCaseCreateInput["priority"];
+    } else if (key === "jobTypes") {
+      if (!Array.isArray(field) || field.length > 4 || field.some(item => typeof item !== "string" || !Object.hasOwn(jobTypeLabels, item)) || new Set(field).size !== field.length) badInput("Neplatné typy zákazky.");
+      input.jobTypes = field;
+    } else badInput("Formulár obsahuje nepovolené pole.");
+  }
+  return input;
+}
+
+export async function readMobileCaseCreate(request: Request): Promise<MobileCaseCreateInput> {
+  if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") badInput("Očakáva sa JSON formulár.");
+  const reader = request.body?.getReader();
+  if (!reader) badInput();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_BODY_BYTES) { await reader.cancel(); badInput("Formulár je príliš veľký."); }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  let body: unknown;
+  try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { badInput("Neplatný JSON formulár."); }
+  return parseMobileCaseCreate(body);
+}
+
+export async function createMobileCase(actor: MotoristActor, input: MobileCaseCreateInput): Promise<Pick<MobileCaseCreated, "caseId" | "caseNumber" | "warnings">> {
+  let result: { caseRow: CaseRow; warnings: MobileCaseCreated["warnings"] };
+  try { result = await createCase(input, actor.profileId, actor.organizationId); }
+  catch (error) {
+    if (!(error instanceof CaseCreationCommittedError)) {
+      if (error instanceof MutationError && error.status < 500) throw error;
+      throw new MutationError("Uloženie sa nepodarilo potvrdiť. Pred ďalším pokusom skontrolujte zoznam prípadov.", 503, "case_create_uncertain");
+    }
+    console.error("Mobile case bookkeeping incomplete", { caseId: error.caseRow.id, organizationId: actor.organizationId, phase: error.phase });
+    result = { caseRow: error.caseRow, warnings: [...error.warnings, { code: "case_history_incomplete", field: "case", message: "Prípad je uložený, ale jeho história alebo audit nie sú úplné. Nevytvárajte ho znovu." }] };
+  }
+  if (result.caseRow.organization_id !== actor.organizationId || result.caseRow.owner_id !== actor.profileId) throw new MutationError("Uloženie prípadu sa nepodarilo overiť.", 503, "case_create_uncertain");
+  return { caseId: result.caseRow.id, caseNumber: result.caseRow.case_number, warnings: result.warnings };
+}
