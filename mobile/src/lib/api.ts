@@ -2,7 +2,7 @@ import type { MobileConsole, MobileHistory, MobileMe, MobileScope } from "../../
 import type { MobileConfig } from "./config";
 
 export class MobileApiError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(message: string, readonly status: number, readonly code?: string) { super(message); }
 }
 type TokenGetter = () => Promise<string | null>;
 export type MobileTransport = (url: string, init: RequestInit) => Promise<Response>;

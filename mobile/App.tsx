@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AppState, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Phone, History as HistoryIcon, UserRound, type LucideIcon } from "lucide-react-native";
@@ -11,6 +11,9 @@ import { readMobileConfig, type MobileConfig } from "./src/lib/config";
 import { createMobileSupabase } from "./src/lib/supabase";
 import { callStatus, dialable, formatNumber, formatTime, presenceLabels } from "./src/lib/display";
 import { Button, Card, ErrorNotice, Loading, colors, styles } from "./src/ui";
+import { useDispatchPhone } from "./src/voice/use-phone";
+import { CallPanel } from "./src/voice/ui";
+import type { DispatchPhone, PhoneState } from "./src/voice/phone";
 
 type Tab = "console" | "history" | "account";
 type Category = "all" | "missed" | "received" | "outbound";
@@ -142,11 +145,15 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const key = ["mobile", config.environment, userId];
-  const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), enabled: active, refetchInterval: active ? 30_000 : false });
+  // First authenticated snapshot must also load during a PushKit cold launch.
+  // Periodic reads still stop when iOS suspends the app.
+  const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), refetchInterval: active ? 30_000 : false });
+  const { phone, state: phoneState } = useDispatchPhone(config, client, userId, me.isError ? null : me.data?.profileId ?? null, active);
   async function logout() {
     if (loggingOut) return;
     setLoggingOut(true); setLogoutError(null);
     try {
+      await phone?.disconnect();
       const { error } = await client.auth.signOut({ scope: "local" });
       if (error) setLogoutError("Odhlásenie sa nepodarilo potvrdiť. Skúste znova.");
     } catch { setLogoutError("Odhlásenie sa nepodarilo. Skúste znova."); }
@@ -159,7 +166,8 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
     <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={loggingOut} secondary />
   </View>;
   return <View style={{ flex: 1 }}>
-    {tab === "console" ? <Console api={api} me={me.data} queryKey={key} active={active} number={number} onNumber={setNumber} />
+    <CallPanel phone={phone} state={phoneState} />
+    {tab === "console" ? <Console api={api} me={me.data} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} />
       : tab === "history" ? <History api={api} me={me.data} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
         onSelect={value => { setNumber(value); setTab("console"); }} />
       : <ScrollView contentContainerStyle={styles.content}>
@@ -169,34 +177,56 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
         </Card><Card><Text style={styles.label}>Prostredie</Text><Text style={styles.text}>{config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"}</Text>
           <Text style={styles.muted}>Verzia 0.1.0</Text></Card>
         {logoutError && <ErrorNotice message={logoutError} />}
-        <Button label={loggingOut ? "Odhlasujem…" : "Odhlásiť sa"} disabled={loggingOut} onPress={() => { void logout(); }} secondary />
+        {(phoneState.call || phoneState.termination) && <Text style={styles.muted}>Pred odhlásením ukončite hovor.</Text>}
+        <Button label={loggingOut ? "Odhlasujem…" : "Odhlásiť sa"} disabled={loggingOut || Boolean(phoneState.call || phoneState.termination)} onPress={() => { void logout(); }} secondary />
       </ScrollView>}
     <View accessibilityRole="tablist" style={s.tabs}>{tabs.map(item => <Pressable key={item.id} accessibilityRole="tab" accessibilityLabel={item.label}
       accessibilityState={{ selected: tab === item.id }} onPress={() => setTab(item.id)} style={s.tab}>
-      <item.icon size={22} color={tab === item.id ? colors.blue : colors.muted} /><Text style={[s.tabLabel, tab === item.id && s.selected]}>{item.label}</Text>
+      <View style={[s.tabIcon, tab === item.id && s.tabIconSelected]}><item.icon size={22} color={tab === item.id ? colors.ink : colors.muted} /></View><Text style={[s.tabLabel, tab === item.id && s.selected]}>{item.label}</Text>
     </Pressable>)}</View>
   </View>;
 }
 
-function Console({ api, me, queryKey, active, number, onNumber }: { api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; number: string; onNumber: (value: string) => void }) {
+function Console({ api, me, queryKey, active, number, onNumber, phone, phoneState }: { api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; number: string; onNumber: (value: string) => void; phone: DispatchPhone | null; phoneState: PhoneState }) {
+  const [changingPresence, setChangingPresence] = useState(false);
   const query = useQuery({ queryKey: [...queryKey, "console", me.profileId], queryFn: ({ signal }) => api.console(me.profileId, signal), enabled: active, refetchInterval: active ? 30_000 : false });
+  async function presence(status: "available" | "paused") {
+    if (!phone || changingPresence) return;
+    setChangingPresence(true);
+    try { await phone.presence(status); await query.refetch(); } catch { /* Phone displays the authorized action's error. */ }
+    finally { setChangingPresence(false); }
+  }
   return <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { void query.refetch(); }} />}>
     <View style={{ gap: 4 }}><Text style={styles.heading}>Ústredňa</Text><Text style={styles.muted}>{me.profile.displayName}</Text></View>
     {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} /> : query.data && <>
-      <Card><Text style={styles.label}>Váš stav v ústredni</Text><View style={styles.row}><View style={[s.dot, { backgroundColor: query.data.presence.status === "available" ? "#239A68" : "#8B98AA" }]} />
+      <Card><Text style={styles.label}>Váš stav v ústredni</Text><View style={styles.row}><View style={[s.dot, { backgroundColor: query.data.presence.status === "available" ? colors.success : colors.muted }]} />
         <Text style={styles.subheading}>{presenceLabels[query.data.presence.status]}</Text></View>
-        <Text style={styles.muted}>Aktualizované {formatTime(query.data.checkedAt)}</Text></Card>
+        <Text style={styles.muted}>Aktualizované {formatTime(query.data.checkedAt)}</Text>
+        {phoneState.registration === "registered" && <View style={styles.row}>{(["available", "paused"] as const).map(status => <View key={status} style={{ flex: 1 }}>
+          <Button label={presenceLabels[status]} secondary disabled={changingPresence || Boolean(phoneState.call || phoneState.termination) || query.data.presence.status === status}
+            onPress={() => { void presence(status); }} />
+        </View>)}</View>}
+      </Card>
       {query.data.activeCalls.length > 0 && <><Text style={styles.subheading}>Hovory na vašom účte</Text>{query.data.activeCalls.map(call => <Card key={call.id}>
         <Text style={styles.subheading}>{call.name || formatNumber(call.number)}</Text><Text style={styles.text}>{callStatus(call.state)}</Text>
         <Text style={styles.muted}>{call.lineLabel ?? ""}</Text>
       </Card>)}</>}
     </>}
-    <View style={s.notice}><Text style={[styles.label, { marginBottom: 2 }]}>Mobilné volanie pripravujeme</Text>
-      <Text style={styles.muted}>Zatiaľ môžete prezerať ústredňu a históriu. Hovory na tomto telefóne ešte nie sú dostupné.</Text></View>
+    {phoneState.supported ? <Card><Text style={styles.subheading}>{phoneState.registration === "registered" ? "Telefón pripojený" : "Pripojte svoj telefón"}</Text>
+      <Text style={styles.muted}>Po pripojení môžete volať. Pre zákaznícke hovory nastavte stav Dostupný.</Text>
+      {phoneState.error && <ErrorNotice message={phoneState.error} />}
+      {phoneState.registration !== "registered" && <Button label={phoneState.registration === "connecting" ? "Pripájam…" : "Pripojiť telefón"}
+        disabled={phoneState.registration === "connecting"} onPress={() => { void phone?.connect(); }} />}
+      {phoneState.takeoverRequired && <Button label="Prevziať telefón na tomto iPhone" secondary onPress={() => Alert.alert("Prevziať telefón?", "Druhý mobil sa odpojí od ústredne.", [
+        { text: "Zrušiť", style: "cancel" }, { text: "Prevziať", onPress: () => { void phone?.connect(true); } },
+      ])} />}
+    </Card> : <View style={s.notice}><Text style={[styles.label, { marginBottom: 2 }]}>Systémové hovory</Text>
+      <Text style={styles.muted}>Telefonovanie a zvonenie pri zamknutom telefóne pripravujeme vo vlastnej aplikácii Linka pomoci. Tento Expo náhľad slúži na prihlásenie, ústredňu a históriu.</Text></View>}
     <Card><Text style={styles.subheading}>Nový hovor</Text><TextInput accessibilityLabel="Telefónne číslo" placeholder="Telefónne číslo" placeholderTextColor={colors.muted}
       keyboardType="phone-pad" maxLength={40} value={number} onChangeText={onNumber} style={styles.input} />
-      <Button label="Zavolať" disabled onPress={() => undefined} />
+      <Button label={phoneState.dialing ? "Vytáčam…" : "Zavolať"} disabled={!phone || phoneState.registration !== "registered" || !dialable(number) || phoneState.dialing || Boolean(phoneState.call || phoneState.termination)}
+        onPress={() => { void phone?.dial(number.trim()); }} />
     </Card>
   </ScrollView>;
 }
@@ -226,7 +256,7 @@ function History({ api, me, queryKey, active, category, onCategory, search, onSe
     {pendingSearch || query.isPending ? <Loading /> : query.isError && !query.isFetchNextPageError || denied ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} />
       : showCalls && <>{calls.length === 0 && <Card><Text style={styles.text}>Žiadne hovory pre tento výber.</Text></Card>}
         {calls.map(call => <Card key={call.id}><View style={[styles.row, { justifyContent: "space-between" }]}>
-          <Text style={[styles.muted, { color: call.status === "missed" ? colors.danger : colors.blue }]}>{call.direction === "outbound" ? "Odchádzajúci" : call.direction === "internal" ? "Interný" : "Prichádzajúci"}</Text>
+          <Text style={[styles.muted, { color: call.status === "missed" ? colors.danger : colors.ink }]}>{call.direction === "outbound" ? "Odchádzajúci" : call.direction === "internal" ? "Interný" : "Prichádzajúci"}</Text>
           <Text style={styles.muted}>{formatTime(call.startedAt)}</Text></View>
           <Text style={styles.subheading}>{call.name || formatNumber(call.number)}</Text>
           {call.name && <Text style={styles.text}>{formatNumber(call.number)}</Text>}
@@ -240,18 +270,20 @@ function History({ api, me, queryKey, active, category, onCategory, search, onSe
 }
 
 const s = StyleSheet.create({
-  brand: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.white },
-  brandMark: { width: 32, height: 32, borderRadius: 10, backgroundColor: colors.blue, alignItems: "center", justifyContent: "center" },
-  brandInitial: { color: colors.white, fontWeight: "800", fontSize: 22 },
+  brand: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingVertical: 14, borderTopWidth: 5, borderTopColor: colors.brand, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.white },
+  brandMark: { width: 32, height: 32, borderRadius: 10, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center" },
+  brandInitial: { color: colors.ink, fontWeight: "800", fontSize: 22 },
   brandName: { fontSize: 17, fontWeight: "700", color: colors.ink, flex: 1 },
-  testBadge: { color: "#7D5A00", backgroundColor: "#FFF0BC", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, fontWeight: "700", fontSize: 11 },
+  testBadge: { color: colors.ink, backgroundColor: colors.brand, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, fontWeight: "700", fontSize: 11 },
   tabs: { flexDirection: "row", backgroundColor: colors.white, paddingVertical: 9, borderTopWidth: 1, borderTopColor: colors.border },
   tab: { flex: 1, alignItems: "center", justifyContent: "center", gap: 3, minHeight: 50 },
+  tabIcon: { paddingHorizontal: 14, paddingVertical: 5, borderRadius: 10 },
+  tabIconSelected: { backgroundColor: colors.brand },
   tabLabel: { color: colors.muted, fontSize: 12, fontWeight: "600" },
-  selected: { color: colors.blue },
+  selected: { color: colors.ink },
   dot: { width: 10, height: 10, borderRadius: 5 },
-  notice: { backgroundColor: "#E8EFFA", borderRadius: 14, padding: 16, gap: 5 },
+  notice: { backgroundColor: colors.notice, borderWidth: 1, borderColor: colors.noticeBorder, borderRadius: 14, padding: 16, gap: 5 },
   filters: { flexDirection: "row", gap: 7, flexWrap: "wrap" },
-  filter: { borderRadius: 18, backgroundColor: "#E5EBF3", paddingHorizontal: 12, paddingVertical: 8 },
-  filterSelected: { backgroundColor: colors.blue },
+  filter: { borderRadius: 18, backgroundColor: colors.surfaceMuted, paddingHorizontal: 12, paddingVertical: 8 },
+  filterSelected: { backgroundColor: colors.ink },
 });

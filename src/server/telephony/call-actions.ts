@@ -51,6 +51,8 @@ import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
 import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, sessionOwnership } from "./ownership";
 import { humansOnly } from "@/server/profile-kind";
+import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
+import { nativeVoiceTestEnabled } from "@/lib/app-environment";
 
 export { CallActionError } from "./service-errors";
 
@@ -468,7 +470,7 @@ async function assertInternalCallBudget(deps: CallActionDeps): Promise<void> {
  */
 async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): Promise<{ profileId: string; sipUri: string; label: string }> {
   if (!isUuid(profileId)) throw new CallActionError("Kolega sa nenašiel.", 404, "target_not_found");
-  const [profile, presence, settings, device] = await Promise.all([
+  const [profile, presence, settings, webDevice, mobileDevice] = await Promise.all([
     humansOnly(deps.admin.from("motorist_profiles").select("id, display_name, active, access_status")
       .eq("organization_id", deps.organizationId).eq("id", profileId)).maybeSingle(),
     deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", deps.organizationId).eq("profile_id", profileId).maybeSingle(),
@@ -476,6 +478,9 @@ async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): 
       ? deps.admin.from("motorist_operator_telephony_settings").select("delivery_mode").eq("organization_id", deps.organizationId).eq("profile_id", profileId).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
     getOperatorDevice({ ...deviceDeps(deps), deviceKind: "web" }, { organizationId: deps.organizationId, profileId }),
+    nativeVoiceTestEnabled()
+      ? getOperatorDevice({ ...deviceDeps(deps), deviceKind: "mobile" }, { organizationId: deps.organizationId, profileId })
+      : Promise.resolve(null),
   ]);
   if (profile.error || presence.error || settings.error) throw new CallActionError("Kolegu sa nepodarilo overiť.", 503, "target_unknown");
   if (!profile.data || !profile.data.active || profile.data.access_status === "disabled") throw new CallActionError("Kolega sa nenašiel.", 404, "target_not_found");
@@ -484,8 +489,12 @@ async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): 
   if (block) throw colleagueCallError(block);
   // Their calls go to a personal mobile: no application phone to ring.
   if ((settings.data as { delivery_mode?: string } | null)?.delivery_mode === "personal_mobile") throw colleagueCallError("personal_mobile");
+  // An explicitly connected TEST native phone takes colleague calls. The
+  // production/browser route retains its established selection unchanged.
+  const mobileReachable = mobileDevice && (deviceIsLive(mobileDevice, nowOf(deps)) || nativeMobilePushReachable(mobileDevice, nowOf(deps)));
+  const device = mobileReachable ? mobileDevice : webDevice;
   const sipUri = device ? deviceSipUri(device) : null;
-  if (!device || !sipUri || !deviceIsLive(device, nowOf(deps))) throw colleagueCallError("no_phone");
+  if (!device || !sipUri || (!mobileReachable && !deviceIsLive(device, nowOf(deps)))) throw colleagueCallError("no_phone");
   return { profileId, sipUri, label: profile.data.display_name };
 }
 

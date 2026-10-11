@@ -1,3 +1,5 @@
+import { nativePushTestEnabled } from "@/lib/app-environment";
+
 /**
  * Freshness of an operator's browser phone registration.
  *
@@ -26,4 +28,38 @@ export function isDeviceLive(device: DeviceLiveness | undefined | null, now: Dat
   const seen = Date.parse(device.deviceSeenAt);
   if (Number.isNaN(seen)) return false;
   return now.getTime() - seen <= windowMs;
+}
+
+/** Shape of a mobile device needed for push liveness; no server dependencies. */
+export type NativeMobileDevice = {
+  environment: string; device_session_id: string | null; telnyx_credential_id: string | null;
+  registration_state: string | null; sip_username: string | null; credential_expires_at: string | null; metadata: unknown;
+};
+
+export const NATIVE_PUSH_LEASE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** No push token or SIP JWT in the database. A bounded, revocable lease allows
+ * the router to dial the mobile SIP identity while iOS has suspended JS.
+ * A cold launch renews the provider JWT using the user's secured Auth session. */
+export function nativePushLease(device: NativeMobileDevice, now: Date, registered: boolean) {
+  if (!registered || !nativePushTestEnabled() || !device.device_session_id || !device.telnyx_credential_id) return null;
+  const credentialExpiry = device.credential_expires_at ? Date.parse(device.credential_expires_at) : Infinity;
+  const until = Math.min(now.getTime() + NATIVE_PUSH_LEASE_MS, credentialExpiry);
+  if (!(until > now.getTime())) return null;
+  return { v: 1, platform: "ios", deviceSessionId: device.device_session_id, until: new Date(until).toISOString() };
+}
+
+export function nativeMobilePushReachable(device: NativeMobileDevice | null | undefined, now: Date): boolean {
+  if (!device || !nativePushTestEnabled() || device.environment !== "development"
+    || !device.device_session_id || !device.telnyx_credential_id || !device.sip_username
+    || device.registration_state !== "registered") return false;
+  const metadata = device.metadata;
+  const value = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>).native_voip : null;
+  const lease = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  if (!lease || typeof lease !== "object" || Array.isArray(lease) || lease.v !== 1 || lease.platform !== "ios"
+    || lease.deviceSessionId !== device.device_session_id || typeof lease.until !== "string") return false;
+  const until = Date.parse(lease.until);
+  const credentialExpiry = device.credential_expires_at ? Date.parse(device.credential_expires_at) : Infinity;
+  return Number.isFinite(until) && until > now.getTime() && until <= now.getTime() + NATIVE_PUSH_LEASE_MS
+    && credentialExpiry > now.getTime() && until <= credentialExpiry;
 }

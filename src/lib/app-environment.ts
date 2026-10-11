@@ -86,3 +86,11 @@ export function canUseMapsIntegration(env: AppEnvironmentVariables = process.env
     return true;
   } catch { return false; }
 }
+
+/** Separate opt-ins: compiling CallKit does not establish APNs readiness. */
+export function nativeVoiceTestEnabled(env: AppEnvironmentVariables = process.env): boolean {
+  return isTestLiveDeployment(env) && env.MOTORIST_NATIVE_VOICE_TEST_ENABLED === "true";
+}
+export function nativePushTestEnabled(env: AppEnvironmentVariables = process.env): boolean {
+  return nativeVoiceTestEnabled(env) && env.MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED === "true";
+}
