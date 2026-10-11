@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { nativeMobilePushReachable } from "../native-mobile";
+import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 
 import type { Database } from "@/lib/supabase/database.types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";

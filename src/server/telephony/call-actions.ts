@@ -51,7 +51,8 @@ import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
 import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, sessionOwnership } from "./ownership";
 import { humansOnly } from "@/server/profile-kind";
-import { nativeMobilePushReachable, nativeVoiceTestEnabled } from "./native-mobile";
+import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
+import { nativeVoiceTestEnabled } from "@/lib/app-environment";
 
 export { CallActionError } from "./service-errors";
 

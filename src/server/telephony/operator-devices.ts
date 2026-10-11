@@ -11,7 +11,7 @@ import { deviceLastOnlineAt, LAST_ONLINE_METADATA_KEY, retainDeviceLastOnline } 
 import { OperatorDeviceError } from "./service-errors";
 import { telnyxSipUri, toJson, type DeviceRow, type TelephonyEnvironment } from "./state/types";
 import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
-import { nativeMobilePushReachable, nativePushLease } from "./native-mobile";
+import { nativeMobilePushReachable, nativePushLease } from "@/lib/telephony/device-liveness";
 
 export { OperatorDeviceError } from "./service-errors";
 

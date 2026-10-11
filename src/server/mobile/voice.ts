@@ -7,7 +7,7 @@ import { MutationError } from "@/server/mutation-error";
 import { getOperatorDevice } from "@/server/telephony/operator-devices";
 import { createTelephonyDeps, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { telnyxSipUri } from "@/server/telephony/state/types";
-import { nativeVoiceTestEnabled } from "@/server/telephony/native-mobile";
+import { nativeVoiceTestEnabled } from "@/lib/app-environment";
 
 export class NativeLeaseError extends MutationError { readonly code = "native_lease_stale"; }
 class NativeDisabledError extends MutationError { readonly code = "native_voice_disabled"; }

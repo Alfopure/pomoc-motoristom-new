@@ -4,7 +4,7 @@ import type { TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { authorizeNativeOffer, nativeVoiceDeps, requireNativeLease, requireNativeSession } from "./voice";
 import { disconnectDevice, touchDevice } from "@/server/telephony/operator-devices";
 import { TelnyxCommandError } from "@/server/telephony/telnyx/client";
-import { nativeMobilePushReachable } from "@/server/telephony/native-mobile";
+import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { callColleague, createRateLimiter } from "@/server/telephony/call-actions";
 import { toEligibilityDevices } from "@/server/telephony/routing/ring-plan";
 
