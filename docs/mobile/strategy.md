@@ -127,10 +127,21 @@ Systémové postupy: [Apple PushKit](https://developer.apple.com/documentation/p
 - TEST účet operátora a konkrétne vzájomné hovory. Potvrdiť názov a IDs pred
   ich vonkajšou registráciou; konfiguračné IDs v M1 sú pracovný návrh.
 
-Žiadny prístupový kľúč z transcriptu Alfo sa nepoužije. APK pilot nemusí
-čakať na verejný Play listing. iPhone vlastný push build vyžaduje príslušný
-signing aj pred verejným App Store vydaním. Stav týchto prístupov zatiaľ
-nie je potvrdený; v tomto rozsahu sa nevytvárajú účty ani provider resources.
+Majiteľ potvrdil zatiaľ iba Expo účet z Alfo a následne výslovne požiadal
+o nastavenie cez dostupné Conductor API. Cez ním dodaný Expo prístup je
+vytvorená organizácia **Linka pomoci** (`linkapomoci`), kde má používateľ
+`alfopure` rolu Owner, a samostatný projekt
+[`@linkapomoci/linka-pomoci-dispecing`](https://expo.dev/accounts/linkapomoci/projects/linka-pomoci-dispecing),
+ID `c7363382-9b12-4e12-9f62-31ec7b8c5623`. Alfo projekt sa nepreberá.
+EAS development/preview majú iba TEST konfiguráciu; EAS production zatiaľ
+nemá konfigurované premenné. Credentials sa neukladajú do zdroja.
+
+Najbližšia distribúcia je samostatné **Android TEST APK pre M1**. Nevyžaduje
+Google Play listing ani Firebase a nepoužíva Metro/Expo Go. Až po natívnom
+proof builde nasleduje Telnyx M2 a potom FCM pre zvonenie v pozadí.
+Apple Developer a Firebase zatiaľ nie sú pripravené. Vývoj oboch platforiem
+pokračuje; vlastný EAS build na fyzický iPhone a jeho VoIP push vyžadujú
+Apple signing aj pred verejným App Store vydaním.
 
 ## Akceptácia telefonujúcej verzie
 
