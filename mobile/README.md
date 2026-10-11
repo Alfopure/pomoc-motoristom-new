@@ -124,7 +124,7 @@ registrácii TEST App ID/zariadenia a nastavení príslušného APNs VoIP certif
 ```sh
 npx eas-cli@24.12.1 build --platform ios --profile voice-proof-simulator
 # Manuálna kompilácia a skutočný štart v cloudovom simulátore:
-npx eas-cli@24.12.1 workflow:run iphone-voice-smoke.yml --non-interactive
+npx eas-cli@24.12.1 build --platform ios --profile voice-smoke-simulator --non-interactive
 # Až s Apple podpisom:
 npx eas-cli@24.12.1 build --platform ios --profile voice-test
 ```

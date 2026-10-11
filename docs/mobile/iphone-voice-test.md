@@ -24,16 +24,19 @@ systémový čas spojenia sa nastaví až po potvrdení ústredne.
 Z adresára `mobile` spustiť:
 
 ```sh
-npx eas-cli@24.12.1 workflow:run iphone-voice-smoke.yml --non-interactive
+npx eas-cli@24.12.1 build --platform ios --profile voice-smoke-simulator --non-interactive
 ```
 
-Workflow nemá automatický trigger. Z aktuálnych lokálnych zdrojov zostaví
-TEST `voice-proof-simulator`, nainštaluje ho do cloudového iOS simulátora
+Manuálny custom EAS build z aktuálnych lokálnych zdrojov zostaví
+TEST `voice-smoke-simulator`, nainštaluje ho do cloudového iOS simulátora
 a cez Maestro overí skutočné zobrazenie prihlásenia a TEST značky. V tomto
 profile JS ešte pred vykreslením vyžaduje načítaný natívny modul `LinkaVoice`.
 Výsledok teda preveruje aj spustenie natívneho bootstrapu; nevytvára hovor,
 neprihlasuje operátora a nedokazuje fyzické APNs ani audio. Zaznamenať build
 ID, source SHA a výsledok Maestro samostatne od fyzickej akceptácie.
+Používa dokumentované `eas/build` a `eas/maestro_test` kroky v jednom build
+procese. Samostatný EAS Workflows Maestro job pri pokuse vyžadoval platený
+Expo plán; nepoužíva sa a žiadne predplatné sa týmto postupom nezriaďuje.
 
 EAS simulátorový build môže mať inú `CFBundleVersion` než vzdialené EAS číslo:
 nepodpísaný simulator build preskočí credentialed Xcode configuration krok,
