@@ -135,3 +135,22 @@ describe("revision-safe mobile editor", () => {
     await g.edit.refresh(); expect(g.api.detail).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("selected location command boundaries", () => {
+  const point = { label: "Vybrané", address: "Nová adresa", lat: 0, lng: 0, provider: "manual" as const };
+  it("applies only a local selection, omits legacy manual field, freezes independent nested command", async () => {
+    let finish!: (receipt: MobileCaseUpdated) => void;
+    const update = vi.fn((_id: string, _input: unknown) => new Promise<MobileCaseUpdated>(resolve => { finish = resolve; }));
+    const edit = new CaseEdit({ update, detail: vi.fn() }, source, () => mutationId), selection = { ...point };
+    edit.selectPlace("pickup", selection); selection.lat = 50; expect(update).not.toHaveBeenCalled();
+    const saving = edit.save(); expect(update).toHaveBeenCalledOnce();
+    const sent = update.mock.calls[0][1] as { pickup: typeof point; manualPickupAddress?: string };
+    expect(sent.pickup).toEqual(point); expect(sent).not.toHaveProperty("manualPickupAddress"); expect(Object.isFrozen(sent.pickup)).toBe(true);
+    finish({ ok: true, apiVersion: 1, environment: "test", profileId: id, checkedAt: source.updatedAt, caseId: id, mutationId, committedRevision: "2026-10-11T13:00:00Z", warnings: [], refreshRequired: true }); await saving;
+  });
+  it("manual editing explicitly removes selected coordinates while a note does not", () => {
+    const edit = new CaseEdit({ update: vi.fn(), detail: vi.fn() }, source, () => mutationId);
+    edit.selectPlace("destination", point); edit.edit({ note: "Note" }); expect(edit.snapshot().input.destination).toEqual(point);
+    edit.edit({ manualDestinationAddress: "Ručný opis" }); expect(edit.snapshot().input).not.toHaveProperty("destination");
+  });
+});

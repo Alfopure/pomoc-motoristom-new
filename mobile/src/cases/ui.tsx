@@ -13,6 +13,10 @@ import { CaseEdit } from "./edit";
 import { CaseEditor } from "./editor";
 import { CaseNoteDraft } from "./notes";
 import { CaseNoteForm, CaseNoteSavedNotice } from "./note-editor";
+import { CaseOwnerDraft } from "./owner";
+import { CaseOwnerForm } from "./owner-ui";
+import { CaseMapFrame } from "./map-frame";
+import { CopyValue } from "./copy";
 import { directionsUrl } from "./maps";
 import { Choice, fields, jobTypes, priorities } from "./form";
 import { HandoffDraft } from "../handoff/draft";
@@ -24,8 +28,8 @@ import type { DraftVault } from "../drafts/vault";
 import { draftId } from "../drafts/port";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Prípady sa nepodarilo načítať. Skúste znova.";
-export type CaseOpenRequest = { kind: "detail" | "case-create" | "case-edit" | "case-note" | "task-create" | "handoff" | "attachment"; id: string | null; nonce: number };
-type Page = { kind: "resume-edit"; id: string; nonce: number; initialError?: string; normalEntry?: boolean } | { kind: "handoffs"; id: string; draft: HandoffDraft } | { kind: "attachments"; id: string } | { kind: "tasks"; id: string; nonce?: number } | { kind: "list" } | { kind: "new" } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
+export type CaseOpenRequest = { kind: "case.owner" | "detail" | "case-create" | "case-edit" | "case-note" | "task-create" | "handoff" | "attachment"; id: string | null; nonce: number };
+type Page = { kind: "case.owner"; id: string; draft: CaseOwnerDraft } | { kind: "resume-edit"; id: string; nonce: number; initialError?: string; normalEntry?: boolean } | { kind: "handoffs"; id: string; draft: HandoffDraft } | { kind: "attachments"; id: string } | { kind: "tasks"; id: string; nonce?: number } | { kind: "list" } | { kind: "new" } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
 
 /** Kept mounted under the authenticated workspace across tab changes. Reads
  * pause when hidden; unsaved input and a confirmed created ID stay in memory. */
@@ -58,6 +62,13 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
     }
     setPage({ kind: "handoffs", id, draft });
   }, [api.handoffs, queryClient, prefix, vault]);
+  const owners = useRef(new Map<string, CaseOwnerDraft>());
+  useEffect(() => { const retained = owners.current; return () => { for (const draft of retained.values()) draft.dispose(); }; }, []);
+  const openOwner = useCallback((id: string) => {
+    let owner = owners.current.get(id);
+    if (!owner) { owner = new CaseOwnerDraft(api, id, randomUUID, vault?.bind("case.owner", id)); owners.current.set(id, owner); }
+    setPage({ kind: "case.owner", id, draft: owner });
+  }, [api, vault]);
   const notes = useRef(new Map<string, CaseNoteDraft>());
   const edits = useRef(new Map<string, CaseEdit>());
   const draft = useMemo(() => new CaseDraft(api, vault?.bind("case-create")), [api, vault]);
@@ -127,9 +138,9 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
   const showList = useCallback(() => {
     setPage({ kind: "list" });
     if (state.status === "uncertain") {
-      // A newly created draft belongs to this operator but may not match the
-      // previous owner, status or search filter. Review all of their cases first.
-      setOwnership("mine"); setOwnerId(null); setCategory("all"); setSearch("");
+      // A committed case may already have been reassigned. Review the whole
+      // organization without owner, status or search restrictions.
+      setOwnership("all"); setOwnerId(null); setCategory("all"); setSearch("");
       void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     }
   }, [state.status, queryClient, prefix]);
@@ -147,17 +158,19 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
       return;
     }
     if (!draftId(id)) return;
-    if (kind === "detail") showDetail(id);
+    if (kind === "case.owner") openOwner(id);
+    else if (kind === "detail") showDetail(id);
     else if (kind === "case-edit") setPage({ kind: "resume-edit", id, nonce });
     else if (kind === "case-note") openNote(id, true);
     else if (kind === "handoff") openHandoffs(id);
     else if (kind === "task-create") setPage({ kind: "tasks", id, nonce });
     else if (kind === "attachment") setPage({ kind: "attachments", id });
-  }, [active, openRequest, draft, showList, showDetail, openNote, openHandoffs]);
+  }, [active, openRequest, draft, showList, showDetail, openNote, openHandoffs, openOwner]);
   useAndroidBack(active && (page.kind === "detail" || page.kind === "list" && !!onLeaveCases), () => page.kind === "list" ? onLeaveCases?.() : showList());
   function showForm() { draft.newDraft(); setPage({ kind: "new" }); }
   return <View style={{ flex: 1 }}>
-    {page.kind === "resume-edit" ? <ResumeCaseEditor key={page.nonce} api={api} id={page.id} active={active} initialError={page.initialError} onLoaded={page.normalEntry ? openEditor : resumeEditor} onBack={showList} />
+    {page.kind === "case.owner" ? <CaseOwnerForm draft={page.draft} active={active} onBack={() => showDetail(page.id)} onSaved={edited} />
+      : page.kind === "resume-edit" ? <ResumeCaseEditor key={page.nonce} api={api} id={page.id} active={active} initialError={page.initialError} onLoaded={page.normalEntry ? openEditor : resumeEditor} onBack={showList} />
       : page.kind === "handoffs" ? <Handoffs draft={page.draft} active={active} onBack={() => showDetail(page.id)} />
       : page.kind === "attachments" ? <Attachments store={work} caseId={page.id} queryKey={prefix} active={active} onBack={() => showDetail(page.id)} />
       : page.kind === "tasks" ? <Tasks key={page.id + ":" + (page.nonce ?? "normal")} store={work} caseId={page.id} queryKey={prefix} profileId={profileId} active={active} onBack={() => showDetail(page.id)} />
@@ -165,10 +178,10 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
       search={search} ownerId={ownerId} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
       onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={setCategory} onOpen={showDetail}
       onNew={showForm} draftState={state} onReviewed={requestedAt => draft.reviewList(requestedAt)} />
-      : page.kind === "new" ? <CaseForm active={active} draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} />
-        : page.kind === "edit" ? <CaseEditor edit={page.edit} active={active} onSaved={edited} onBack={() => showDetail(page.id)} />
+      : page.kind === "new" ? <CaseForm api={api} active={active} draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} />
+        : page.kind === "edit" ? <CaseEditor api={api} edit={page.edit} active={active} onSaved={edited} onBack={() => showDetail(page.id)} />
         : page.kind === "note" ? <CaseNoteForm active={active} draft={page.draft} onSaved={noteSaved} onBack={() => showDetail(page.id)} />
-        : <CaseDetail api={api} queryKey={prefix} active={active} id={page.id} created={state.created?.caseId === page.id ? state.created : null}
+        : <CaseDetail onOwner={() => openOwner(page.id)} api={api} queryKey={prefix} active={active} id={page.id} created={state.created?.caseId === page.id ? state.created : null}
           onBack={showList} onHandoffs={() => openHandoffs(page.id)} onAttachments={() => setPage({ kind: "attachments", id: page.id })} onTasks={() => setPage({ kind: "tasks", id: page.id })} onSelectNumber={onSelectNumber} onEdit={normalEditor} onNote={openNote} savedNote={page.note} onNoteUpdated={noteUpdated} />}
   </View>;
 }
@@ -219,7 +232,7 @@ function CaseList({ api, queryKey, active, ownership, category, search, ownerId,
   const denied = query.error instanceof MobileApiError && [401, 403, 409, 502].includes(query.error.status);
   const canShow = !pendingSearch && !denied && !(query.isError && !query.isFetchNextPageError);
   useEffect(() => {
-    if (active && canShow && query.isSuccess && !query.isFetching && ownership === "mine" && !ownerId && category === "all" && !debounced) onReviewed(query.data?.pages[0]?.requestedAt ?? 0);
+    if (active && canShow && query.isSuccess && !query.isFetching && ownership === "all" && !ownerId && category === "all" && !debounced) onReviewed(query.data?.pages[0]?.requestedAt ?? 0);
   }, [active, canShow, query.isSuccess, query.isFetching, query.data, ownership, ownerId, category, debounced, onReviewed]);
   const cases = [...new Map(query.data?.pages.flatMap(page => page.cases).map(item => [item.id, item]) ?? []).values()];
   const hasDraft = draftState.status !== "saved" && Object.entries(draftState.input).some(([key, value]) =>
@@ -233,6 +246,7 @@ function CaseList({ api, queryKey, active, ownership, category, search, ownerId,
     <TextInput accessibilityLabel="Hľadať prípady" placeholder="Číslo prípadu, meno alebo EČV" placeholderTextColor={colors.muted} value={search}
       onChangeText={onSearch} maxLength={120} style={styles.input} autoCorrect={false} />
     <View style={s.choices}>
+      <Choice label="Nepriradené" selected={ownership === "unassigned"} onPress={() => onOwnership("unassigned")} />
       <Choice label="Moje" selected={ownership === "mine"} onPress={() => onOwnership("mine")} />
       <Choice label="Všetkých" selected={ownership === "all" && ownerId === null} onPress={() => onOwnership("all")} />
     </View>
@@ -275,22 +289,37 @@ function CaseHeading({ item }: { item: MobileCaseSummary }) {
 function Info({ label, value }: { label: string; value: string | null }) {
   return <View><Text style={styles.label}>{label}</Text><Text selectable style={styles.text}>{value || "Nedoplnené"}</Text></View>;
 }
-function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, onAttachments, onTasks, onSelectNumber, onEdit, onNote, savedNote, onNoteUpdated }: {
-  api: CasesApi; queryKey: string[]; active: boolean; id: string; created: DraftState["created"]; onBack: () => void; onHandoffs: () => void; onAttachments: () => void; onTasks: () => void; onSelectNumber: (number: string) => void; onEdit: (item: MobileCaseDetailData) => void; onNote: (id: string) => void; savedNote?: CaseNoteDraft; onNoteUpdated: (receipt: MobileCaseNoteAdded) => void;
+function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, onAttachments, onTasks, onSelectNumber, onEdit, onNote, savedNote, onNoteUpdated, onOwner }: {
+  api: CasesApi; queryKey: string[]; active: boolean; id: string; created: DraftState["created"]; onBack: () => void; onOwner: () => void; onHandoffs: () => void; onAttachments: () => void; onTasks: () => void; onSelectNumber: (number: string) => void; onEdit: (item: MobileCaseDetailData) => void; onNote: (id: string) => void; savedNote?: CaseNoteDraft; onNoteUpdated: (receipt: MobileCaseNoteAdded) => void;
 }) {
   const query = useQuery({ queryKey: [...queryKey, "detail", id], queryFn: ({ signal }) => api.detail(id, signal), enabled: active });
   const item = query.isError ? null : query.data?.case;
+  const [mapTarget, setMapTarget] = useState<"pickup" | "destination" | null>(null);
   return <ScrollView contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { void query.refetch(); }} />}>
     <Button label="Späť na prípady" onPress={onBack} secondary />
     {savedNote && <CaseNoteSavedNotice draft={savedNote} onUpdated={onNoteUpdated} />}
     {created && <Card><Text accessibilityRole="alert" style={styles.subheading}>Prípad {created.caseNumber} je uložený.</Text>
       {created.warnings.map((warning, index) => <Text key={warning.code + index} style={styles.text}>{warning.message}</Text>)}</Card>}
     {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} />
-      : item && <><Button label="Upraviť prípad" onPress={() => onEdit(item)} /><Button label="Pridať poznámku" secondary onPress={() => onNote(item.id)} /><Button label="Prílohy prípadu" secondary onPress={onAttachments} /><Button label="Úlohy prípadu" secondary onPress={onTasks} /><Button label="Odovzdať prípad" secondary onPress={onHandoffs} /><Card><CaseHeading item={item} /><Text style={styles.muted}>{item.owner.mine ? "Môj prípad" : item.owner.name || "Bez vlastníka"} · {formatTime(item.createdAt)}</Text></Card>
+      : item && <><Text style={styles.muted}>Údaje overené {formatTime(query.data!.checkedAt)}</Text><Button label="Dispečer prípadu" secondary onPress={onOwner} /><Button label="Upraviť prípad" onPress={() => onEdit(item)} /><Button label="Pridať poznámku" secondary onPress={() => onNote(item.id)} /><Button label="Prílohy prípadu" secondary onPress={onAttachments} /><Button label="Úlohy prípadu" secondary onPress={onTasks} /><Button label="Odovzdať prípad" secondary onPress={onHandoffs} /><Card><CaseHeading item={item} /><CopyValue scopeKey={id} active={active} label="Kopírovať číslo prípadu" value={item.caseNumber} /><Text style={styles.muted}>{item.owner.mine ? "Môj prípad" : item.owner.name || "Bez vlastníka"} · {formatTime(item.createdAt)}</Text></Card>
         <Card><Info label="Kontakt" value={item.contact.name} /><Info label="Telefón" value={item.contact.phone ? formatNumber(item.contact.phone) : null} />
+          <CopyValue scopeKey={id} active={active} label="Kopírovať telefón" value={item.contact.phone} />
           {dialable(item.contact.phone) && <Button label="Vybrať číslo v ústredni" onPress={() => { if (item.contact.phone) onSelectNumber(item.contact.phone); }} secondary />}</Card>
-        <Card><Info label="EČV" value={item.vehicle.licensePlate} /><Info label="Vozidlo" value={item.vehicle.description} /><Info label="Služba" value={item.jobTypeLabels.join(", ")} /></Card>
+        <Card><Info label="EČV" value={item.vehicle.licensePlate} /><CopyValue scopeKey={id} active={active} label="Kopírovať EČV" value={item.vehicle.licensePlate} /><Info label="Vozidlo" value={item.vehicle.description} /><Info label="Služba" value={item.jobTypeLabels.join(", ")} /></Card>
         <Card><Info label="Vyzdvihnutie" value={item.pickupAddress} /><Info label="Cieľ" value={item.destinationAddress} />
+          <CopyValue scopeKey={id} active={active} label="Kopírovať vyzdvihnutie" value={item.pickupAddress} /><CopyValue scopeKey={id} active={active} label="Kopírovať cieľ" value={item.destinationAddress} />
+          {(["pickup", "destination"] as const).map(target => { const place = item.map?.[target]; return place?.point && <View key={target} style={{ gap: 8 }}>
+            <Info label={target === "pickup" ? "Poloha vyzdvihnutia" : "Poloha cieľa"} value={`${place.point.lat}, ${place.point.lng}`} />
+            <Text style={styles.muted}>Zdroj: {place.source === "google_places" ? "Google Places" : place.source === "client_gps" ? "GPS klienta" : place.source === "approximate" ? "Približný bod" : place.source === "manual" ? "Ručne zadané" : "Neznámy"}</Text>
+            <CopyValue scopeKey={id} active={active} label="Kopírovať súradnice" value={`${place.point.lat}, ${place.point.lng}`} />
+            <Button label={target === "pickup" ? "Mapa vyzdvihnutia" : "Mapa cieľa"} secondary onPress={() => setMapTarget(target)} />
+          </View>; })}
+          {item.map?.clientLocation?.point && <View style={{ gap: 8 }}>
+            <Info label="Prijatá poloha klienta" value={`${item.map.clientLocation.point.lat}, ${item.map.clientLocation.point.lng}`} />
+            <Text style={styles.muted}>{item.map.clientLocation.capturedAt ? formatTime(item.map.clientLocation.capturedAt) : "Čas nezistený"}{item.map.clientLocation.accuracyMeters !== null ? ` · presnosť približne ${Math.round(item.map.clientLocation.accuracyMeters)} m` : ""}</Text>
+            <CopyValue scopeKey={id} active={active} label="Kopírovať GPS klienta" value={`${item.map.clientLocation.point.lat}, ${item.map.clientLocation.point.lng}`} />
+            <Button label="Mapa polohy klienta" secondary onPress={() => setMapTarget("pickup")} />
+          </View>}
           <Navigate label="Navigovať na vyzdvihnutie" address={item.pickupAddress} /><Navigate label="Navigovať do cieľa" address={item.destinationAddress} /></Card>
         <Card><Info label="Problém" value={item.incidentDescription || item.summary} /><Info label="Poznámka" value={item.mainNote} /></Card>
         <Text style={styles.subheading}>Posledné udalosti</Text>
@@ -298,6 +327,7 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
         {item.timeline.map(event => <Card key={event.id}><Text style={styles.label}>{event.title}</Text>{Boolean(event.body) && <Text selectable style={styles.text}>{event.body}</Text>}
           <Text style={styles.muted}>{formatTime(event.createdAt)}{event.actorName ? " · " + event.actorName : ""}</Text></Card>)}
       </>}
+    {active && item && mapTarget && <CaseMapFrame key={`${id}:view:${mapTarget}`} api={api} caseId={id} mode="view" target={mapTarget} seed={{ selection: null, address: "" }} onClose={() => setMapTarget(null)} />}
   </ScrollView>;
 }
 function Navigate({ label, address }: { label: string; address: string | null }) {
@@ -312,7 +342,8 @@ function Navigate({ label, address }: { label: string; address: string | null })
     })();
   }} />{error && <ErrorNotice message={error} />}</View>;
 }
-function CaseForm({ draft, state, active, onBack, onSubmit }: { active: boolean; draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: () => void }) {
+function CaseForm({ api, draft, state, active, onBack, onSubmit }: { api: CasesApi; active: boolean; draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: () => void }) {
+  const [mapTarget, setMapTarget] = useState<"pickup" | "destination" | null>(null);
   const saving = state.status === "saving", uncertain = state.status === "uncertain";
   const back = () => { if (draft.snapshot().status !== "saving") onBack(); };
   useAndroidBack(active, back, saving);
@@ -321,10 +352,12 @@ function CaseForm({ draft, state, active, onBack, onSubmit }: { active: boolean;
       <Button label="Späť na prípady" onPress={back} disabled={saving} secondary /><Text style={styles.heading}>Nový prípad</Text>
       <Text style={styles.muted}>Môžete uložiť aj neúplný koncept. Údaje doplníte neskôr v dispečingu.</Text>
       {fields.map(field => <View key={field.key}><Text style={styles.label}>{field.label}</Text>
-        <TextInput accessibilityLabel={field.label} value={state.input[field.key] ?? ""} onChangeText={value => draft.edit({ [field.key]: value })}
+        <TextInput accessibilityLabel={field.label} value={field.key === "manualPickupAddress" ? state.input.pickup?.address ?? state.input.manualPickupAddress ?? "" : field.key === "manualDestinationAddress" ? state.input.destination?.address ?? state.input.manualDestinationAddress ?? "" : state.input[field.key] ?? ""} onChangeText={value => draft.edit({ [field.key]: value })}
           editable={!saving} maxLength={field.max} multiline={field.multiline} keyboardType={field.key === "contactPhone" ? "phone-pad" : "default"}
           autoCapitalize={field.key === "licensePlate" ? "characters" : "sentences"} autoCorrect={field.key !== "licensePlate" && field.key !== "contactPhone"}
           style={[styles.input, field.multiline && { minHeight: 90, textAlignVertical: "top" }]} />
+        {(field.key === "manualPickupAddress" || field.key === "manualDestinationAddress") && <Button label="Vybrať miesto na mape" secondary disabled={state.status !== "editing"}
+          onPress={() => setMapTarget(field.key === "manualPickupAddress" ? "pickup" : "destination")} />}
       </View>)}
       <View><Text style={styles.label}>Služba</Text><View style={s.choices}>{jobTypes.map(item => {
         const selected = state.input.jobTypes?.includes(item.value) === true;
@@ -336,6 +369,9 @@ function CaseForm({ draft, state, active, onBack, onSubmit }: { active: boolean;
       {state.error && <ErrorNotice message={state.error} />}
       {uncertain && <><Button label="Skontrolovať zoznam prípadov" onPress={back} secondary />
         {state.reviewedList && <Button label="Prípad som nenašiel – povoliť opakovanie" onPress={() => draft.allowRetry()} secondary />}</>}
+      {active && mapTarget && state.status === "editing" && <CaseMapFrame key={`new:pick:${mapTarget}`} api={api} caseId={null} mode="pick" target={mapTarget}
+        seed={{ selection: state.input[mapTarget] ?? null, address: state.input[mapTarget]?.address ?? state.input[mapTarget === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"] ?? "" }}
+        onClose={() => setMapTarget(null)} onApply={value => draft.selectPlace(mapTarget, value)} />}
       <Button label={saving ? "Ukladám prípad…" : "Uložiť prípad"} disabled={saving || uncertain || state.status === "saved"} onPress={() => { Keyboard.dismiss(); onSubmit(); }} />
     </ScrollView>
   </KeyboardAvoidingView>;

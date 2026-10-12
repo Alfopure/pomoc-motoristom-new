@@ -5,6 +5,7 @@ import { MobileApiError } from "../lib/api";
 import { CaseDraft } from "./draft";
 import { CaseEdit } from "./edit";
 import { CaseNoteDraft } from "./notes";
+import { CaseOwnerDraft } from "./owner";
 vi.mock("expo-crypto", () => ({ randomUUID: () => "00000000-0000-4000-8000-000000000009" }));
 const id = (value: number) => `00000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
 const caseId = id(1), profileId = id(2), command = id(9), date = "2026-10-12T14:00:00.123456Z";
@@ -27,6 +28,23 @@ async function fixture() {
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; };
 
 describe("case controllers using actual account vault", () => {
+  it("restarts unknown owner assignment from actual WAL and records its exact late receipt after disposal", async () => {
+    const f = await fixture(), late = deferred<import("../../../src/lib/mobile-api").MobileCaseOwnerAssigned>();
+    const context = { ...reply, caseId, caseRevision: date, owner: { id: null, name: null, mine: false }, available: true, capabilities: { take: true, assign: true }, targets: [{ id: profileId, name: "Ja" }] };
+    const receipt = { ...reply, caseId, mutationId: command, ownerId: profileId, committedRevision: date, refreshRequired: true as const };
+    const api = { ownerContext: vi.fn(async () => context), assignOwner: vi.fn().mockRejectedValueOnce(new MobileApiError("Unknown", 503)).mockImplementationOnce(() => late.promise) };
+    const first = new CaseOwnerDraft(api, caseId, () => command, f.vault.bind("case.owner", caseId));
+    await first.refresh(); first.select(profileId); await first.submit(); const sent = api.assignOwner.mock.calls[0][1]; first.dispose(); f.vault.close();
+    const reopened = await DraftVault.open(f.driver, f.scope, f.options), uuid = vi.fn(() => id(10));
+    const restored = new CaseOwnerDraft(api, caseId, uuid, reopened.bind("case.owner", caseId));
+    expect(restored.snapshot().status).toBe("uncertain"); expect(api.assignOwner).toHaveBeenCalledOnce();
+    const checking = restored.reconcile(); await vi.waitFor(() => expect(api.assignOwner).toHaveBeenCalledTimes(2));
+    expect(api.assignOwner.mock.calls[1][1]).toEqual(sent); expect(uuid).not.toHaveBeenCalled();
+    restored.dispose(); reopened.close(); late.resolve(receipt); await checking;
+    const lastVault = await DraftVault.open(f.driver, f.scope, f.options), saved = new CaseOwnerDraft(api, caseId, uuid, lastVault.bind("case.owner", caseId));
+    expect(saved.snapshot()).toMatchObject({ status: "saved", receipt }); saved.dispose(); lastVault.close();
+  });
+
   it("restores unsent case and note text without any server mutation", async () => {
     const f = await fixture(), create = vi.fn(), api = { addNote: vi.fn() };
     const draft = new CaseDraft({ create }, f.vault.bind("case-create")), note = new CaseNoteDraft(api, caseId, () => command, f.vault.bind("case-note", caseId));
@@ -91,5 +109,17 @@ describe("case controllers using actual account vault", () => {
     const f = await fixture(), api = { addNote: vi.fn() }, port = f.vault.bind("case-note", caseId);
     port.changed({ version: 1, caseId, note: "Must not expose", status: "saved", pending: { mutationId: command, note: "Must not expose" }, receipt: { ...noteReceipt, profileId: id(99) } }); await f.vault.flush();
     const restored = new CaseNoteDraft(api, caseId, () => command, f.vault.bind("case-note", caseId)); expect(restored.snapshot().note).toBe(""); expect(f.vault.snapshot().error).toBeTruthy(); await restored.submit(); expect(api.addNote).not.toHaveBeenCalled(); restored.dispose(); f.vault.close();
+  });
+});
+
+describe("phase8 selected-point WAL", () => {
+  it("restores nested selected point command without inferred manual address after actual vault reopen", async () => {
+    const f = await fixture(), point = { label: "Miesto", address: "Nová adresa", lat: 0, lng: 0, provider: "manual" as const };
+    const api = { update: vi.fn().mockRejectedValueOnce(new MobileApiError("unknown", 0)).mockResolvedValue(editReceipt), detail: vi.fn() };
+    const edit = new CaseEdit(api, source, () => command, f.vault.bind("case-edit", caseId)); edit.selectPlace("pickup", point); await edit.save(); edit.dispose(); f.vault.close();
+    const vault = await DraftVault.open(f.driver, f.scope, f.options), restored = new CaseEdit(api, source, () => id(10), vault.bind("case-edit", caseId));
+    expect(restored.snapshot().status).toBe("uncertain"); expect(api.update).toHaveBeenCalledOnce(); await restored.save();
+    expect(api.update.mock.calls[1][1]).toEqual(api.update.mock.calls[0][1]); expect(api.update.mock.calls[1][1]).not.toHaveProperty("manualPickupAddress"); expect(api.update.mock.calls[1][1].pickup).toEqual(point);
+    restored.dispose(); vault.close();
   });
 });

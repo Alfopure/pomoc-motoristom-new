@@ -15,7 +15,7 @@ import { WorkStore } from "../work/store";
 import { Button, Card, ErrorNotice, Loading, styles } from "../ui";
 import { DraftNotSentError } from "./port";
 import { createDraftStorage } from "./storage";
-import { DraftVault, type DraftScope, type StoredDraft } from "./vault";
+import { DraftVault, type DraftKind, type DraftScope, type StoredDraft } from "./vault";
 import { DraftAuthority, DraftScopeSuperseded } from "./authority";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
@@ -144,7 +144,7 @@ function Account(props: Props) {
     {props.logoutError && <Button label="Odhlásiť bez neuložených zmien" disabled={props.logoutBusy || props.logoutState.busy || props.hasCall} onPress={props.onLogoutWithoutSaving} secondary />}
   </View>;
 }
-const labels = { "case-create": "Nový prípad", "case-edit": "Úprava prípadu", "case-note": "Poznámka prípadu", "task-create": "Nová úloha", "task-state": "Správa alebo stav úlohy", handoff: "Odovzdanie prípadu", attachment: "Príloha prípadu" };
+const labels: Record<DraftKind, string> = { "case-create": "Nový prípad", "case-edit": "Úprava prípadu", "case-note": "Poznámka prípadu", "case.owner": "Priradenie dispečera", "task-create": "Nová úloha", "task-state": "Správa alebo stav úlohy", handoff: "Odovzdanie prípadu", attachment: "Príloha prípadu" };
 function LocalDrafts({ vault, onResume, onDiscarded, needsReset, deferReset }: { vault: DraftVault; onResume: (record: StoredDraft) => void; onDiscarded: () => void; needsReset: boolean; deferReset: () => void }) {
   const state = useSyncExternalStore(vault.subscribe, vault.snapshot, vault.snapshot), [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   function discard(record?: StoredDraft) {

@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { loadCaseDetail } from "@/data/case-detail-repository";
+import { loadCaseDetailSnapshot } from "@/data/case-detail-repository";
 import { mapCase } from "@/data/dispatch-repository";
 import { compareCaseRevisions, type CaseDetailData } from "@/data/case-detail";
 import { jobTypeLabels } from "@/domain/case-card";
@@ -16,6 +16,7 @@ import { CaseCreationCommittedError, createCase, updateCase } from "@/server/mot
 import { MutationError } from "@/server/mutation-error";
 import { humansOnly } from "@/server/profile-kind";
 import { readMobileJsonBody } from "./body";
+import { mobileCaseMap, mobileLocationChanges, parseMobilePlaceSelection } from "./case-locations";
 
 type Admin = SupabaseClient<Database>;
 type CaseRow = Database["public"]["Tables"]["motorist_cases"]["Row"];
@@ -36,7 +37,7 @@ export function parseMobileCaseQuery(params: URLSearchParams): MobileCaseQuery {
   const allowed = new Set(["ownership", "category", "q", "cursor", "limit", "ownerId"]);
   for (const key of params.keys()) if (!allowed.has(key) || params.getAll(key).length !== 1) badInput("Neplatný filter prípadov.");
   const ownership = params.get("ownership") ?? "all", category = params.get("category") ?? "open";
-  if (ownership !== "mine" && ownership !== "all" || category !== "open" && category !== "all") badInput("Neplatný filter prípadov.");
+  if (ownership !== "mine" && ownership !== "all" && ownership !== "unassigned" || category !== "open" && category !== "all") badInput("Neplatný filter prípadov.");
   const ownerId = params.get("ownerId");
   if (ownerId !== null && (ownership !== "all" || !isUuid(ownerId))) badInput("Neplatný filter dispečera.");
   const q = (params.get("q") ?? "").trim();
@@ -81,6 +82,7 @@ export async function listMobileCaseDispatchers(actor: MotoristActor, signal?: A
 function filteredCases(admin: Admin, actor: MotoristActor, query: Selection, signal: AbortSignal) {
   let read = admin.from("motorist_cases").select("*").eq("organization_id", actor.organizationId).abortSignal(signal);
   if (query.ownership === "mine") read = read.eq("owner_id", actor.profileId);
+  else if (query.ownership === "unassigned") read = read.is("owner_id", null);
   else if (query.ownerId) read = read.eq("owner_id", query.ownerId);
   if (query.category === "open") for (const status of CLOSED) read = read.neq("status", status);
   return read;
@@ -172,9 +174,10 @@ export async function listMobileCases(actor: MotoristActor, query: MobileCaseQue
 
 export async function getMobileCase(actor: MotoristActor, id: string, signal?: AbortSignal, admin: Admin = createSupabaseAdminClient()): Promise<MobileCaseDetailData> {
   if (!isUuid(id)) badInput("Neplatný prípad.");
-  const detail = await loadCaseDetail(id, actor, signal, admin);
+  const snapshot = await loadCaseDetailSnapshot(id, actor, signal, admin),
+    detail = snapshot.detail;
   const summary = mobileCaseSummary(detail, actor);
-  return { ...summary, mainNote: detail.mainNote, incidentDescription: detail.incidentDetails.description ?? null,
+  return { ...summary, mainNote: detail.mainNote, incidentDescription: detail.incidentDetails.description ?? null, map: mobileCaseMap(snapshot),
     editable: { contactName: summary.contact.name ?? "", contactPhone: summary.contact.phone ?? "", licensePlate: detail.vehicle.licensePlate,
       vehicleMake: detail.vehicle.make, vehicleModel: detail.vehicle.model, manualPickupAddress: summary.pickupAddress ?? "",
       manualDestinationAddress: summary.destinationAddress ?? "", incidentDescription: detail.incidentDetails.description ?? "",
@@ -192,6 +195,8 @@ export function parseMobileCaseCreate(value: unknown): MobileCaseCreateInput {
       const name = key as keyof typeof STRING_LIMITS;
       if (typeof field !== "string" || field.length > STRING_LIMITS[name] || field.includes("\0")) badInput(`Neplatné pole: ${name}.`);
       input[name] = field.trim();
+    } else if (key === "pickup" || key === "destination") {
+      input[key] = parseMobilePlaceSelection(field);
     } else if (key === "priority") {
       if (typeof field !== "string" || !Object.hasOwn(casePriorityLabels, field)) badInput("Neplatná priorita.");
       input.priority = field as MobileCaseCreateInput["priority"];
@@ -200,6 +205,8 @@ export function parseMobileCaseCreate(value: unknown): MobileCaseCreateInput {
       input.jobTypes = field;
     } else badInput("Formulár obsahuje nepovolené pole.");
   }
+  if (input.pickup !== undefined && input.manualPickupAddress !== undefined
+    || input.destination !== undefined && input.manualDestinationAddress !== undefined) badInput("Pre jedno miesto vyberte mapu alebo ručnú adresu.");
   return input;
 }
 
@@ -228,8 +235,7 @@ export async function updateMobileCase(actor: MotoristActor, id: string, input: 
   const parsed = parseMobileCaseUpdate(input);
   // A manual address replaces the old mapped location. Presence, including clearing,
   // produces the same payload on replay; omitted addresses keep their references.
-  const changes = { ...parsed, ...(parsed.manualPickupAddress !== undefined ? { pickup: null } : {}),
-    ...(parsed.manualDestinationAddress !== undefined ? { destination: null } : {}) };
+  const changes = mobileLocationChanges(parsed);
   try {
     const { caseRow, warnings } = await updateCase(id, changes, actor.profileId, actor.organizationId, { synchronizePrimaryContact: true });
     if (!caseRow || caseRow.id !== id || caseRow.organization_id !== actor.organizationId || !isHistoryTimestamp(caseRow.updated_at)
@@ -244,8 +250,9 @@ export async function updateMobileCase(actor: MotoristActor, id: string, input: 
 }
 
 export async function createMobileCase(actor: MotoristActor, input: MobileCaseCreateInput): Promise<Pick<MobileCaseCreated, "caseId" | "caseNumber" | "warnings">> {
+  const parsed = parseMobileCaseCreate(input);
   let result: { caseRow: CaseRow; warnings: MobileCaseCreated["warnings"] };
-  try { result = await createCase(input, actor.profileId, actor.organizationId); }
+  try { result = await createCase(mobileLocationChanges(parsed), actor.profileId, actor.organizationId); }
   catch (error) {
     if (!(error instanceof CaseCreationCommittedError)) {
       if (error instanceof MutationError && error.status < 500) throw error;

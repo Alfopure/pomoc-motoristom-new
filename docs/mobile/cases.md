@@ -18,6 +18,11 @@ Zoznam možno filtrovať podľa konkrétneho dispečera alebo rýchlo prepnúť 
 moje prípady. Výber obsahuje aj neaktívnych ľudských dispečerov organizácie,
 aby sa dali nájsť staršie priradené prípady; označí ich ako neaktívnych.
 
+Nové [priradenie a mapa](case-owner-map.md) pridávajú filter nepridelených
+prípadov, prevzatie voľného otvoreného prípadu, potvrdené preradenie
+aktívnemu kolegovi aj pre bežného dispečera a výber adresy alebo bodu
+do formulára. Dostupnosť priradenia závisí od schválenej databázovej funkcie.
+
 **Nový prípad** je krátky formulár pre meno a telefón kontaktu, EČV,
 značku/model, miesto vyzdvihnutia, cieľ, popis problému, typ zákazky,
 prioritu a poznámku. Neúplný prípad možno založiť a doplniť neskôr rovnako
@@ -121,9 +126,11 @@ prestane ponúkať. Výsledok systémového dialógu nepotvrdzuje doručenie.
 | Route | Výsledok |
 | --- | --- |
 | `GET /api/mobile/v1/drafts/scope` | Minimálna overená organizácia a profil pred otvorením chránených konceptov; bez zapisovania |
-| `GET /api/mobile/v1/cases` | Stránka najviac 25 prípadov; `ownership=mine\|all`, `ownerId`, `category=open\|all`, `q` a `cursor` |
+| `GET /api/mobile/v1/cases` | Stránka najviac 25 prípadov; `ownership=mine\|all\|unassigned`, `ownerId`, `category=open\|all`, `q` a `cursor` |
 | `GET /api/mobile/v1/cases/dispatchers` | Najviac 200 ľudských dispečerov tej istej organizácie; iba ID, meno a aktívnosť |
 | `GET /api/mobile/v1/cases/[id]` | Detail jedného prípadu organizácie |
+| `GET/POST /api/mobile/v1/cases/[id]/owner` | Čerstvá revízia, aktívni kolegovia a oprávnenia; samostatné atomické priradenie s presným potvrdením |
+| `GET /api/mobile/v1/maps/picker` | Privátna Google browser mapa, režim/cieľ/nonce v hlavičkách; výber potvrdí iba do miestneho formulára |
 | `POST /api/mobile/v1/cases` | Založenie cez existujúcu mutáciu, ID/číslo potvrdeného prípadu a prípadné upozornenia |
 | `PATCH /api/mobile/v1/cases/[id]` | Zmenené jednoduché polia, `expectedUpdatedAt` a `mutationId`; potvrdená revízia a upozornenia |
 | `POST /api/mobile/v1/cases/[id]/notes` | Nový historický záznam; iba `note` a `mutationId`, potvrdené ID udalosti a upozornenia |
@@ -196,8 +203,9 @@ a 200 udalostí na odovzdanie. Prekročenie vráti výslovnú chybu; nejde o
 ohraničenie databázovej práce. Údaje náhľadu sa neskracujú: neznáma verzia,
 pole alebo nadmerný obsah nemôžu viesť k publikovaniu neviditeľných údajov.
 
-Nevzniká nová schéma, worker, cron, provider integrácia ani automatická SMS
-či e-mail. TEST používa iba `nzpnqdstvkfncflgqlny` a
+Priradenie pridáva samostatnú atomickú funkciu so schvaľovaním konkrétneho
+SQL cieľa; ostatné časti používajú existujúcu schému. TEST používa iba
+`nzpnqdstvkfncflgqlny` a
 https://test.dispecing.linkapomoci.sk. Produkcia potrebuje osobitné
 explicitné schválenie identifikovaného TEST rozsahu.
 

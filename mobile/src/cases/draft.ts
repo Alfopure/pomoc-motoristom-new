@@ -2,6 +2,7 @@ import type { MobileCaseCreated, MobileCaseCreateInput } from "../../../src/lib/
 import { MobileApiError } from "../lib/api";
 import type { CasesApi } from "./api";
 import { DraftNotSentError, draftKeys, draftObject, type DraftPort, type DraftWrite } from "../drafts/port";
+import { freezeCommand, placeSelection } from "./location";
 import { caseCreatedDraft, caseDraftInput, copyCaseDraft } from "./draft-codecs";
 
 export type DraftState = { input: MobileCaseCreateInput; status: "editing" | "saving" | "uncertain" | "saved";
@@ -20,8 +21,8 @@ export class CaseDraft {
     if (port && value !== null) {
       try {
         const v = draftObject(value); draftKeys(v, ["version", "input", "status", "submitted", "created"]);
-        if (v.version !== 1 || !["editing", "saving", "uncertain", "saved"].includes(v.status as string)) throw new Error();
-        const input = caseDraftInput(v.input), submitted = v.submitted === null ? null : caseDraftInput(v.submitted);
+        if (![1, 2].includes(v.version as number) || !["editing", "saving", "uncertain", "saved"].includes(v.status as string)) throw new Error();
+        const input = caseDraftInput(v.input, v.version as number), submitted = v.submitted === null ? null : caseDraftInput(v.submitted, v.version as number);
         if ((v.status === "editing") !== (submitted === null) || (v.status === "saved") !== (v.created !== null)) throw new Error();
         const created = v.status === "saved" ? caseCreatedDraft(v.created, port) : null;
         const status = v.status === "saving" ? "uncertain" : v.status as DraftState["status"];
@@ -31,7 +32,7 @@ export class CaseDraft {
       } catch { this.rejected = true; port.reject(); this.state.error = "Uložený koncept prípadu sa nepodarilo overiť."; }
     }
   }
-  exportDraft() { return copyCaseDraft({ version: 1, input: this.state.input, status: this.state.status, submitted: this.submitted, created: this.state.created }); }
+  exportDraft() { return copyCaseDraft({ version: 2, input: this.state.input, status: this.state.status, submitted: this.submitted, created: this.state.created }); }
   snapshot = () => this.state;
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   private update(change: Partial<DraftState>, persist = true) {
@@ -42,7 +43,16 @@ export class CaseDraft {
   }
   edit(change: Partial<MobileCaseCreateInput>) {
     if (this.rejected || this.disposed || this.state.status === "saving" || this.state.status === "saved") return;
-    this.update({ input: { ...this.state.input, ...change } });
+    const input = copyCaseDraft({ ...this.state.input, ...change });
+    if ("manualPickupAddress" in change) delete input.pickup;
+    if ("manualDestinationAddress" in change) delete input.destination;
+    this.update({ input });
+  }
+  selectPlace(target: "pickup" | "destination", value: unknown) {
+    if (this.rejected || this.disposed || this.state.status !== "editing") return;
+    const input = copyCaseDraft(this.state.input); input[target] = placeSelection(value);
+    delete input[target === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"];
+    this.update({ input });
   }
   reviewList(requestedAt: number) {
     if (this.state.status === "uncertain" && !this.state.reviewedList && requestedAt > this.state.reviewAfter) this.update({ reviewedList: true });
@@ -52,7 +62,7 @@ export class CaseDraft {
   }
   async submit() {
     if (this.disposed || this.rejected || this.state.status !== "editing") return;
-    const input = { ...this.state.input, jobTypes: [...(this.state.input.jobTypes ?? [])] };
+    const input = freezeCommand({ ...this.state.input, jobTypes: [...(this.state.input.jobTypes ?? [])] });
     this.submitted = copyCaseDraft(input);
     this.update({ status: "saving", error: null, reviewAfter: 0, reviewedList: false }, false);
     let write: DraftWrite | undefined;

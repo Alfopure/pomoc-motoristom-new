@@ -82,8 +82,9 @@ Poradie vychádza z bežnej práce mobilného dispečera:
 Aktuálny zdroj zahŕňa prehľad, založenie a úpravy prípadov, poznámky,
 fotografie/dokumenty, úlohy s kontrolou a správami, odovzdanie a otvorenie
 navigácie. Rozšírenie z 12. októbra pridáva prehľad vlastných úloh naprieč
-prípadmi a chránené textové koncepty. GPS/výber mapového miesta, priame
-preradenie dispečera a bežné notifikácie zostávajú ďalším rozsahom.
+prípadmi a chránené textové koncepty. Ďalší schválený rozsah pridáva
+[priradenie dispečera, nepridelené prípady a mapový výber](case-owner-map.md).
+Aktuálna poloha zariadenia a bežné notifikácie zostávajú ďalším rozsahom.
 Zakladanie je výslovná online operácia; výpadok nesmie spustiť automatické
 opakované odoslanie. Úspešný zápis sa oddelí od následného načítania detailu.
 Podrobný kontrakt a TEST skúšky sú v [mobilných prípadoch](cases.md).

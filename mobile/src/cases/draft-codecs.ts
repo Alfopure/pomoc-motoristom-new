@@ -1,6 +1,9 @@
-import type { MobileCaseCreateInput, MobileCaseCreated, MobileCaseDetailData, MobileCaseNoteAdded, MobileCaseNoteInput, MobileCaseUpdated, MobileCaseUpdateInput, MobileScope } from "../../../src/lib/mobile-api";
+import type { MobileCaseCreateInput, MobileCaseCreated, MobileCaseDetailData, MobileCaseNoteAdded, MobileCaseNoteInput, MobileCaseUpdated, MobileCaseUpdateInput, MobileScope, MobileCasePlaceSelection } from "../../../src/lib/mobile-api";
 import { draftDate, draftId, draftKeys, draftObject, draftText, type DraftPort } from "../drafts/port";
 
+import { placeSelection } from "./location";
+
+export type CaseEditable = MobileCaseDetailData["editable"] & { pickup?: MobileCasePlaceSelection | null; destination?: MobileCasePlaceSelection | null };
 const lengths = { contactName: 200, contactPhone: 64, licensePlate: 32, vehicleMake: 80, vehicleModel: 120,
   manualPickupAddress: 500, manualDestinationAddress: 500, incidentDescription: 5000, note: 10000 };
 const priorities = ["urgent", "high", "normal", "low"];
@@ -9,20 +12,25 @@ const statuses = ["open", "completed_assisted", "completed_no_assistance", "wait
 const check = (condition: unknown) => { if (!condition) throw new Error("Invalid case draft"); };
 export const copyCaseDraft = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
-export function caseDraftInput(value: unknown): MobileCaseCreateInput {
-  const input = draftObject(value); draftKeys(input, [], [...Object.keys(lengths), "priority", "jobTypes"]);
+export function caseDraftInput(value: unknown, version = 2): MobileCaseCreateInput {
+  const input = draftObject(value); draftKeys(input, [], [...Object.keys(lengths), "priority", "jobTypes", ...(version === 2 ? ["pickup", "destination"] : [])]);
   for (const [key, max] of Object.entries(lengths)) check(!(key in input) || draftText(input[key], max));
   check(!("priority" in input) || priorities.includes(input.priority as string));
   if ("jobTypes" in input) check(Array.isArray(input.jobTypes) && input.jobTypes.length <= jobs.length
     && new Set(input.jobTypes).size === input.jobTypes.length && input.jobTypes.every(job => jobs.includes(job as string)));
+  for (const target of ["pickup", "destination"] as const) if (target in input) {
+    check(!((target === "pickup" ? "manualPickupAddress" : "manualDestinationAddress") in input));
+    if (input[target] !== null) { const selected = placeSelection(input[target]); check(JSON.stringify(selected) === JSON.stringify(input[target]) || Object.entries(selected).every(([key, v]) => v === draftObject(input[target])[key])); }
+  }
   return copyCaseDraft(input) as MobileCaseCreateInput;
 }
-export function editableDraft(value: unknown): MobileCaseDetailData["editable"] {
-  const input = draftObject(value); draftKeys(input, [...Object.keys(lengths), "priority", "jobTypes", "status"]);
+export function editableDraft(value: unknown, version = 2): CaseEditable {
+  const input = draftObject(value); draftKeys(input, [...Object.keys(lengths), "priority", "jobTypes", "status"], version === 2 ? ["pickup", "destination"] : []);
   check(draftText(input.status, 80) && !!input.status);
-  const { status, ...fields } = input;
-  caseDraftInput(fields);
-  return { ...copyCaseDraft(fields), status } as MobileCaseDetailData["editable"];
+  const { status, pickup, destination, ...fields } = input;
+  caseDraftInput(fields, 1);
+  const selections = Object.fromEntries((["pickup", "destination"] as const).filter(target => target in input).map(target => [target, input[target] === null ? null : placeSelection(input[target])]));
+  return { ...copyCaseDraft(fields), ...selections, status } as CaseEditable;
 }
 function warnings(value: unknown): MobileCaseCreated["warnings"] {
   check(Array.isArray(value) && value.length <= 100);
@@ -42,10 +50,10 @@ export function caseCreatedDraft(value: unknown, port: DraftPort): MobileCaseCre
   const scope = receiptScope(v, port); check(draftId(v.caseId) && draftText(v.caseNumber, 160) && !!v.caseNumber);
   return { ...scope, caseId: v.caseId as string, caseNumber: v.caseNumber as string, warnings: warnings(v.warnings) };
 }
-export function caseUpdateCommand(value: unknown, base: { updatedAt: string; editable: MobileCaseDetailData["editable"] }): MobileCaseUpdateInput {
-  const v = draftObject(value); draftKeys(v, ["mutationId", "expectedUpdatedAt"], [...Object.keys(lengths), "priority", "jobTypes", "status"]);
+export function caseUpdateCommand(value: unknown, base: { updatedAt: string; editable: MobileCaseDetailData["editable"] }, version = 2): MobileCaseUpdateInput {
+  const v = draftObject(value); draftKeys(v, ["mutationId", "expectedUpdatedAt"], [...Object.keys(lengths), "priority", "jobTypes", "status", ...(version === 2 ? ["pickup", "destination"] : [])]);
   check(draftId(v.mutationId) && v.expectedUpdatedAt === base.updatedAt && draftDate(v.expectedUpdatedAt));
-  const { mutationId, expectedUpdatedAt, status, ...fields } = v; caseDraftInput(fields);
+  const { mutationId, expectedUpdatedAt, status, ...fields } = v; caseDraftInput(fields, version);
   check(status === undefined || statuses.includes(status as string));
   check(Object.keys(fields).length > 0 || status !== undefined);
   return { ...copyCaseDraft(fields), mutationId, expectedUpdatedAt, ...(status === undefined ? {} : { status }) } as MobileCaseUpdateInput;

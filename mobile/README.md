@@ -15,11 +15,15 @@ Z webu importuje iba vymazateľné TypeScript typy z `src/lib/mobile-api.ts`.
 - **História:** existujúce autorizované serverové vyhľadávanie, filtre,
   stránkovanie a výber čísla do ústredne. Výber nevytvorí hovor.
 - **Prípady:** moje alebo všetky prípady organizácie, otvorené alebo všetky stavy,
-  filter podľa dispečera, vyhľadávanie, stránkovanie, detail, založenie a úpravy prípadu,
+  filter podľa dispečera aj nepridelené prípady, vyhľadávanie, stránkovanie, detail, založenie a úpravy prípadu,
   hlavná poznámka, historické poznámky, zmeny stavu a otvorenie navigácie.
   Súčasťou sú fotografie/dokumenty, úlohy prípadu a jeho odovzdanie.
   Predvolene sa zobrazia všetky otvorené. Používajú
   rovnaké záznamy a pravidlá ako web; fungujú aj v Expo Go.
+  Nový rozsah pridáva potvrdené priradenie aktívnemu kolegovi aj pre bežného
+  dispečera a WebView mapu s výberom adresy alebo bodu do formulára.
+  Priradenie potrebuje schválenú atomickú databázovú funkciu; bez nej sa
+  zobrazí ako nedostupné. Mapový výber sa uloží až spolu s prípadom.
 - **Moje úlohy:** všetky vlastné otvorené úlohy, výber úloh na kontrolu,
   aj dokončené, vyhľadávanie podľa názvu a prechod na prípad.
 - **Účet:** meno, e-mail, rola, prostredie, miestne koncepty a odhlásenie.
@@ -32,7 +36,7 @@ Z webu importuje iba vymazateľné TypeScript typy z `src/lib/mobile-api.ts`.
   ovládanie hovoru s upozornením. Periodický polling sa zastaví v pozadí;
   prvé overenie identity sa dokončí aj po PushKit prebudení.
 
-Aktuálny zdroj zahŕňa prípady, Moje úlohy a koncepty. Konkrétne publikované
+Aktuálny zdroj zahŕňa prípady, Moje úlohy, koncepty, priradenie a mapu. Konkrétne publikované
 Expo Go a natívne buildy treba overiť podľa ich zdrojového commitu;
 starší M1 build obsahuje iba prihlasovanie, ústredňu a históriu.
 **iPhone voice TEST** pridáva lokálny Expo modul `modules/linka-voice` s natívnym
@@ -43,6 +47,10 @@ nie sú prijaté ako funkčné. Android hlas/FCM nasleduje po iPhone pilote.
 
 Rozhranie používa žltú `#FCD703`, čierne tlačidlá a zinc/sivé plochy webu.
 Kontrakt úložiska, obnova a fyzické skúšky sú v [konceptoch](../docs/mobile/drafts.md).
+Priradenie, mapové hranice a TEST akceptácia sú v
+[samostatnom postupe](../docs/mobile/case-owner-map.md). WebView 13.16.1
+a Clipboard 57.0.2 zodpovedajú SDK 57; vlastné staršie natívne balíky
+potrebujú nové zostavenie. Expo Go má svoje dostupné natívne moduly.
 Natívny telefón má pripojenie, vytáčanie, prijatie/odmietnutie, ukončenie,
 mikrofón, reproduktor, DTMF a Dostupný/Pauza. Aktívny hovor zostáva viditeľný
 pri zmene záložky. Prebiehajúci hovor sa zobrazí až po potvrdení spojenia

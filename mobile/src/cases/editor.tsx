@@ -3,9 +3,12 @@ import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, 
 import { useAndroidBack } from "../lib/use-android-back";
 import { Button, Card, ErrorNotice, styles } from "../ui";
 import { CaseEdit, changedFields } from "./edit";
+import type { CasesApi } from "./api";
+import { CaseMapFrame } from "./map-frame";
+import { describeCurrentPlace, describeSelectedPlace } from "./location";
 import { Choice, fields, jobTypes, priorities } from "./form";
 
-export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; active: boolean; onBack: () => void; onSaved: () => void }) {
+export function CaseEditor({ api, edit, active, onBack, onSaved }: { api: CasesApi; edit: CaseEdit; active: boolean; onBack: () => void; onSaved: () => void }) {
   const state = useSyncExternalStore(edit.subscribe, edit.snapshot, edit.snapshot);
   const back = () => { if (edit.snapshot().status !== "saving") onBack(); };
   useAndroidBack(active, back, state.status === "saving");
@@ -13,6 +16,7 @@ export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; 
   useEffect(() => {
     if (active && (state.error || ["uncertain", "conflict", "blocked", "committed", "saved"].includes(state.status))) scroll.current?.scrollTo({ y: 0, animated: false });
   }, [active, state.status, state.error]);
+  const [mapTarget, setMapTarget] = useState<"pickup" | "destination" | null>(null);
   const [addressAcknowledged, setAddressAcknowledged] = useState("");
   useEffect(() => { edit.setActive(active); return () => edit.setActive(false); }, [edit, active]);
   useEffect(() => {
@@ -23,8 +27,8 @@ export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; 
   }, [active, state.status, state.error, state.refreshing, edit]);
   const changes = changedFields(state.base.editable, state.input), keys = Object.keys(changes);
   const editing = state.status === "editing";
-  const addressChange = "manualPickupAddress" in changes || "manualDestinationAddress" in changes;
-  const addressKey = JSON.stringify([state.base.updatedAt, state.input.manualPickupAddress, state.input.manualDestinationAddress]);
+  const addressChange = "manualPickupAddress" in changes || "manualDestinationAddress" in changes || "pickup" in changes || "destination" in changes;
+  const addressKey = JSON.stringify([state.base.updatedAt, state.input.manualPickupAddress, state.input.manualDestinationAddress, state.input.pickup, state.input.destination]);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
       <Button label="Späť na detail" secondary disabled={state.status === "saving"} onPress={back} /><Text style={styles.heading}>Upraviť {state.base.caseNumber}</Text>
@@ -41,11 +45,13 @@ export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; 
         {state.latest && <><Text style={styles.subheading}>Porovnanie vašich zmien</Text>
           {keys.map(key => {
             const field = key as keyof typeof state.input;
-            const label = fields.find(item => item.key === field)?.label ?? (field === "priority" ? "Priorita" : field === "jobTypes" ? "Služba" : "Stav prípadu");
-            const value = (input: typeof state.input) => field === "status" ? state.base.statusOptions.find(option => option.value === input.status)?.label ?? input.status
+            const label = fields.find(item => item.key === field)?.label ?? (field === "pickup" ? "Miesto vyzdvihnutia" : field === "destination" ? "Cieľ" : undefined) ?? (field === "priority" ? "Priorita" : field === "jobTypes" ? "Služba" : "Stav prípadu");
+            const value = (input: typeof state.input) => field === "pickup" || field === "destination" ? describeSelectedPlace(input[field]) : field === "status" ? state.base.statusOptions.find(option => option.value === input.status)?.label ?? input.status
               : field === "priority" ? priorities.find(option => option.value === input.priority)?.label ?? input.priority
                 : field === "jobTypes" ? jobTypes.filter(option => input.jobTypes.includes(option.value)).map(option => option.label).join(", ") : String(input[field] || "Prázdne");
-            return <View key={key}><Text style={styles.label}>{label}</Text><Text style={styles.text}>Moje: {value(state.input)}</Text><Text style={styles.muted}>Aktuálne: {value(state.latest!.editable)}</Text></View>;
+            const locationTarget = field === "pickup" || field === "manualPickupAddress" ? "pickup" : field === "destination" || field === "manualDestinationAddress" ? "destination" : null;
+            const current = locationTarget ? describeCurrentPlace(state.latest!, locationTarget) : value(state.latest!.editable);
+            return <View key={key}><Text style={styles.label}>{label}</Text><Text style={styles.text}>Moje: {value(state.input)}</Text><Text style={styles.muted}>Aktuálne: {current}</Text></View>;
           })}
           <Text style={styles.muted}>Použitie vašich zmien prepíše iba uvedené polia. Ostatné aktuálne údaje zostanú zachované.</Text>
           <Button label="Použiť moje zmeny na aktuálne údaje" disabled={state.refreshing} onPress={() => edit.rebase()} />
@@ -53,10 +59,12 @@ export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; 
         </>}
       </Card>}
       {fields.map(field => <View key={field.key}><Text style={styles.label}>{field.label}</Text>
-        <TextInput accessibilityLabel={field.label} value={state.input[field.key]} onChangeText={value => edit.edit({ [field.key]: value })} editable={editing}
+        <TextInput accessibilityLabel={field.label} value={field.key === "manualPickupAddress" ? state.input.pickup?.address ?? state.input.manualPickupAddress : field.key === "manualDestinationAddress" ? state.input.destination?.address ?? state.input.manualDestinationAddress : state.input[field.key]} onChangeText={value => edit.edit({ [field.key]: value })} editable={editing}
           maxLength={field.max} multiline={field.multiline} keyboardType={field.key === "contactPhone" ? "phone-pad" : "default"}
           autoCapitalize={field.key === "licensePlate" ? "characters" : "sentences"} autoCorrect={field.key !== "licensePlate" && field.key !== "contactPhone"}
           style={[styles.input, field.multiline && { minHeight: 90, textAlignVertical: "top" }]} />
+        {(field.key === "manualPickupAddress" || field.key === "manualDestinationAddress") && <Button label="Vybrať miesto na mape" secondary disabled={!editing}
+          onPress={() => setMapTarget(field.key === "manualPickupAddress" ? "pickup" : "destination")} />}
       </View>)}
       <Text style={styles.label}>Služba</Text><View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>{jobTypes.map(item => <Choice key={item.value} label={item.label}
         selected={state.input.jobTypes.includes(item.value)} disabled={!editing} onPress={() => edit.edit({ jobTypes: state.input.jobTypes.includes(item.value)
@@ -73,6 +81,9 @@ export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; 
           onPress={() => setAddressAcknowledged(addressAcknowledged === addressKey ? "" : addressKey)} /></Card>}
       {changes.status && ["completed_assisted", "completed_no_assistance", "cancelled", "futile_trip"].includes(changes.status)
         && <Text style={styles.muted}>Prípad zmizne z otvorených prípadov. Nájdete ho cez filter Aj uzavreté.</Text>}
+      {active && mapTarget && editing && <CaseMapFrame key={`${state.base.id}:pick:${mapTarget}`} api={api} caseId={state.base.id} mode="pick" target={mapTarget}
+        seed={{ selection: state.input[mapTarget] ?? null, address: state.input[mapTarget]?.address ?? state.input[mapTarget === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"] }}
+        onClose={() => setMapTarget(null)} onApply={value => edit.selectPlace(mapTarget, value)} />}
       {state.status === "saved" ? <Button label="Zobraziť uložený detail" onPress={back} />
         : <Button label={state.status === "saving" ? "Ukladám zmeny…" : "Uložiť zmeny"} disabled={!editing || keys.length === 0 || addressChange && addressAcknowledged !== addressKey}
           onPress={() => { Keyboard.dismiss(); void edit.save(); }} />}
