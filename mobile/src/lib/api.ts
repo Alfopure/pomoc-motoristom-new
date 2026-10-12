@@ -1,5 +1,6 @@
-import type { MobileConsole, MobileHistory, MobileMe, MobileScope } from "../../../src/lib/mobile-api";
+import type { MobileConsole, MobileDraftScope, MobileHistory, MobileMe, MobileScope } from "../../../src/lib/mobile-api";
 import type { MobileConfig } from "./config";
+import { draftDate } from "../drafts/port";
 
 export class MobileApiError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) { super(message); }
@@ -70,6 +71,13 @@ export function createMobileApi(config: MobileConfig, getToken: TokenGetter, tra
     } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
   }
   return {
+    draftScope: async (profileId: string, signal?: AbortSignal): Promise<MobileDraftScope> => {
+      const body = object(await read("drafts/scope", signal));
+      scope(body, config, profileId);
+      const uuid = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i;
+      if (!uuid.test(profileId) || !text(body.organizationId) || !uuid.test(body.organizationId) || !draftDate(body.checkedAt)) throw contractError();
+      return { ok: true, apiVersion: 1, environment: config.environment, profileId, checkedAt: String(body.checkedAt), organizationId: body.organizationId };
+    },
     me: async (signal?: AbortSignal): Promise<MobileMe> => {
       const body = object(await read("me", signal));
       scope(body, config);

@@ -18,15 +18,18 @@ export function Attachments({ store, caseId, queryKey, active, onBack }: { store
   useEffect(() => { visible.current = active; }, [active]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => { if (state.error || state.status === "saved") scroll.current?.scrollTo({ y: 0, animated: true }); }, [state.error, state.status]);
-  const query = useQuery({ queryKey: [...queryKey, "attachments", caseId], queryFn: ({ signal }) => store.api.attachments(caseId, signal), enabled: active });
+  const query = useQuery({ queryKey: [...queryKey, "attachments", caseId], queryFn: async ({ signal }) => { const requestedAt = Date.now(); return { ...await store.api.attachments(caseId, signal), requestedAt }; }, enabled: active });
+  useEffect(() => {
+    if (active && !form && query.isSuccess && !query.isFetching) draft.reviewList(query.data, query.data.requestedAt);
+  }, [active, form, query.isSuccess, query.isFetching, query.data, draft]);
   async function prepare(photo: boolean) {
-    if (locked.current) return; locked.current = true; setBusy(true); setError(null);
+    if (locked.current || draft.snapshot().status !== "editing") return; locked.current = true; setBusy(true); setError(null);
     try { const ready: Chooser = photo ? { photo: await preparePhotoPicker() } : { document: await prepareDocumentPicker() }; if (alive.current) setChooser(ready); }
     catch (error) { if (alive.current) setError(workError(error)); }
     finally { locked.current = false; if (alive.current) setBusy(false); }
   }
   async function pick(action: () => Promise<PickedFile | null>) {
-    if (locked.current) return; locked.current = true; setBusy(true); setChooser(null); setError(null);
+    if (locked.current || draft.snapshot().status !== "editing") return; locked.current = true; setBusy(true); setChooser(null); setError(null);
     try { const file = await action(); if (alive.current && file) draft.select(file); }
     catch (error) { if (alive.current) setError(workError(error)); }
     finally { locked.current = false; if (alive.current) setBusy(false); }
@@ -41,21 +44,27 @@ export function Attachments({ store, caseId, queryKey, active, onBack }: { store
   const back = () => { if (draft.snapshot().status !== "saving" && !locked.current) { if (form) setForm(false); else onBack(); } };
   useAndroidBack(active, back, saving || busy);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-    <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { void query.refetch(); }} />}>
+    <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { if (active) void query.refetch(); }} />}>
       <Button label={form ? "Späť na prílohy" : "Späť na prípad"} secondary disabled={saving || busy} onPress={back} />
       <Text style={styles.heading}>{form ? "Pridať prílohu" : "Prílohy prípadu"}</Text>
       {error && <ErrorNotice message={error} />}{state.error && <ErrorNotice message={state.error} />}
       {state.status === "saved" && <Card><Text accessibilityRole="alert" style={styles.subheading}>Príloha je uložená.</Text><Text style={styles.text}>{state.receipt?.attachment.fileName}</Text></Card>}
-      {state.status === "uncertain" && <Button label="Overiť pôvodné priloženie" disabled={busy} onPress={() => { void draft.reconcile(); }} />}
+      {state.status === "uncertain" && (state.coldMissingFile ? <Card>
+        <Text style={styles.subheading}>Pôvodný súbor už nie je v pamäti.</Text>
+        <Text style={styles.text}>Najprv obnovte a skontrolujte prílohy. Rovnaký názov súboru nepotvrdzuje, že pôvodné priloženie uspelo. Nový výber môže vytvoriť ďalšiu prílohu.</Text>
+        <Button label="Obnoviť a skontrolovať prílohy" secondary disabled={!active || query.isFetching} onPress={() => { setForm(false); void query.refetch(); }} />
+        {!form && <Button label="Skontroloval som prílohy; povoliť nový výber" disabled={!state.reviewedList || query.isError || query.isFetching} onPress={() => { draft.allowNewSelection(); setForm(true); }} />}
+      </Card> : <Button label="Overiť pôvodné priloženie" disabled={busy} onPress={() => { void draft.reconcile(); }} />)}
       {form ? <>
         <Text style={styles.muted}>Fotografia sa priloží ako zmenšená JPEG kópia do 2048 px. Dokument JPEG, PNG alebo PDF môže mať najviac 3 MiB.</Text>
         <Button label="Fotografia alebo fotoaparát" secondary disabled={!editing || busy} onPress={() => { void prepare(true); }} />
         <Button label="Vybrať dokument" secondary disabled={!editing || busy} onPress={() => { void prepare(false); }} />
         {busy && <Loading label="Pripravujem prílohu…" />}
+        {editing && state.coldMissingFile && <Text style={styles.muted}>Súbor sa do konceptu neukladá. Vyberte ho znova; poznámka zostala zachovaná.</Text>}
         {state.selected && <Card><Text style={styles.subheading}>{state.selected.fileName}</Text><Text style={styles.muted}>{state.selected.mimeType} · {sizeLabel(state.selected.sizeBytes)}</Text></Card>}
         <View><Text style={styles.label}>Poznámka k prílohe</Text><TextInput accessibilityLabel="Poznámka k prílohe" value={state.note} onChangeText={v => draft.editNote(v)} editable={editing} maxLength={2000} multiline style={[styles.input, { minHeight: 100 }]} /></View>
         {query.isError && <ErrorNotice message={workError(query.error)} onRetry={() => { void query.refetch(); }} />}
-        <Button label={saving ? "Prikladám…" : "Priložiť k prípadu"} disabled={!editing || busy || !state.selected || !query.data || query.isError || query.isFetching}
+        <Button label={saving ? "Prikladám…" : "Priložiť k prípadu"} disabled={!editing || busy || !state.selected || state.coldMissingFile || !query.data || query.isError || query.isFetching}
           onPress={() => { if (query.data) void draft.save(query.data.caseRevision); }} />
       </> : <>
         <Button label={state.status === "uncertain" || state.selected && state.status !== "saved" ? "Rozpracovaná príloha" : "Pridať prílohu"} onPress={() => { draft.reset(); setForm(true); }} disabled={saving} />

@@ -32,6 +32,8 @@ export type RouteAuthEntry = {
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/me": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "mobile/v1/drafts/scope": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Private verified organization scope for account-bound device drafts and expected-organization fencing." },
+  "mobile/v1/tasks": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Bounded current-actor assigned or reviewer task overview; no arbitrary actor selection." },
   "mobile/v1/cases": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Scoped bounded case list and allowlisted draft creation owned by the authenticated actor." },
   "mobile/v1/cases/[id]": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Organization-scoped case detail and allowlisted revision-safe atomic edits with actor-bound replay receipts." },
   "mobile/v1/cases/[id]/notes": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Append-only organization/case/actor-bound UUID notes with exact replay and explicit audit warnings." },

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { Phone, History as HistoryIcon, UserRound, FolderOpen, type LucideIcon } from "lucide-react-native";
+import { Phone, History as HistoryIcon, UserRound, FolderOpen, ClipboardList, type LucideIcon } from "lucide-react-native";
 import { QueryClient, QueryClientProvider, focusManager, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import type { MobileMe } from "../src/lib/mobile-api";
@@ -12,19 +12,22 @@ import { createMobileSupabase } from "./src/lib/supabase";
 import { callStatus, dialable, formatNumber, formatTime, presenceLabels } from "./src/lib/display";
 import { Button, Card, ErrorNotice, Loading, colors, styles } from "./src/ui";
 import { useDispatchPhone } from "./src/voice/use-phone";
-import { createCasesApi } from "./src/cases/api";
-import { Cases } from "./src/cases/ui";
+import { DraftWorkspace } from "./src/drafts/workspace";
+import { flushAccountDrafts } from "./src/drafts/vault";
+import { AuthIncarnation } from "./src/lib/auth-incarnation";
+import { supportsDurableDrafts } from "./src/drafts/storage";
 import { CallPanel } from "./src/voice/ui";
 import type { DispatchPhone, PhoneState } from "./src/voice/phone";
 import { SessionLogout, type LogoutState } from "./src/lib/logout";
 import { useAndroidBack } from "./src/lib/use-android-back";
 
-type Tab = "console" | "history" | "cases" | "account";
+type Tab = "console" | "history" | "cases" | "tasks" | "account";
 type Category = "all" | "missed" | "received" | "outbound";
 const tabs: { id: Tab; label: string; icon: LucideIcon }[] = [
   { id: "console", label: "Ústredňa", icon: Phone },
   { id: "history", label: "História", icon: HistoryIcon },
   { id: "cases", label: "Prípady", icon: FolderOpen },
+  { id: "tasks", label: "Moje úlohy", icon: ClipboardList },
   { id: "account", label: "Účet", icon: UserRound },
 ];
 const categories: { id: Category; label: string }[] = [
@@ -61,7 +64,11 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
   const [resetError, setResetError] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [active, setActive] = useState(AppState.currentState === null || AppState.currentState === "active");
-  const previousUser = useRef<string | null>(null);
+  const [authScope] = useState(() => new AuthIncarnation());
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const liveUser = useMemo(() => () => authScope.snapshot().userId, [authScope]);
+  const workspaceUser = session?.user.id ?? null;
+  const workspaceLiveUser = useMemo(() => () => authScope.current(workspaceUser, sessionEpoch) ? workspaceUser : null, [authScope, workspaceUser, sessionEpoch]);
   useEffect(() => {
     let alive = true;
     let observedEvent = false;
@@ -69,18 +76,18 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
       if (!alive) return;
       observedEvent = true;
       logout.observe(event, next?.user.id ?? null);
-      if (previousUser.current !== (next?.user.id ?? null)) queryClient.clear();
-      previousUser.current = next?.user.id ?? null;
+      if (authScope.observe(next?.user.id ?? null)) queryClient.clear();
+      setSessionEpoch(authScope.snapshot().epoch);
       setSession(next); setBooting(false);
     });
     void client.auth.getSession().then(({ data, error }) => {
       if (!alive) return;
       if (error) setBootError(true);
-      if (!observedEvent) { setSession(data.session); previousUser.current = data.session?.user.id ?? null; logout.observe("INITIAL_SESSION", previousUser.current); }
+      if (!observedEvent) { authScope.observe(data.session?.user.id ?? null); setSessionEpoch(authScope.snapshot().epoch); setSession(data.session); logout.observe("INITIAL_SESSION", liveUser()); }
       setBooting(false);
     }).catch(() => { if (alive) { setBootError(true); setBooting(false); } });
     return () => { alive = false; subscription.unsubscribe(); };
-  }, [client, queryClient, logout]);
+  }, [client, queryClient, logout, authScope, liveUser]);
   useEffect(() => {
     const update = (state: string) => {
       const foreground = state === "active";
@@ -98,10 +105,12 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
     return () => { subscription.remove(); client.auth.stopAutoRefresh(); };
   }, [client, queryClient]);
   const api = useMemo(() => createMobileApi(config, async () => {
+    const expected = authScope.snapshot();
     const { data, error } = await client.auth.getSession();
     if (error) throw new MobileApiError("Prihlásenie sa nepodarilo obnoviť. Skúste znova.", 0);
+    if (!authScope.current(expected.userId, expected.epoch) || data.session?.user.id !== expected.userId) throw new MobileApiError("Prihláste sa do aplikácie.", 401);
     return data.session?.access_token ?? null;
-  }), [config, client]);
+  }), [config, client, authScope]);
 
   return <QueryClientProvider client={queryClient}>
     <View style={s.brand}><View style={s.brandMark}><Text style={s.brandInitial}>L</Text></View>
@@ -114,7 +123,8 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
         setResetting(true); setResetError(false);
         void supabase.clearStoredSession().then(onReset).catch(() => { setResetError(true); setResetting(false); });
       }} />
-    </View> : session ? <Workspace key={config.environment + ":" + session.user.id} config={config} client={client} api={api} active={active} userId={session.user.id}
+    </View> : session ? <Workspace key={config.environment + ":" + session.user.id + ":" + sessionEpoch} config={config} client={client} api={api} active={active} userId={session.user.id}
+      liveUser={workspaceLiveUser}
       logoutState={logoutState} onLogout={disconnect => logout.run(disconnect)} />
       : <SignIn client={client} config={config} logoutState={logoutState} />}
   </QueryClientProvider>;
@@ -125,6 +135,7 @@ function SignIn({ client, config, logoutState }: { client: SupabaseClient; confi
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [durableDrafts] = useState(supportsDurableDrafts);
   async function login() {
     if (busy || logoutState.busy || !email.trim() || !password) return;
     setBusy(true); setError(null);
@@ -150,40 +161,54 @@ function SignIn({ client, config, logoutState }: { client: SupabaseClient; confi
       <Button label="Zabudnuté heslo" secondary onPress={() => {
         void Linking.openURL(config.apiOrigin + "/auth/forgot-password?email=" + encodeURIComponent(email.trim())).catch(() => setError("Stránku na obnovu hesla sa nepodarilo otvoriť."));
       }} />
+      <Text style={styles.muted}>{durableDrafts ? "Aplikácia podporuje chránené uloženie rozpísaných formulárov." : "Koncepty v tomto náhľade ostávajú iba do zatvorenia aplikácie."}</Text>
     </ScrollView>
   </KeyboardAvoidingView>;
 }
 
-function Workspace({ config, client, api, active, userId, logoutState, onLogout }: { config: MobileConfig; client: SupabaseClient; api: MobileApi; active: boolean; userId: string;
+function Workspace({ config, client, api, active, userId, liveUser, logoutState, onLogout }: { config: MobileConfig; client: SupabaseClient; api: MobileApi; active: boolean; userId: string; liveUser: () => string | null;
   logoutState: LogoutState; onLogout: (disconnect: () => Promise<void>) => Promise<void> }) {
   const [tab, setTab] = useState<Tab>("console");
   const [number, setNumber] = useState("");
   const [category, setCategory] = useState<Category>("all");
   const [search, setSearch] = useState("");
-  useAndroidBack(active && tab !== "console" && tab !== "cases", () => setTab("console"));
+  const [logoutError, setLogoutError] = useState<string | null>(null), [logoutBusy, setLogoutBusy] = useState(false);
+  const preparingLogout = useRef(false);
+  useAndroidBack(active && tab !== "console" && tab !== "cases" && tab !== "tasks", () => setTab("console"));
   const key = ["mobile", config.environment, userId];
   // First authenticated snapshot must also load during a PushKit cold launch.
   // Periodic reads still stop when iOS suspends the app.
   const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), refetchInterval: active ? 30_000 : false });
   const identity = usableMobileIdentity(me.data, me.error);
-  const profileId = identity?.profileId;
-  const casesApi = useMemo(() => profileId ? createCasesApi(config, profileId, async () => {
-    const { data, error } = await client.auth.getSession();
-    if (error) throw new MobileApiError("Prihlásenie sa nepodarilo obnoviť. Skúste znova.", 0);
-    if (data.session?.user.id !== userId) throw new MobileApiError("Prihláste sa do aplikácie.", 401);
-    return data.session.access_token;
-  }) : null, [config, client, userId, profileId]);
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
-  async function logout() {
+  async function logout(leaveUnsaved = false) {
     const currentPhone = phone?.snapshot();
-    if (currentPhone?.call || currentPhone?.termination) return;
-    await onLogout(async () => { await phone?.disconnect(); });
+    if (currentPhone?.call || currentPhone?.termination || preparingLogout.current || logoutState.busy) return;
+    preparingLogout.current = true; setLogoutBusy(true); setLogoutError(null);
+    try {
+      try { await flushAccountDrafts({ environment: config.environment, projectUrl: config.supabaseUrl, userId }); }
+      catch { if (!leaveUnsaved) { setLogoutError("Niektoré koncepty sa pred odhlásením nepodarilo uložiť. Skúste miestne uloženie znova alebo sa vedome odhláste bez neuložených zmien."); return; } }
+      const afterFlush = phone?.snapshot();
+      if (afterFlush?.call || afterFlush?.termination) { setLogoutError("Pred odhlásením ukončite hovor. Koncepty zostali zachované."); return; }
+      if (liveUser() === userId) await onLogout(async () => {
+        const beforeDisconnect = phone?.snapshot();
+        if (beforeDisconnect?.call || beforeDisconnect?.termination) { setLogoutError("Pred odhlásením ukončite hovor. Koncepty zostali zachované."); throw new Error("Active call prevents logout"); }
+        await phone?.disconnect();
+      });
+    } finally { preparingLogout.current = false; setLogoutBusy(false); }
+  }
+  function logoutWithoutSaving() {
+    Alert.alert("Odhlásiť bez neuložených zmien?", "Novšie neuložené údaje sa môžu stratiť. Staršie chránené koncepty zostanú pre tento účet. Zápisy na serveri sa tým nezrušia.", [
+      { text: "Zostať", style: "cancel" }, { text: "Odhlásiť bez uloženia", style: "destructive", onPress: () => { void logout(true); } },
+    ]);
   }
   if (me.isPending) return <Loading label="Overujem prístup do dispečingu…" />;
   if (!identity) return <View style={styles.content}>
     <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />
     {logoutState.message && <ErrorNotice message={logoutState.message} />}
-    <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={logoutState.busy || Boolean(phoneState.call || phoneState.termination)} secondary />
+    {logoutError && <ErrorNotice message={logoutError} />}
+    <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={logoutBusy || logoutState.busy || Boolean(phoneState.call || phoneState.termination)} secondary />
+    {logoutError && <Button label="Odhlásiť bez neuložených zmien" onPress={logoutWithoutSaving} disabled={logoutBusy || logoutState.busy || Boolean(phoneState.call || phoneState.termination)} secondary />}
   </View>;
   return <View style={{ flex: 1 }}>
     <CallPanel phone={phone} state={phoneState} />
@@ -191,20 +216,10 @@ function Workspace({ config, client, api, active, userId, logoutState, onLogout 
     {tab === "console" ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} />
       : tab === "history" ? <History api={api} me={identity} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
         onSelect={value => { setNumber(value); setTab("console"); }} />
-      : tab === "cases" ? null : <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.heading}>Účet</Text><Card><Text style={styles.subheading}>{identity.profile.displayName}</Text>
-          <Text style={styles.text}>{identity.profile.email ?? ""}</Text>
-          <Text style={styles.muted}>{({ dispatcher: "Dispečer", senior_dispatcher: "Vedúci dispečer", manager: "Manažér", admin: "Administrátor" })[identity.profile.role]}</Text>
-        </Card><Card><Text style={styles.label}>Prostredie</Text><Text style={styles.text}>{config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"}</Text>
-          <Text style={styles.muted}>Verzia 0.1.0</Text></Card>
-        {logoutState.message && <ErrorNotice message={logoutState.message} />}
-        {(phoneState.call || phoneState.termination) && <Text style={styles.muted}>Pred odhlásením ukončite hovor.</Text>}
-        <Button label={logoutState.busy ? "Odhlasujem…" : "Odhlásiť sa"} disabled={logoutState.busy || Boolean(phoneState.call || phoneState.termination)} onPress={() => { void logout(); }} secondary />
-      </ScrollView>}
-    {casesApi && <View style={tab === "cases" ? { flex: 1 } : { display: "none" }}>
-      <Cases key={identity.profileId} api={casesApi} environment={config.environment} userId={userId} profileId={identity.profileId}
-        active={active && tab === "cases"} onLeaveCases={() => setTab("console")} onSelectNumber={value => { setNumber(value); setTab("console"); }} />
-    </View>}
+      : null}
+    <DraftWorkspace key={identity.profileId} config={config} client={client} identity={identity} userId={userId} liveUser={liveUser} active={active} tab={tab} onTab={setTab}
+      onSelectNumber={value => { setNumber(value); setTab("console"); }} logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy}
+      hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} />
     <View accessibilityRole="tablist" style={s.tabs}>{tabs.map(item => <Pressable key={item.id} accessibilityRole="tab" accessibilityLabel={item.label}
       accessibilityState={{ selected: tab === item.id }} onPress={() => setTab(item.id)} style={s.tab}>
       <View style={[s.tabIcon, tab === item.id && s.tabIconSelected]}><item.icon size={22} color={tab === item.id ? colors.ink : colors.muted} /></View><Text style={[s.tabLabel, tab === item.id && s.selected]}>{item.label}</Text>

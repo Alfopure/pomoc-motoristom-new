@@ -86,3 +86,38 @@ describe("native user authentication", () => {
     expect(mocks.admin).not.toHaveBeenCalled();
   });
 });
+
+describe("expected organization fence for private drafts", () => {
+  it("rejects a same-user/profile organization change while a legacy request still resolves its current actor", async () => {
+    const headers = { "X-PM-Expected-Organization": organizationId };
+    expect(await requireMobileActor(request(headers))).toMatchObject({ userId, profileId, organizationId });
+    const nextOrganization = "44444444-4444-4444-8444-444444444444";
+    profile!.organization_id = nextOrganization;
+    mocks.organization.mockResolvedValue(nextOrganization);
+    await expect(requireMobileActor(request(headers))).rejects.toMatchObject({ status: 409, code: "expected_organization_mismatch" });
+    expect(await requireMobileActor(request())).toMatchObject({ userId, profileId, organizationId: nextOrganization });
+  });
+  it.each(["", "not-a-uuid", organizationId + "," + organizationId, "33333333-3333-4333-8333-33333333333z"])("rejects malformed supplied UUID %s before application reads", async header => {
+    await expect(requireMobileActor(request({ "X-PM-Expected-Organization": header }))).rejects.toMatchObject({ status: 400 });
+    expect(mocks.organization).not.toHaveBeenCalled(); expect(mocks.admin).not.toHaveBeenCalled();
+  });
+  it("accepts a case-insensitive canonical UUID without selecting organization from the header", async () => {
+    const resolved = "abcdefab-cdef-4abc-8abc-abcdefabcdef";
+    mocks.organization.mockResolvedValue(resolved); profile!.organization_id = resolved;
+    expect(await requireMobileActor(request({ "X-PM-Expected-Organization": resolved.toUpperCase(), "X-Organization-Id": profileId })))
+      .toMatchObject({ organizationId: resolved, profileId, userId });
+    expect(mocks.organization).toHaveBeenCalledWith();
+  });
+  it("does not let the expected header bypass JWT verification or grant profile access", async () => {
+    mocks.claims.mockResolvedValueOnce({ data: null, error: new Error("Bad signature") });
+    await expect(requireMobileActor(request({ "X-PM-Expected-Organization": organizationId }))).rejects.toMatchObject({ status: 401 });
+    expect(mocks.admin).not.toHaveBeenCalled();
+    profile!.active = false;
+    await expect(requireMobileActor(request({ "X-PM-Expected-Organization": profileId }))).rejects.toMatchObject({ status: 403 });
+  });
+  it("keeps cookie-only requests unauthorized even with a matching expected organization", async () => {
+    await expect(requireMobileActor(request({ authorization: "", Cookie: "sb-auth-token=fixture", "X-PM-Expected-Organization": organizationId })))
+      .rejects.toMatchObject({ status: 401 });
+    expect(mocks.organization).not.toHaveBeenCalled();
+  });
+});

@@ -7,7 +7,7 @@ vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: mocks.admin 
 vi.mock("@/server/task-notifications", () => ({ deliverTaskAssignmentNotifications: async () => { throw new Error("postcommit notice unavailable"); } }));
 import { createFakeSupabase, fakeError, type FakeRow } from "@/test/fake-supabase";
 import {
-  createMobileTask, getMobileTask, listMobileCaseTasks, listMobileTaskColleagues, listMobileTaskMessages,
+  listMobileMyTasks, parseMobileMyTaskQuery, createMobileTask, getMobileTask, listMobileCaseTasks, listMobileTaskColleagues, listMobileTaskMessages,
   parseMobileTaskCreate, parseMobileTaskMessage, parseMobileTaskQuery, parseMobileTaskWorkflow,
   sendMobileTaskMessage, transitionMobileTask,
 } from "./tasks";
@@ -185,5 +185,122 @@ describe("strict mobile task forms", () => {
   });
   it.each(["limit=26", "limit=1&limit=2", "cursor=bad", "organizationId=spoof"])("rejects invalid scoped list filter %s", query => {
     expect(() => parseMobileTaskQuery(new URLSearchParams(query))).toThrow();
+  });
+});
+
+
+describe("actor-scoped cross-case My tasks", () => {
+  const query = (value = "") => parseMobileMyTaskQuery(new URLSearchParams(value));
+  const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  it("defaults to assigned/open and scopes every task read to verified actor and organization", async () => {
+    seed("motorist_case_tasks", [
+      row(taskId, { assigned_to: profile, provider_payload: "PRIVATE" }),
+      row(commandId, { assigned_to: colleagueId }),
+      row(id(1), { assigned_to: profile, organization_id: otherOrg }),
+      row(id(2), { assigned_to: profile, status: "done" }),
+      row(id(3), { assigned_to: profile, status: "overdue" }),
+      row(id(4), { assigned_to: null, created_by: profile }),
+    ]);
+    // Any service-role access beyond the existing config read is a regression.
+    mocks.admin.mockReturnValue({ from: (table: string) => {
+      expect(table).toBe("motorist_task_workspace_settings"); return fake.admin.from("motorist_task_workspace_settings");
+    } });
+    const result = await listMobileMyTasks(actor, query(), user);
+    expect(result.selection).toEqual({ view: "assigned", category: "open", q: "" });
+    expect(result.tasks.map(task => task.id)).toEqual([taskId, id(3)]);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+    const taskReads = fake.db.log.filter(log => log.table === "motorist_case_tasks");
+    expect(taskReads).toHaveLength(1);
+    expect(taskReads[0].filters).toEqual(expect.arrayContaining(["eq(organization_id)", "eq(assigned_to)", "neq(status)"]));
+    expect(fake.db.log.some(log => log.table === "motorist_task_case_links" || log.table === "motorist_cases")).toBe(false);
+    expect(fake.db.log.filter(log => log.kind === "query").every(log => log.operation === "select")).toBe(true);
+  });
+  it("review scope is the actor's reviewer assignment across states, with explicit all retaining done", async () => {
+    seed("motorist_case_tasks", [
+      row(taskId, { reviewer_profile_id: profile, workflow_state: "todo" }),
+      row(commandId, { reviewer_profile_id: profile, status: "done", workflow_state: "done" }),
+      row(id(1), { reviewer_profile_id: colleagueId, assigned_to: profile }),
+      row(id(2), { reviewer_profile_id: profile, organization_id: otherOrg }),
+    ]);
+    const result = await listMobileMyTasks(actor, query("view=review&category=all"), user);
+    expect(result.tasks.map(task => task.id)).toEqual([commandId, taskId]);
+    expect(result.selection).toEqual({ view: "review", category: "all", q: "" });
+    expect((await listMobileMyTasks(actor, query("view=review"), user)).tasks.map(task => task.id)).toEqual([taskId]);
+  });
+  it("filters title before page limit and echoes only trimmed query", async () => {
+    seed("motorist_case_tasks", [row(taskId, { assigned_to: profile, title: "Kontrola dokumentov" }), row(commandId, { assigned_to: profile, title: "Telefonovať" })]);
+    const result = await listMobileMyTasks(actor, query("q=%20dokumentov%20&limit=1"), user);
+    expect(result.tasks.map(task => task.id)).toEqual([taskId]);
+    expect(result.selection.q).toBe("dokumentov"); expect(result.nextCursor).toBeNull();
+  });
+  it("escapes wildcard and backslash search as a literal parameter, not PostgREST grammar", async () => {
+    // The shared fake does not model PostgreSQL's LIKE escape rules. Inspect
+    // the actual installed SDK request instead of relying on that fake parser.
+    const { createClient } = await import("@supabase/supabase-js");
+    const requests: URL[] = [];
+    const client = createClient<Database>("https://fixture.invalid", "fixture-public", {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { headers: { Authorization: "Bearer fixture" }, fetch: async input => {
+        const url = new URL(String(input)); requests.push(url);
+        expect(["/rest/v1/motorist_case_tasks", "/rest/v1/rpc/motorist_task_workflow_enabled"]).toContain(url.pathname);
+        return Response.json(url.pathname.includes("/rpc/") ? true : []);
+      } },
+    });
+    await listMobileMyTasks(actor, query(new URLSearchParams({ q: "a_b%\\c,(id.eq.x)" }).toString()), client);
+    const search = requests.find(url => url.pathname.endsWith("motorist_case_tasks"))!.searchParams;
+    expect(search.get("title")).toBe("ilike.%a\\_b\\%\\\\c,(id.eq.x)%");
+    expect(search.get("organization_id")).toBe("eq." + org);
+    expect(search.get("assigned_to")).toBe("eq." + profile);
+    expect(search.get("limit")).toBe("26");
+    expect(search.has("or")).toBe(false);
+  });
+  it("paginates 25 with microseconds, descending UUID ties and all predicates on both cursor branches", async () => {
+    const sameTime = "2026-10-11T20:00:00.123456+00:00";
+    seed("motorist_case_tasks", [
+      ...Array.from({ length: 27 }, (_, n) => row(id(n + 1), { assigned_to: profile, title: "Match", created_at: sameTime })),
+      row(id(100), { assigned_to: profile, title: "Match", created_at: "2026-10-11T20:00:00.123455+00:00" }),
+      row(id(101), { assigned_to: colleagueId, title: "Match", created_at: sameTime }),
+      row(id(102), { assigned_to: profile, title: "Match", status: "done", created_at: sameTime }),
+    ]);
+    const first = await listMobileMyTasks(actor, query("q=Match"), user);
+    expect(first.tasks).toHaveLength(25); expect(first.tasks[0].id).toBe(id(27));
+    expect(JSON.parse(Buffer.from(first.nextCursor!, "base64url").toString()).createdAt).toBe(sameTime);
+    fake.db.log.length = 0;
+    const second = await listMobileMyTasks(actor, query(new URLSearchParams({ q: "Match", cursor: first.nextCursor! }).toString()), user);
+    expect(second.tasks.map(task => task.id)).toEqual([id(2), id(1), id(100)]); expect(second.nextCursor).toBeNull();
+    const reads = fake.db.log.filter(log => log.table === "motorist_case_tasks");
+    expect(reads).toHaveLength(2);
+    for (const read of reads) expect(read.filters).toEqual(expect.arrayContaining(["eq(organization_id)", "eq(assigned_to)", "neq(status)", "ilike(title)"]));
+  });
+  it("rejects cursors from another actor, organization or any selected filter before reading", async () => {
+    seed("motorist_case_tasks", [row(taskId, { assigned_to: profile }), row(commandId, { assigned_to: profile })]);
+    const first = await listMobileMyTasks(actor, query("limit=1"), user);
+    for (const [viewer, selection] of [
+      [{ ...actor, profileId: colleagueId }, ""], [{ ...actor, organizationId: otherOrg }, ""],
+      [actor, "view=review"], [actor, "category=all"], [actor, "q=documents"],
+    ] as const) {
+      fake.db.log.length = 0;
+      await expect(listMobileMyTasks(viewer, query(selection + "&cursor=" + first.nextCursor), user)).rejects.toMatchObject({ status: 400 });
+      expect(fake.db.log).toEqual([]);
+    }
+  });
+  it("keeps readable data with disabled writes and missing workflow rollout", async () => {
+    seed("motorist_case_tasks", [row(taskId, { assigned_to: profile })]);
+    seed("motorist_task_workspace_settings", [{ organization_id: org, enabled: false }]);
+    fake.db.failNext("motorist_task_workflow_enabled", "rpc", fakeError("not installed", "PGRST202"));
+    const result = await listMobileMyTasks(actor, query(), user);
+    expect(result.tasks).toHaveLength(1); expect(result.capabilities).toEqual({ create: false, workflow: false, messages: false });
+  });
+  it.each(["motorist_case_tasks", "motorist_profiles", "motorist_task_workspace_settings"])("does not turn %s query failure into an empty successful page", async table => {
+    seed("motorist_case_tasks", [row(taskId, { assigned_to: profile })]);
+    fake.db.failNext(table, "select", fakeError("PRIVATE_DB_FAILURE", "57014"));
+    await expect(listMobileMyTasks(actor, query(), user)).rejects.toMatchObject({ status: 503 });
+  });
+  it("rejects malformed task data even when assigned to the actor", async () => {
+    seed("motorist_case_tasks", [row(taskId, { assigned_to: profile, created_at: "2026-02-30T00:00:00Z" })]);
+    await expect(listMobileMyTasks(actor, query(), user)).rejects.toMatchObject({ status: 503 });
+  });
+  it.each(["userId=spoof", "organizationId=spoof", "assignedTo=spoof", "view=all", "category=done", "view=assigned&view=review", "limit=26", "limit=0", "cursor=bad", "q=" + "x".repeat(201), "q=%00", "q=*"])("rejects unsupported filters %s", value => {
+    expect(() => query(value)).toThrow();
   });
 });

@@ -37,7 +37,8 @@ function warnings(value: unknown): MobileCaseCreated["warnings"] {
   });
 }
 
-export function createCasesApi(config: MobileConfig, profileId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch) {
+export function createCasesApi(config: MobileConfig, profileId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch, expectedOrganization?: string) {
+  if (expectedOrganization !== undefined && !isId(expectedOrganization)) throw new MobileApiError("Organizáciu sa nepodarilo overiť.", 400);
   function scope(body: Record<string, unknown>): MobileScope {
     if (body.ok !== true || body.apiVersion !== 1 || body.environment !== config.environment || body.profileId !== profileId || !isDate(body.checkedAt)) throw invalid();
     return { ok: true, apiVersion: 1, environment: config.environment, profileId, checkedAt: body.checkedAt };
@@ -53,6 +54,7 @@ export function createCasesApi(config: MobileConfig, profileId: string, getToken
       const response = await transport(config.apiOrigin + "/api/mobile/v1/cases" + path, {
         method: method ?? (input === undefined ? "GET" : "POST"), credentials: "omit", signal: controller.signal,
         headers: { Authorization: "Bearer " + token, "X-PM-App-Environment": config.environment, Accept: "application/json",
+          ...(expectedOrganization ? { "X-PM-Expected-Organization": expectedOrganization } : {}),
           ...(input === undefined ? {} : { "Content-Type": "application/json" }) },
         ...(input === undefined ? {} : { body: JSON.stringify(input) }),
       });
@@ -68,8 +70,8 @@ export function createCasesApi(config: MobileConfig, profileId: string, getToken
     } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
   }
   return {
-    work: createWorkApi(config, profileId, getToken, transport),
-    handoffs: createHandoffApi(config, profileId, getToken, transport),
+    work: createWorkApi(config, profileId, getToken, transport, undefined, expectedOrganization),
+    handoffs: createHandoffApi(config, profileId, getToken, transport, expectedOrganization),
     list: async (filter: MobileCaseFilter, signal?: AbortSignal): Promise<MobileCases & { requestedAt: number }> => {
       const requestedAt = Date.now();
       const q = filter.q.trim(), ownerId = filter.ownerId ?? null;

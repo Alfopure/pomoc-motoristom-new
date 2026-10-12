@@ -63,6 +63,10 @@ Staršie vlastné natívne zostavenie potrebuje novú binárnu verziu s pickermi
 Expo Go má vlastné natívne moduly a oprávnenia.
 
 Upload zachová pôvodné bajty, metadáta, revíziu a UUID aj po strate odpovede.
+Platí to počas otvorenej aplikácie. Po reštarte ostane iba chránený záznam
+príkazu a metadát; súbor sa neuchováva a pôvodný upload sa nedá zopakovať.
+Mobil vyžiada čerstvý zoznam príloh a vedomé potvrdenie pred novým výberom.
+Zhoda názvu súboru nepotvrdzuje pôvodné uloženie.
 Overenie neistého výsledku odošle tú istú požiadavku; nikdy znovu nenačíta
 meniteľný pôvodný súbor. Súbor sa neprepisuje ani automaticky nemaže.
 Pripojenie metadát, história a audit používajú existujúcu atomickú mutáciu.
@@ -75,6 +79,16 @@ začať prácu, odovzdať výsledok kolegovi na kontrolu, schváliť alebo vrát
 prácu a pridať správu. Dostupnosť a oprávnenie na zmenu určuje existujúca
 aktivácia pracovných úloh a serverové pravidlá webu. Výber riešiteľov
 obsahuje iba aktívnych kolegov s prístupom; historické mená zostanú viditeľné.
+
+Samostatná záložka **Moje úlohy** zobrazí úlohy priradené aktuálnemu
+operátorovi naprieč prípadmi. Predvolene obsahuje otvorené aj oneskorené,
+možno zahrnúť dokončené alebo prepnúť na úlohy, kde je operátor kontrolórom.
+Výber „Na kontrolu“ zahŕňa aj úlohy ešte neodovzdané na kontrolu.
+Vyhľadávanie používa doslovný názov, najviac 200 znakov; hviezdička sa
+výslovne odmietne, aby PostgREST nezmenil doslovné hľadanie na wildcard.
+Detail a správy používajú ten istý formulár ako úlohy prípadu.
+
+Textové koncepty sa obnovujú podľa [kontraktu miestneho úložiska](drafts.md).
 
 Nová úloha používa existujúci zápis bez identity pre opakovanie: po neistom
 výsledku treba výslovne obnoviť a skontrolovať zoznam pred ďalším pokusom.
@@ -106,6 +120,7 @@ prestane ponúkať. Výsledok systémového dialógu nepotvrdzuje doručenie.
 
 | Route | Výsledok |
 | --- | --- |
+| `GET /api/mobile/v1/drafts/scope` | Minimálna overená organizácia a profil pred otvorením chránených konceptov; bez zapisovania |
 | `GET /api/mobile/v1/cases` | Stránka najviac 25 prípadov; `ownership=mine\|all`, `ownerId`, `category=open\|all`, `q` a `cursor` |
 | `GET /api/mobile/v1/cases/dispatchers` | Najviac 200 ľudských dispečerov tej istej organizácie; iba ID, meno a aktívnosť |
 | `GET /api/mobile/v1/cases/[id]` | Detail jedného prípadu organizácie |
@@ -116,6 +131,7 @@ prestane ponúkať. Výsledok systémového dialógu nepotvrdzuje doručenie.
 | `GET/POST /api/mobile/v1/cases/[id]/attachments` | Zoznam do 200 príloh; ohraničený upload jednej prílohy |
 | `GET /api/mobile/v1/cases/[id]/attachments/[attachmentId]/download` | Dočasný odkaz na presnú prílohu prípadu |
 | `GET/POST /api/mobile/v1/cases/[id]/tasks` | Stránka do 25 pripojených úloh; vytvorenie iba pre prípad v ceste |
+| `GET /api/mobile/v1/tasks` | Do 25 vlastných úloh; `view=assigned\|review`, `category=open\|all`, doslovný `q` a scope-bound cursor |
 | `GET /api/mobile/v1/tasks/[id]` | Minimálny detail úlohy a pripojených prípadov |
 | `GET /api/mobile/v1/tasks/colleagues` | Do 200 aktívnych ľudských kolegov s prístupom |
 | `POST /api/mobile/v1/tasks/[id]/workflow` | Existujúci pracovný command/revision zápis, minimálne potvrdenie |
@@ -126,6 +142,10 @@ podpis, projekt, platnosť tokenu, aktívny ľudský profil a rolu
 dispatcher/senior_dispatcher/manager/admin. Actor ani organizácia sa
 nepreberajú z formulára. Úspešné odpovede majú scope s profilom, prostredím,
 verziou a časom; klient ho overí pred zobrazením.
+Po overení konceptov mobil posiela aj `X-PM-Expected-Organization` s UUID.
+Server porovná túto hodnotu s aktuálnou autorizovanou organizáciou, nikdy
+ju nepoužije ako výber organizácie. Zmena vráti `409
+expected_organization_mismatch` pred čítaním/zápisom prípadu alebo úlohy.
 
 Čítanie vracia iba polia potrebné pre obrazovku. Súvisiace záznamy aj
 vyhľadávanie sa obmedzia na organizáciu actor-a. API nevracia provider ID,

@@ -94,3 +94,13 @@ describe('action-specific link availability', () => {
     expect((await api({ ...receipt(), link: { status: 'not_requested' } }).api.command(caseId, command)).link).toEqual({ status: 'unavailable', warning: 'link_unavailable' });
   });
 });
+
+describe('draft organization request fence', () => {
+  it('binds context and explicit commands to the expected organization', async () => {
+    const transport = vi.fn(async () => Response.json({ error: 'scope' }, { status: 409 }));
+    const client = createHandoffApi(config, scope.profileId, async () => 'MOCK', transport, caseId);
+    await expect(client.context(caseId)).rejects.toMatchObject({ status: 409 });
+    await expect(client.command(caseId, command)).rejects.toMatchObject({ status: 409 });
+    for (const [, init] of transport.mock.calls as unknown as [string, RequestInit][]) expect(init.headers).toMatchObject({ 'X-PM-Expected-Organization': caseId });
+  });
+});

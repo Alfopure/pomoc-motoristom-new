@@ -11,6 +11,7 @@ export type MobileScope = {
   profileId: string;
   checkedAt: string;
 };
+export type MobileDraftScope = MobileScope & { organizationId: string };
 export type MobileMe = MobileScope & {
   profile: { id: string; displayName: string; email: string | null; role: MobileRole };
   capabilities: { voice: false; presenceWrite: false };
@@ -188,6 +189,18 @@ export type MobileTask = {
   createdByMe: boolean;
   reviewSubmission: string | null;
   reviewReturnReason: string | null;
+};
+export type MobileMyTaskFilter = {
+  view: "assigned" | "review";
+  category: "open" | "all";
+  q: string;
+  cursor?: string | null;
+};
+export type MobileMyTasks = MobileScope & {
+  tasks: MobileTask[];
+  nextCursor: string | null;
+  capabilities: MobileTaskCapabilities;
+  selection: Pick<MobileMyTaskFilter, "view" | "category" | "q">;
 };
 export type MobileCaseTasks = MobileScope & {
   caseId: string;

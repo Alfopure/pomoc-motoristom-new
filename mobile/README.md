@@ -17,16 +17,24 @@ Z webu importuje iba vymazateľné TypeScript typy z `src/lib/mobile-api.ts`.
 - **Prípady:** moje alebo všetky prípady organizácie, otvorené alebo všetky stavy,
   filter podľa dispečera, vyhľadávanie, stránkovanie, detail, založenie a úpravy prípadu,
   hlavná poznámka, historické poznámky, zmeny stavu a otvorenie navigácie.
+  Súčasťou sú fotografie/dokumenty, úlohy prípadu a jeho odovzdanie.
   Predvolene sa zobrazia všetky otvorené. Používajú
   rovnaké záznamy a pravidlá ako web; fungujú aj v Expo Go.
-- **Účet:** meno, e-mail, rola, prostredie a odhlásenie z tohto zariadenia.
+- **Moje úlohy:** všetky vlastné otvorené úlohy, výber úloh na kontrolu,
+  aj dokončené, vyhľadávanie podľa názvu a prechod na prípad.
+- **Účet:** meno, e-mail, rola, prostredie, miestne koncepty a odhlásenie.
+- Rozpísané textové formuláre a pôvodné neisté príkazy sa na iPhone ukladajú
+  do samostatného chráneného úložiska. Android potrebuje nový natívny build
+  s kontrolou potvrdenia zápisu; starší Android/Expo Go a web používajú iba
+  pamäť a rozhranie to označí. Obnova nikdy sama neodošle požiadavku.
 - Odobratý prístup alebo neoveriteľná odpoveď skryje obsah; rôzne účty nemajú
   spoločnú cache. Dočasná chyba siete pri obnove už overeného profilu ponechá
   ovládanie hovoru s upozornením. Periodický polling sa zastaví v pozadí;
   prvé overenie identity sa dokončí aj po PushKit prebudení.
 
-Aktuálny Expo Go náhľad zahŕňa aj prípady; pôvodný M1 build ostáva pri
-prihlasovaní, ústredni a histórii.
+Aktuálny zdroj zahŕňa prípady, Moje úlohy a koncepty. Konkrétne publikované
+Expo Go a natívne buildy treba overiť podľa ich zdrojového commitu;
+starší M1 build obsahuje iba prihlasovanie, ústredňu a históriu.
 **iPhone voice TEST** pridáva lokálny Expo modul `modules/linka-voice` s natívnym
 Telnyx iOS SDK 4.2.2, CallKit a PushKit. Apple Developer členstvo majiteľa čaká
 na schválenie; majiteľ potvrdil spustenie Expo náhľadu na fyzickom iPhone.
@@ -34,6 +42,7 @@ Skutočné audio, APNs a systémové zvonenie na zamknutom zariadení zatiaľ
 nie sú prijaté ako funkčné. Android hlas/FCM nasleduje po iPhone pilote.
 
 Rozhranie používa žltú `#FCD703`, čierne tlačidlá a zinc/sivé plochy webu.
+Kontrakt úložiska, obnova a fyzické skúšky sú v [konceptoch](../docs/mobile/drafts.md).
 Natívny telefón má pripojenie, vytáčanie, prijatie/odmietnutie, ukončenie,
 mikrofón, reproduktor, DTMF a Dostupný/Pauza. Aktívny hovor zostáva viditeľný
 pri zmene záložky. Prebiehajúci hovor sa zobrazí až po potvrdení spojenia

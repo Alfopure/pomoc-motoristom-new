@@ -2,6 +2,12 @@ import type { MobileCaseHandoffs, MobileHandoffGrant, MobileHandoffInput, Mobile
 import { MobileApiError } from '../lib/api';
 import type { HandoffApi } from './api';
 import { parseDueAt } from '../work/commands';
+import { DraftNotSentError, type DraftPort, type DraftWrite } from '../drafts/port';
+import { handoffProjection, restoreHandoff } from './persistence';
+const receiptStorageError = 'Zápis je potvrdený, ale miestne uloženie potvrdenia zlyhalo. Najprv opravte uloženie konceptov.';
+async function finishDraft(write: DraftWrite | undefined, payload: object) {
+  try { return write ? await write.finish(payload) : true; } catch { return false; }
+}
 function localTime(value: string | null | undefined) {
   if (!value)
     return '';
@@ -45,7 +51,7 @@ export type HandoffState = {
   canRebase: boolean;
 };
 const active = (grant: MobileHandoffGrant) => ['offered', 'accepted', 'en_route', 'arrived'].includes(grant.status) && Date.parse(grant.expiresAt) > Date.now();
-const message = (error: unknown) => error instanceof MobileApiError ? error.message : 'Požiadavku sa nepodarilo dokončiť.';
+const message = (error: unknown) => error instanceof MobileApiError || error instanceof DraftNotSentError ? error.message : 'Požiadavku sa nepodarilo dokončiť.';
 const initialInput = (): Input => ({
   recipientName: '', recipientPhone: '', instructions: '', scheduledAt: '', hours: '24', comment: ''
 });
@@ -72,14 +78,22 @@ export class HandoffDraft {
   };
   private listeners = new Set<() => void>();
   private disposed = false;
+  private rejected = false;
   private sending = false;
   private epoch = 0;
   private read = 0;
   private recovery = 0;
   private readAbort: AbortController | null = null;
-  constructor(private api: HandoffApi, readonly caseId: string, private uuid: () => string, private changed: () => void = () => {
-  }) {
+  constructor(private api: HandoffApi, readonly caseId: string, private uuid: () => string, private changed: () => void = () => {}, private port?: DraftPort) {
+    const value = port?.load();
+    if (port && value !== null) {
+      try {
+        const restored = restoreHandoff(value, caseId, port!);
+        this.state = { ...this.state, ...restored, error: restored.status === 'uncertain' ? 'Obnovená požiadavka nemá potvrdený výsledok. Overte pôvodný zápis.' : restored.status === 'conflict' ? 'Obnovený koncept vyžaduje aktuálny náhľad a vedomé potvrdenie nových údajov.' : null };
+      } catch { this.rejected = true; port!.reject(); this.state.error = 'Uložený koncept odovzdania sa nepodarilo overiť.'; }
+    }
   }
+  exportDraft() { return handoffProjection(this.caseId, this.state); }
   snapshot = () => this.state;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -87,10 +101,11 @@ export class HandoffDraft {
       this.listeners.delete(listener);
     };
   };
-  private set(value: Partial<HandoffState>) {
+  private set(value: Partial<HandoffState>, persist = true) {
     if (this.disposed)
       return;
     this.state = { ...this.state, ...value };
+    if (persist && !this.rejected && ['input', 'selected', 'status', 'pending', 'receipt'].some(key => key in value)) this.port?.changed(this.exportDraft());
     for (const listener of this.listeners)
       listener();
   }
@@ -138,7 +153,7 @@ export class HandoffDraft {
     }
   }
   select(action: Action, handoffId?: string) {
-    if (this.disposed || this.sending || ['uncertain', 'conflict'].includes(this.state.status))
+    if (this.disposed || this.rejected || this.sending || this.state.status === 'saved' && this.port && !this.port.settled() || ['uncertain', 'conflict'].includes(this.state.status))
       return false;
     const context = this.state.context;
     if (!context)
@@ -152,21 +167,21 @@ export class HandoffDraft {
     this.set({
       selected: {
         action, preview: copy(context.preview), previewVersion: context.previewVersion, ...(grant ? { handoffId: grant.id, expectedRevision: grant.revision } : {})
-      }, status: 'editing', pending: null, error: null, canRebase: false, input: {
+      }, status: 'editing', pending: null, receipt: null, error: null, canRebase: false, input: {
         ...this.state.input, instructions: grant?.published?.instructions ?? this.state.input.instructions, scheduledAt: grant ? localTime(grant.published?.scheduledAt) : this.state.input.scheduledAt, comment: ''
       }
     });
     return true;
   }
   edit(value: Partial<Input>) {
-    if (this.state.status === 'editing' && !this.sending)
+    if (!this.rejected && this.state.status === 'editing' && !this.sending)
       this.set({ input: { ...this.state.input, ...value } });
   }
   rebase() {
     if (this.state.status !== 'conflict' || !this.state.canRebase || this.state.loading || !this.state.selected)
       return false;
     const { action, handoffId } = this.state.selected, input = this.state.input;
-    this.set({ status: 'editing' });
+    this.set({ status: 'editing' }, false);
     if (!this.select(action, handoffId)) {
       this.set({ status: 'conflict', error: 'Aktuálny stav túto akciu neumožňuje.' });
       return false;
@@ -175,10 +190,10 @@ export class HandoffDraft {
     return true;
   }
   cancel() {
-    if (this.sending || this.state.status === 'uncertain' || this.state.status === 'conflict' && (!this.state.canRebase || this.state.loading))
+    if (this.rejected || this.sending || this.state.status === 'saved' && this.port && !this.port.settled() || this.state.status === 'uncertain' || this.state.status === 'conflict' && (!this.state.canRebase || this.state.loading))
       return;
     this.set({
-      selected: null, pending: null, status: this.state.receipt ? 'saved' : 'editing', error: null
+      selected: null, pending: this.state.receipt ? this.state.pending : null, status: this.state.receipt ? 'saved' : 'editing', error: null
     });
   }
   private command(): MobileHandoffInput {
@@ -230,7 +245,7 @@ export class HandoffDraft {
     };
   }
   async submit() {
-    if (this.disposed || this.sending || this.state.status !== 'editing')
+    if (this.disposed || this.rejected || this.sending || this.state.status !== 'editing')
       return;
     let command: MobileHandoffInput;
     try {
@@ -240,12 +255,13 @@ export class HandoffDraft {
       this.set({ error: message(error) });
       return;
     }
-    this.set({ pending: copy(command) });
+    this.set({ pending: copy(command) }, false);
     return this.send(false);
   }
   async reconcile() {
-    if (this.disposed || this.sending || !this.state.pending || !['uncertain', 'saved'].includes(this.state.status))
+    if (this.disposed || this.rejected || this.sending || !this.state.pending || !['uncertain', 'saved'].includes(this.state.status))
       return;
+    if (this.state.status === 'saved' && this.port && !this.port.settled()) { this.set({ error: receiptStorageError }, false); return; }
     return this.send(true);
   }
   private async send(replay: boolean) {
@@ -258,44 +274,43 @@ export class HandoffDraft {
     this.pause();
     this.epoch++;
     const epoch = this.epoch;
-    this.set({ status: known ? 'saved' : 'saving', error: null, ...(['renew', 'revoke', 'issue'].includes(pending.action) ? { link: null } : {}) });
+    this.set({ status: known ? 'saved' : 'saving', error: null, ...(['renew', 'revoke', 'issue'].includes(pending.action) ? { link: null } : {}) }, false);
+    const original = this.exportDraft();
+    let write: DraftWrite | undefined;
     try {
+      if (this.port) {
+        try { write = await this.port.prepare(original); } catch (error) { throw error instanceof DraftNotSentError ? error : new DraftNotSentError(); }
+        if (this.disposed || !this.port.current()) throw new DraftNotSentError();
+      }
       const result = await this.api.command(this.caseId, copy(pending));
-      if (this.disposed)
-        return;
-      if (result.kind !== 'mutation')
+      if (result.kind !== 'mutation' || this.port && !this.port.acceptsScope(result))
         throw new MobileApiError('Potvrdenie uloženia sa nepodarilo overiť.', 502);
       const available = result.link.status === 'available' ? result.link : null;
       const receipt = { ...result, link: result.link.status === 'available' ? { status: 'not_requested' as const } : result.link };
-      this.set({
-        status: 'saved', receipt, error: null, link: epoch === this.epoch && available && Date.parse(available.expiresAt) > Date.now() ? { ...available, handoffId: result.handoffId } : null
-      });
+      const persisted = await finishDraft(write, { ...original, status: 'saved', receipt });
+      if (this.disposed) return;
+      this.set({ status: 'saved', receipt, error: persisted ? null : receiptStorageError,
+        link: epoch === this.epoch && available && Date.parse(available.expiresAt) > Date.now() ? { ...available, handoffId: result.handoffId } : null }, false);
       this.changed();
       return receipt;
     }
     catch (error) {
-      if (this.disposed)
-        return;
       const status = error instanceof MobileApiError ? error.status : 0;
-      const denied = [401, 403, 409].includes(status);
-      if (denied)
-        this.set({ link: null });
-      if (known)
-        this.set({ status: 'saved', receipt: known, error: message(error) });
-      else if (uncertain || status === 0 || status === 408 || status === 429 || status >= 500)
-        this.set({ status: 'uncertain', error: 'Výsledok nie je potvrdený. Overte pôvodnú požiadavku; údaje zostali zachované. ' + message(error) });
+      let outcome: Partial<HandoffState>;
+      if (known) outcome = { status: 'saved', receipt: known, error: message(error) };
+      else if (uncertain || !(error instanceof DraftNotSentError) && (status === 0 || status === 408 || status === 429 || status >= 500))
+        outcome = { status: 'uncertain', error: 'Výsledok nie je potvrdený. Overte pôvodnú požiadavku; údaje zostali zachované. ' + message(error) };
       else if (status === 409)
-        this.set({ status: 'conflict', canRebase: false, error: 'Stav sa zmenil. Načítajte aktuálny náhľad a vedome potvrďte nové údaje.' });
-      else
-        this.set({ status: 'editing', pending: null, error: message(error) });
+        outcome = { status: 'conflict', canRebase: false, error: 'Stav sa zmenil. Načítajte aktuálny náhľad a vedome potvrďte nové údaje.' };
+      else outcome = { status: 'editing', pending: null, error: message(error) };
+      await finishDraft(write, { ...original, status: outcome.status, pending: outcome.pending === null ? null : pending, receipt: known });
+      if (this.disposed) return;
+      this.set({ ...outcome, ...([401, 403, 409].includes(status) ? { link: null } : {}) }, !write);
     }
-    finally {
-      this.sending = false;
-      this.set({});
-    }
+    finally { this.sending = false; this.set({}, false); }
   }
   async recover(handoffId: string) {
-    if (this.disposed || this.sending || this.state.recovering || ['uncertain', 'conflict'].includes(this.state.status))
+    if (this.disposed || this.rejected || this.sending || this.state.recovering || ['uncertain', 'conflict'].includes(this.state.status))
       return;
     const grant = this.state.context?.handoffs.find(h => h.id === handoffId);
     if (!this.state.context?.enhanced || !grant || !active(grant) || !grant.recoverable)
@@ -303,6 +318,18 @@ export class HandoffDraft {
     const epoch = this.epoch, recovery = ++this.recovery;
     this.set({ recovering: true, error: null, link: null });
     try {
+      if (this.port) {
+        // Recovery has no grant-mutation receipt. Finish its scope/storage gate
+        // before retrieval so no late link response can overwrite a newer draft.
+        const original = this.exportDraft();
+        let gate: DraftWrite | undefined;
+        this.sending = true;
+        try {
+          try { gate = await this.port.prepare(original); } catch { throw new DraftNotSentError(); }
+          const ready = await finishDraft(gate, original); gate = undefined;
+          if (!ready || this.disposed || !this.port.current() || epoch !== this.epoch || recovery !== this.recovery) throw new DraftNotSentError();
+        } finally { if (gate) await finishDraft(gate, original); this.sending = false; this.set({}, false); }
+      }
       const result = await this.api.command(this.caseId, {
         action: 'recover', commandId: this.uuid(), handoffId, expectedRevision: grant.revision
       });

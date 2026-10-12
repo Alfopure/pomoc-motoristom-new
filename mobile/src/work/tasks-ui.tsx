@@ -73,9 +73,10 @@ export function availableActions(task: MobileTask, viewer: string): MobileTaskWo
   if (task.workflowState === "in_review") return task.reviewer?.id === viewer ? ["approve", "return"] : [];
   return [...(task.workflowState === "todo" ? ["start" as const] : ["to_todo" as const]), "submit_review", ...(!task.reviewer ? ["complete" as const] : [])];
 }
-function TaskDetail({ store, taskId, queryKey, active, profileId, onBack, created }: { store: WorkStore; taskId: string; queryKey: string[]; active: boolean; profileId: string; onBack: () => void; created?: boolean }) {
+export function TaskDetail({ store, taskId, queryKey, active, profileId, onBack, created, onOpenCase }: { store: WorkStore; taskId: string; queryKey: string[]; active: boolean; profileId: string; onBack: () => void; created?: boolean; onOpenCase?: (id: string) => void }) {
   const retained = store.task(taskId), workflow = useSyncExternalStore(retained.workflow.subscribe, retained.workflow.snapshot, retained.workflow.snapshot), message = useSyncExternalStore(retained.message.subscribe, retained.message.snapshot, retained.message.snapshot);
-  const [comment, setComment] = useState(retained.comment), [reviewer, setReviewer] = useState(retained.reviewerId), [body, setBody] = useState(retained.body), [error, setError] = useState<string | null>(null);
+  const { comment, body, reviewerId: reviewer } = useSyncExternalStore(retained.subscribeComposer, retained.composerSnapshot, retained.composerSnapshot);
+  const [error, setError] = useState<string | null>(null);
   const scroll = useRef<ScrollView>(null);
   const query = useQuery({ queryKey: [...queryKey, "task", taskId], queryFn: ({ signal }) => store.api.task(taskId, signal), enabled: active });
   const messages = useInfiniteQuery({ queryKey: [...queryKey, "messages", taskId], queryFn: ({ pageParam, signal }) => store.api.messages(taskId, pageParam, signal), enabled: active && query.isSuccess && !query.isError,
@@ -109,19 +110,22 @@ function TaskDetail({ store, taskId, queryKey, active, profileId, onBack, create
     {workflow.status === "uncertain" && <Button label="Overiť pôvodnú zmenu stavu" onPress={() => { void retained.workflow.reconcile(); }} />}
     {message.status === "uncertain" && <Button label="Overiť pôvodnú správu" onPress={() => { void retained.message.reconcile(); }} />}
     {workflow.status === "saved" && <Card><Text accessibilityRole="alert" style={styles.text}>Zmena stavu je uložená.</Text>{!current && <Text style={styles.muted}>Aktuálny detail ešte nie je potvrdený. Obnovte ho bez opakovania zápisu.</Text>}</Card>}
-    {message.status === "saved" && <Card><Text accessibilityRole="alert" style={styles.text}>Správa je odoslaná.</Text><Text style={styles.text}>{message.receipt?.message.body}</Text><Button label="Napísať ďalšiu správu" secondary onPress={() => { retained.message.reset(); retained.body = ""; setBody(""); }} /></Card>}
+    {message.status === "saved" && <Card><Text accessibilityRole="alert" style={styles.text}>Správa je odoslaná.</Text><Text style={styles.text}>{message.receipt?.message.body}</Text><Button label="Napísať ďalšiu správu" secondary onPress={() => { if (retained.message.reset()) { retained.body = ""; } }} /></Card>}
     {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={workError(query.error)} onRetry={() => { void query.refetch(); }} /> : task && <>
       <Card><Text style={styles.subheading}>{task.title}</Text><Text style={styles.text}>{workflowLabels[task.workflowState]} · {priorities.find(v => v.value === task.priority)?.label}</Text>
         <Text style={styles.muted}>{taskKinds.find(v => v.value === task.kind)?.label} · {task.assignedTo?.name ?? "Nepriradená"}</Text>
         {task.dueAt && <Text style={styles.text}>Termín: {formatTime(task.dueAt)}</Text>}{task.reviewer && <Text style={styles.text}>Kontrolór: {task.reviewer.name}</Text>}
         {task.reviewSubmission && <Text style={styles.text}>Výsledok práce: {task.reviewSubmission}</Text>}{task.reviewReturnReason && <Text style={styles.text}>Na dopracovanie: {task.reviewReturnReason}</Text>}
         {task.originLocked && <Text style={styles.muted}>Úloha vznikla z naviazanej udalosti.</Text>}
-        <Text style={styles.muted}>{query.data?.linkedCases.map(v => v.caseNumber).join(" · ")}</Text></Card>
+        <Text style={styles.muted}>{query.data?.linkedCases.map(v => v.caseNumber).join(" · ")}</Text>
+        {onOpenCase && query.data?.linkedCases.map(item => <Button key={item.id} label={"Otvoriť prípad " + item.caseNumber} secondary disabled={saving} onPress={() => {
+          if (workflowSnapshot().status !== "saving" && messageSnapshot().status !== "saving") onOpenCase(item.id);
+        }} />)}</Card>
       {!capability?.workflow && <Text style={styles.muted}>Zmeny stavu momentálne nie sú dostupné. Neoverená požiadavka zostáva zachovaná.</Text>}
       {workflow.status === "saved" && current && <Button label="Ďalšia zmena stavu" secondary onPress={() => retained.workflow.reset()} />}
       {workflow.status === "editing" && capability?.workflow && <>
-        <Text style={styles.subheading}>Zmeniť stav</Text><TextInput accessibilityLabel="Výsledok alebo dôvod zmeny" placeholder="Výsledok práce alebo dôvod vrátenia" value={comment} onChangeText={v => { retained.comment = v; setComment(v); }} maxLength={10000} multiline style={[styles.input, { minHeight: 100 }]} />
-        <ColleaguePicker api={store.api} queryKey={queryKey} active={active} label="Kontrolór" value={selectedReviewer(reviewer, task.reviewer?.id ?? null)} onChange={v => { retained.reviewerId = v; setReviewer(v); }} />
+        <Text style={styles.subheading}>Zmeniť stav</Text><TextInput accessibilityLabel="Výsledok alebo dôvod zmeny" placeholder="Výsledok práce alebo dôvod vrátenia" value={comment} onChangeText={v => { retained.comment = v; }} maxLength={10000} multiline style={[styles.input, { minHeight: 100 }]} />
+        <ColleaguePicker api={store.api} queryKey={queryKey} active={active} label="Kontrolór" value={selectedReviewer(reviewer, task.reviewer?.id ?? null)} onChange={v => { retained.reviewerId = v; }} />
         {availableActions(task, profileId).map(action => <Button key={action} label={actionLabels[action]} secondary disabled={saving || !current} onPress={() => { Keyboard.dismiss(); void transition(action); }} />)}
       </>}
       <Text style={styles.subheading}>Správy k úlohe</Text>
@@ -131,7 +135,7 @@ function TaskDetail({ store, taskId, queryKey, active, profileId, onBack, create
         {messages.isFetchNextPageError && <ErrorNotice message={workError(messages.error)} onRetry={() => { void messages.fetchNextPage(); }} />}
         {messages.hasNextPage && <Button label="Staršie správy" secondary disabled={messages.isFetchingNextPage} onPress={() => { void messages.fetchNextPage(); }} />}
       </>}
-      {message.status === "editing" && <><TextInput accessibilityLabel="Správa k úlohe" placeholder="Napíšte správu" value={body} onChangeText={v => { retained.body = v; setBody(v); }} maxLength={10000} editable={!!capability?.messages} multiline style={[styles.input, { minHeight: 100 }]} />
+      {message.status === "editing" && <><TextInput accessibilityLabel="Správa k úlohe" placeholder="Napíšte správu" value={body} onChangeText={v => { retained.body = v; }} maxLength={10000} editable={!!capability?.messages} multiline style={[styles.input, { minHeight: 100 }]} />
         {!capability?.messages && <Text style={styles.muted}>Odosielanie správ momentálne nie je dostupné.</Text>}
         <Button label="Odoslať správu" disabled={!capability?.messages || !body.trim() || saving} onPress={() => { Keyboard.dismiss(); void sendMessage(); }} /></>}
     </>}

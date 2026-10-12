@@ -84,3 +84,66 @@ describe("attachment receipt and signed-path rejection", () => {
     const params = new URL(f.transport.mock.calls[0][0]).searchParams; expect(params.get("cursor")).toBe("opaque"); expect(params.has("limit")).toBe(false);
   });
 });
+
+describe("cross-case My tasks contract", () => {
+  const assigned = { ...task, assignedTo: { id: actor, name: "Operátor" } };
+  const selection = { view: "assigned" as const, category: "open" as const, q: "" };
+  const page = { ...scope, tasks: [assigned], nextCursor: null, capabilities, selection };
+  it("defaults to actor-assigned open tasks and uses a bounded bearer-only GET", async () => {
+    const f = fixture(page);
+    expect(await f.api.myTasks()).toEqual(page);
+    const [url, init] = f.transport.mock.calls[0];
+    expect(new URL(url).pathname).toBe("/api/mobile/v1/tasks");
+    expect(Object.fromEntries(new URL(url).searchParams)).toEqual({ view: "assigned", category: "open", q: "", limit: "25" });
+    expect(init).toMatchObject({ method: "GET", credentials: "omit", headers: { Authorization: "Bearer token", "X-PM-App-Environment": "test" } });
+  });
+  it("encodes trimmed literal search and opaque cursor; review includes done outside in_review", async () => {
+    const selected = { view: "review" as const, category: "all" as const, q: "100%_\\ \" + &" };
+    const reviewed = { ...task, reviewer: { id: actor, name: "Operátor" }, status: "done", workflowState: "done" };
+    const f = fixture({ ...page, tasks: [reviewed], selection: selected, nextCursor: "next" });
+    expect((await f.api.myTasks({ ...selected, q: "  " + selected.q + "  ", cursor: "opaque+/=" })).tasks).toEqual([reviewed]);
+    const params = new URL(f.transport.mock.calls[0][0]).searchParams;
+    expect(params.get("q")).toBe(selected.q); expect(params.get("cursor")).toBe("opaque+/=");
+  });
+  it.each([
+    { profileId: taskId }, { environment: "production" }, { selection: { ...selection, view: "review" } },
+    { selection: { ...selection, category: "all" } }, { selection: { ...selection, q: "other" } }, { selection: null },
+    { tasks: [task] }, { tasks: [{ ...assigned, assignedTo: { id: taskId, name: "Iný" } }] },
+    { tasks: [{ ...assigned, status: "done", workflowState: "done" }] }, { tasks: [assigned, assigned] },
+    { tasks: Array.from({ length: 26 }, (_, i) => ({ ...assigned, id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}` })) },
+    { tasks: [{ ...assigned, revision: 0 }] }, { capabilities: { create: true } }, { nextCursor: "" },
+  ])("fails closed on wrong actor/filter/scope or malformed page %j", async changed => {
+    await expect(fixture({ ...page, ...changed }).api.myTasks()).rejects.toMatchObject({ status: 502 });
+  });
+  it("rejects wrong reviewer and a cursor that would repeat the same page", async () => {
+    await expect(fixture({ ...page, selection: { ...selection, view: "review" } }).api.myTasks({ ...selection, view: "review" })).rejects.toMatchObject({ status: 502 });
+    await expect(fixture({ ...page, nextCursor: "again" }).api.myTasks({ ...selection, cursor: "again" })).rejects.toMatchObject({ status: 502 });
+  });
+  it("accepts overdue assigned tasks and disabled write capabilities without fabricating an empty list", async () => {
+    const response = { ...page, tasks: [{ ...assigned, status: "overdue" }], capabilities: { create: false, workflow: false, messages: false } };
+    expect(await fixture(response).api.myTasks()).toEqual(response);
+  });
+  it.each(["*", "nul\0text", " " + "x".repeat(199) + " "])("rejects unsupported or oversized literal search before sending %j", async q => {
+    const f = fixture(page);
+    await expect(f.api.myTasks({ ...selection, q })).rejects.toMatchObject({ status: 400 });
+    expect(f.transport).not.toHaveBeenCalled();
+  });
+  it("rejects oversize title search before a request and forwards abort for hidden-screen cancellation", async () => {
+    const f = fixture(page);
+    await expect(f.api.myTasks({ ...selection, q: "x".repeat(201) })).rejects.toMatchObject({ status: 400 });
+    expect(f.transport).not.toHaveBeenCalled();
+    const controller = new AbortController(); controller.abort();
+    await f.api.myTasks(selection, controller.signal);
+    expect(f.transport.mock.calls[0][1]?.signal?.aborted).toBe(true);
+  });
+});
+
+describe("draft organization request fence", () => {
+  it("binds ordinary and binary requests to the expected organization", async () => {
+    const transport = vi.fn<MobileTransport>().mockImplementation(async () => Response.json({ error: "scope", code: "MOBILE_ORGANIZATION_CHANGED" }, { status: 409 }));
+    const api = createWorkApi(config, actor, async () => "token", transport, async () => transport, caseId);
+    await expect(api.myTasks()).rejects.toMatchObject({ status: 409 });
+    await expect(api.upload(caseId, { mutationId: commandId, expectedUpdatedAt: scope.checkedAt, fileName: "x.pdf", category: "document" }, { bytes: new Uint8Array([1]), contentType: "multipart/form-data; boundary=MOCK", mimeType: "application/pdf", sizeBytes: 1 })).rejects.toMatchObject({ status: 409 });
+    for (const [, init] of transport.mock.calls) expect(init?.headers).toMatchObject({ "X-PM-Expected-Organization": caseId });
+  });
+});
