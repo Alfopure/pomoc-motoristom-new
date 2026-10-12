@@ -308,6 +308,7 @@ describe("TelnyxWebphone", () => {
     expect(() => h.phone.hangup()).not.toThrow();
     expect(call.hungUp).toBe(true);
     expect(() => h.phone.stop("component_unmount")).not.toThrow();
+    await flush();
     expect(h.client.disconnected).toBe(true);
     expect(logger).toHaveBeenCalled();
   });
@@ -325,6 +326,7 @@ describe("TelnyxWebphone", () => {
       expect.objectContaining({ event: "disconnect", reason: "component_unmount", deviceSessionId: "device-1", callSessionId: "session-1", alreadyDisconnected: false }),
     ]);
     expect(h.phone.getSnapshot().call).toBeNull();
+    await flush();
     expect(h.client.disconnected).toBe(true);
   });
 
@@ -1682,6 +1684,8 @@ describe("Telnyx SDK authentication and recovery contract", () => {
     const h = await active();
     h.client.emit("telnyx.error", { error: { code: 45003, fatal: true } });
     expect(h.phone.getSnapshot()).toMatchObject({ status: "failed", call: null });
+    expect(h.media.track.stop).toHaveBeenCalledOnce();
+    await flush();
     expect(h.client.disconnected).toBe(true);
     expect(h.requests.filter(row => row.url.includes("/token"))).toHaveLength(1);
     h.phone.stop();

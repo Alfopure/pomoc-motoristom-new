@@ -60,7 +60,7 @@ function explain(alert: TelephonyAlert): Explanation {
     },
     ledger: {
       title: "Udalosť sa nepodarilo spracovať",
-      happened: `Počet neúspešne spracovaných udalostí za posledných 24 hodín: ${d.truncated ? "najmenej " : ""}${count(d.failed24h)}. Môže ísť o doručenie alebo následný krok v aplikácii.`,
+      happened: `Počet neúspešne spracovaných udalostí vyžadujúcich kontrolu za posledných 24 hodín: ${d.truncated ? "najmenej " : ""}${count(d.actionableFailures ?? d.failed24h)}. Môže ísť o doručenie alebo následný krok v aplikácii.${typeof d.retrying === "number" && d.retrying > 0 ? ` Ďalšie udalosti čakajú na automatické opakovanie: ${count(d.retrying)}; ich výsledok zatiaľ nie je potvrdený.` : ""}`,
       outcome: "Chyba spracovania udalosti sama nedokazuje, že hovor zlyhal. Aj „call.hangup“ môže znamenať iba ukončenie jednej vetvy súbežného vyzváňania, nie celého rozhovoru.",
       action: "Porovnajte výsledok dotknutého hovoru nižšie s históriou. Technickú správu pošlite na kontrolu spracovania udalosti.",
     },

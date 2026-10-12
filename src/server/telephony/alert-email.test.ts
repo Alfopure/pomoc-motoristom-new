@@ -18,6 +18,15 @@ function render(alerts: TelephonyAlert[], calls: AlertCallEvidence[] = []) {
 }
 
 describe("Slovak telephony alert explanations", () => {
+  it("separates actionable ledger failures from events awaiting automatic retry", () => {
+    const message = render([alert("ledger", { failed24h: 5, actionableFailures: 2, retrying: 3 })]);
+    for (const output of [message.text, message.html]) {
+      expect(output).toContain("vyžadujúcich kontrolu za posledných 24 hodín: 2");
+      expect(output).toContain("čakajú na automatické opakovanie: 3");
+      expect(output).not.toContain("vyžadujúcich kontrolu za posledných 24 hodín: 5");
+    }
+  });
+
   it.each(["configuration", "sessions", "webhooks", "ledger", "connections", "incidents", "usage", "devices", "provider", "future_check"])("explains %s without claiming every call failed", (check) => {
     const message = render([alert(check)]);
     expect(message.text).toContain("Čo sa stalo:");
