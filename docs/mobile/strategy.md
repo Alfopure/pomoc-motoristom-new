@@ -84,6 +84,9 @@ fotografie/dokumenty, úlohy s kontrolou a správami, odovzdanie a otvorenie
 navigácie. Rozšírenie z 12. októbra pridáva prehľad vlastných úloh naprieč
 prípadmi a chránené textové koncepty. Ďalší schválený rozsah pridáva
 [priradenie dispečera, nepridelené prípady a mapový výber](case-owner-map.md).
+Nasledujúci celok pridáva [rýchly prehľad a presné filtre](case-filter-overview.md):
+počty otvorených prípadov organizácie, priame výbery a konkrétny stav/prioritu.
+Používa existujúce prípady a nevyžaduje ďalšiu SQL migráciu ani natívny modul.
 Aktuálna poloha zariadenia a bežné notifikácie zostávajú ďalším rozsahom.
 Zakladanie je výslovná online operácia; výpadok nesmie spustiť automatické
 opakované odoslanie. Úspešný zápis sa oddelí od následného načítania detailu.

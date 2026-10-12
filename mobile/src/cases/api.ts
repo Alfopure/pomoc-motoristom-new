@@ -1,4 +1,5 @@
-import type { MobileCaseCreated, MobileCaseCreateInput, MobileCaseDetail, MobileCaseDispatchers, MobileCaseFilter, MobileCaseNoteInput, MobileCaseNoteAdded, MobileCases, MobileCaseSummary, MobileCaseUpdateInput, MobileCaseUpdated, MobileScope, MobileCaseOwnerContext, MobileCaseOwnerInput, MobileCaseOwnerAssigned } from "../../../src/lib/mobile-api";
+import type { MobileCaseOverview, MobileCaseCreated, MobileCaseCreateInput, MobileCaseDetail, MobileCaseDispatchers, MobileCaseFilter, MobileCaseNoteInput, MobileCaseNoteAdded, MobileCases, MobileCaseSummary, MobileCaseUpdateInput, MobileCaseUpdated, MobileScope, MobileCaseOwnerContext, MobileCaseOwnerInput, MobileCaseOwnerAssigned } from "../../../src/lib/mobile-api";
+import { isMobileCaseStatus, isMobileCasePriority, isClosedCaseStatus } from "../../../src/lib/mobile-case-filters";
 import { MobileApiError, type MobileTransport } from "../lib/api";
 import { createHandoffApi } from "../handoff/api";
 import { createWorkApi } from "../work/api";
@@ -87,20 +88,33 @@ export function createCasesApi(config: MobileConfig, profileId: string, getToken
     handoffs: createHandoffApi(config, profileId, getToken, transport, expectedOrganization),
     list: async (filter: MobileCaseFilter, signal?: AbortSignal): Promise<MobileCases & { requestedAt: number }> => {
       const requestedAt = Date.now();
+      const status = filter.status ?? null, priority = filter.priority ?? null;
+      if (status !== null && !isMobileCaseStatus(status) || priority !== null && !isMobileCasePriority(priority)
+        || status !== null && isClosedCaseStatus(status) && filter.category !== "all") throw new MobileApiError("Vyberte platný stav a prioritu prípadu.", 400);
       const q = filter.q.trim(), ownerId = filter.ownerId ?? null;
       if (ownerId !== null && (!isId(ownerId) || filter.ownership !== "all")) throw new MobileApiError("Vyberte platného dispečera.", 400);
       const params = new URLSearchParams({ ownership: filter.ownership, category: filter.category, q, limit: "25" });
       if (ownerId) params.set("ownerId", ownerId);
+      if (status) params.set("status", status);
+      if (priority) params.set("priority", priority);
       if (filter.cursor) params.set("cursor", filter.cursor);
       const body = await request("?" + params.toString(), undefined, signal), selection = object(body.selection);
-      // Older servers omit ownerId only for an unfiltered list; a selected
-      // dispatcher must always be echoed exactly before rows reach the UI.
+      // Older servers may omit inactive optional filters. Every selected
+      // owner, status and priority must be echoed exactly before rows reach the UI.
       if (selection.ownership !== filter.ownership || selection.category !== filter.category || selection.q !== q || (selection.ownerId ?? null) !== ownerId
+        || (selection.status ?? null) !== status || (selection.priority ?? null) !== priority
         || !Array.isArray(body.cases) || body.cases.length > 25 || !isNullableText(body.nextCursor)
         || body.nextCursor === "" || (body.nextCursor !== null && body.nextCursor === filter.cursor)) throw invalid();
       const cases = body.cases.map(summary);
+      if (cases.some(item => status !== null && item.status !== status || priority !== null && item.priority !== priority)) throw invalid();
       if (filter.ownership === "unassigned" && cases.some(item => item.owner.id !== null || item.owner.mine) || new Set(cases.map(item => item.id)).size !== cases.length || (ownerId !== null && cases.some(item => item.owner.id !== ownerId))) throw invalid();
-      return { ...scope(body), requestedAt, cases, nextCursor: body.nextCursor, selection: { ownership: filter.ownership, category: filter.category, q, ownerId } };
+      return { ...scope(body), requestedAt, cases, nextCursor: body.nextCursor, selection: { ownership: filter.ownership, category: filter.category, q, ownerId, status, priority } };
+    },
+    overview: async (signal?: AbortSignal): Promise<MobileCaseOverview> => {
+      const body = await request("/overview", undefined, signal), counts = object(body.counts);
+      const names = ["open", "mine", "unassigned", "urgent"] as const;
+      if (names.some(name => typeof counts[name] !== "number" || !Number.isSafeInteger(counts[name]) || (counts[name] as number) < 0)) throw invalid();
+      return { ...scope(body), counts: { open: counts.open as number, mine: counts.mine as number, unassigned: counts.unassigned as number, urgent: counts.urgent as number } };
     },
     ownerContext: async (id: string, signal?: AbortSignal): Promise<MobileCaseOwnerContext> => {
       if (!isId(id)) throw new MobileApiError("Prípad sa nenašiel.", 404);

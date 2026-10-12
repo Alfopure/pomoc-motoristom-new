@@ -165,7 +165,7 @@ export type Contact = {
 };
 
 export type Vehicle = {
-  vehicleLookup?: import("@/lib/vehicle-lookup").VehicleLookupSnapshot;
+  vehicleLookup?: import("../lib/vehicle-lookup").VehicleLookupSnapshot;
   id: string;
   licensePlate: string;
   vin?: string;
@@ -470,7 +470,7 @@ export type PartnerDirectoryEntry = {
 };
 
 export type FleetAsset = {
-  vehicleLookup?: import("@/lib/vehicle-lookup").VehicleLookupSnapshot;
+  vehicleLookup?: import("../lib/vehicle-lookup").VehicleLookupSnapshot;
   id: string;
   kind: FleetAssetKind;
   label: string;

@@ -55,7 +55,7 @@ describe("mobile cases contract", () => {
   it("sends and verifies a specific dispatcher filter and projects only that owner's rows", async () => {
     const filter = { ...selection, ownership: "all" as const, ownerId: otherId };
     const f = fixture({ ...list, selection: filter, cases: [{ ...item, owner: { id: otherId, name: "Kolegyňa", mine: false } }] });
-    expect((await f.api.list(filter)).selection).toEqual(filter);
+    expect((await f.api.list(filter)).selection).toEqual({ ...filter, status: null, priority: null });
     expect(new URL(f.transport.mock.calls[0][0]).searchParams.get("ownerId")).toBe(otherId);
     await expect(fixture({ ...list, selection: filter }).api.list(filter)).rejects.toMatchObject({ status: 502 });
   });
@@ -227,5 +227,57 @@ describe("private map request source", () => {
     let ready!: (value: string) => void; const token = new Promise<string>(done => { ready = done; }), controller = new AbortController();
     const result = createCasesApi(config, profileId, () => token, vi.fn(), otherId).mapSource({ mode: "view", target: "pickup", caseId, nonce }, controller.signal);
     controller.abort(); ready("PRIVATE"); await expect(result).rejects.toMatchObject({ status: 0 });
+  });
+});
+
+describe("case status/priority filters and organization overview", () => {
+  it("sends active filters and requires their exact echo and matching rows", async () => {
+    const filter = { ownership: "all" as const, category: "all" as const, q: "", status: "cancelled" as const, priority: "urgent" as const };
+    const body = { ...list, selection: filter, cases: [{ ...item, status: "cancelled", priority: "urgent" }] };
+    const f = fixture(body);
+    expect((await f.api.list(filter)).selection).toMatchObject(filter);
+    const url = new URL(f.transport.mock.calls[0][0]);
+    expect(url.searchParams.get("status")).toBe("cancelled"); expect(url.searchParams.get("priority")).toBe("urgent");
+    for (const change of [{ status: undefined }, { priority: undefined }, { status: "open" }, { priority: "normal" }]) {
+      await expect(fixture({ ...body, selection: { ...filter, ...change } }).api.list(filter)).rejects.toMatchObject({ status: 502 });
+    }
+    for (const change of [{ status: "open" }, { priority: "normal" }]) {
+      await expect(fixture({ ...body, cases: [{ ...body.cases[0], ...change }] }).api.list(filter)).rejects.toMatchObject({ status: 502 });
+    }
+  });
+  it.each([{ status: "bogus" }, { status: "" }, { status: [] }, { priority: "" }, { priority: "bogus" }, { priority: 1 }, { status: "cancelled" }])("rejects invalid outgoing filter before any request %j", async change => {
+    const f = fixture();
+    await expect(f.api.list({ ...selection, ...change } as Parameters<typeof f.api.list>[0])).rejects.toMatchObject({ status: 400 });
+    expect(f.transport).not.toHaveBeenCalled();
+  });
+  it.each([{}, { status: null, priority: null }])("accepts inactive legacy filters without adding params %j", async change => {
+    const f = fixture({ ...list, selection: { ...selection, ...change } });
+    await f.api.list({ ...selection, status: null, priority: null });
+    const params = new URL(f.transport.mock.calls[0][0]).searchParams;
+    expect(params.has("status")).toBe(false); expect(params.has("priority")).toBe(false);
+  });
+  it("rejects a server silently applying a filter to an unfiltered request", async () => {
+    await expect(fixture({ ...list, selection: { ...selection, priority: "urgent" } }).api.list(selection)).rejects.toMatchObject({ status: 502 });
+  });
+  it("reads independent organization counts through scoped auth without list parameters", async () => {
+    const counts = { open: 200, mine: 12, unassigned: 30, urgent: 4 };
+    const f = fixture({ ...scope, counts: { ...counts, secret: "omit" } });
+    expect(await f.api.overview()).toEqual({ ...scope, counts });
+    expect(f.transport.mock.calls[0][0]).toBe(config.apiOrigin + "/api/mobile/v1/cases/overview");
+    expect(f.transport.mock.calls[0][1]).toMatchObject({ method: "GET", headers: { Authorization: "Bearer user-token" } });
+  });
+  it.each([undefined, null, {}, { open: 0, mine: -1, unassigned: 0, urgent: 0 }, { open: "3", mine: 0, unassigned: 0, urgent: 0 }, { open: 3.2, mine: 0, unassigned: 0, urgent: 0 }, { open: Number.MAX_SAFE_INTEGER + 1, mine: 0, unassigned: 0, urgent: 0 }])("never turns invalid counts into zero %#", async counts => {
+    await expect(fixture({ ...scope, counts }).api.overview()).rejects.toMatchObject({ status: 502 });
+  });
+  it("accepts separate-count changes without imposing transactional relationships", async () => {
+    const counts = { open: 0, mine: 2, unassigned: 3, urgent: 1 };
+    expect((await fixture({ ...scope, counts }).api.overview()).counts).toEqual(counts);
+  });
+  it.each([{ profileId: otherId }, { environment: "production" }, { checkedAt: "invalid" }])("rejects foreign overview scope %j", async change => {
+    await expect(fixture({ ...scope, ...change, counts: { open: 0, mine: 0, unassigned: 0, urgent: 0 } }).api.overview()).rejects.toMatchObject({ status: 502 });
+  });
+  it("preserves an unavailable overview as an error", async () => {
+    const f = fixture(); f.transport.mockResolvedValue(Response.json({ error: "Prehľad nie je dostupný." }, { status: 503 }));
+    await expect(f.api.overview()).rejects.toMatchObject({ status: 503 });
   });
 });

@@ -5,7 +5,7 @@ import { loadCaseDetailSnapshot } from "@/data/case-detail-repository";
 import { mapCase } from "@/data/dispatch-repository";
 import { compareCaseRevisions, type CaseDetailData } from "@/data/case-detail";
 import { jobTypeLabels } from "@/domain/case-card";
-import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
+import { casePriorityLabels, caseStatusLabels, isMobileCaseStatus, isMobileCasePriority, isClosedCaseStatus, MOBILE_CLOSED_CASE_STATUSES } from "@/lib/mobile-case-filters";
 import type { MobileCaseCreateInput, MobileCaseCreated, MobileCaseDetailData, MobileCaseDispatcher, MobileCaseFilter, MobileCaseSummary, MobileCaseUpdateInput, MobileCaseUpdated, MobileCaseUpdateStatus } from "@/lib/mobile-api";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/database.types";
@@ -20,10 +20,9 @@ import { mobileCaseMap, mobileLocationChanges, parseMobilePlaceSelection } from 
 
 type Admin = SupabaseClient<Database>;
 type CaseRow = Database["public"]["Tables"]["motorist_cases"]["Row"];
-type Selection = Pick<MobileCaseFilter, "ownership" | "category" | "q"> & { ownerId: string | null };
+type Selection = Pick<MobileCaseFilter, "ownership" | "category" | "q"> & Required<Pick<MobileCaseFilter, "ownerId" | "status" | "priority">>;
 type Cursor = { createdAt: string; id: string; selection: string };
 export type MobileCaseQuery = Selection & { limit: number; cursor: Cursor | null };
-const CLOSED = ["completed_assisted", "completed_no_assistance", "rejected", "cancelled", "futile_trip"] as const;
 const UPDATE_STATUSES = ["open", "completed_assisted", "completed_no_assistance", "waiting_for_docs", "cancelled", "futile_trip"] as const satisfies readonly MobileCaseUpdateStatus[];
 const SEARCH_LIMIT = 100;
 const DISPATCHER_LIMIT = 200;
@@ -34,12 +33,15 @@ const STRING_LIMITS = { contactName: 200, contactPhone: 64, licensePlate: 32, ve
 function badInput(message = "Neplatné údaje prípadu."): never { throw new MutationError(message, 400); }
 
 export function parseMobileCaseQuery(params: URLSearchParams): MobileCaseQuery {
-  const allowed = new Set(["ownership", "category", "q", "cursor", "limit", "ownerId"]);
+  const allowed = new Set(["ownership", "category", "q", "cursor", "limit", "ownerId", "status", "priority"]);
   for (const key of params.keys()) if (!allowed.has(key) || params.getAll(key).length !== 1) badInput("Neplatný filter prípadov.");
   const ownership = params.get("ownership") ?? "all", category = params.get("category") ?? "open";
   if (ownership !== "mine" && ownership !== "all" && ownership !== "unassigned" || category !== "open" && category !== "all") badInput("Neplatný filter prípadov.");
   const ownerId = params.get("ownerId");
   if (ownerId !== null && (ownership !== "all" || !isUuid(ownerId))) badInput("Neplatný filter dispečera.");
+  const status = params.get("status"), priority = params.get("priority");
+  if (status !== null && !isMobileCaseStatus(status) || priority !== null && !isMobileCasePriority(priority)) badInput("Neplatný stav alebo priorita prípadu.");
+  if (category === "open" && isClosedCaseStatus(status)) badInput("Ukončený stav vyžaduje zobrazenie všetkých prípadov.");
   const q = (params.get("q") ?? "").trim();
   if (q.length > 120 || /[\u0000-\u001f]/.test(q)) badInput("Vyhľadávanie môže mať najviac 120 znakov.");
   const rawLimit = params.get("limit") ?? "25";
@@ -55,13 +57,14 @@ export function parseMobileCaseQuery(params: URLSearchParams): MobileCaseQuery {
       cursor = { id: value.id, createdAt: value.createdAt, selection: value.selection };
     } catch { badInput("Stránka prípadov už nie je platná. Obnovte zoznam."); }
   }
-  return { ownership, category, q, ownerId, limit: Number(rawLimit), cursor };
+  return { ownership, category, q, ownerId, status, priority, limit: Number(rawLimit), cursor };
 }
 
 function selectionKey(actor: MotoristActor, query: Selection) {
   const scope = [actor.organizationId, actor.profileId, query.ownership, query.category, query.q];
   // Keep existing unfiltered cursors valid for clients that send explicit ownership.
   if (query.ownerId) scope.push(query.ownerId);
+  if (query.status !== null || query.priority !== null) scope.push("case-filters-v1", "status", query.status ?? "", "priority", query.priority ?? "");
   return createHash("sha256").update(JSON.stringify(scope)).digest("hex");
 }
 
@@ -84,7 +87,9 @@ function filteredCases(admin: Admin, actor: MotoristActor, query: Selection, sig
   if (query.ownership === "mine") read = read.eq("owner_id", actor.profileId);
   else if (query.ownership === "unassigned") read = read.is("owner_id", null);
   else if (query.ownerId) read = read.eq("owner_id", query.ownerId);
-  if (query.category === "open") for (const status of CLOSED) read = read.neq("status", status);
+  if (query.category === "open") for (const status of MOBILE_CLOSED_CASE_STATUSES) read = read.neq("status", status);
+  if (query.status !== null) read = read.eq("status", query.status);
+  if (query.priority !== null) read = read.eq("priority", query.priority);
   return read;
 }
 
@@ -137,7 +142,7 @@ export async function listMobileCases(actor: MotoristActor, query: MobileCaseQue
     if (!data) badInput("Vybraný dispečer sa nenašiel.");
   }
   const ids = await searchCaseIds(admin, actor, query, abort);
-  const selection = { ownership: query.ownership, category: query.category, q: query.q, ownerId: query.ownerId };
+  const selection = { ownership: query.ownership, category: query.category, q: query.q, ownerId: query.ownerId, status: query.status, priority: query.priority };
   if (ids?.length === 0) return { cases: [], nextCursor: null, selection };
   const page = () => {
     let read = filteredCases(admin, actor, query, abort);

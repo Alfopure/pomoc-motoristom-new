@@ -14,6 +14,10 @@ cieľ, problém, poznámku a nedávnu históriu. Výber telefónu pripraví čí
 v ústredni; nezačne sám hovor.
 
 Predvolene sa zobrazia **všetky otvorené prípady** podľa výberu majiteľa.
+Prehľad pridáva [počty a filtre podľa stavu a priority](case-filter-overview.md).
+Počty sa vzťahujú na otvorené prípady celej organizácie; aktuálny textový
+alebo dispečerský filter ich nemení. Výslovný výber konkrétneho stavu
+umožní vyhľadať aj uzavreté prípady bez zmeny predvoleného pohľadu.
 Zoznam možno filtrovať podľa konkrétneho dispečera alebo rýchlo prepnúť na
 moje prípady. Výber obsahuje aj neaktívnych ľudských dispečerov organizácie,
 aby sa dali nájsť staršie priradené prípady; označí ich ako neaktívnych.
