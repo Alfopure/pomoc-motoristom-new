@@ -110,6 +110,7 @@ export type EffectsDeps = {
   environment: TelephonyEnvironment;
   mediaBaseUrl: string | null;
   now: () => Date;
+  monotonicNow?: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger?: (entry: Record<string, unknown>) => void;
   /** Wrap-up seconds for an operator (defaults to 30 when unknown). */
@@ -1114,7 +1115,7 @@ class RecordingConnectionPendingError extends Error {
   constructor() { super("recorded connection awaits provider confirmation; durable continuation retained"); }
 }
 
-async function executeRecordedConnection(deps: EffectsDeps, ctx: ExecutionContext, command: Extract<Command, { kind: "bridge" }>): Promise<{ skipped: false; detail: { conferenceId: string } }> {
+async function executeRecordedConnection(deps: EffectsDeps, ctx: ExecutionContext, command: Extract<Command, { kind: "bridge" }>): Promise<{ skipped: false; detail: { conferenceId: string; connectedAt: string; unbridgedControlIds: string[] } }> {
   const telnyx = requireTelnyx(deps), name = command.recordingConferenceName;
   if (!deps.renewLease || name !== `rec-${ctx.session.id}-${command.commandId}`) throw new RecordingContinuationSupersededError();
   // Normalize optional undefined values exactly as the persisted JSON snapshot.
@@ -1123,10 +1124,20 @@ async function executeRecordedConnection(deps: EffectsDeps, ctx: ExecutionContex
   const sourceEventId = readMeta(ctx.session).recording?.pendingAudio?.sourceEventId;
   const operatorProfileId = ctx.session.answered_by_profile_id;
   let expectedConferenceId = ctx.session.conference_name === name ? ctx.session.conference_id : null;
+  let unbridgedControlIds: string[] = [];
   const readinessDeadline = Date.now() + 10_000;
   const current = async () => {
     try { await deps.renewLease?.(); } catch { throw new RecordingContinuationSupersededError(); }
-    const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
+    // Both reads are scoped to the same owned session and fixed command legs.
+    // Settle both before failing or releasing the lease; neither read depends
+    // on the other's result. Provider actions still wait for both guards.
+    const reads = await Promise.allSettled([
+      deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle(),
+      deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id)
+        .in("telnyx_call_control_id", [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)]),
+    ]);
+    if (reads[0].status === "rejected" || reads[1].status === "rejected") throw new RecordingContinuationSupersededError();
+    const fresh = reads[0].value, legs = reads[1].value;
     const recording = fresh.data ? readMeta(fresh.data).recording : undefined;
     if (fresh.error || !fresh.data || fresh.data.ended_at || !recording ||
       recording.epoch !== epoch || recording.suppressionReason === "objection" ||
@@ -1138,17 +1149,16 @@ async function executeRecordedConnection(deps: EffectsDeps, ctx: ExecutionContex
     // version. Validate the actual operation/epoch/topology and adopt its latest
     // snapshot, retaining CAS for subsequent writes.
     ctx.session = fresh.data;
-    const legs = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", deps.organizationId).eq("session_id", ctx.session.id)
-      .in("telnyx_call_control_id", [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)]);
     if (legs.error || legs.data?.length !== 2 || legs.data.some((leg) => !isOpenLeg(leg) || !leg.answered_at)) throw new RecordingContinuationSupersededError();
+    unbridgedControlIds = legs.data.filter(leg => !leg.bridged_at).map(leg => leg.telnyx_call_control_id);
   };
   await current();
-  const joined = async (id: string, leg: string) => {
+  const joined = async (id: string, required: string[]) => {
     for (let attempt = 0; attempt < 8; attempt++) {
       if (Date.now() > readinessDeadline) throw new RecordingConnectionPendingError();
       await current();
       const response = await telnyx.request<{ data?: Array<{ call_control_id?: string; status?: string }> }>("GET", `/conferences/${encodeURIComponent(id)}/participants`);
-      if (response?.data?.some((entry) => entry.call_control_id === leg && entry.status === "joined")) return;
+      if (required.every(leg => response?.data?.some(entry => entry.call_control_id === leg && entry.status === "joined"))) return deps.now().toISOString();
       if (attempt < 7) await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(200);
     }
     throw new RecordingConnectionPendingError();
@@ -1175,16 +1185,16 @@ async function executeRecordedConnection(deps: EffectsDeps, ctx: ExecutionContex
       ctx.session = updated.data;
     }
     ctx.conferenceId = id;
-    await joined(id, resolveLeg(ctx, command.leg));
+    await joined(id, [resolveLeg(ctx, command.leg)]);
     await current();
     await telnyx.conferenceAction(id, "join", {
       call_control_id: resolveLeg(ctx, command.target), hold: false, mute: false,
       start_conference_on_enter: true, end_conference_on_exit: false, beep_enabled: "never",
       commandId: commandId({ sessionId: ctx.session.id, legId: resolveLeg(ctx, command.target), step: command.commandId, intent: "recording:conference:connect" }),
     });
-    await joined(id, resolveLeg(ctx, command.target));
+    const connectedAt = await joined(id, [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)]);
     await current();
-    return { skipped: false, detail: { conferenceId: id } };
+    return { skipped: false, detail: { conferenceId: id, connectedAt, unbridgedControlIds } };
   } catch (error) {
     if (error instanceof RecordingContinuationSupersededError) throw error;
     throw new RecordingConnectionPendingError();
@@ -1900,6 +1910,9 @@ async function executeReduceResult(
         }
       }
       const executed = await (overlapped.get(key) ?? executeCommand(deps, ctx, command));
+      const acknowledgedAt = deps.now().toISOString();
+      const monotonicNow = deps.monotonicNow ?? (() => performance.now());
+      const acknowledgedTick = monotonicNow();
       if (command.kind === "dial" && executed.skipped) {
         throw new CommandPrerequisiteRejectedError(String(executed.detail?.reason ?? "dial no longer authorized"));
       }
@@ -1931,9 +1944,20 @@ async function executeReduceResult(
             const update = emptyTransition();
             const verifiedConnection = command.kind === "bridge" && command.recordingConferenceName && typeof executed.detail?.conferenceId === "string"
               ? { commandId: command.commandId, epoch: pending.epoch, startedAt: pending.startedAt ?? pending.readyAt,
-                confirmedAt: deps.now().toISOString(), conferenceId: executed.detail.conferenceId,
+                confirmedAt: typeof executed.detail.connectedAt === "string" ? executed.detail.connectedAt : acknowledgedAt, conferenceId: executed.detail.conferenceId,
                 operatorProfileId: fresh.data.answered_by_profile_id, callControlIds: [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)] }
               : recording.connection;
+            if (command.kind === "bridge" && command.recordingConferenceName && typeof executed.detail?.connectedAt === "string" &&
+              verifiedConnection?.confirmedAt && !recording.connection?.confirmedAt) {
+              // Conference calls emit joined membership, not call.bridged.
+              // Persist the verified two-party connection for the existing
+              // timeline/classifier, together with the connection checkpoint.
+              // No answer or merely accepted join is evidence of connection.
+              update.legs = verifiedConnection.callControlIds.filter(callControlId =>
+                Array.isArray(executed.detail?.unbridgedControlIds) && executed.detail.unbridgedControlIds.includes(callControlId)).map(callControlId => ({
+                callControlId, values: { bridged_at: verifiedConnection.confirmedAt },
+              }));
+            }
             update.session.metadata = toJson({ ...meta, recording: { ...recording, connection: verifiedConnection, pendingAudio: remaining.length ? { ...recording.pendingAudio, commands: remaining } : null } });
             session = await persistTransition(deps, { session: fresh.data, transition: update, expectedVersion: fresh.data.version, event: input.event, phase: "critical" });
             ctx.session = session;
@@ -1953,7 +1977,7 @@ async function executeReduceResult(
             const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
             if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
             ctx.session = latest.data;
-            const changed = recordingCommandOutcome(ctx.session, command, true, deps.now().toISOString(), false, false, typeof executed.detail?.providerRecordingId === "string" ? executed.detail.providerRecordingId : null);
+            const changed = recordingCommandOutcome(ctx.session, command, true, acknowledgedAt, false, false, typeof executed.detail?.providerRecordingId === "string" ? executed.detail.providerRecordingId : null);
             const update = emptyTransition();
             update.session.metadata = changed.metadata;
             try {
@@ -1967,8 +1991,11 @@ async function executeReduceResult(
         ctx.session = session;
         if (command.kind === "recording_start") {
           const pendingBeforeSettle = readMeta(session).recording?.pendingAudio;
-          // Persist the provider identity before the proven media-settle interval.
-          await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(RECORDING_START_SETTLE_MS);
+          // The recorder is already starting while its acknowledgement is saved.
+          // Keep the full proven interval after success, counting that DB work
+          // once. Never shorten it because the wall clock jumped forward.
+          const remaining = Math.ceil(Math.max(0, RECORDING_START_SETTLE_MS - Math.max(0, monotonicNow() - acknowledgedTick)));
+          if (remaining > 0) await (deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(remaining);
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
           const recording = fresh.data ? readMeta(fresh.data).recording : undefined;
           const recorder = recording?.recorders.find((item) => item.id === command.recorderId);

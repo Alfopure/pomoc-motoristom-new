@@ -202,6 +202,7 @@ export function callCenterCallFromActive(
     // The call-log routes (`link-case`, `outcome`) are keyed on the log row, so
     // a live session uses that id as soon as the row exists.
     id: call.callId ?? call.sessionId,
+    sessionId: call.sessionId,
     providerSessionId: call.sessionId,
     status: callCenterStatusFor(call),
     direction: call.direction,

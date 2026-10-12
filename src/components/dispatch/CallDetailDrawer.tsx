@@ -92,7 +92,7 @@ export function CallDetailDrawer({
         {call.outcomeNote?.trim() && <section className="rounded-md border border-zinc-200 p-3 text-sm"><h3 className="font-semibold">Poznámka k hovoru</h3><p className="mt-1 whitespace-pre-wrap break-words text-zinc-700">{call.outcomeNote}</p></section>}
         {call.providerSessionId && <CallJourneyCard key={`journey:${call.id}`} id={call.id} />}
         <CallRecordingDetail key={`recording:${call.id}`} callId={call.id} />
-        {canViewDiagnostics && <CallDiagnosticsCard key={`diagnostics:${call.id}`} callSessionId={call.providerSessionId} />}
+        {canViewDiagnostics && <CallDiagnosticsCard key={`diagnostics:${call.id}`} callSessionId={call.sessionId} />}
       </div> : null}
     </div>
   );

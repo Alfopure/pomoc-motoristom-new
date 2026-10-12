@@ -25,7 +25,8 @@ function detail(index: number): CallRecordingDetail {
 }
 
 async function setup(page: Page) {
-  const state = { reads: [] as number[], pending: new Map<number, Route>(), delay: new Set<number>(), deny: false };
+  const state = { reads: [] as number[], pending: new Map<number, Route>(), delay: new Set<number>(), deny: false,
+    diagnosticReads: [] as string[], diagnosticUnavailable: false };
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/*", async (route) => {
@@ -33,6 +34,14 @@ async function setup(page: Page) {
     if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: `<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
       *{box-sizing:border-box}body{margin:0;background:#f6f7f9;color:#18181b;font:14px/1.5 Arial,sans-serif}main{max-width:900px;margin:20px auto;padding:20px}button{font:inherit;padding:8px;border:1px solid #ddd;border-radius:6px;background:white;cursor:pointer}button:disabled{opacity:.6}h1,h2,h3,p{margin:10px 0}svg{width:16px;height:16px;vertical-align:middle}section{padding:14px;border:1px solid #ddd;border-radius:8px;margin:12px 0}[role=dialog]{background:white;padding:20px}[role=dialog][aria-hidden=true]{display:none}[data-testid=call-recording-detail]{margin-top:16px}audio{width:100%}
       </style><div id="root"></div></html>` });
+    if (url.pathname === "/api/diagnostics") {
+      const session = url.searchParams.get("callSessionId") ?? "";
+      state.diagnosticReads.push(session);
+      if (state.diagnosticUnavailable) return route.fulfill({ status: 503, json: { error: "unavailable" } });
+      if (![101, 102, 103].map(id).includes(session)) return route.fulfill({ status: 404, json: { error: "not found" } });
+      return route.fulfill({ json: { callSessionId: session, checkedAt: "2026-10-11T14:30:00.000Z", events: [],
+        legs: [{ id: id(500), role: "operator", answeredAt: "2026-10-11T14:27:25.000Z", bridgedAt: "2026-10-11T14:27:28.000Z", endedAt: "2026-10-11T14:28:23.000Z" }], nextCursor: null, cause: "unknown" } });
+    }
     const match = url.pathname.match(/\/calls\/[^/]+\/(recording-detail|journey)$/);
     if (match) {
       const index = Number(url.pathname.split("/")[4].slice(-12));
@@ -96,4 +105,23 @@ test("a slow previous detail cannot survive a call change or a denied refresh", 
   await expect(page.getByText("Záznam testovacieho hovoru 2", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Úsek 1/ })).toHaveCount(0);
   expect(errors).toEqual([]);
+});
+
+test("historical diagnostics uses the internal session and recovers a failed refresh", async ({ page }) => {
+  const { state, errors } = await setup(page);
+  await page.getByRole("button", { name: "Hovor 1", exact: true }).click();
+  await page.getByRole("button", { name: /Diagnostika hovoru/ }).click();
+  await expect(page.getByRole("table", { name: "Vetvy hovoru · serverové údaje" })).toBeVisible();
+  expect(state.diagnosticReads).toEqual([id(101)]);
+  await page.evaluate(() => window.callDetailFixture.select(2));
+  state.diagnosticUnavailable = true;
+  await page.getByRole("button", { name: /Diagnostika hovoru/ }).click();
+  await expect(page.getByRole("alert")).toContainText("Obnovenie sa nepodarilo");
+  state.diagnosticUnavailable = false;
+  await page.getByRole("button", { name: "Skúsiť znova", exact: true }).click();
+  await expect(page.getByRole("table", { name: "Vetvy hovoru · serverové údaje" })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(state.diagnosticReads).toEqual([id(101), id(102), id(102)]);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: ".context/recorded-call-diagnostics-fixture-20261011.png", fullPage: true });
 });
