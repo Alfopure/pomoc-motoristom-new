@@ -1,13 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Archive, ListChecks, Plus, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
+import { useState } from "react";
+import { Plus, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
 import { CaseTable, type CaseSortState } from "./CaseTable";
+import { CaseStatusFilter } from "./CaseStatusFilter";
 import type { CaseFilters } from "./CaseList";
 import { CaseAccessBoundary, CaseDraftActivity } from "./CaseCollaborationProvider";
 import type { CallCenterCall } from "@/data/dispatch-types";
-import { casePriorityLabels, caseStatusLabels } from "@/domain/statuses";
-import type { CasePriority, CaseStatus, DispatchCase, FleetAsset, Branch, Operator } from "@/domain/types";
+import { casePriorityLabels } from "@/domain/statuses";
+import type { CasePriority, DispatchCase, FleetAsset, Branch, Operator } from "@/domain/types";
 
 type CaseDirectoryProps = {
   activeCaseId: string;
@@ -30,22 +31,6 @@ type CaseDirectoryProps = {
   onSortChange: (sort: CaseSortState) => void;
 };
 
-const statusOptions: CaseStatus[] = [
-  "new",
-  "triage",
-  "open",
-  "waiting_for_client",
-  "scheduled",
-  "assigned",
-  "dispatched",
-  "in_progress",
-  "waiting_for_docs",
-  "completed_assisted",
-  "completed_no_assistance",
-  "rejected",
-  "cancelled",
-  "futile_trip",
-];
 const priorityOptions: CasePriority[] = ["urgent", "high", "normal", "low"];
 type CaseSourceType = NonNullable<DispatchCase["sourceType"]>;
 const sourceOptions: CaseSourceType[] = ["client", "assistance", "samoplatca", "partner", "internal"];
@@ -56,16 +41,6 @@ const sourceLabels: Record<CaseSourceType, string> = {
   partner: "Partner",
   internal: "Interné",
 };
-
-type DirectoryMode = "active" | "history";
-
-const terminalStatuses = new Set<CaseStatus>([
-  "completed_assisted",
-  "completed_no_assistance",
-  "rejected",
-  "cancelled",
-  "futile_trip",
-]);
 
 export function CaseDirectory({
   activeCaseId,
@@ -87,14 +62,8 @@ export function CaseDirectory({
   sort,
   totalCases,
 }: CaseDirectoryProps) {
-  const [mode, setMode] = useState<DirectoryMode>("active");
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const activeCount = useMemo(() => cases.filter((caseItem) => !terminalStatuses.has(caseItem.status)).length, [cases]);
-  const historyCount = cases.length - activeCount;
-  const visibleCases = useMemo(
-    () => cases.filter((caseItem) => (mode === "active" ? !terminalStatuses.has(caseItem.status) : terminalStatuses.has(caseItem.status))),
-    [cases, mode],
-  );
+  const visibleCases = cases;
 
   return (
     <CaseAccessBoundary>
@@ -105,7 +74,7 @@ export function CaseDirectory({
           <div className="hidden min-w-0 lg:block">
             <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-normal text-zinc-700">
               <SlidersHorizontal size={16} />
-              {mode === "active" ? "Aktívne prípady" : "História prípadov"}
+              Prípady
             </div>
             <p className="mt-1 text-xs font-medium text-zinc-500">
               {visibleCases.length} z {totalCases} záznamov
@@ -143,27 +112,6 @@ export function CaseDirectory({
           </div>
         </div>
 
-        <div className="mt-2 grid grid-cols-2 gap-1 rounded-md bg-zinc-100 p-0.5 lg:mt-3 lg:w-fit lg:min-w-[320px] lg:p-1">
-          <button
-            type="button"
-            onClick={() => setMode("active")}
-            aria-pressed={mode === "active"}
-            className={`inline-flex h-9 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold ${mode === "active" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-600 hover:bg-white/70"}`}
-          >
-            <ListChecks size={14} />
-            Aktívne ({activeCount})
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("history")}
-            aria-pressed={mode === "history"}
-            className={`inline-flex h-9 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold ${mode === "history" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-600 hover:bg-white/70"}`}
-          >
-            <Archive size={14} />
-            História ({historyCount})
-          </button>
-        </div>
-
         <div className="mt-2 grid gap-2 md:grid-cols-2 lg:mt-3 xl:grid-cols-[minmax(260px,1.6fr)_repeat(5,minmax(140px,1fr))]">
           <label className="flex min-w-0 items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-sm text-zinc-500 md:col-span-2 lg:px-3 lg:py-2 xl:col-span-1">
             <Search size={16} />
@@ -176,12 +124,7 @@ export function CaseDirectory({
             />
           </label>
           <div id="directory-filters" className={`${filtersOpen ? "grid" : "hidden"} min-w-0 grid-cols-2 gap-2 md:col-span-2 lg:contents`}>
-          <FilterSelect
-            label="Stav"
-            value={filters.status}
-            onChange={(value) => onFiltersChange({ ...filters, status: value as CaseFilters["status"] })}
-            options={[["all", "Všetky stavy"], ...statusOptions.map((status) => [status, caseStatusLabels[status]] as const)]}
-          />
+          <CaseStatusFilter filters={filters} onChange={onFiltersChange} />
           <FilterSelect
             label="Priorita"
             value={filters.priority}

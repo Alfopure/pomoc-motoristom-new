@@ -6,7 +6,8 @@ export type IncomingWaitPolicy = { mode: "music" | "announcement" | "callback"; 
 export type IncomingWaitStep = { id: string; type: "wait"; minutes: number; policy?: IncomingWaitPolicy };
 export type IncomingRepeatStep = { id: string; type: "repeat"; stepIds: string[]; times: number };
 export type IncomingExternalStep = { id: string; type: "external"; number: string; seconds: number };
-export type IncomingFlowStep = IncomingRingStep | IncomingWaitStep | IncomingRepeatStep | IncomingExternalStep;
+export type IncomingLineStep = { id: string; type: "line"; lineId: string };
+export type IncomingFlowStep = IncomingRingStep | IncomingWaitStep | IncomingRepeatStep | IncomingExternalStep | IncomingLineStep;
 export type IncomingFlow = { version: 1; steps: IncomingFlowStep[]; ending: "hangup_message" | "callback_prompt" | "hangup" };
 export type ExpandedIncomingFlowStep = { step: Exclude<IncomingFlowStep, IncomingRepeatStep>; sourceId: string; occurrenceId: string };
 export type IncomingFlowIssue = { path: string; code: string; message: string };
@@ -54,6 +55,7 @@ export function parseIncomingFlow(value: unknown): IncomingFlow {
     add("steps", "steps_invalid", `Postup musí mať 1 až ${MAX_INCOMING_FLOW_STEPS} krokov.`);
     throw new IncomingFlowValidationError(issues);
   }
+  const stepCount = value.steps.length;
   const preceding = new Map<string, string>();
   value.steps.forEach((raw, index) => {
     const path = `steps[${index}]`;
@@ -90,6 +92,10 @@ export function parseIncomingFlow(value: unknown): IncomingFlow {
       keys(raw, ["id", "type", "number", "seconds"], path);
       phone(raw.number, `${path}.number`);
       integer(raw.seconds, MIN_INCOMING_RING_SECONDS, MAX_INCOMING_RING_SECONDS, `${path}.seconds`);
+    } else if (raw.type === "line") {
+      keys(raw, ["id", "type", "lineId"], path);
+      id(raw.lineId, `${path}.lineId`);
+      if (index !== stepCount - 1) add(path, "line_must_be_last", "Presmerovanie na našu linku musí byť posledný krok. Hovor potom pokračuje podľa cieľovej linky.");
     } else if (raw.type === "wait") {
       keys(raw, ["id", "type", "minutes"], path, ["policy"]);
       integer(raw.minutes, 1, MAX_INCOMING_WAIT_MINUTES, `${path}.minutes`);
@@ -123,7 +129,7 @@ export function parseIncomingFlow(value: unknown): IncomingFlow {
   flow.steps = flow.steps.map(step => ({ ...step, id: step.id.toLowerCase(), ...(step.type === "ring" ? { people: step.people.map(person => ({ ...person, profileId: person.profileId.toLowerCase() })) } : {}), ...(step.type === "repeat" ? { stepIds: step.stepIds.map(ref => ref.toLowerCase()) } : {}) }));
   const expanded = expandIncomingFlow(flow);
   if (expanded.length > MAX_INCOMING_FLOW_EXPANDED_STEPS) add("steps", "expanded_too_long", `Postup môže vykonať najviac ${MAX_INCOMING_FLOW_EXPANDED_STEPS} krokov.`);
-  const seconds = expanded.reduce((sum, { step }) => sum + (step.type === "wait" ? step.minutes * 60 : step.seconds), 0);
+  const seconds = expanded.reduce((sum, { step }) => sum + (step.type === "wait" ? step.minutes * 60 : step.type === "line" ? 0 : step.seconds), 0);
   if (seconds > MAX_INCOMING_FLOW_DURATION_SECONDS) add("steps", "duration_too_long", "Celý postup môže trvať najviac dve hodiny.");
   if (issues.length) throw new IncomingFlowValidationError(issues);
   return flow;

@@ -646,7 +646,7 @@ function HistoryCallRow({
 }) {
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
   const customerNumber = call.direction === "outbound" ? call.calledNumber : call.callerNumber;
-  const customerName = call.direction === "outbound" ? undefined : call.callerName;
+  const customerName = call.contactName ?? (call.direction === "outbound" ? undefined : call.callerName);
   // Some linked call records use "case number · job type" as callerName.
   // The case already has its own link below; keep the full value in details.
   const customerSummary = call.caseNumber && customerName?.startsWith(`${call.caseNumber} · `)

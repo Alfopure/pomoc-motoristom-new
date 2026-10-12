@@ -83,7 +83,7 @@ export function CallDetailDrawer({
         <section className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm">
           <div className="font-semibold text-zinc-950">{call.lineLabel}</div>
           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-600">
-            <span>Volajúci: {call.callerNumber}</span>
+            <span>{call.direction === "outbound" ? "Volaný" : "Volajúci"}: {call.contactName && `${call.contactName} · `}{phone}</span>
             {call.receivedNumber && <span>Volané číslo: {call.receivedNumber}</span>}
             {call.destinationNumber && <span>Finálny cieľ: {call.destinationNumber}</span>}
             {call.queueLabel && <span>Rad: {call.queueLabel}</span>}

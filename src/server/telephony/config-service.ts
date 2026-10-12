@@ -374,6 +374,7 @@ export type RoutingDocument = {
     atomicIncomingLineModes?: boolean;
     /** Atomic flow save and application endpoint schema are both installed. */
     unifiedIncomingFlow?: boolean;
+    lineWorkspace?: boolean;
     /** The personal-mobile server guard only; does not assert parallel-endpoint schema readiness. */
     ownedMobileRouting: boolean;
     defaultInboundCallMode: "ring_first" | "queue_first";
@@ -1450,7 +1451,7 @@ export async function getRoutingDocument(deps: ConfigDeps, input: RoutingDocumen
 }
 
 const SNAPSHOT_KEYS = ["groups", "members", "plans", "steps", "hours", "intervals", "exceptions", "pauseReasons", "presence", "lines", "ivrMenus", "ivrOptions", "profiles", "operatorSettings", "devices", "settings"] as const;
-export type RoutingSnapshot = Record<(typeof SNAPSHOT_KEYS)[number], unknown> & { snapshotId: string; atomicIncomingLineModes?: boolean; unifiedIncomingFlow?: boolean };
+export type RoutingSnapshot = Record<(typeof SNAPSHOT_KEYS)[number], unknown> & { snapshotId: string; atomicIncomingLineModes?: boolean; unifiedIncomingFlow?: boolean; lineWorkspace?: boolean };
 
 export function routingDocumentFromSnapshot(snapshot: RoutingSnapshot, input: RoutingDocumentInput): RoutingDocument {
   if (!snapshot || typeof snapshot.snapshotId !== "string" || SNAPSHOT_KEYS.some(key => key !== "settings" && !Array.isArray(snapshot[key]))) {
@@ -1458,7 +1459,7 @@ export function routingDocumentFromSnapshot(snapshot: RoutingSnapshot, input: Ro
   }
   const rows = SNAPSHOT_KEYS.map(key => snapshot[key]) as unknown as Awaited<ReturnType<typeof loadLegacyRoutingRows>>;
   const document = routingDocumentFromRows(rows, input);
-  return { ...document, snapshotId: snapshot.snapshotId, capabilities: { ...document.capabilities!, atomicIncomingLineModes: snapshot.atomicIncomingLineModes === true, unifiedIncomingFlow: snapshot.unifiedIncomingFlow === true } };
+  return { ...document, snapshotId: snapshot.snapshotId, capabilities: { ...document.capabilities!, atomicIncomingLineModes: snapshot.atomicIncomingLineModes === true, unifiedIncomingFlow: snapshot.unifiedIncomingFlow === true, lineWorkspace: snapshot.lineWorkspace === true && snapshot.unifiedIncomingFlow === true } };
 }
 
 /** A single SQL statement sees one MVCC snapshot, including lines/settings which do not bump routingVersion. */

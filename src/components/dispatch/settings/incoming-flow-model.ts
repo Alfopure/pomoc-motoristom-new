@@ -164,6 +164,7 @@ export function moveFlowStep(flow: IncomingFlow, id: string, direction: -1 | 1):
   if (from < 0 || to < 0 || to >= flow.steps.length) return null;
   const steps = [...flow.steps];
   [steps[from], steps[to]] = [steps[to], steps[from]];
+  if (steps.some((step, index) => step.type === "line" && index !== steps.length - 1)) return null;
   if (steps.some((step, index) => step.type === "repeat" && step.stepIds.some(target => !steps.slice(0, index).some(candidate => candidate.id === target && (candidate.type === "ring" || candidate.type === "external"))))) return null;
   return { ...flow, steps };
 }
@@ -174,6 +175,7 @@ export function removeFlowStep(flow: IncomingFlow, id: string): IncomingFlow {
 
 export function incomingStepSummary(step: IncomingFlowStep, flow: IncomingFlow, document: RoutingDocument): string {
   if (step.type === "ring") return `${step.people.map(person => document.operators.find(operator => operator.profileId === person.profileId)?.displayName ?? "Nedostupný operátor").join(" + ") || "Zvonenie bez ľudí"} (najviac ${step.seconds} s)`;
+  if (step.type === "line") { const target = document.lines.find(line => line.id === step.lineId); return `presmerovať na ${target?.label ?? "nedostupnú linku"} (${target?.phoneNumber ?? ""})`; }
   if (step.type === "wait") {
     const policy = step.policy ?? { mode: "callback", intervalSeconds: 60 };
     const audio = policy.mode === "music" ? "iba hudba" : `${policy.mode === "callback" ? "ponuka spätného volania" : "informácia o čakaní"}, medzi hláškami ${policy.intervalSeconds} s hudby`;
@@ -184,5 +186,5 @@ export function incomingStepSummary(step: IncomingFlowStep, flow: IncomingFlow, 
 }
 
 export function incomingFlowSummary(flow: IncomingFlow, document: RoutingDocument): string {
-  return [...flow.steps.map(step => incomingStepSummary(step, flow, document)), FLOW_ENDINGS[flow.ending]].join(" → ");
+  return [...flow.steps.map(step => incomingStepSummary(step, flow, document)), ...(flow.steps.at(-1)?.type === "line" ? [] : [FLOW_ENDINGS[flow.ending]])].join(" → ");
 }

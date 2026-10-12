@@ -62,6 +62,7 @@ export type ActiveCallPayload = {
   callId: string | null;
   state: ActiveCallSessionState;
   direction: ActiveCallDirection;
+  contactName?: string | null;
   callerNumber: string | null;
   calledNumber: string | null;
   lineId: string | null;
@@ -207,6 +208,7 @@ export function callCenterCallFromActive(
     callerNumber: call.callerNumber ?? "",
     calledNumber: call.calledNumber ?? "",
     ...colleagueCallNames(call, options.operatorName),
+    ...(call.contactName ? { contactName: call.contactName, ...(call.direction === "inbound" ? { callerName: call.contactName } : {}) } : {}),
     ...(call.lineId ? { lineId: call.lineId } : {}),
     lineLabel: call.direction === "internal" ? COLLEAGUE_CALL_LABEL : call.lineLabel ?? call.partnerName ?? "Neznáma linka",
     ...(call.partnerName ? { queueLabel: call.partnerName } : {}),
@@ -433,7 +435,7 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     lineLabel: colleague ? COLLEAGUE_CALL_LABEL : call.lineLabel ?? call.partnerName ?? (formatPhoneNumberForDisplay(call.direction === "outbound" ? call.callerNumber : call.calledNumber) || "Neznáma linka"),
     partnerName: call.partnerName,
     number: colleague ? "" : counterpartNumber(call),
-    callerName: colleague,
+    callerName: colleague ?? call.contactName ?? null,
     caseId: call.caseId,
     match: null,
     matchCount: 0,

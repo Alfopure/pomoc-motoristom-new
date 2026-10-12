@@ -183,6 +183,48 @@ try:
                 metadata['incoming_flow']==next_flow and metadata['custom']=={'keep':True})
     before=snapshot(c);save(c,changes(next_flow,next_flow))
     check('unchanged waiting policy save is a no-op',snapshot(c)==before)
+    # Unified workspace: exact migration, no provider calls or seed changes.
+    c.execute("create table motorist_contacts(organization_id uuid, name text, phone text); create table motorist_partner_directory(organization_id uuid,name text,phone text,active boolean); create table motorist_branches(organization_id uuid,name text,phone text,active boolean)")
+    original=snapshot(c)
+    c.execute((ROOT/'supabase/migrations/20261012190000_line_workspace.sql').read_text())
+    check('workspace migration preserves all stored routes',snapshot(c)['lines']==original['lines'] and snapshot(c)['snapshotId']==original['snapshotId'])
+    check('workspace capability is advertised',snapshot(c)['lineWorkspace'] is True)
+    c.execute("update motorist_telephony_lines set metadata=metadata-'return_line_id' where organization_id=%s",(ORG,))
+    def ws(payload,read=None):
+      read=read or snapshot(c)
+      return c.execute('select motorist_save_line_workspace(%s,%s,%s,%s)',(ORG,Jsonb(payload),read['settings']['routing_version'],read['snapshotId'])).fetchone()[0]
+    def ws_rejected(label,payload,code,read=None):
+      before=snapshot(c)
+      try: ws(payload,read); raise AssertionError(label+' accepted')
+      except psycopg.Error as error: check(label,code in str(error))
+      check(label+' is atomic',snapshot(c)==before)
+    current=next(row for row in snapshot(c)['lines'] if row['id']==LINE)['metadata']['incoming_flow']
+    transfer={'version':1,'ending':'hangup','steps':[{'id':str(uuid4()),'type':'line','lineId':LINE2}]}
+    payload=[{'id':LINE,'flow':transfer,'expected_flow':current,'patch':{'label':'Odťahovka','partnerName':'Allianz'}}]
+    committed=ws(payload)
+    stored=next(row for row in committed['after']['lines'] if row['id']==LINE)
+    check('line properties and internal transfer commit together',stored['label']=='Odťahovka' and stored['partner_name']=='Allianz' and stored['metadata']['incoming_flow']==transfer and stored['metadata']['custom']=={'keep':True})
+    read=snapshot(c)
+    ws([{'id':LINE,'flow':None,'expected_flow':transfer,'patch':{'partnerName':None}}])
+    check('metadata-only save retains incoming flow',next(row for row in snapshot(c)['lines'] if row['id']==LINE)['metadata']['incoming_flow']==transfer)
+    ws_rejected('stale combined save cannot overwrite',[{'id':LINE,'flow':None,'expected_flow':transfer,'patch':{'label':'Stale'}}],'stale_document',read)
+    circle={'version':1,'ending':'hangup','steps':[{'id':str(uuid4()),'type':'line','lineId':LINE}]}
+    ws_rejected('internal transfer loop rejected',[{'id':LINE2,'flow':circle,'expected_flow':None,'patch':{'label':'Should rollback'}}],'incoming_line_loop')
+    ws_rejected('destination cannot be disabled while referenced',[{'id':LINE2,'flow':None,'expected_flow':None,'patch':{'active':False}}],'incoming_line_target_invalid')
+    ws_rejected('destination environment cannot split a chain',[{'id':LINE2,'flow':None,'expected_flow':None,'patch':{'environment':'development'}}],'incoming_line_target_invalid')
+    foreign={'version':1,'ending':'hangup','steps':[{'id':str(uuid4()),'type':'line','lineId':FOREIGN_LINE}]}
+    ws_rejected('foreign destination rejected',[{'id':LINE,'flow':foreign,'expected_flow':transfer,'patch':{}}],'incoming_line_target_invalid')
+    c.execute("insert into motorist_contacts values(%s,'Jana','0910 123 456'),(%s,'Foreign','0910 123 456')",(ORG,OTHER))
+    c.execute("insert into motorist_partner_directory values(%s,'AWP Allianz','02 / 3240 8718',true),(%s,'Old','+421911123456',false)",(ORG,ORG))
+    c.execute('set role service_role')
+    try: names=dict(c.execute('select * from motorist_resolve_call_contacts(%s,%s)',(ORG,['421910123456','421232408718','421911123456','910123456'])).fetchall())
+    finally: c.execute('reset role')
+    check('contact names match full normalized phones in one organization',names=={'421910123456':'Jana','421232408718':'AWP Allianz'})
+    for role in ['anon','authenticated']:
+      try:
+        c.execute(f'set role {role}');ws([{'id':LINE,'flow':None,'expected_flow':transfer,'patch':{'label':'Forbidden'}}],snapshot(c));raise AssertionError('workspace callable by '+role)
+      except psycopg.errors.InsufficientPrivilege: checks.append('workspace write denied to '+role)
+      finally: c.execute('reset role')
   print(json.dumps({'checks':len(checks),'passed':checks},ensure_ascii=False,indent=2))
 finally:
   with psycopg.connect(dbname='postgres',autocommit=True,**LOCAL) as admin: admin.execute(f'drop database {NAME} with (force)')

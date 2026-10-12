@@ -1,3 +1,5 @@
+import { loadCallContactNames } from "./contact-names";
+import { normalizeDialNumberForComparison } from "@/lib/telephony/phone";
 import { readPauseReturn } from "@/lib/telephony/presence-policy";
 import { telephonyStabilityEnabled } from "./stability";
 import { UNOWNED_READ_MS } from "./ownership";
@@ -61,6 +63,7 @@ export type ActiveCallView = {
   callId: string | null;
   state: SessionRow["state"];
   direction: SessionRow["direction"];
+  contactName?: string | null;
   callerNumber: string | null;
   calledNumber: string | null;
   lineId: string | null;
@@ -209,6 +212,7 @@ export type ActiveCallRows = {
   devices: DeviceRow[];
   lines: LineRow[];
   operatorSettings: Array<{ profile_id: string; delivery_mode?: string | null; default_mobile_number?: string | null }>;
+  contactNames?: Map<string, string>;
   callIdBySession: Map<string, string>;
 };
 
@@ -282,6 +286,7 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
     if (!keys.every(key => Array.isArray(data[key]))) throw new Error("incomplete active call snapshot");
     const rows = data as unknown as Omit<ActiveCallRows, "callIdBySession"> & { callRows: Array<{ id: string; session_id: string | null }> };
     return {
+      contactNames: await loadCallContactNames(admin, organizationId, rows.sessions.filter(session => session.direction !== "internal").map(session => session.direction === "outbound" ? session.called_number : session.caller_number), 300),
       sessions: rows.sessions, legs: rows.legs, attempts: rows.attempts,
       presence: rows.presence, devices: rows.devices, lines: rows.lines, operatorSettings: rows.operatorSettings,
       callIdBySession: new Map(rows.callRows.flatMap(row => row.session_id ? [[row.session_id, row.id] as const] : [])),
@@ -323,6 +328,7 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
   if (callRowsResult.error) throw new Error(`call rows load failed: ${callRowsResult.error.message}`);
 
   return {
+    contactNames: await loadCallContactNames(admin, organizationId, sessions.filter(session => session.direction !== "internal").map(session => session.direction === "outbound" ? session.called_number : session.caller_number), 300),
     sessions,
     legs: (legsResult.data ?? []) as LegRow[],
     attempts: (attemptsResult.data ?? []) as AttemptRow[],
@@ -398,10 +404,11 @@ function buildActiveCalls(
       callId: callIdBySession.get(session.id) ?? null,
       state: session.state,
       direction: session.direction,
+      contactName: session.direction === "internal" ? null : rows.contactNames?.get(normalizeDialNumberForComparison(session.direction === "outbound" ? session.called_number : session.caller_number)) ?? null,
       callerNumber: session.caller_number,
       calledNumber: session.called_number,
       lineId: session.line_id,
-      lineLabel: line?.label ?? meta.line_label ?? null,
+      lineLabel: meta.routing_line_label ?? line?.label ?? meta.line_label ?? null,
       partnerName: line?.partner_name ?? meta.partner_name ?? null,
       caseId: session.case_id,
       // Keep the field for client compatibility, but never expose a stale

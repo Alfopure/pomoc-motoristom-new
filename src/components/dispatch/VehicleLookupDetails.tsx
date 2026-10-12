@@ -92,7 +92,7 @@ export function VehicleLookupDetails(props: Props) {
   }
 
   return <dialog ref={dialog} aria-labelledby={headingId} aria-describedby={descriptionId}
-    className="m-auto max-h-[92dvh] w-[calc(100dvw-1.5rem)] max-w-7xl overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 p-0 text-zinc-950 [overflow-wrap:anywhere] shadow-2xl backdrop:bg-zinc-950/50 open:flex open:flex-col"
+    className="m-auto h-[min(900px,92dvh)] max-h-[92dvh] w-[calc(100dvw-1.5rem)] max-w-7xl overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 p-0 text-zinc-950 [overflow-wrap:anywhere] shadow-2xl backdrop:bg-zinc-950/50 open:flex open:flex-col"
     onCancel={event => { event.preventDefault(); event.stopPropagation(); closeDialog(); }}
     onKeyDown={event => {
       // A vehicle popup can be opened inside a case/fleet dialog. Keep Escape local.
@@ -108,7 +108,7 @@ export function VehicleLookupDetails(props: Props) {
     <header className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-200 bg-white p-4 sm:px-5">
       <div className="min-w-0">
         <p className="text-xs font-medium text-zinc-500">{props.readOnly ? "Výsledok overenia vozidla" : props.proposal ? "Dohľadané údaje · návrh" : "Uložené overenie vozidla"}</p>
-        <h2 id={headingId} className="mt-1 text-lg font-semibold">Detail vozidla{title ? ` · ${title}` : ""}</h2>
+        <h2 id={headingId} className="mt-1 text-lg font-semibold">Detail vozidla{props.conflict ? " · Overte identitu" : title ? ` · ${title}` : ""}</h2>
         <p id={descriptionId} className="mt-1 break-words text-xs text-zinc-600">{facts.plate?.value ?? props.identity.plate ?? result.query.value}{facts.vin && ` · VIN ${facts.vin.value}`}</p>
         <p className={`mt-2 text-xs ${props.conflict ? "font-medium text-amber-900" : "text-zinc-700"}`}>{props.conflict ? "Identita nesúhlasí · PZP vozidla nepotvrdené" : <>PZP: <strong>{facts.insuranceStatus?.value ?? (isCzech ? "neoverené" : "nepotvrdené")}</strong>{facts.insurer && ` · ${facts.insurer.value}`} · k {vehicleLookupDate(result.query.checkedForDate)}</>}</p>
       </div>

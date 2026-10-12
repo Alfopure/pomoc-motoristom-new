@@ -622,6 +622,7 @@ export type DispatchCall = {
   status: CallStatus;
   callerNumber: string;
   callerName?: string;
+  contactName?: string;
   calledNumber: string;
   receivedNumber?: string;
   destinationNumber?: string;
