@@ -28,7 +28,7 @@ describe("incoming routing service",()=>{
     const h = fixture();
     h.db.update("motorist_telephony_settings", { inbound_call_mode: "queue_first" }, () => true);
     const document = await getCoherentRoutingDocument(h.deps, { organizationId: ORG, includeSettings: false, includeLimits: true });
-    expect(document.capabilities).toEqual({ ownedMobileRouting: flag === "true", defaultInboundCallMode: "queue_first", atomicIncomingLineModes: true, unifiedIncomingFlow: false });
+    expect(document.capabilities).toEqual({ ownedMobileRouting: flag === "true", defaultInboundCallMode: "queue_first", atomicIncomingLineModes: true, unifiedIncomingFlow: false, lineWorkspace: false });
     expect(document.settings).toBeNull();
     expect(h.db.log.filter(row => row.kind === "query")).toHaveLength(0);
   });

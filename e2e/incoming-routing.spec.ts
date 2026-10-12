@@ -80,7 +80,7 @@ for(const width of [1440,1280,390])test(`combined editor remains readable at ${w
  await expect(recipients.getByRole("listitem").filter({hasText:"Martin Novák"})).toHaveCount(1);
  await expect(page.getByRole("textbox",{name:/^Externé číslo/})).toHaveCount(0);
  await page.screenshot({path:path.join(screenshotDirectory,`people-save-${width}.png`),fullPage:true});
- if(width===1440)await page.getByRole("region",{name:"Prichádzajúce hovory",exact:true}).screenshot({path:path.join(screenshotDirectory,"people-save-detail.png")});
+ if(width===1440)await page.getByRole("region",{name:"Linky a smerovanie",exact:true}).screenshot({path:path.join(screenshotDirectory,"people-save-detail.png")});
  if(width!==1280){
   const card=page.locator(`#ring-plan-${ids.plan}`);
   await card.getByRole("radiogroup",{name:"Ako zvoní",exact:true}).getByRole("radio",{name:/^postupne$/i}).click();
@@ -162,7 +162,7 @@ test("dirty tab departure offers save discard and stay",async({page})=>{
  const dialog=page.getByRole("dialog",{name:"Neuložené nastavenia"});await expect(dialog).toBeVisible();await dialog.getByRole("button",{name:"Zostať",exact:true}).click();await expect(page.getByLabel("Názov plánu",{exact:true})).toHaveValue("Zachovať návrh");await page.getByRole("button",{name:"Čísla",exact:true}).click();await expect(dialog).toBeVisible();await page.keyboard.press("Escape");await expect(dialog).toHaveCount(0);
 });
 test("missing coherent RPC adapts deep link to existing plan editor",async({page})=>{
- await boot(page,1440,{mode:"missing",writes:0});await expect(page.locator(`#ring-plan-${ids.plan}`)).toBeVisible();await expect(page.getByRole("button",{name:"Prichádzajúce hovory",exact:true})).toHaveCount(0);
+ await boot(page,1440,{mode:"missing",writes:0});await expect(page.locator(`#ring-plan-${ids.plan}`)).toBeVisible();await expect(page.getByRole("button",{name:"Linky a smerovanie",exact:true})).toHaveCount(0);
 });
 test("readonly dispatcher can inspect but not change routing",async({page})=>{
  await boot(page,1440,{mode:"readonly",writes:0});await openPlanDetails(page);await expect(page.getByLabel("Názov plánu",{exact:true})).toBeDisabled();await expect(page.getByRole("button",{name:"Uložiť všetky zmeny"})).toBeDisabled();
@@ -348,7 +348,7 @@ test("line mode alone protects tab departure and is discarded with the rest",asy
  await page.getByRole("button",{name:"Čísla",exact:true}).click();
  await dialog.getByRole("button",{name:"Zahodiť a pokračovať",exact:true}).click();
  await expect(dialog).toHaveCount(0);
- await page.getByRole("button",{name:"Prichádzajúce hovory",exact:true}).click();
+ await page.getByRole("button",{name:"Linky a smerovanie",exact:true}).click();
  await expect(await openLineMode(page)).toHaveValue("");
  await expect(page.getByRole("button",{name:"Uložiť všetky zmeny",exact:true})).toBeDisabled();
  expect(api.writes).toBe(0);expect(api.linePatches??[]).toEqual([]);

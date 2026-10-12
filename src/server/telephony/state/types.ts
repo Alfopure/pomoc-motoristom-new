@@ -118,7 +118,11 @@ export type FrozenRingStep = {
   timeoutSecs: number;
   members: FrozenRingMember[];
   /** Legacy plans omit this and remain ordinary ring steps. */
-  kind?: "ring" | "wait";
+  kind?: "ring" | "wait" | "line";
+  targetLineId?: string;
+  targetLineLabel?: string;
+  transferHours?: BusinessHoursSchedule | null;
+  transferMode?: "ring_first" | "queue_first";
   waitMinutes?: number;
   waitPolicy?: IncomingWaitPolicy;
   sourceId?: string;
@@ -724,6 +728,8 @@ export type SessionMeta = {
   previous_operator?: string | null;
   answered_external?: string | null;
   sdk_hold?: { leg: string; at: string } | null;
+  routing_line_id?: string;
+  routing_line_label?: string;
   line_label?: string | null;
   partner_name?: string | null;
   [key: string]: unknown;

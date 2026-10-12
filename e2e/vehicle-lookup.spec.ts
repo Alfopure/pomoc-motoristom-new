@@ -192,6 +192,9 @@ for (const width of [1280, 390]) {
     await expect(technical).toContainText("Automatická");
     expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
     const popupBounds = await dialog.boundingBox();
+    expect(popupBounds!.height).toBeGreaterThan(450);
+    const contentHeight = await dialog.locator(":scope > div").evaluate(element => element.clientHeight);
+    expect(contentHeight).toBeGreaterThan(200);
     expect(popupBounds!.x).toBeGreaterThanOrEqual(0);
     expect(popupBounds!.x + popupBounds!.width).toBeLessThanOrEqual(width);
     if (width === 390) {

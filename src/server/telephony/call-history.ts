@@ -1,3 +1,5 @@
+import { loadCallContactNames } from "./contact-names";
+import { normalizeDialNumberForComparison } from "@/lib/telephony/phone";
 import "server-only";
 
 import { mapCallCenterCall } from "@/data/dispatch-repository";
@@ -118,6 +120,7 @@ async function hydrateHistory(supabase: SupabaseClient<Database>, organizationId
     });
   }
 
+  const contactNames = await loadCallContactNames(supabase, organizationId, calls.filter(call => call.direction !== "internal").map(call => call.direction === "outbound" ? call.called_number : call.caller_number));
   return calls.map((call) => ({
     ...mapCallCenterCall({
       call,
@@ -128,6 +131,7 @@ async function hydrateHistory(supabase: SupabaseClient<Database>, organizationId
       queuesById,
       recordingIdByCallId,
     }),
+    contactName: call.direction === "internal" ? undefined : contactNames.get(normalizeDialNumberForComparison(call.direction === "outbound" ? call.called_number : call.caller_number)),
     endReason: call.end_reason ?? undefined,
     waitSecondsKnown: typeof call.wait_seconds === "number" && Number.isFinite(call.wait_seconds) && call.wait_seconds >= 0,
     ...(call.session_id && callbackBySession.has(call.session_id) ? {callback:callbackBySession.get(call.session_id)} : {}),

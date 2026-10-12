@@ -555,3 +555,12 @@ describe("colleague calls", () => {
     expect(row).toMatchObject({ direction: "internal", callerName: "Peter Kováč", colleagueName: "Jana Nováková", lineLabel: "Interný hovor" });
   });
 });
+
+it("shows the directory contact for incoming and operator-originated outgoing calls", () => {
+  for (const direction of ["inbound", "outbound"] as const) {
+    const contact = call({ direction, contactName: "AWP Allianz", callerNumber: direction === "inbound" ? "+421232408718" : "+421232408774", calledNumber: direction === "outbound" ? "+421232408718" : "+421232408774" });
+    const model = buildPhoneBarModel(payload({ calls: [contact] }));
+    expect(model.active?.callerName).toBe("AWP Allianz");
+    expect(model.active?.number).toBe("+421232408718");
+  }
+});

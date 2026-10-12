@@ -1013,6 +1013,17 @@ function startRingPlan(b: TransitionBuilder, customer: LegRow, plan: FrozenRingP
 function ringFromStep(b: TransitionBuilder, customer: LegRow, plan: FrozenRingPlan, fromStep: number): boolean {
   for (let index = fromStep; index < plan.steps.length; index += 1) {
     const step = plan.steps[index];
+    if (step.kind === "line") {
+      // A frozen boundary continues the same customer leg; no PSTN call back
+      // into our own DID and no reuse of earlier offer/command indices.
+      b.enterJourneyStep(index, "routing");
+      b.patchMeta({ routing_line_id: step.targetLineId, routing_line_label: step.targetLineLabel });
+      const hours = evaluateBusinessHours(step.transferHours ?? null, b.ctx.now);
+      if (!hours.open) { startAfterHours(b, customer, hours.reason); return true; }
+      b.exitJourneyStep("line_transferred");
+      if (step.transferMode === "queue_first") { enterWaiting(b, customer, "queue_first", "waiting", true); return true; }
+      continue;
+    }
     if (step.kind === "wait") {
       enterFlowWait(b, customer, index, step.waitMinutes!, step.waitPolicy);
       return true;

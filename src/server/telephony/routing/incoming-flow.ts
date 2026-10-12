@@ -21,6 +21,7 @@ export function materialiseIncomingFlow(flow: IncomingFlow, now: Date, pausedRou
   const steps: FrozenRingStep[] = expandIncomingFlow(flow).map(({ step, sourceId, occurrenceId }, index) => {
     const common = { index, groupId: null, sourceId, occurrenceId, ...origins[index], strategy: "all" as const };
     if (step.type === "wait") return { ...common, kind: "wait", groupName: "Čakáreň", timeoutSecs: 0, waitMinutes: step.minutes, ...(step.policy ? { waitPolicy: { ...step.policy } } : {}), members: [] };
+    if (step.type === "line") return { ...common, kind: "line", groupName: "Presmerovať na našu linku", timeoutSecs: 0, targetLineId: step.lineId, members: [] };
     if (step.type === "external") return {
       ...common, kind: "ring", groupName: "Záložné číslo", timeoutSecs: step.seconds,
       members: [{ kind: "external_number", profileId: null, externalNumber: step.number, provenance: "configured_external", position: 0, ringSecs: step.seconds, memberId: null }],
