@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { AppState, KeyboardAvoidingView, Platform, ScrollView, Share, Text, TextInput, View } from 'react-native';
+import { useAndroidBack } from "../lib/use-android-back";
 import type { MobileHandoffInput } from '../../../src/lib/mobile-api';
 import { Button, Card, ErrorNotice, Loading, styles } from '../ui';
 import { HandoffDraft, previewSnapshot } from './draft';
@@ -22,6 +23,8 @@ export function Handoffs({ draft, active, onBack }: {
   onBack: () => void;
 }) {
   const state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot), scroll = useRef<ScrollView>(null);
+  const back = () => { if (!draft.busy) onBack(); };
+  useAndroidBack(active, back, draft.busy);
   const [shareError, setShareError] = useState<string | null>(null), [expanded, setExpanded] = useState<string | null>(null), [sharing, setSharing] = useState(false);
   useEffect(() => {
     if (active) {
@@ -92,7 +95,7 @@ export function Handoffs({ draft, active, onBack }: {
       <Button
         label="Späť na prípad"
         secondary
-        onPress={onBack}
+        onPress={back}
         disabled={draft.busy} />
 
       {state.receipt && <Card>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { KeyboardAvoidingView, Linking, Modal, Platform, RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
+import { useAndroidBack } from "../lib/use-android-back";
 import { Button, Card, ErrorNotice, Loading, colors, styles } from "../ui";
 import { formatTime } from "../lib/display";
 import type { WorkStore } from "./store";
@@ -37,9 +38,11 @@ export function Attachments({ store, caseId, queryKey, active, onBack }: { store
     finally { locked.current = false; if (alive.current) setBusy(false); }
   }
   const saving = state.status === "saving", editing = state.status === "editing";
+  const back = () => { if (draft.snapshot().status !== "saving" && !locked.current) { if (form) setForm(false); else onBack(); } };
+  useAndroidBack(active, back, saving || busy);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { void query.refetch(); }} />}>
-      <Button label={form ? "Späť na prílohy" : "Späť na prípad"} secondary disabled={saving || busy} onPress={() => form ? setForm(false) : onBack()} />
+      <Button label={form ? "Späť na prílohy" : "Späť na prípad"} secondary disabled={saving || busy} onPress={back} />
       <Text style={styles.heading}>{form ? "Pridať prílohu" : "Prílohy prípadu"}</Text>
       {error && <ErrorNotice message={error} />}{state.error && <ErrorNotice message={state.error} />}
       {state.status === "saved" && <Card><Text accessibilityRole="alert" style={styles.subheading}>Príloha je uložená.</Text><Text style={styles.text}>{state.receipt?.attachment.fileName}</Text></Card>}

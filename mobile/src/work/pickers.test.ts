@@ -9,9 +9,9 @@ vi.mock("expo-image-picker", () => ({ UIImagePickerPreferredAssetRepresentationM
 vi.mock("expo-image-manipulator", () => ({ SaveFormat: { JPEG: "jpeg" }, ImageManipulator: { manipulate: () => {
   let width = mock.width, height = mock.height;
   const context = { resize: (size: { width: number; height: number }) => { mock.resize(size); width = size.width; height = size.height; return context; }, release: vi.fn(),
-    renderAsync: async () => ({ width, height, release: vi.fn(), saveAsync: async (options: unknown) => { mock.save(options); return { uri: "file://prepared.jpg", width, height }; } }) }; return context;
+    renderAsync: async () => ({ width, height, release: vi.fn(), saveAsync: async (options: unknown) => { mock.save(options); return { uri: "file:///cache/ImageManipulator/12345678-1234-4234-8234-123456789abc.jpg", width, height }; } }) }; return context;
 } } }));
-vi.mock("expo-file-system", () => ({ File: class { constructor(private uri: string) {} size = mock.size; bytes = async () => { mock.read(); return mock.bytes; }; delete() { mock.deleted(this.uri); if (mock.cleanupFails) throw new Error("cache unavailable"); } } }));
+vi.mock("expo-file-system", () => ({ Paths: { cache: { uri: "file:///cache/" } }, File: class { constructor(private uri: string) {} size = mock.size; bytes = async () => { mock.read(); return mock.bytes; }; delete() { mock.deleted(this.uri); if (mock.cleanupFails) throw new Error("cache unavailable"); } } }));
 beforeEach(() => { mock.bytes = new Uint8Array([255, 216, 255, 224]); mock.size = 4; mock.canceled = false; mock.permission = true; mock.cleanupFails = false; vi.clearAllMocks(); });
 describe("photo preparation", () => {
   it("requests compatible image, renders aspect-preserving JPEG then reads actual prepared bytes", async () => {
@@ -23,7 +23,7 @@ describe("photo preparation", () => {
   it("preserves prepared bytes when cleanup of only the generated cache file fails", async () => {
     mock.cleanupFails = true;
     const file = await (await preparePhotoPicker())(false);
-    expect(file?.bytes).toEqual(mock.bytes); expect(mock.deleted).toHaveBeenCalledExactlyOnceWith("file://prepared.jpg");
+    expect(file?.bytes).toEqual(mock.bytes); expect(mock.deleted).toHaveBeenCalledExactlyOnceWith("file:///cache/ImageManipulator/12345678-1234-4234-8234-123456789abc.jpg");
   });
   it("rejects a renamed HEIC output instead of accepting its jpg suffix", async () => {
     mock.bytes = new TextEncoder().encode("HEIC"); await expect((await preparePhotoPicker())(false)).rejects.toThrow("JPEG");

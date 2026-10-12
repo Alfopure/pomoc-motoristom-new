@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, View } from "react-native";
+import { useAndroidBack } from "../lib/use-android-back";
 import { Button, Card, ErrorNotice, styles } from "../ui";
 import { CaseEdit, changedFields } from "./edit";
 import { Choice, fields, jobTypes, priorities } from "./form";
 
 export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; active: boolean; onBack: () => void; onSaved: () => void }) {
   const state = useSyncExternalStore(edit.subscribe, edit.snapshot, edit.snapshot);
+  const back = () => { if (edit.snapshot().status !== "saving") onBack(); };
+  useAndroidBack(active, back, state.status === "saving");
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
     if (active && (state.error || ["uncertain", "conflict", "blocked", "committed", "saved"].includes(state.status))) scroll.current?.scrollTo({ y: 0, animated: false });
@@ -24,7 +27,7 @@ export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; 
   const addressKey = JSON.stringify([state.base.updatedAt, state.input.manualPickupAddress, state.input.manualDestinationAddress]);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-      <Button label="Späť na detail" secondary disabled={state.status === "saving"} onPress={onBack} /><Text style={styles.heading}>Upraviť {state.base.caseNumber}</Text>
+      <Button label="Späť na detail" secondary disabled={state.status === "saving"} onPress={back} /><Text style={styles.heading}>Upraviť {state.base.caseNumber}</Text>
       <Text style={styles.muted}>Zmeny zostanú rozpracované, kým ich neuložíte. Poznámka tu upravuje hlavný text prípadu.</Text>
       {state.receipt && <Card><Text accessibilityRole="alert" style={styles.subheading}>Zmeny sú uložené.</Text>
         {state.receipt.warnings.map((item, i) => <Text key={item.code + i} style={styles.text}>{item.message}</Text>)}
@@ -32,7 +35,8 @@ export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; 
       {state.error && <ErrorNotice message={state.error} />}
       {state.status === "uncertain" && <Button label="Overiť pôvodné uloženie" onPress={() => { void edit.save(); }} />}
       {state.status === "committed" && state.error && <Button label="Obnoviť uložený detail" disabled={state.refreshing} onPress={() => { void edit.refresh(); }} secondary />}
-      {state.status === "conflict" && <Card>
+      {(state.status === "conflict" || state.status === "blocked" && state.canRecover) && <Card>
+        {state.status === "blocked" && <Text style={styles.text}>Pôvodné uloženie bolo zamietnuté. Overte obnovený prístup a porovnajte aktuálne údaje pred ďalším uložením.</Text>}
         <Button label={state.refreshing ? "Načítavam aktuálne údaje…" : "Načítať údaje na porovnanie"} secondary disabled={state.refreshing} onPress={() => { void edit.refresh(); }} />
         {state.latest && <><Text style={styles.subheading}>Porovnanie vašich zmien</Text>
           {keys.map(key => {
@@ -69,7 +73,7 @@ export function CaseEditor({ edit, active, onBack, onSaved }: { edit: CaseEdit; 
           onPress={() => setAddressAcknowledged(addressAcknowledged === addressKey ? "" : addressKey)} /></Card>}
       {changes.status && ["completed_assisted", "completed_no_assistance", "cancelled", "futile_trip"].includes(changes.status)
         && <Text style={styles.muted}>Prípad zmizne z otvorených prípadov. Nájdete ho cez filter Aj uzavreté.</Text>}
-      {state.status === "saved" ? <Button label="Zobraziť uložený detail" onPress={onBack} />
+      {state.status === "saved" ? <Button label="Zobraziť uložený detail" onPress={back} />
         : <Button label={state.status === "saving" ? "Ukladám zmeny…" : "Uložiť zmeny"} disabled={!editing || keys.length === 0 || addressChange && addressAcknowledged !== addressKey}
           onPress={() => { Keyboard.dismiss(); void edit.save(); }} />}
     </ScrollView>

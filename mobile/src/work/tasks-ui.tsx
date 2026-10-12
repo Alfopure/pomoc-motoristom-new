@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Keyboard, KeyboardAvoidingView, Platform, Pressable, RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
+import { useAndroidBack } from "../lib/use-android-back";
 import type { MobileTask, MobileTaskWorkflowAction } from "../../../src/lib/mobile-api";
 import { Button, Card, ErrorNotice, Loading, styles } from "../ui";
 import { Choice, priorities } from "../cases/form";
@@ -19,6 +20,7 @@ export function Tasks({ store, caseId, queryKey, profileId, active, onBack }: { 
 function TaskList({ store, caseId, queryKey, active, onBack, onNew, onOpen }: { store: WorkStore; caseId: string; queryKey: string[]; active: boolean; onBack: () => void; onNew: () => void; onOpen: (id: string) => void }) {
   const client = useQueryClient(), draft = store.create(caseId), state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot);
   const key = [...queryKey, "tasks", caseId];
+  useAndroidBack(active, onBack);
   const query = useInfiniteQuery({ queryKey: key, enabled: active, initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) => store.api.tasks(caseId, pageParam, signal), getNextPageParam: page => page.nextCursor ?? undefined });
   useEffect(() => {
@@ -47,12 +49,14 @@ function TaskList({ store, caseId, queryKey, active, onBack, onNew, onOpen }: { 
 }
 function TaskForm({ store, caseId, queryKey, active, draft, onBack, onSaved }: { store: WorkStore; caseId: string; queryKey: string[]; active: boolean; draft: TaskCreateDraft; onBack: () => void; onSaved: (id: string) => void }) {
   const state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot), editing = state.status === "editing", scroll = useRef<ScrollView>(null);
+  const back = () => { if (draft.snapshot().status !== "saving") onBack(); };
+  useAndroidBack(active, back, state.status === "saving");
   const query = useQuery({ queryKey: [...queryKey, "task-create-capability", caseId], queryFn: ({ signal }) => store.api.tasks(caseId, null, signal), enabled: active });
   useEffect(() => { if (state.error) scroll.current?.scrollTo({ y: 0, animated: true }); }, [state.error]);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}><ScrollView ref={scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}>
-    <Button label="Späť na úlohy" secondary disabled={state.status === "saving"} onPress={onBack} /><Text style={styles.heading}>Nová úloha</Text>
+    <Button label="Späť na úlohy" secondary disabled={state.status === "saving"} onPress={back} /><Text style={styles.heading}>Nová úloha</Text>
     {state.error && <ErrorNotice message={state.error} />}
-    {state.status === "uncertain" && <><Button label="Skontrolovať zoznam úloh" secondary onPress={onBack} />{state.reviewed && <Button label="Úlohu som nenašiel – povoliť opakovanie" secondary onPress={() => draft.allowRetry()} />}</>}
+    {state.status === "uncertain" && <><Button label="Skontrolovať zoznam úloh" secondary onPress={back} />{state.reviewed && <Button label="Úlohu som nenašiel – povoliť opakovanie" secondary onPress={() => draft.allowRetry()} />}</>}
     <View><Text style={styles.label}>Názov úlohy</Text><TextInput accessibilityLabel="Názov úlohy" value={state.input.title} onChangeText={title => draft.edit({ title })} editable={editing} multiline maxLength={500} style={styles.input} /></View>
     <ColleaguePicker api={store.api} queryKey={queryKey} active={active} label="Priradiť kolegovi" value={state.input.assignedTo ?? null} disabled={!editing} onChange={assignedTo => draft.edit({ assignedTo })} />
     <View><Text style={styles.label}>Termín (RRRR-MM-DD HH:mm)</Text><TextInput accessibilityLabel="Termín úlohy" placeholder="2026-10-12 14:30" value={state.input.dueAt ?? ""} onChangeText={dueAt => draft.edit({ dueAt: dueAt || null })} editable={editing} maxLength={16} autoCorrect={false} style={styles.input} /><Text style={styles.muted}>Miestny čas telefónu; pole môže zostať prázdne.</Text></View>
@@ -80,6 +84,9 @@ function TaskDetail({ store, taskId, queryKey, active, profileId, onBack, create
   const task = query.isError ? null : query.data?.task, capability = query.isError ? null : query.data?.capabilities;
   const current = !!task && (!workflow.receipt || task.revision >= workflow.receipt.committedRevision);
   const saving = workflow.status === "saving" || message.status === "saving";
+  const workflowSnapshot = retained.workflow.snapshot, messageSnapshot = retained.message.snapshot;
+  const back = () => { if (workflowSnapshot().status !== "saving" && messageSnapshot().status !== "saving") onBack(); };
+  useAndroidBack(active, back, saving);
   async function transition(action: MobileTaskWorkflowAction) {
     if (!task || !capability?.workflow || workflow.status !== "editing") return;
     if ((action === "submit_review" || action === "return") && !comment.trim()) { setError("Doplňte výsledok práce alebo dôvod vrátenia."); return; }
@@ -96,7 +103,7 @@ function TaskDetail({ store, taskId, queryKey, active, profileId, onBack, create
   const visibleMessages = orderedMessages(messages.data?.pages ?? []);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}><ScrollView ref={scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching || messages.isRefetching} onRefresh={() => { void query.refetch(); void messages.refetch(); }} />}>
-    <Button label="Späť na úlohy" secondary disabled={saving} onPress={onBack} /><Text style={styles.heading}>Detail úlohy</Text>
+    <Button label="Späť na úlohy" secondary disabled={saving} onPress={back} /><Text style={styles.heading}>Detail úlohy</Text>
     {created && <Card><Text accessibilityRole="alert" style={styles.subheading}>Úloha je vytvorená.</Text></Card>}
     {error && <ErrorNotice message={error} />}{workflow.error && <><ErrorNotice message={workflow.error} /><Button label="Obnoviť detail úlohy" secondary disabled={query.isFetching} onPress={() => { void query.refetch(); }} /></>}{message.error && <ErrorNotice message={message.error} />}
     {workflow.status === "uncertain" && <Button label="Overiť pôvodnú zmenu stavu" onPress={() => { void retained.workflow.reconcile(); }} />}
