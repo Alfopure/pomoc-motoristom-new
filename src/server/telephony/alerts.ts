@@ -88,7 +88,18 @@ function scopedAlerts(alert: TelephonyAlert, checkedAt: string): TelephonyAlert[
     alert = { ...alert, detail: { ...alert.detail, entries, sessionIds: entries.map((entry) => alertObject(entry).sessionId) } };
   }
   if (alert.check === "provider" && Array.isArray(alert.detail.entries)) {
-    const entries = alert.detail.entries.filter((entry) => alertObject(entry).verdict !== "alive");
+    const observations = alert.detail.entries;
+    const entries = observations.filter((value) => {
+      const entry = alertObject(value);
+      // Preserve explicit errors even when the other fields look recovered.
+      if (entry.error) return true;
+      if (entry.verdict === "alive" || entry.verdict === "ended" && entry.reconciled === true) return false;
+      // Unknown legs remain actionable: unlike session pages, a per-session
+      // leg/time limit does not guarantee that the next pass covers them.
+      return true;
+    });
+    if (!entries.length && alert.status === "warn" && !alert.detail.error &&
+      (observations.length > 0 || typeof alert.detail.remaining === "number" && alert.detail.remaining > 0)) return [];
     alert = { ...alert, detail: { ...alert.detail, entries, sessionIds: entries.map((entry) => alertObject(entry).sessionId) } };
   }
   const sessionIds = alertSessionIds(alert);

@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, ORG, type TelephonyHarness } from "@/test/telephony-harness";
 
 import { alertsFromReport, runTelephonyAlerts, type TelephonyAlertDeps } from "./alerts";
-import type { TelephonyHealthReport } from "./health";
+import { getTelephonyHealth, type TelephonyHealthReport } from "./health";
+import type { ProviderObservation } from "./health-progress";
 import { usageDay } from "./usage";
 
 type SentMessage = Parameters<NonNullable<TelephonyAlertDeps["send"]>>[0];
@@ -222,6 +223,57 @@ describe("telephony alerts", () => {
     expect(alerts).toHaveLength(2);
     expect(alerts[0].detail.sessionIds).toEqual(["unknown"]);
     expect(alerts[1].check).toBe("devices");
+  });
+
+  it.each([
+    { name: "an automatically reconciled end", remaining: 0, entries: [{ sessionId: "repaired", verdict: "ended", reconciled: true }] },
+    { name: "the next bounded page", remaining: 1, entries: [{ sessionId: "alive", verdict: "alive" }] },
+    { name: "a fully deferred page", remaining: 1, entries: [] },
+  ] satisfies Array<{ name: string; remaining: number; entries: Array<Omit<ProviderObservation, "state" | "checkedAt">> }>)("does not email for $name while keeping the health warning", async ({ entries, remaining }) => {
+    const h = createTelephonyHarness();
+    const { send } = mailbox();
+    const health = await getTelephonyHealth({ ...h.deps, providerVerification: {
+      checkedAt: h.now().toISOString(), remaining, error: null,
+      entries: entries.map(entry => ({ ...entry, state: "talking", checkedAt: h.now().toISOString() })),
+    } });
+    expect(health.checks.find(check => check.key === "provider")?.status).toBe("warn");
+    const result = await runTelephonyAlerts(alertDeps(h, { send, report: health }));
+    expect(result).toMatchObject({ status: "ok", detail: { health: "warn", sent: 0, alerts: 0 } });
+    expect(send).not.toHaveBeenCalled();
+    expect(h.rows("motorist_telephony_alerts")).toHaveLength(0);
+  });
+
+  it("emails unresolved provider evidence in a pass that also recovered or deferred other legs", () => {
+    const alerts = alertsFromReport(report([{ key: "provider", status: "warn", detail: { remaining: 2, entries: [
+      { sessionId: "alive", verdict: "alive" },
+      { sessionId: "repaired", verdict: "ended", reconciled: true },
+      { sessionId: "deferred", verdict: "unknown", reason: "verification_budget_exhausted" },
+      { sessionId: "limited", verdict: "unknown", reason: "leg_limit" },
+      { sessionId: "unknown", verdict: "unknown", reason: "provider_status_unknown" },
+      { sessionId: "unavailable", verdict: "unavailable", reason: "provider_read_failed" },
+      // The same call can contain a recovered leg and a still unknown leg.
+      { sessionId: "unknown", verdict: "ended", reconciled: true },
+    ] } }], "warn"), "today");
+    expect(alerts.map(alert => alert.detail.sessionIds)).toEqual([["deferred"], ["limited"], ["unknown"], ["unavailable"]]);
+    expect(alerts[2].detail.entries).toEqual([{ sessionId: "unknown", verdict: "unknown", reason: "provider_status_unknown" }]);
+  });
+
+  it("keeps failed reconciliation and explicit provider errors alertable", () => {
+    const unresolved = { sessionId: "failed", verdict: "ended", reconciled: false };
+    const fail = alertsFromReport(report([{ key: "provider", status: "fail", detail: { entries: [
+      { sessionId: "repaired", verdict: "ended", reconciled: true }, unresolved,
+    ] } }]), "today");
+    expect(fail).toHaveLength(1);
+    expect(fail[0]).toMatchObject({ status: "fail", detail: { sessionIds: ["failed"], entries: [unresolved] } });
+    const readError = alertsFromReport(report([{ key: "provider", status: "warn", detail: {
+      error: "read failed", remaining: 1, entries: [{ sessionId: "alive", verdict: "alive" }],
+    } }], "warn"), "today");
+    expect(readError).toHaveLength(1);
+    expect(readError[0].detail.error).toBe("read failed");
+    const entryError = alertsFromReport(report([{ key: "provider", status: "warn", detail: {
+      entries: [{ sessionId: "problem", verdict: "ended", reconciled: true, error: "read failed" }],
+    } }], "warn"), "today");
+    expect(entryError[0].detail.sessionIds).toEqual(["problem"]);
   });
 
   it("uses an order-independent bounded idempotency key and retries after ledger failure", async () => {

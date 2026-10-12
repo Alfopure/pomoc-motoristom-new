@@ -1011,6 +1011,12 @@ export class TelnyxWebphone {
     this.audioAttempt += 1;
     this.audioBlocked = false;
     if (!client) return;
+    // SDK 2.27.10 iterates its live listener array. A socket event can emit a
+    // nested fatal error (reconnect exhaustion); off() inside that callback
+    // deletes the outer event's array and crashes its next iteration. Retire
+    // ownership/media above immediately, then let event dispatch finish before
+    // removing listeners. The generation guard ignores remaining callbacks.
+    await Promise.resolve();
     for (const event of ["telnyx.ready", "telnyx.error", "telnyx.socket.close", "telnyx.socket.open", "telnyx.socket.error", "telnyx.warning", "telnyx.notification"]) client.off(event);
     await Promise.resolve(client.disconnect()).catch(() => undefined);
   }

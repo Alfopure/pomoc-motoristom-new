@@ -33,9 +33,11 @@ describe("telephony alert lifecycle regressions", () => {
     expect(h.rows("motorist_telnyx_webhook_events").some(event => event.status === "failed" && String(event.error).startsWith("90018(422):"))).toBe(true);
     await h.legEvent(call.callControlId, "call.hangup", { hangup_source: "caller", hangup_cause: "normal_clearing" });
     expect(h.session(call.sessionId).state).toBe("ended");
-    // One parallel leg has not delivered its cancellation yet: keep the failure
-    // visible until the evidence is complete, as the production fixture was.
-    expect((await getTelephonyHealth(h.deps)).checks.find(check => check.key === "ledger")?.status).toBe("fail");
+    // One parallel leg has not delivered its cancellation yet: this is still
+    // an unresolved failure, with a durable fresh retry pending, not a proven
+    // benign end until the remaining evidence arrives.
+    expect((await getTelephonyHealth(h.deps)).checks.find(check => check.key === "ledger"))
+      .toMatchObject({ status: "warn", detail: { retrying: 1, resolvedCallEndFailures: 0 } });
     for (const leg of h.legs(call.sessionId).filter(leg => !leg.ended_at)) {
       await h.legEvent(String(leg.telnyx_call_control_id), "call.hangup", { hangup_cause: "originator_cancel" });
     }

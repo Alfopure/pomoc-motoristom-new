@@ -590,6 +590,24 @@ describe("telephony cron jobs", () => {
     expect(h.telnyx.of("retrieveCall")).toHaveLength(0);
   });
 
+  it("verifies a transient candidate-read timeout before reporting the provider unavailable", async () => {
+    const h = createTelephonyHarness();
+    h.db.failNext("motorist_call_sessions", "select", { code: "", message: "AbortError: un-owned read exceeded 10000 ms", details: null, hint: null });
+    const result = await reconcileWithTelnyx(h.deps);
+    expect(result).toMatchObject({ status: "ok", verification: { entries: [], error: null } });
+    expect(h.telnyx.of("retrieveCall")).toHaveLength(0);
+  });
+
+  it("keeps a repeated candidate-read timeout as failed verification", async () => {
+    const h = createTelephonyHarness();
+    const failure = { code: "", message: "AbortError: un-owned read exceeded 10000 ms", details: null, hint: null };
+    h.db.failNext("motorist_call_sessions", "select", failure);
+    h.db.failNext("motorist_call_sessions", "select", failure);
+    const result = await reconcileWithTelnyx(h.deps);
+    expect(result).toMatchObject({ status: "failed", verification: { entries: [], error: failure.message } });
+    expect(h.telnyx.of("retrieveCall")).toHaveLength(0);
+  });
+
   it("passes provider observations into the cron alert decision and logs only its summary", async () => {
     const h = createTelephonyHarness({ ivrOnNeutralLine: false });
     const call = await h.inbound({ to: "+421232408718" });
