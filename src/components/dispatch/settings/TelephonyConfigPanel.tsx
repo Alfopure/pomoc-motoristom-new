@@ -46,7 +46,7 @@ const TABS: Array<{ icon: LucideIcon; label: string; value: TelephonyConfigTab; 
   // "Môj telefón" is first and open to every operator; everything after it is
   // configuration a manager owns.
   { icon: Smartphone, label: "Môj telefón", value: "phone" },
-  { icon: ListOrdered, label: "Prichádzajúce hovory", value: "incoming" },
+  { icon: ListOrdered, label: "Linky a smerovanie", value: "incoming" },
   { icon: Users, label: "Skupiny", value: "groups" },
   { icon: ListOrdered, label: "Plány zvonenia", value: "plans" },
   { icon: ListTree, label: "IVR menu", value: "ivr" },
@@ -206,8 +206,8 @@ export function TelephonyConfigPanel({ onTestCall, routingTarget, onRoutingDirty
       </div>
 
       <nav className="flex flex-wrap content-start gap-1 lg:col-start-1 lg:row-span-2 lg:row-start-1 lg:flex-col" aria-label="Nastavenia telefónie">
-        {TABS.filter((entry) => (coherent ? entry.value !== "groups" && entry.value !== "plans" : entry.value !== "incoming") && (!entry.adminOnly || state.canManageSettings) && (!entry.managerOnly || state.canEdit) && (!entry.requiresAiDemo || state.aiDemoEnabled)).map(({ icon: Icon, label, value }) => {
-          const active = tab === value;
+        {TABS.filter((entry) => (coherent ? entry.value !== "groups" && entry.value !== "plans" && (!state.document.capabilities?.lineWorkspace || entry.value !== "numbers") : entry.value !== "incoming") && (!entry.adminOnly || state.canManageSettings) && (!entry.managerOnly || state.canEdit) && (!entry.requiresAiDemo || state.aiDemoEnabled)).map(({ icon: Icon, label, value }) => {
+          const active = tab === value || value === "incoming" && tab === "numbers" && state.document.capabilities?.lineWorkspace;
           return (
             <button
               key={value}
@@ -229,7 +229,7 @@ export function TelephonyConfigPanel({ onTestCall, routingTarget, onRoutingDirty
 
       {target?.lineId && !state.document.lines.some(line => line.id === target.lineId) && <SettingsNotice tone="warning">Vybraná linka už neexistuje alebo k nej nemáš prístup.</SettingsNotice>}
       {tab === "incoming" && coherent && !state.document.snapshotId && <SettingsNotice tone="info">Overujem aktuálne nastavenie skupín a plánov…</SettingsNotice>}
-      {tab === "incoming" && coherent && state.document.snapshotId && <IncomingRoutingEditor document={state.document} canEdit={state.canEdit} target={target} onSaved={applyResponse} onNavigate={next => void navigate(next.tab, next)} onDirtyChange={dirtyChanged} onActionsChange={actionsChanged} onEditorStateChange={onRoutingEditorStateChange} />}
+      {(tab === "incoming" || tab === "numbers" && state.document.capabilities?.lineWorkspace) && coherent && state.document.snapshotId && <IncomingRoutingEditor document={state.document} canEdit={state.canEdit} target={target} onSaved={applyResponse} onNavigate={next => void navigate(next.tab, next)} onDirtyChange={dirtyChanged} onActionsChange={actionsChanged} onEditorStateChange={onRoutingEditorStateChange} />}
       {tab === "phone" && <MyPhonePanel key={`phone-${version}`} document={state.document} onSaved={applyResponse} onTestCall={onTestCall} />}
       {tab === "groups" && (
         <RingGroupsEditor
@@ -263,7 +263,7 @@ export function TelephonyConfigPanel({ onTestCall, routingTarget, onRoutingDirty
       {tab === "recording" && state.canEdit && <RecordingPolicyPanel onOpenAnnouncements={() => { setAnnouncementsOpened(true); setTab("announcements"); }} />}
       {tab === "hours" && <BusinessHoursEditor key={`hours-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "pauses" && <PauseReasonsEditor key={`pauses-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
-      {tab === "numbers" && <NumbersPanel key={`numbers-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
+      {tab === "numbers" && !state.document.capabilities?.lineWorkspace && <NumbersPanel key={`numbers-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />}
       {tab === "operators" && state.canEdit && (
         <OperatorsTelephonyPanel key={`operators-${version}`} canEdit={state.canEdit} document={state.document} onSaved={applyResponse} />
       )}

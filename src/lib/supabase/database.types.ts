@@ -1904,6 +1904,14 @@ export type Database = {
         Args: { p_organization_id: string; p_changes: Json; p_expected_version: number; p_expected_snapshot_id: string };
         Returns: Json;
       };
+      motorist_resolve_call_contacts: {
+        Args: { p_organization_id: string; p_numbers: string[] };
+        Returns: { number: string; name: string }[];
+      };
+      motorist_save_line_workspace: {
+        Args: { p_organization_id: string; p_changes: Json; p_expected_version: number; p_expected_snapshot_id: string };
+        Returns: Json;
+      };
       motorist_save_incoming_routing: {
         Args: { p_organization_id: string; p_document: Json; p_expected_version: number };
         Returns: Json;

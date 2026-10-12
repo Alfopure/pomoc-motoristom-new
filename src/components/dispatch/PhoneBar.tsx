@@ -152,7 +152,7 @@ function OfferBar({ call, now, ...props }: PhoneBarProps & { call: PhoneBarCall;
   }
   return <article data-testid="call-tray-offer" data-session-id={call.sessionId} className={styles.offerRow}>
     <PhoneIncoming size={18} className="shrink-0 text-yellow-300 motion-safe:animate-pulse" aria-hidden="true" />
-    <div className={styles.offerIdentity}><strong>{call.callerName || formatPhoneNumberForDisplay(call.number) || "Neznámy volajúci"}</strong><span>{call.lineLabel}{call.offeredOperatorNames.length ? ` · Zvoní: ${call.offeredOperatorNames.join(", ")}` : " · Zvoní"}</span>{blocked && <small className={styles.mobileBlockReason}>{blocked}</small>}</div>
+    <div className={styles.offerIdentity}><strong>{call.callerName || formatPhoneNumberForDisplay(call.number) || "Neznámy volajúci"}</strong><span>{call.callerName && `${formatPhoneNumberForDisplay(call.number)} · `}{call.lineLabel}{call.offeredOperatorNames.length ? ` · Zvoní: ${call.offeredOperatorNames.join(", ")}` : " · Zvoní"}</span>{blocked && <small className={styles.mobileBlockReason}>{blocked}</small>}</div>
     <time className="shrink-0 text-xs tabular-nums text-zinc-300">{formatCallTimer(callElapsedSeconds(call, now))}</time>
     <button type="button" onClick={answer} disabled={Boolean(blocked)} title={blocked ?? undefined} className={styles.acceptOffer}><PhoneCall size={15} />{busy && exactInvite ? "Prijímam…" : exactInvite ? "Prijať" : "Prevziať"}</button>
     {offerCallControlId && call.direction === "inbound" && props.onDeferOfferIdentity && <button type="button" onClick={() => {
