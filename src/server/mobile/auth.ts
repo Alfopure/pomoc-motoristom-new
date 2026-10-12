@@ -57,6 +57,11 @@ export async function requireMobileActor(request: Request): Promise<MotoristActo
     throw new MutationError("Prihlásenie vypršalo. Prihláste sa znova.", 401);
   }
 
+  const expectedOrganization = request.headers.get("x-pm-expected-organization");
+  if (expectedOrganization !== null && !isUuid(expectedOrganization)) {
+    throw new MutationError("Neplatná organizácia rozpracovaných údajov. Obnovte prihlásenie.", 400);
+  }
+
   const organizationId = await resolveDefaultOrganizationId();
   const { data: profile, error: profileError } = await createSupabaseAdminClient()
     .from("motorist_profiles").select("id,display_name,email,role")
@@ -65,6 +70,10 @@ export async function requireMobileActor(request: Request): Promise<MotoristActo
   if (profileError) throw new MutationError("Oprávnenie sa nepodarilo overiť.", 503);
   if (!profile || !MOBILE_ROLES.includes(profile.role)) {
     throw new MutationError("Nemáte prístup k mobilnému dispečingu.", 403);
+  }
+  // The header fences an already authorized actor; it never selects their org.
+  if (expectedOrganization !== null && expectedOrganization.toLowerCase() !== organizationId.toLowerCase()) {
+    throw new MutationError("Organizácia účtu sa zmenila. Obnovte prihlásenie pred pokračovaním.", 409, "expected_organization_mismatch");
   }
   return {
     userId: claims.sub, profileId: profile.id, organizationId,

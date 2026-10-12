@@ -1,4 +1,4 @@
-import type { MobileCaseAttachment, MobileCaseAttachmentAdded, MobileCaseAttachmentDownload, MobileCaseAttachmentInput, MobileCaseAttachments, MobileCaseTasks, MobileScope, MobileTask, MobileTaskCapabilities, MobileTaskColleague, MobileTaskColleagues, MobileTaskCreated, MobileTaskCreateInput, MobileTaskDetail, MobileTaskMessage, MobileTaskMessageInput, MobileTaskMessages, MobileTaskMessageSent, MobileTaskTransitioned, MobileTaskWorkflowInput } from "../../../src/lib/mobile-api";
+import type { MobileCaseAttachment, MobileCaseAttachmentAdded, MobileCaseAttachmentDownload, MobileCaseAttachmentInput, MobileCaseAttachments, MobileCaseTasks, MobileMyTaskFilter, MobileMyTasks, MobileScope, MobileTask, MobileTaskCapabilities, MobileTaskColleague, MobileTaskColleagues, MobileTaskCreated, MobileTaskCreateInput, MobileTaskDetail, MobileTaskMessage, MobileTaskMessageInput, MobileTaskMessages, MobileTaskMessageSent, MobileTaskTransitioned, MobileTaskWorkflowInput } from "../../../src/lib/mobile-api";
 import { MobileApiError, type MobileTransport } from "../lib/api";
 import type { UploadPayload } from "./attachments";
 import type { MobileConfig } from "../lib/config";
@@ -56,7 +56,7 @@ const nativeTransport = async (): Promise<MobileTransport> => {
   catch { throw new MobileApiError("Prikladanie súborov v tejto zostave nie je dostupné. Použite aktuálne Expo Go alebo novú natívnu zostavu.", 400, "mobile_upload_unavailable"); }
 };
 
-export function createWorkApi(config: MobileConfig, profileId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch, uploadTransport: () => Promise<MobileTransport> = nativeTransport) {
+export function createWorkApi(config: MobileConfig, profileId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch, uploadTransport: () => Promise<MobileTransport> = nativeTransport, expectedOrganization?: string) {
   function scope(value: Record<string, unknown>): MobileScope {
     if (value.ok !== true || value.apiVersion !== 1 || value.environment !== config.environment || value.profileId !== profileId || !date(value.checkedAt)) throw invalid();
     return { ok: true, apiVersion: 1, environment: config.environment, profileId, checkedAt: value.checkedAt };
@@ -69,7 +69,7 @@ export function createWorkApi(config: MobileConfig, profileId: string, getToken:
     try {
       const send = binary ? await uploadTransport() : transport;
       const response = await send(config.apiOrigin + "/api/mobile/v1/" + path, { method: input === undefined && !binary ? "GET" : "POST", credentials: "omit", signal: controller.signal,
-        headers: { Authorization: "Bearer " + token, "X-PM-App-Environment": config.environment, Accept: "application/json", ...(binary ? { "Content-Type": binary.contentType } : input === undefined ? {} : { "Content-Type": "application/json" }) },
+        headers: { Authorization: "Bearer " + token, "X-PM-App-Environment": config.environment, Accept: "application/json", ...(expectedOrganization ? { "X-PM-Expected-Organization": expectedOrganization } : {}), ...(binary ? { "Content-Type": binary.contentType } : input === undefined ? {} : { "Content-Type": "application/json" }) },
         ...(binary ? { body: binary.bytes as BodyInit } : input === undefined ? {} : { body: JSON.stringify(input) }) });
       let value: unknown; try { value = await response.json(); } catch { throw invalid(); }
       const body = object(value);
@@ -109,6 +109,18 @@ export function createWorkApi(config: MobileConfig, profileId: string, getToken:
       const requestedAt = Date.now(), params = new URLSearchParams({ limit: "25" }); if (after) params.set("cursor", after);
       const body = await request(casePath(caseId) + "/tasks?" + params, undefined, signal); if (body.caseId !== caseId) throw invalid();
       return { ...scope(body), caseId, tasks: array(body.tasks, 25, task), nextCursor: cursor(body.nextCursor, after), capabilities: capabilities(body.capabilities), requestedAt };
+    },
+    myTasks: async (filter: MobileMyTaskFilter = { view: "assigned", category: "open", q: "" }, signal?: AbortSignal): Promise<MobileMyTasks> => {
+      if (!["assigned", "review"].includes(filter.view) || !["open", "all"].includes(filter.category) || !text(filter.q) || filter.q.length > 200 || /[\0*]/.test(filter.q)
+        || !(filter.cursor == null || text(filter.cursor) && filter.cursor.length > 0)) throw new MobileApiError("Skontrolujte filter úloh. Hľadajte najviac 200 znakmi bez hviezdičky.", 400);
+      const selection = { view: filter.view, category: filter.category, q: filter.q.trim() };
+      const params = new URLSearchParams({ ...selection, limit: "25" });
+      if (filter.cursor) params.set("cursor", filter.cursor);
+      const body = await request("tasks?" + params, undefined, signal), echoed = object(body.selection);
+      if (echoed.view !== selection.view || echoed.category !== selection.category || echoed.q !== selection.q) throw invalid();
+      const tasks = array(body.tasks, 25, task);
+      if (tasks.some(item => (selection.view === "assigned" ? item.assignedTo?.id : item.reviewer?.id) !== profileId || selection.category === "open" && item.status === "done")) throw invalid();
+      return { ...scope(body), tasks, nextCursor: cursor(body.nextCursor, filter.cursor), capabilities: capabilities(body.capabilities), selection };
     },
     task: async (taskId: string, signal?: AbortSignal): Promise<MobileTaskDetail> => {
       const body = await request(taskPath(taskId), undefined, signal), item = task(body.task); if (item.id !== taskId) throw invalid();

@@ -123,7 +123,7 @@ function link(value: unknown, origin: string, minRevision: number): MobileHandof
     status: 'available', url: v.url, expiresAt: v.expiresAt, currentRevision: v.currentRevision
   };
 }
-export function createHandoffApi(config: MobileConfig, profileId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch) {
+export function createHandoffApi(config: MobileConfig, profileId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch, expectedOrganization?: string) {
   function scope(v: Record<string, unknown>): MobileScope {
     if (v.ok !== true || v.apiVersion !== 1 || v.environment !== config.environment || v.profileId !== profileId || !date(v.checkedAt))
       throw invalid();
@@ -145,7 +145,7 @@ export function createHandoffApi(config: MobileConfig, profileId: string, getTok
     try {
       const response = await transport(config.apiOrigin + '/api/mobile/v1/cases/' + caseId + '/handoffs', {
         method: input ? 'POST' : 'GET', credentials: 'omit', signal: controller.signal, headers: {
-          Authorization: 'Bearer ' + token, 'X-PM-App-Environment': config.environment, Accept: 'application/json', ...(input ? { 'Content-Type': 'application/json' } : {})
+          Authorization: 'Bearer ' + token, 'X-PM-App-Environment': config.environment, Accept: 'application/json', ...(expectedOrganization ? { 'X-PM-Expected-Organization': expectedOrganization } : {}), ...(input ? { 'Content-Type': 'application/json' } : {})
         }, ...(input ? { body: JSON.stringify(input) } : {})
       });
       const raw = await response.text();

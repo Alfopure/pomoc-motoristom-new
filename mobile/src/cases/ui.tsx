@@ -20,31 +20,48 @@ import { Handoffs } from "../handoff/ui";
 import { WorkStore } from "../work/store";
 import { Attachments } from "../work/attachments-ui";
 import { Tasks } from "../work/tasks-ui";
+import type { DraftVault } from "../drafts/vault";
+import { draftId } from "../drafts/port";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Prípady sa nepodarilo načítať. Skúste znova.";
-type Page = { kind: "handoffs"; id: string; draft: HandoffDraft } | { kind: "attachments"; id: string } | { kind: "tasks"; id: string } | { kind: "list" } | { kind: "new" } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
+export type CaseOpenRequest = { kind: "detail" | "case-create" | "case-edit" | "case-note" | "task-create" | "handoff" | "attachment"; id: string | null; nonce: number };
+type Page = { kind: "resume-edit"; id: string; nonce: number; initialError?: string; normalEntry?: boolean } | { kind: "handoffs"; id: string; draft: HandoffDraft } | { kind: "attachments"; id: string } | { kind: "tasks"; id: string; nonce?: number } | { kind: "list" } | { kind: "new" } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
 
 /** Kept mounted under the authenticated workspace across tab changes. Reads
  * pause when hidden; unsaved input and a confirmed created ID stay in memory. */
-export function Cases({ api, environment, userId, profileId, active, onSelectNumber, onLeaveCases }: {
+export function Cases({ api, environment, userId, profileId, active, onSelectNumber, onLeaveCases, workStore, vault, queryKey, openRequest }: {
   api: CasesApi; environment: string; userId: string; profileId: string; active: boolean; onSelectNumber: (number: string) => void; onLeaveCases?: () => void;
+  workStore?: WorkStore; vault?: DraftVault; queryKey?: string[]; openRequest?: CaseOpenRequest;
 }) {
   const queryClient = useQueryClient();
-  const prefix = useMemo(() => ["mobile", environment, userId, "cases", profileId], [environment, userId, profileId]);
-  const work = useMemo(() => new WorkStore(api.work, () => { void queryClient.invalidateQueries({ queryKey: prefix }); }), [api.work, queryClient, prefix]);
-  useEffect(() => () => work.dispose(), [work]);
+  const [page, setPage] = useState<Page>({ kind: "list" });
+  const prefix = useMemo(() => queryKey ?? ["mobile", environment, userId, "cases", profileId], [queryKey, environment, userId, profileId]);
+  const work = useMemo(() => workStore ?? new WorkStore(
+    api.work,
+    () => { void queryClient.invalidateQueries({ queryKey: prefix }); },
+    vault ? (kind, id) => vault.bind(kind, id) : undefined
+  ), [workStore, api.work, queryClient, prefix, vault]);
+  useEffect(() => () => {
+    if (!workStore) work.dispose();
+  }, [work, workStore]);
   const handoffs = useRef(new Map<string, HandoffDraft>());
   useEffect(() => { const retained = handoffs.current; return () => { for (const draft of retained.values()) draft.dispose(); }; }, []);
-  function openHandoffs(id: string) {
+  const openHandoffs = useCallback((id: string) => {
     let draft = handoffs.current.get(id);
-    if (!draft) { draft = new HandoffDraft(api.handoffs, id, randomUUID, () => { void queryClient.invalidateQueries({ queryKey: prefix }); }); handoffs.current.set(id, draft); }
+    if (!draft) {
+      draft = new HandoffDraft(
+        api.handoffs, id, randomUUID,
+        () => { void queryClient.invalidateQueries({ queryKey: prefix }); },
+        vault?.bind("handoff", id)
+      );
+      handoffs.current.set(id, draft);
+    }
     setPage({ kind: "handoffs", id, draft });
-  }
+  }, [api.handoffs, queryClient, prefix, vault]);
   const notes = useRef(new Map<string, CaseNoteDraft>());
   const edits = useRef(new Map<string, CaseEdit>());
-  const draft = useMemo(() => new CaseDraft(api), [api]);
+  const draft = useMemo(() => new CaseDraft(api, vault?.bind("case-create")), [api, vault]);
   const state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot);
-  const [page, setPage] = useState<Page>({ kind: "list" });
   const [ownership, setOwnership] = useState<MobileCaseFilter["ownership"]>("all");
   const [category, setCategory] = useState<MobileCaseFilter["category"]>("open");
   const [ownerId, setOwnerId] = useState<string | null>(null);
@@ -55,17 +72,34 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
     void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     void queryClient.invalidateQueries({ queryKey: [...prefix, "detail"] });
   }, [queryClient, prefix]);
-  function showDetail(id: string) { setPage({ kind: "detail", id, note: notes.current.get(id) }); }
-  function openEditor(item: MobileCaseDetailData) {
-    const previous = edits.current.get(item.id);
-    if (!previous || previous.snapshot().status === "saved") { previous?.dispose(); edits.current.set(item.id, new CaseEdit(api, item, randomUUID)); }
-    setPage({ kind: "edit", id: item.id, edit: edits.current.get(item.id)! });
-  }
-  function openNote(id: string) {
+  const showDetail = useCallback((id: string) => { setPage({ kind: "detail", id, note: notes.current.get(id) }); }, []);
+  const openEditor = useCallback((item: MobileCaseDetailData, resume = false) => {
+    let edit = edits.current.get(item.id);
+    if (!edit) {
+      edit = new CaseEdit(api, item, randomUUID, vault?.bind("case-edit", item.id));
+      edits.current.set(item.id, edit);
+    } else edit.observeFreshSource(item);
+    if (!resume) edit.newEdit(item);
+    setPage({ kind: "edit", id: item.id, edit });
+  }, [api, vault]);
+  const editorErrorNonce = useRef(0);
+  const normalEditor = useCallback((item: MobileCaseDetailData) => {
+    try {
+      openEditor(item);
+    } catch (error) {
+      setPage({ kind: "resume-edit", id: item.id, nonce: --editorErrorNonce.current, initialError: errorMessage(error), normalEntry: true });
+    }
+  }, [openEditor]);
+  const resumeEditor = useCallback((item: MobileCaseDetailData) => openEditor(item, true), [openEditor]);
+  const openNote = useCallback((id: string, resume = false) => {
     let note = notes.current.get(id);
-    if (!note) { note = new CaseNoteDraft(api, id); notes.current.set(id, note); }
-    note.newNote(); setPage({ kind: "note", id, draft: note });
-  }
+    if (!note) {
+      note = new CaseNoteDraft(api, id, randomUUID, vault?.bind("case-note", id));
+      notes.current.set(id, note);
+    }
+    if (!resume) note.newNote();
+    setPage({ kind: "note", id, draft: note });
+  }, [api, vault]);
   function noteUpdated(receipt: MobileCaseNoteAdded) {
     void queryClient.invalidateQueries({ queryKey: [...prefix, "detail", receipt.caseId] });
     void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
@@ -90,7 +124,7 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
       void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     }
   }
-  function showList() {
+  const showList = useCallback(() => {
     setPage({ kind: "list" });
     if (state.status === "uncertain") {
       // A newly created draft belongs to this operator but may not match the
@@ -98,13 +132,35 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
       setOwnership("mine"); setOwnerId(null); setCategory("all"); setSearch("");
       void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     }
-  }
+  }, [state.status, queryClient, prefix]);
+  const consumedRequest = useRef<number | null>(null);
+  useEffect(() => {
+    // The nonce is an explicit navigation command from the parent workspace.
+    if (!active || !openRequest || !Number.isSafeInteger(openRequest.nonce) || consumedRequest.current === openRequest.nonce) return;
+    consumedRequest.current = openRequest.nonce;
+    const { kind, id, nonce } = openRequest;
+    if (kind === "case-create") {
+      if (id !== null) return;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Consume an external navigation command once.
+      if (draft.snapshot().status === "uncertain") showList();
+      else setPage({ kind: "new" });
+      return;
+    }
+    if (!draftId(id)) return;
+    if (kind === "detail") showDetail(id);
+    else if (kind === "case-edit") setPage({ kind: "resume-edit", id, nonce });
+    else if (kind === "case-note") openNote(id, true);
+    else if (kind === "handoff") openHandoffs(id);
+    else if (kind === "task-create") setPage({ kind: "tasks", id, nonce });
+    else if (kind === "attachment") setPage({ kind: "attachments", id });
+  }, [active, openRequest, draft, showList, showDetail, openNote, openHandoffs]);
   useAndroidBack(active && (page.kind === "detail" || page.kind === "list" && !!onLeaveCases), () => page.kind === "list" ? onLeaveCases?.() : showList());
   function showForm() { draft.newDraft(); setPage({ kind: "new" }); }
   return <View style={{ flex: 1 }}>
-    {page.kind === "handoffs" ? <Handoffs draft={page.draft} active={active} onBack={() => showDetail(page.id)} />
+    {page.kind === "resume-edit" ? <ResumeCaseEditor key={page.nonce} api={api} id={page.id} active={active} initialError={page.initialError} onLoaded={page.normalEntry ? openEditor : resumeEditor} onBack={showList} />
+      : page.kind === "handoffs" ? <Handoffs draft={page.draft} active={active} onBack={() => showDetail(page.id)} />
       : page.kind === "attachments" ? <Attachments store={work} caseId={page.id} queryKey={prefix} active={active} onBack={() => showDetail(page.id)} />
-      : page.kind === "tasks" ? <Tasks store={work} caseId={page.id} queryKey={prefix} profileId={profileId} active={active} onBack={() => showDetail(page.id)} />
+      : page.kind === "tasks" ? <Tasks key={page.id + ":" + (page.nonce ?? "normal")} store={work} caseId={page.id} queryKey={prefix} profileId={profileId} active={active} onBack={() => showDetail(page.id)} />
       : page.kind === "list" ? <CaseList api={api} queryKey={prefix} active={active} ownership={ownership} category={category}
       search={search} ownerId={ownerId} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
       onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={setCategory} onOpen={showDetail}
@@ -113,7 +169,33 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
         : page.kind === "edit" ? <CaseEditor edit={page.edit} active={active} onSaved={edited} onBack={() => showDetail(page.id)} />
         : page.kind === "note" ? <CaseNoteForm active={active} draft={page.draft} onSaved={noteSaved} onBack={() => showDetail(page.id)} />
         : <CaseDetail api={api} queryKey={prefix} active={active} id={page.id} created={state.created?.caseId === page.id ? state.created : null}
-          onBack={showList} onHandoffs={() => openHandoffs(page.id)} onAttachments={() => setPage({ kind: "attachments", id: page.id })} onTasks={() => setPage({ kind: "tasks", id: page.id })} onSelectNumber={onSelectNumber} onEdit={openEditor} onNote={openNote} savedNote={page.note} onNoteUpdated={noteUpdated} />}
+          onBack={showList} onHandoffs={() => openHandoffs(page.id)} onAttachments={() => setPage({ kind: "attachments", id: page.id })} onTasks={() => setPage({ kind: "tasks", id: page.id })} onSelectNumber={onSelectNumber} onEdit={normalEditor} onNote={openNote} savedNote={page.note} onNoteUpdated={noteUpdated} />}
+  </View>;
+}
+
+/** Explicit resumes read current scoped detail without accepting cached data. */
+function ResumeCaseEditor({ api, id, active, initialError, onLoaded, onBack }: {
+  api: CasesApi; id: string; active: boolean; initialError?: string; onLoaded: (item: MobileCaseDetailData) => void; onBack: () => void;
+}) {
+  const [attempt, setAttempt] = useState(0);
+  const [error, setError] = useState<string | null>(initialError ?? null);
+  useAndroidBack(active, onBack);
+  useEffect(() => {
+    if (!active || initialError && attempt === 0) return;
+    const read = new AbortController();
+    void (async () => {
+      try {
+        const result = await api.detail(id, read.signal);
+        if (!read.signal.aborted) onLoaded(result.case);
+      } catch (error) {
+        if (!read.signal.aborted) setError(errorMessage(error));
+      }
+    })();
+    return () => read.abort();
+  }, [api, id, active, attempt, initialError, onLoaded]);
+  return <View style={styles.content}>
+    <Button label="Späť na prípady" secondary onPress={onBack} />
+    {error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading />}
   </View>;
 }
 

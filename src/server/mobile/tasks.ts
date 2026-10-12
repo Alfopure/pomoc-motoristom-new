@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import type { MobileCaseTasks, MobileTask, MobileTaskCapabilities, MobileTaskColleague, MobileTaskCreateInput, MobileTaskCreated, MobileTaskDetail, MobileTaskMessage, MobileTaskMessageInput, MobileTaskMessages, MobileTaskMessageSent, MobileTaskTransitioned, MobileTaskWorkflowInput } from "@/lib/mobile-api";
+import type { MobileMyTasks, MobileMyTaskFilter, MobileCaseTasks, MobileTask, MobileTaskCapabilities, MobileTaskColleague, MobileTaskCreateInput, MobileTaskCreated, MobileTaskDetail, MobileTaskMessage, MobileTaskMessageInput, MobileTaskMessages, MobileTaskMessageSent, MobileTaskTransitioned, MobileTaskWorkflowInput } from "@/lib/mobile-api";
 import { isHistoryTimestamp } from "@/lib/telephony/call-history-query";
 import { isUuid as isUuidString } from "@/lib/telephony/uuid";
 import { taskWorkflowState, taskWorkflowStates } from "@/domain/task-workflow";
@@ -18,6 +18,8 @@ type UserClient = SupabaseClient<Database>;
 type TaskRow = Database["public"]["Tables"]["motorist_case_tasks"]["Row"];
 type Cursor = { id: string; createdAt: string; scope: string };
 type TaskQuery = { limit: number; cursor: Cursor | null };
+type MyTaskQuery = TaskQuery & Pick<MobileMyTaskFilter, "view" | "category" | "q">;
+type TaskDisplayRow = Pick<TaskRow, "id" | "title" | "status" | "priority" | "kind" | "revision" | "assigned_to" | "reviewer_profile_id" | "origin_locked" | "created_by" | "due_at" | "created_at" | "updated_at" | "workflow_state" | "review_submission" | "review_return_reason">;
 type Names = Map<string, string>;
 const priorities = ["urgent", "high", "normal", "low"] as const;
 const kinds = ["callback", "sms", "dispatch", "documents", "billing", "handover", "other"] as const;
@@ -106,6 +108,20 @@ export function parseMobileTaskQuery(params: URLSearchParams): TaskQuery {
   return { limit: Number(limit), cursor: decodeCursor(params.get("cursor")) };
 }
 
+export function parseMobileMyTaskQuery(params: URLSearchParams): MyTaskQuery {
+  parseParams(params, ["view", "category", "q", "cursor", "limit"]);
+  const view = params.get("view") ?? "assigned";
+  const category = params.get("category") ?? "open";
+  const rawQuery = params.get("q") ?? "";
+  if (!choice(view, ["assigned", "review"] as const) || !choice(category, ["open", "all"] as const)) invalid("Neplatný filter úloh.");
+  if (!text(rawQuery, 200)) invalid("Vyhľadávanie môže mať najviac 200 znakov.");
+  // PostgREST converts every asterisk to a LIKE wildcard before SQL escaping.
+  if (rawQuery.includes("*")) invalid("Vyhľadávanie nepodporuje hviezdičku. Zadajte inú časť názvu.");
+  const paging = new URLSearchParams();
+  for (const key of ["limit", "cursor"]) if (params.has(key)) paging.set(key, params.get(key)!);
+  return { ...parseMobileTaskQuery(paging), view, category, q: rawQuery.trim() };
+}
+
 async function requireCase(actor: MotoristActor, id: string, client: UserClient) {
   taskId(id);
   const { data, error } = await client.from("motorist_cases").select("id").eq("organization_id", actor.organizationId).eq("id", id).maybeSingle();
@@ -146,7 +162,7 @@ async function profileNames(actor: MotoristActor, ids: string[], client: UserCli
     return [row.id, row.display_name];
   }));
 }
-function fromRow(row: TaskRow) {
+function fromRow(row: TaskDisplayRow) {
   return { id: row.id, title: row.title, status: row.status, priority: row.priority, kind: row.kind, revision: row.revision,
     assignedTo: row.assigned_to, reviewerProfileId: row.reviewer_profile_id, originLocked: row.origin_locked,
     createdBy: row.created_by, dueAt: row.due_at, createdAt: row.created_at, updatedAt: row.updated_at,
@@ -169,6 +185,41 @@ function safeTask(value: unknown, actor: MotoristActor, names: Names): MobileTas
     assignedTo: person(optionalId(task.assignedTo)), reviewer: person(optionalId(task.reviewerProfileId)), dueAt: taskDueAt(task.dueAt),
     createdAt: task.createdAt, updatedAt: task.updatedAt, createdByMe: task.createdBy === actor.profileId,
     reviewSubmission: optionalText(task.reviewSubmission, 10_000), reviewReturnReason: optionalText(task.reviewReturnReason, 10_000) };
+}
+
+export async function listMobileMyTasks(actor: MotoristActor, query: MyTaskQuery, client: UserClient): Promise<Pick<MobileMyTasks, "tasks" | "nextCursor" | "capabilities" | "selection">> {
+  const selection = { view: query.view, category: query.category, q: query.q };
+  const scope = scopeKey(actor, "my_tasks", JSON.stringify(selection));
+  if (query.cursor && query.cursor.scope !== scope) invalid("Stránka patrí inému filtru alebo prihláseniu.");
+  const ownerColumn = query.view === "assigned" ? "assigned_to" : "reviewer_profile_id";
+  const page = () => {
+    let read = client.from("motorist_case_tasks")
+      .select("id,organization_id,title,status,priority,kind,revision,assigned_to,reviewer_profile_id,origin_locked,created_by,due_at,created_at,updated_at,workflow_state,review_submission,review_return_reason")
+      .eq("organization_id", actor.organizationId).eq(ownerColumn, actor.profileId)
+      .order("created_at", { ascending: false }).order("id", { ascending: false }).limit(query.limit + 1);
+    if (query.category === "open") read = read.neq("status", "done");
+    if (query.q) read = read.ilike("title", `%${query.q.replace(/[\\%_]/g, character => `\\${character}`)}%`);
+    return read;
+  };
+  // Equal timestamps precede older timestamps; retain PostgreSQL microseconds.
+  const pages = query.cursor ? await Promise.all([
+    page().eq("created_at", query.cursor.createdAt).lt("id", query.cursor.id),
+    page().lt("created_at", query.cursor.createdAt),
+  ]) : [await page()];
+  if (pages.some(result => result.error || !Array.isArray(result.data) || result.data.length > query.limit + 1)) unavailable("Vaše úlohy sa nepodarilo načítať.");
+  const rows = pages.flatMap(result => result.data ?? []).slice(0, query.limit + 1);
+  if (rows.some(row => row.organization_id !== actor.organizationId || row[ownerColumn] !== actor.profileId
+    || !isUuid(row.id) || !isHistoryTimestamp(row.created_at) || query.category === "open" && row.status === "done")
+    || new Set(rows.map(row => row.id)).size !== rows.length) unavailable();
+  const selected = rows.slice(0, query.limit).map(fromRow);
+  const [names, enabled] = await Promise.all([
+    profileNames(actor, selected.flatMap(taskPeople), client), capabilities(actor, client),
+  ]);
+  const last = selected.at(-1);
+  return {
+    tasks: selected.map(task => safeTask(task, actor, names)), capabilities: enabled, selection,
+    nextCursor: rows.length > query.limit && last ? encodeCursor({ id: last.id, createdAt: last.createdAt, scope }) : null,
+  };
 }
 
 export async function listMobileCaseTasks(actor: MotoristActor, caseId: string, query: TaskQuery, client: UserClient): Promise<Pick<MobileCaseTasks, "caseId" | "tasks" | "nextCursor" | "capabilities">> {

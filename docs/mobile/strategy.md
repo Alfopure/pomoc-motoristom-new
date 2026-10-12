@@ -1,10 +1,10 @@
 # Jednoduchý mobilný dispečing: stratégia a prvé vydanie
 
-Stav auditu: **2026-10-11**. Majiteľ oznámil nasadenie novej produkčnej verzie
+Stav vývoja: **2026-10-12**. Majiteľ oznámil nasadenie novej produkčnej verzie
 a následne vybral „Plán aj prvý základ v kóde“. Cieľ je natívna aplikácia pre
 iPhone a Android s existujúcim prihlásením, ústredňou a telefonovaním.
 
-## Overené východisko
+## Počiatočné overené východisko z 11. októbra
 
 | Oblasť | Overenie pred implementáciou |
 | --- | --- |
@@ -25,6 +25,13 @@ Health dokazuje nasadenie aplikácie, nie úspešný hovor alebo push.
 Pôvodné tri záložky: **Ústredňa — História — Účet**. Pred nimi obyčajné prihlásenie
 e-mailom a heslom. Zabudnuté heslo otvorí existujúcu obnovu na správnom webe.
 Operátor používa svoj aktuálny účet a serverové oprávnenia.
+
+Aktuálny rozšírený zdroj má päť záložiek: **Ústredňa — História — Prípady —
+Moje úlohy — Účet**. Prípady zostávajú predvolene všetky otvorené s filtrom
+podľa dispečera. Moje úlohy začínajú vlastnými otvorenými úlohami; možno
+vybrať úlohy na kontrolu a dokončené. Účet umožní obnoviť alebo vedome
+zahodiť miestny koncept. Je to rozsah pre TEST; nepredstavuje prijatie
+systémového telefonovania ani produkčného vydania.
 
 Ústredňa vo výslednom telefonujúcom vydaní ponúkne stav Dostupný/Pauza,
 telefónne číslo a Zavolať. Pri hovore zobrazí volajúceho, Prijať/Odmietnuť
@@ -72,11 +79,15 @@ Poradie vychádza z bežnej práce mobilného dispečera:
 4. **Organizácia služby:** úlohy, termíny a prevzatie/odovzdanie prípadu
    podľa existujúcich oprávnení a pravidiel webu.
 
-Aktuálny rozsah zahŕňa prvé dva body a otvorenie navigácie z detailu.
-Fotografie, prílohy, poloha a organizácia služby zostávajú ďalšími rozšíreniami.
+Aktuálny zdroj zahŕňa prehľad, založenie a úpravy prípadov, poznámky,
+fotografie/dokumenty, úlohy s kontrolou a správami, odovzdanie a otvorenie
+navigácie. Rozšírenie z 12. októbra pridáva prehľad vlastných úloh naprieč
+prípadmi a chránené textové koncepty. GPS/výber mapového miesta, priame
+preradenie dispečera a bežné notifikácie zostávajú ďalším rozsahom.
 Zakladanie je výslovná online operácia; výpadok nesmie spustiť automatické
 opakované odoslanie. Úspešný zápis sa oddelí od následného načítania detailu.
 Podrobný kontrakt a TEST skúšky sú v [mobilných prípadoch](cases.md).
+Hranice uloženia po reštarte sú v [konceptoch](drafts.md).
 
 ## Architektúra a rozhodnutia pred M2/M3
 
