@@ -211,6 +211,7 @@ organizačná rola sa číta z profilu. Bez prihlásenia je odpoveď 401, bez pr
 | `/api/mobile/v1/console` | vlastná prezencia a vlastné aktívne hovory; iba čítanie |
 | `/api/mobile/v1/calls/history` | `category`, `q`, `cursor`, `limit`; existujúca autorizovaná história |
 | `/api/mobile/v1/cases` | GET prehľad/filtre/stránky, POST nový prípad |
+| `/api/mobile/v1/cases/overview` | GET počty otvorených, mojich, nepriradených a urgentných prípadov organizácie |
 | `/api/mobile/v1/cases/[id]` | GET detail prípadu organizácie, PATCH s presnou revíziou a identitou uloženia |
 | `/api/mobile/v1/cases/[id]/notes` | POST historická poznámka s identitou proti duplicitnému zápisu |
 | `/api/mobile/v1/cases/dispatchers` | GET obmedzený organizačný výber dispečerov |

@@ -1,3 +1,4 @@
+import type { CaseStatus } from "../domain/types";
 import type { HandoffEvent, HandoffPublished, HandoffState } from "../domain/case-handoff";
 
 /** Versioned, provider-neutral DTOs shared with the native client. */
@@ -49,6 +50,7 @@ export type MobileHistory = MobileScope & {
   nextCursor: string | null;
 };
 
+export type MobileCaseStatus = CaseStatus;
 export type MobileCasePriority = "urgent" | "high" | "normal" | "low";
 export type MobileCaseJobType = "tow" | "replacement_vehicle" | "onsite_assistance" | "vehicle_recovery";
 export type MobileCaseUpdateStatus = "open" | "completed_assisted" | "completed_no_assistance" | "waiting_for_docs" | "cancelled" | "futile_trip";
@@ -57,6 +59,8 @@ export type MobileCaseFilter = {
   category: "open" | "all";
   q: string;
   ownerId?: string | null;
+  status?: MobileCaseStatus | null;
+  priority?: MobileCasePriority | null;
   cursor?: string | null;
 };
 export type MobileCaseSummary = {
@@ -78,7 +82,11 @@ export type MobileCaseSummary = {
 export type MobileCases = MobileScope & {
   cases: MobileCaseSummary[];
   nextCursor: string | null;
-  selection: Pick<MobileCaseFilter, "ownership" | "category" | "q"> & { ownerId: string | null };
+  selection: Pick<MobileCaseFilter, "ownership" | "category" | "q" | "status" | "priority"> & { ownerId: string | null };
+};
+/** Four independent exact-count observations, not a transaction-wide snapshot. */
+export type MobileCaseOverview = MobileScope & {
+  counts: { open: number; mine: number; unassigned: number; urgent: number };
 };
 export type MobileCaseDispatcher = { id: string; name: string; active: boolean };
 export type MobileCaseDispatchers = MobileScope & { dispatchers: MobileCaseDispatcher[] };

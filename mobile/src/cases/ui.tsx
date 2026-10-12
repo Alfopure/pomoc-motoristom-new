@@ -3,6 +3,10 @@ import { Keyboard, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, Re
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAndroidBack } from "../lib/use-android-back";
 import type { MobileCaseDetailData, MobileCaseFilter, MobileCaseNoteAdded, MobileCaseSummary } from "../../../src/lib/mobile-api";
+import { isClosedCaseStatus } from "../../../src/lib/mobile-case-filters";
+import { caseShortcut, caseRecoverySelection, canReviewCaseCreation, statusForCategory, type CaseSelection, type CaseShortcut } from "./filters";
+import { CaseFilterControls } from "./filter-controls";
+import { CaseOverview } from "./overview";
 import { MobileApiError } from "../lib/api";
 import { dialable, formatNumber, formatTime } from "../lib/display";
 import { Button, Card, ErrorNotice, Loading, colors, styles } from "../ui";
@@ -77,11 +81,18 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
   const [category, setCategory] = useState<MobileCaseFilter["category"]>("open");
   const [ownerId, setOwnerId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<MobileCaseFilter["status"]>(null);
+  const [priority, setPriority] = useState<MobileCaseFilter["priority"]>(null);
+  const selectFilters = useCallback((selection: CaseSelection) => {
+    setOwnership(selection.ownership); setOwnerId(selection.ownerId ?? null); setCategory(selection.category);
+    setSearch(selection.q); setStatus(selection.status ?? null); setPriority(selection.priority ?? null);
+  }, []);
   useEffect(() => { const retained = edits.current; return () => { for (const edit of retained.values()) edit.dispose(); }; }, []);
   useEffect(() => { const retained = notes.current; return () => { for (const note of retained.values()) note.dispose(); }; }, []);
   const edited = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     void queryClient.invalidateQueries({ queryKey: [...prefix, "detail"] });
+    void queryClient.invalidateQueries({ queryKey: [...prefix, "overview"] });
   }, [queryClient, prefix]);
   const showDetail = useCallback((id: string) => { setPage({ kind: "detail", id, note: notes.current.get(id) }); }, []);
   const openEditor = useCallback((item: MobileCaseDetailData, resume = false) => {
@@ -132,6 +143,7 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
     const created = await draft.submit();
     if (created) {
       showDetail(created.caseId);
+      void queryClient.invalidateQueries({ queryKey: [...prefix, "overview"] });
       void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     }
   }
@@ -140,10 +152,10 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
     if (state.status === "uncertain") {
       // A committed case may already have been reassigned. Review the whole
       // organization without owner, status or search restrictions.
-      setOwnership("all"); setOwnerId(null); setCategory("all"); setSearch("");
+      selectFilters(caseRecoverySelection());
       void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     }
-  }, [state.status, queryClient, prefix]);
+  }, [state.status, queryClient, prefix, selectFilters]);
   const consumedRequest = useRef<number | null>(null);
   useEffect(() => {
     // The nonce is an explicit navigation command from the parent workspace.
@@ -175,8 +187,10 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
       : page.kind === "attachments" ? <Attachments store={work} caseId={page.id} queryKey={prefix} active={active} onBack={() => showDetail(page.id)} />
       : page.kind === "tasks" ? <Tasks key={page.id + ":" + (page.nonce ?? "normal")} store={work} caseId={page.id} queryKey={prefix} profileId={profileId} active={active} onBack={() => showDetail(page.id)} />
       : page.kind === "list" ? <CaseList api={api} queryKey={prefix} active={active} ownership={ownership} category={category}
-      search={search} ownerId={ownerId} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
-      onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={setCategory} onOpen={showDetail}
+      search={search} ownerId={ownerId} status={status} priority={priority}
+      onShortcut={value => selectFilters(caseShortcut(value))} onPriority={setPriority}
+      onStatus={value => { setStatus(value); if (value && isClosedCaseStatus(value)) setCategory("all"); }} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
+      onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={value => { setCategory(value); setStatus(statusForCategory(status, value)); }} onOpen={showDetail}
       onNew={showForm} draftState={state} onReviewed={requestedAt => draft.reviewList(requestedAt)} />
       : page.kind === "new" ? <CaseForm api={api} active={active} draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} />
         : page.kind === "edit" ? <CaseEditor api={api} edit={page.edit} active={active} onSaved={edited} onBack={() => showDetail(page.id)} />
@@ -212,37 +226,40 @@ function ResumeCaseEditor({ api, id, active, initialError, onLoaded, onBack }: {
   </View>;
 }
 
-function CaseList({ api, queryKey, active, ownership, category, search, ownerId, onOwner, onSearch, onOwnership, onCategory, onOpen, onNew, draftState, onReviewed }: {
+function CaseList({ api, queryKey, active, ownership, category, search, ownerId, status, priority, onStatus, onPriority, onShortcut, onOwner, onSearch, onOwnership, onCategory, onOpen, onNew, draftState, onReviewed }: {
   api: CasesApi; queryKey: string[]; active: boolean; ownership: MobileCaseFilter["ownership"]; category: MobileCaseFilter["category"]; search: string; ownerId: string | null; onOwner: (id: string | null) => void;
+  status: MobileCaseFilter["status"]; priority: MobileCaseFilter["priority"]; onStatus: (value: MobileCaseFilter["status"]) => void; onPriority: (value: MobileCaseFilter["priority"]) => void; onShortcut: (value: CaseShortcut) => void;
   onSearch: (value: string) => void; onOwnership: (value: MobileCaseFilter["ownership"]) => void; onCategory: (value: MobileCaseFilter["category"]) => void;
   onOpen: (id: string) => void; onNew: () => void; draftState: DraftState; onReviewed: (requestedAt: number) => void;
 }) {
+  const queryClient = useQueryClient();
   const [selectingOwner, setSelectingOwner] = useState(false);
   const dispatchers = useQuery({ queryKey: [...queryKey, "dispatchers"], queryFn: ({ signal }) => api.dispatchers(signal), enabled: active && (selectingOwner || ownerId !== null) });
   const selectedOwner = dispatchers.isError ? undefined : dispatchers.data?.dispatchers.find(item => item.id === ownerId);
   const [debounced, setDebounced] = useState(search.trim());
   useEffect(() => { const timer = setTimeout(() => setDebounced(search.trim()), 300); return () => clearTimeout(timer); }, [search]);
   const query = useInfiniteQuery({
-    queryKey: [...queryKey, "list", ownership, ownerId, category, debounced], enabled: active,
+    queryKey: [...queryKey, "list", ownership, ownerId, category, debounced, status ?? null, priority ?? null], enabled: active,
     initialPageParam: null as string | null,
-    queryFn: ({ pageParam, signal }) => api.list({ ownership, ownerId, category, q: debounced, cursor: pageParam }, signal),
+    queryFn: ({ pageParam, signal }) => api.list({ ownership, ownerId, category, status, priority, q: debounced, cursor: pageParam }, signal),
     getNextPageParam: page => page.nextCursor ?? undefined,
   });
   const pendingSearch = search.trim() !== debounced;
   const denied = query.error instanceof MobileApiError && [401, 403, 409, 502].includes(query.error.status);
-  const canShow = !pendingSearch && !denied && !(query.isError && !query.isFetchNextPageError);
+  const canShow = active && !pendingSearch && !denied && !(query.isError && !query.isFetchNextPageError);
   useEffect(() => {
-    if (active && canShow && query.isSuccess && !query.isFetching && ownership === "all" && !ownerId && category === "all" && !debounced) onReviewed(query.data?.pages[0]?.requestedAt ?? 0);
-  }, [active, canShow, query.isSuccess, query.isFetching, query.data, ownership, ownerId, category, debounced, onReviewed]);
+    if (canShow && query.isSuccess && !query.isFetching && canReviewCaseCreation({ ownership, ownerId, category, q: debounced, status, priority })) onReviewed(query.data?.pages[0]?.requestedAt ?? 0);
+  }, [active, canShow, query.isSuccess, query.isFetching, query.data, ownership, ownerId, category, debounced, status, priority, onReviewed]);
   const cases = [...new Map(query.data?.pages.flatMap(page => page.cases).map(item => [item.id, item]) ?? []).values()];
   const hasDraft = draftState.status !== "saved" && Object.entries(draftState.input).some(([key, value]) =>
     key === "priority" ? value !== "normal" : Array.isArray(value) ? value.length > 0 : typeof value === "string" && value.trim().length > 0);
   return <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}
-    refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { void query.refetch(); }} />}>
+    refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { if (active) { void query.refetch(); void queryClient.invalidateQueries({ queryKey: [...queryKey, "overview"] }); } }} />}>
     <Text style={styles.heading}>Prípady</Text>
     <Button label={draftState.status === "saving" ? "Ukladanie prípadu…" : draftState.status === "uncertain" ? "Overiť uloženie prípadu" : hasDraft ? "Rozpracovaný prípad" : "Nový prípad"} onPress={onNew} />
     {draftState.status === "uncertain" && <Card><Text style={styles.text}>Skontrolujte, či sa váš prípad už uložil. Nájdete ho podľa mena, EČV alebo času vytvorenia.</Text>
       {draftState.reviewedList && <Text style={styles.muted}>Ak ho nenájdete, v rozpracovanom formulári môžete vedome povoliť opakovanie.</Text>}</Card>}
+    <CaseOverview api={api} queryKey={queryKey} active={active} pendingFilter={pendingSearch || query.isFetching} onSelect={onShortcut} />
     <TextInput accessibilityLabel="Hľadať prípady" placeholder="Číslo prípadu, meno alebo EČV" placeholderTextColor={colors.muted} value={search}
       onChangeText={onSearch} maxLength={120} style={styles.input} autoCorrect={false} />
     <View style={s.choices}>
@@ -268,6 +285,7 @@ function CaseList({ api, queryKey, active, ownership, category, search, ownerId,
       <Choice label="Otvorené" selected={category === "open"} onPress={() => onCategory("open")} />
       <Choice label="Aj uzavreté" selected={category === "all"} onPress={() => onCategory("all")} />
     </View>
+    <CaseFilterControls active={active} status={status} priority={priority} onStatus={onStatus} onPriority={onPriority} />
     {pendingSearch || query.isPending ? <Loading /> : !canShow ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} />
       : <>{cases.length === 0 && <Card><Text style={styles.text}>Žiadne prípady pre tento výber.</Text></Card>}
         {cases.map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={"Otvoriť prípad " + item.caseNumber} onPress={() => onOpen(item.id)}>

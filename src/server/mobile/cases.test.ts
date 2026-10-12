@@ -38,7 +38,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe("mobile case filters and input", () => {
   it("defaults to all open cases and trims only the search edges", () => {
-    expect(query()).toEqual({ ownership: "all", category: "open", q: "", ownerId: null, limit: 25, cursor: null });
+    expect(query()).toEqual({ ownership: "all", category: "open", q: "", ownerId: null, status: null, priority: null, limit: 25, cursor: null });
     expect(query("q=++Ján++Novák++").q).toBe("Ján  Novák");
   });
   it.each(["ownership=foreign", "ownerId=", "ownerId=invalid", `ownership=mine&ownerId=${actor.profileId}`, `ownerId=${actor.profileId}&ownerId=${actor.profileId}`, "category=closed", "limit=0", "limit=26", "limit=2.5", "limit=01", "q=x&q=y", "organizationId=forged", "cursor=nope", "cursor=" + "a".repeat(1025), "q=" + "x".repeat(121)])("rejects invalid filter %s", raw => {
@@ -88,7 +88,7 @@ describe("authorized bounded mobile case reads", () => {
     f.db.seed("motorist_profiles", [{ id: ownerId, organization_id: actor.organizationId, display_name: "Former dispatcher", role: "dispatcher", kind: "human", active: false }]);
     const first = await listMobileCases(actor, query(`ownerId=${ownerId}&q=defekt&limit=1`), undefined, f.admin);
     expect(first.cases.map(item => item.id)).toEqual([uuid(11)]);
-    expect(first.selection).toEqual({ ownership: "all", category: "open", q: "defekt", ownerId });
+    expect(first.selection).toEqual({ ownership: "all", category: "open", q: "defekt", ownerId, status: null, priority: null });
     const next = await listMobileCases(actor, query(`ownerId=${ownerId}&q=defekt&limit=1&cursor=${first.nextCursor}`), undefined, f.admin);
     expect(next.cases.map(item => item.id)).toEqual([uuid(10)]);
     expect(next.nextCursor).toBeNull();
