@@ -1,12 +1,12 @@
 import type { StorageDriver } from "../lib/session-storage";
 import { DraftNotSentError, draftDate, draftId, draftKeys, draftObject, type DraftPort } from "./port";
 
-export type DraftKind = "case-create" | "case-edit" | "case-note" | "task-create" | "task-state" | "handoff" | "attachment";
+export type DraftKind = "case-create" | "case-edit" | "case-note" | "case.owner" | "task-create" | "task-state" | "handoff" | "attachment";
 export type DraftScope = { environment: "test" | "production"; projectUrl: string; userId: string; profileId: string; organizationId: string };
 export type StoredDraft = { key: string; kind: DraftKind; resourceId: string | null; generation: string; updatedAt: string; payload: object };
 export type VaultState = { ready: boolean; saving: boolean; busy: boolean; error: string | null; records: StoredDraft[]; durable: boolean };
 type Options = { durable: boolean; uuid: () => string; current: () => boolean; revalidate: () => Promise<void> };
-const kinds: DraftKind[] = ["case-create", "case-edit", "case-note", "task-create", "task-state", "handoff", "attachment"];
+const kinds: DraftKind[] = ["case-create", "case-edit", "case-note", "case.owner", "task-create", "task-state", "handoff", "attachment"];
 const ACCOUNT_LIMIT = 90_000;
 const RECORD_LIMIT = 64_000;
 const RECORD_COUNT = 32;

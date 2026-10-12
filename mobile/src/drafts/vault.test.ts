@@ -42,6 +42,20 @@ describe("account draft vault protocol", () => {
     expect(JSON.parse(f.files.get(draftStorageKey(f.scope))!).records.map((r: { payload: unknown }) => r.payload)).toEqual([{ text: "A" }, { text: "B" }]);
     a.close(); b.close();
   });
+  it("restores an exact uncertain owner command beside an older case edit", async () => {
+    const f = fixture(), vault = await f.open();
+    const owner = { v: 1, status: "uncertain", command: { mutationId: id(9), expectedUpdatedAt: "2026-10-12T18:00:00.123456Z", ownerId: id(8) } };
+    const edit = { v: 1, status: "uncertain", command: { mutationId: id(10), expectedUpdatedAt: "2026-10-12T17:00:00.654321Z", contactName: "Rozpísaný kontakt" } };
+    vault.bind("case.owner", resource).changed(owner);
+    vault.bind("case-edit", resource).changed(edit);
+    await vault.flush(); vault.close();
+    const restored = await f.open();
+    expect(restored.snapshot().ready).toBe(true);
+    expect(restored.bind("case.owner", resource).load()).toEqual(owner);
+    expect(restored.bind("case-edit", resource).load()).toEqual(edit);
+    expect(restored.snapshot().records.map(record => record.key)).toEqual(["case.owner." + resource, "case-edit." + resource]);
+    restored.close();
+  });
   it("settles a captured receipt after close without losing the original command", async () => {
     const f = fixture(), vault = await f.open(), port = vault.bind("case-note", resource), write = await port.prepare({ commandId: id(9), status: "saving" });
     vault.close(); expect(port.current()).toBe(false);

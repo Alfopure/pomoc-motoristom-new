@@ -4,6 +4,13 @@ Rozšírenie z 12. 10. 2026 pridáva obnovu nového prípadu, jeho úprav,
 poznámky, novej úlohy, správy/pracovného príkazu a odovzdania. Koncept
 nemá offline frontu a po obnove sa nič samo neodosiela.
 
+Priradenie dispečera má vlastný záznam `case.owner` pre konkrétny prípad.
+Úprava prípadu a priradenie sa obnovujú oddelene; neisté priradenie zachová
+pôvodné UUID, cieľového kolegu a presnú revíziu. Nové mapové miesto je
+vnorená hodnota formulára s vlastnou verziou kodeku. Starší presný príkaz
+bez mapových polí sa pri obnove nedopĺňa novými predvolenými hodnotami.
+Prihlasovacie hlavičky mapy a WebView sa do konceptov neukladajú.
+
 ## Obnova a neisté uloženie
 
 V účte je zoznam záznamov podľa druhu a času. „Pokračovať“ otvorí príslušný

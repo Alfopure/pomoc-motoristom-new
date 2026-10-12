@@ -1,7 +1,10 @@
-import type { MobileCaseCreated, MobileCaseCreateInput, MobileCaseDetail, MobileCaseDispatchers, MobileCaseFilter, MobileCaseNoteInput, MobileCaseNoteAdded, MobileCases, MobileCaseSummary, MobileCaseUpdateInput, MobileCaseUpdated, MobileScope } from "../../../src/lib/mobile-api";
+import type { MobileCaseCreated, MobileCaseCreateInput, MobileCaseDetail, MobileCaseDispatchers, MobileCaseFilter, MobileCaseNoteInput, MobileCaseNoteAdded, MobileCases, MobileCaseSummary, MobileCaseUpdateInput, MobileCaseUpdated, MobileScope, MobileCaseOwnerContext, MobileCaseOwnerInput, MobileCaseOwnerAssigned } from "../../../src/lib/mobile-api";
 import { MobileApiError, type MobileTransport } from "../lib/api";
 import { createHandoffApi } from "../handoff/api";
 import { createWorkApi } from "../work/api";
+import type { MapRequest, MapSource } from "./map-bridge";
+import { draftDate } from "../drafts/port";
+import { caseMap, compareRevisions } from "./location";
 import type { MobileConfig } from "../lib/config";
 
 const invalid = () => new MobileApiError("Odpoveď prípadov sa nepodarilo overiť. Obnovte údaje.", 502);
@@ -43,7 +46,7 @@ export function createCasesApi(config: MobileConfig, profileId: string, getToken
     if (body.ok !== true || body.apiVersion !== 1 || body.environment !== config.environment || body.profileId !== profileId || !isDate(body.checkedAt)) throw invalid();
     return { ok: true, apiVersion: 1, environment: config.environment, profileId, checkedAt: body.checkedAt };
   }
-  async function request(path: string, input?: MobileCaseCreateInput | MobileCaseUpdateInput | MobileCaseNoteInput, signal?: AbortSignal, method?: "PATCH") {
+  async function request(path: string, input?: MobileCaseCreateInput | MobileCaseUpdateInput | MobileCaseNoteInput | MobileCaseOwnerInput, signal?: AbortSignal, method?: "PATCH") {
     const token = await getToken();
     if (!token) throw new MobileApiError("Prihláste sa do aplikácie.", 401);
     const controller = new AbortController(), abort = () => controller.abort();
@@ -70,6 +73,16 @@ export function createCasesApi(config: MobileConfig, profileId: string, getToken
     } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
   }
   return {
+    mapSource: async (input: MapRequest, signal?: AbortSignal): Promise<MapSource> => {
+      if (!expectedOrganization || !isId(input.nonce) || !(input.caseId === null || isId(input.caseId)) || !["view", "pick"].includes(input.mode) || !["pickup", "destination"].includes(input.target)) throw new MobileApiError("Mapu sa nepodarilo bezpečne pripraviť.", 400);
+      const token = await getToken();
+      if (signal?.aborted) throw new MobileApiError("Mapa bola zatvorená.", 0);
+      if (!token) throw new MobileApiError("Prihláste sa do aplikácie.", 401);
+      return { uri: config.apiOrigin + "/api/mobile/v1/maps/picker" + (input.caseId ? "?caseId=" + input.caseId : ""),
+        headers: { Authorization: "Bearer " + token, "X-PM-App-Environment": config.environment, "X-PM-Expected-Organization": expectedOrganization,
+          "X-PM-Map-Mode": input.mode, "X-PM-Map-Target": input.target, "X-PM-Map-Nonce": input.nonce },
+        identity: { version: 1, ...input, environment: config.environment, profileId, organizationId: expectedOrganization } };
+    },
     work: createWorkApi(config, profileId, getToken, transport, undefined, expectedOrganization),
     handoffs: createHandoffApi(config, profileId, getToken, transport, expectedOrganization),
     list: async (filter: MobileCaseFilter, signal?: AbortSignal): Promise<MobileCases & { requestedAt: number }> => {
@@ -86,8 +99,29 @@ export function createCasesApi(config: MobileConfig, profileId: string, getToken
         || !Array.isArray(body.cases) || body.cases.length > 25 || !isNullableText(body.nextCursor)
         || body.nextCursor === "" || (body.nextCursor !== null && body.nextCursor === filter.cursor)) throw invalid();
       const cases = body.cases.map(summary);
-      if (new Set(cases.map(item => item.id)).size !== cases.length || (ownerId !== null && cases.some(item => item.owner.id !== ownerId))) throw invalid();
+      if (filter.ownership === "unassigned" && cases.some(item => item.owner.id !== null || item.owner.mine) || new Set(cases.map(item => item.id)).size !== cases.length || (ownerId !== null && cases.some(item => item.owner.id !== ownerId))) throw invalid();
       return { ...scope(body), requestedAt, cases, nextCursor: body.nextCursor, selection: { ownership: filter.ownership, category: filter.category, q, ownerId } };
+    },
+    ownerContext: async (id: string, signal?: AbortSignal): Promise<MobileCaseOwnerContext> => {
+      if (!isId(id)) throw new MobileApiError("Prípad sa nenašiel.", 404);
+      const body = await request("/" + id + "/owner", undefined, signal), owner = object(body.owner), caps = object(body.capabilities);
+      if (body.caseId !== id || !draftDate(body.caseRevision) || typeof body.available !== "boolean"
+        || !(owner.id === null || isId(owner.id)) || !isNullableText(owner.name) || typeof owner.mine !== "boolean" || owner.mine !== (owner.id === profileId)
+        || typeof caps.take !== "boolean" || typeof caps.assign !== "boolean" || !Array.isArray(body.targets) || body.targets.length > 200
+        || !body.available && (caps.take || caps.assign || body.targets.length) || caps.take && owner.id !== null) throw invalid();
+      const targets = body.targets.map(value => { const target = object(value);
+        if (!isId(target.id) || !isText(target.name) || !target.name.trim() || target.name.length > 320) throw invalid();
+        return { id: target.id, name: target.name }; });
+      if (new Set(targets.map(item => item.id)).size !== targets.length || caps.take && !targets.some(item => item.id === profileId)) throw invalid();
+      return { ...scope(body), caseId: id, caseRevision: body.caseRevision, owner: { id: owner.id, name: owner.name, mine: owner.mine }, available: body.available,
+        capabilities: { take: caps.take, assign: caps.assign }, targets };
+    },
+    assignOwner: async (id: string, input: MobileCaseOwnerInput): Promise<MobileCaseOwnerAssigned> => {
+      if (!isId(id) || !isId(input.mutationId) || !isId(input.ownerId) || !draftDate(input.expectedUpdatedAt)) throw new MobileApiError("Neplatné priradenie prípadu.", 400);
+      const body = await request("/" + id + "/owner", input);
+      if (body.caseId !== id || body.mutationId !== input.mutationId || body.ownerId !== input.ownerId || !draftDate(body.committedRevision)
+        || compareRevisions(body.committedRevision, input.expectedUpdatedAt) < 0 || body.refreshRequired !== true) throw invalid();
+      return { ...scope(body), caseId: id, mutationId: input.mutationId, ownerId: input.ownerId, committedRevision: body.committedRevision, refreshRequired: true };
     },
     dispatchers: async (signal?: AbortSignal): Promise<MobileCaseDispatchers> => {
       const body = await request("/dispatchers", undefined, signal);
@@ -117,13 +151,15 @@ export function createCasesApi(config: MobileConfig, profileId: string, getToken
         return { value: option.value as MobileCaseUpdateInput["status"] & string, label: option.label };
       });
       if (new Set(statusOptions.map(option => option.value)).size !== statusOptions.length) throw invalid();
-      const fields = Object.fromEntries(textFields.map(field => [field, editable[field]])) as Required<Omit<MobileCaseCreateInput, "priority" | "jobTypes">>;
+      const fields = Object.fromEntries(textFields.map(field => [field, editable[field]])) as Required<Omit<MobileCaseCreateInput, "priority" | "jobTypes" | "pickup" | "destination">>;
       const timeline = item.timeline.map(value => {
         const event = object(value);
         if (!isId(event.id) || !isText(event.title) || !isNullableText(event.body) || !isDate(event.createdAt) || !isNullableText(event.actorName)) throw invalid();
         return { id: event.id, title: event.title, body: event.body, createdAt: event.createdAt, actorName: event.actorName };
       });
-      return { ...scope(body), case: { ...base, mainNote: item.mainNote, incidentDescription: item.incidentDescription, jobTypeLabels: item.jobTypeLabels, editable: { ...fields, status: base.status, priority: base.priority, jobTypes: editable.jobTypes as NonNullable<MobileCaseCreateInput["jobTypes"]> }, statusOptions, timeline } };
+      let map;
+      try { map = item.map === undefined ? undefined : caseMap(item.map); } catch { throw invalid(); }
+      return { ...scope(body), case: { ...base, ...(map === undefined ? {} : { map }), mainNote: item.mainNote, incidentDescription: item.incidentDescription, jobTypeLabels: item.jobTypeLabels, editable: { ...fields, status: base.status, priority: base.priority, jobTypes: editable.jobTypes as NonNullable<MobileCaseCreateInput["jobTypes"]> }, statusOptions, timeline } };
     },
     addNote: async (id: string, input: MobileCaseNoteInput): Promise<MobileCaseNoteAdded> => {
       if (!isId(id) || !isId(input.mutationId)) throw new MobileApiError("Chýba platná identita poznámky.", 400);

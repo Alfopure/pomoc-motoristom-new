@@ -2,15 +2,19 @@ import type { MobileCaseDetailData, MobileCaseUpdateInput, MobileCaseUpdated } f
 import { MobileApiError } from "../lib/api";
 import type { CasesApi } from "./api";
 import { DraftNotSentError, draftDate, draftId, draftKeys, draftObject, draftText, type DraftPort, type DraftWrite } from "../drafts/port";
-import { caseUpdateCommand, caseUpdatedDraft, copyCaseDraft, editableDraft } from "./draft-codecs";
+import { caseUpdateCommand, caseUpdatedDraft, copyCaseDraft, editableDraft, type CaseEditable } from "./draft-codecs";
 
-type Editable = MobileCaseDetailData["editable"];
+import { freezeCommand, placeSelection } from "./location";
+type Editable = CaseEditable;
 export type EditState = { base: MobileCaseDetailData; input: Editable; status: "editing" | "saving" | "uncertain" | "conflict" | "blocked" | "committed" | "saved";
   error: string | null; receipt: MobileCaseUpdated | null; latest: MobileCaseDetailData | null; refreshing: boolean; canRecover: boolean };
 const writableStatuses = ["open", "completed_assisted", "completed_no_assistance", "waiting_for_docs", "cancelled", "futile_trip"];
 export function changedFields(base: Editable, input: Editable): Partial<Editable> {
-  return Object.fromEntries(Object.keys(base).filter(key => JSON.stringify(base[key as keyof Editable]) !== JSON.stringify(input[key as keyof Editable]))
-    .map(key => [key, input[key as keyof Editable]]));
+  const result = Object.fromEntries(Object.keys(input).filter(key => JSON.stringify(base[key as keyof Editable]) !== JSON.stringify(input[key as keyof Editable]))
+    .map(key => [key, input[key as keyof Editable]])) as Partial<Editable>;
+  if ("pickup" in result) delete result.manualPickupAddress;
+  if ("destination" in result) delete result.manualDestinationAddress;
+  return result;
 }
 // Date truncates database microseconds. Compare the remaining fraction too,
 // without changing either revision string sent to the mutation endpoint.
@@ -34,10 +38,10 @@ export class CaseEdit {
       try {
         const v = draftObject(saved); draftKeys(v, ["version", "base", "input", "status", "pending", "receipt", "canRecover"]);
         const b = draftObject(v.base); draftKeys(b, ["id", "caseNumber", "updatedAt", "editable"]);
-        if (v.version !== 1 || b.id !== source.id || !draftId(b.id) || !draftText(b.caseNumber, 160) || !b.caseNumber || !draftDate(b.updatedAt)
+        if (![1, 2].includes(v.version as number) || b.id !== source.id || !draftId(b.id) || !draftText(b.caseNumber, 160) || !b.caseNumber || !draftDate(b.updatedAt)
           || !["editing", "saving", "uncertain", "conflict", "blocked", "committed", "saved"].includes(v.status as string) || typeof v.canRecover !== "boolean") throw new Error();
-        const base = { ...source, id: b.id, caseNumber: b.caseNumber, updatedAt: b.updatedAt, editable: editableDraft(b.editable) }, input = editableDraft(v.input);
-        this.pending = v.pending === null ? null : caseUpdateCommand(v.pending, base);
+        const base = { ...source, id: b.id, caseNumber: b.caseNumber, updatedAt: b.updatedAt, editable: editableDraft(b.editable, v.version as number) }, input = editableDraft(v.input, v.version as number);
+        this.pending = v.pending === null ? null : freezeCommand(caseUpdateCommand(v.pending, base, v.version as number));
         if (this.pending) {
           const { mutationId: _id, expectedUpdatedAt: _revision, ...fields } = this.pending;
           const changes = changedFields(base.editable, input);
@@ -62,13 +66,21 @@ export class CaseEdit {
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   exportDraft(change: Partial<EditState> = {}) {
     const state = { ...this.state, ...change };
-    return copyCaseDraft({ version: 1, base: { id: state.base.id, caseNumber: state.base.caseNumber, updatedAt: state.base.updatedAt, editable: state.base.editable },
+    return copyCaseDraft({ version: 2, base: { id: state.base.id, caseNumber: state.base.caseNumber, updatedAt: state.base.updatedAt, editable: state.base.editable },
       input: state.input, status: state.status, pending: this.pending, receipt: state.receipt, canRecover: state.canRecover });
   }
   private update(change: Partial<EditState>, persist = true) { if (!this.disposed) { this.state = { ...this.state, ...change }; if (persist && !this.rejected) this.port?.changed(this.exportDraft()); for (const notify of this.listeners) notify(); } }
   edit(change: Partial<Editable>) {
     if (this.disposed || this.rejected || this.state.status !== "editing") return;
-    this.update({ input: { ...this.state.input, ...change }, error: null });
+    const input = copyCaseDraft({ ...this.state.input, ...change });
+    if ("manualPickupAddress" in change) delete input.pickup;
+    if ("manualDestinationAddress" in change) delete input.destination;
+    this.update({ input, error: null });
+  }
+  selectPlace(target: "pickup" | "destination", value: unknown) {
+    if (this.disposed || this.rejected || this.state.status !== "editing") return;
+    const selected = placeSelection(value), manual = target === "pickup" ? "manualPickupAddress" : "manualDestinationAddress";
+    this.update({ input: { ...this.state.input, [target]: selected, [manual]: selected.address }, error: null });
   }
   async save() {
     if (this.disposed || this.rejected || !["editing", "uncertain"].includes(this.state.status)) return;
@@ -77,7 +89,7 @@ export class CaseEdit {
       if (!Object.keys(changes).length) return;
       if (changes.status !== undefined && !writableStatuses.includes(changes.status)) { this.update({ error: "Vyberte podporovaný stav prípadu." }); return; }
       try {
-        this.pending = Object.freeze({ ...changes, ...(changes.jobTypes ? { jobTypes: [...changes.jobTypes] } : {}), expectedUpdatedAt: this.state.base.updatedAt, mutationId: this.uuid() }) as MobileCaseUpdateInput;
+        this.pending = freezeCommand({ ...changes, expectedUpdatedAt: this.state.base.updatedAt, mutationId: this.uuid() }) as MobileCaseUpdateInput;
       } catch { this.update({ error: "Požiadavku sa nepodarilo pripraviť. Skúste znova." }); return; }
     }
     const reconciling = this.state.status === "uncertain";

@@ -179,3 +179,53 @@ describe("mobile cases contract", () => {
   });
 
 });
+
+describe("phase8 case scope and assignment boundaries", () => {
+  const ownerContext = { ...scope, caseId, caseRevision: "2026-10-11T12:00:00.000001Z", owner: { id: null, name: null, mine: false }, available: true,
+    capabilities: { take: true, assign: true }, targets: [{ id: profileId, name: "Ja" }, { id: otherId, name: "Kolega" }] };
+  it("separates unassigned from all and rejects assigned rows in that result", async () => {
+    const filter = { ownership: "unassigned" as const, category: "open" as const, q: "" };
+    const f = fixture({ ...list, selection: { ...filter, ownerId: null }, cases: [{ ...item, owner: { id: null, name: null, mine: false } }] });
+    expect((await f.api.list(filter)).cases[0].owner.id).toBeNull(); expect(new URL(f.transport.mock.calls[0][0]).searchParams.get("ownership")).toBe("unassigned");
+    await expect(fixture({ ...list, selection: { ...filter, ownerId: null } }).api.list(filter)).rejects.toMatchObject({ status: 502 });
+  });
+  it("reads eligible owner context without using inactive historical directory", async () => {
+    const f = fixture(ownerContext); expect(await f.api.ownerContext(caseId)).toEqual(ownerContext);
+    expect(f.transport.mock.calls[0][0]).toBe(config.apiOrigin + "/api/mobile/v1/cases/" + caseId + "/owner");
+  });
+  it.each([{ caseId: otherId }, { caseRevision: "2026" }, { available: false }, { targets: [{ id: otherId, name: "X" }, { id: otherId, name: "Y" }] }, { owner: { id: null, name: null, mine: true } }])("rejects malformed authority context %j", async change => {
+    await expect(fixture({ ...ownerContext, ...change }).api.ownerContext(caseId)).rejects.toMatchObject({ status: 502 });
+  });
+  it("binds receipt to exact owner, command and microsecond revision", async () => {
+    const input = { mutationId: otherId, ownerId: profileId, expectedUpdatedAt: ownerContext.caseRevision };
+    const receipt = { ...scope, caseId, mutationId: input.mutationId, ownerId: profileId, committedRevision: input.expectedUpdatedAt, refreshRequired: true };
+    expect(await fixture(receipt).api.assignOwner(caseId, input)).toEqual(receipt); // same-owner no-op may preserve revision
+    for (const change of [{ ownerId: otherId }, { mutationId: profileId }, { committedRevision: "2026-10-11T12:00:00.000000Z" }]) {
+      await expect(fixture({ ...receipt, ...change }).api.assignOwner(caseId, input)).rejects.toMatchObject({ status: 502 });
+    }
+  });
+  it("preserves null map points and true zero coordinates without coercing null", async () => {
+    const place = { id: otherId, label: "Miesto", address: "Adresa", point: { lat: 0, lng: 0 }, source: "manual", accuracyMeters: null, capturedAt: null };
+    const map = { pickup: place, destination: { ...place, point: null }, clientLocation: null };
+    expect((await fixture({ ...detail, case: { ...detail.case, map } }).api.detail(caseId)).case.map).toEqual(map);
+    await expect(fixture({ ...detail, case: { ...detail.case, map: { ...map, pickup: { ...place, point: { lat: null, lng: 0 } } } } }).api.detail(caseId)).rejects.toMatchObject({ status: 502 });
+  });
+});
+
+describe("private map request source", () => {
+  const nonce = "00000000-0000-4000-8000-000000000009";
+  it("keeps auth in initial request headers, never URI/bridge identity or a cached HTTP response", async () => {
+    const token = vi.fn(async () => "PRIVATE_TOKEN"), transport = vi.fn<MobileTransport>();
+    const api = createCasesApi(config, profileId, token, transport, otherId);
+    const source = await api.mapSource({ mode: "pick", target: "pickup", caseId, nonce });
+    expect(source.uri).toBe(config.apiOrigin + "/api/mobile/v1/maps/picker?caseId=" + caseId);
+    expect(source.headers).toMatchObject({ Authorization: "Bearer PRIVATE_TOKEN", "X-PM-Expected-Organization": otherId, "X-PM-Map-Nonce": nonce });
+    expect(JSON.stringify(source.identity)).not.toContain("PRIVATE_TOKEN"); expect(transport).not.toHaveBeenCalled();
+    await expect(fixture().api.mapSource({ mode: "pick", target: "pickup", caseId, nonce })).rejects.toMatchObject({ status: 400 });
+  });
+  it("rejects late token after map closes and never creates a source", async () => {
+    let ready!: (value: string) => void; const token = new Promise<string>(done => { ready = done; }), controller = new AbortController();
+    const result = createCasesApi(config, profileId, () => token, vi.fn(), otherId).mapSource({ mode: "view", target: "pickup", caseId, nonce }, controller.signal);
+    controller.abort(); ready("PRIVATE"); await expect(result).rejects.toMatchObject({ status: 0 });
+  });
+});

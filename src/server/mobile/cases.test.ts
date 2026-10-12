@@ -198,7 +198,7 @@ describe("mobile atomic editor", () => {
     expect(() => parseMobileCaseUpdate({ note: "x", mutationId: uuid(30) })).toThrow(expect.objectContaining({ status: 428, code: "CASE_REVISION_REQUIRED" }));
     for (const input of [null, [], { ...identity }, { ...identity, mutationId: "bad", note: "x" }, { ...identity, expectedUpdatedAt: "2026-02-31T00:00:00Z", note: "x" },
       { ...identity, ownerId: actor.profileId }, { ...identity, organizationId: actor.organizationId }, { ...identity, contacts: [] },
-      { ...identity, pickup: null }, { ...identity, attachmentMetadata: [] }, { ...identity, status: "new" }, { ...identity, note: "x".repeat(10001) }]) {
+      { ...identity, pickup: { lat: 48 } }, { ...identity, attachmentMetadata: [] }, { ...identity, status: "new" }, { ...identity, note: "x".repeat(10001) }]) {
       expect(() => parseMobileCaseUpdate(input)).toThrow(MutationError);
     }
     expect(parseMobileCaseUpdate({ ...identity, note: "  hello  ", manualPickupAddress: "" })).toEqual({ ...identity, note: "hello", manualPickupAddress: "" });

@@ -53,7 +53,7 @@ export type MobileCasePriority = "urgent" | "high" | "normal" | "low";
 export type MobileCaseJobType = "tow" | "replacement_vehicle" | "onsite_assistance" | "vehicle_recovery";
 export type MobileCaseUpdateStatus = "open" | "completed_assisted" | "completed_no_assistance" | "waiting_for_docs" | "cancelled" | "futile_trip";
 export type MobileCaseFilter = {
-  ownership: "mine" | "all";
+  ownership: "mine" | "all" | "unassigned";
   category: "open" | "all";
   q: string;
   ownerId?: string | null;
@@ -86,7 +86,8 @@ export type MobileCaseDetailData = MobileCaseSummary & {
   mainNote: string;
   incidentDescription: string | null;
   jobTypeLabels: string[];
-  editable: Required<MobileCaseCreateInput> & { status: string };
+  editable: Required<Omit<MobileCaseCreateInput, "pickup" | "destination">> & { status: string };
+  map?: MobileCaseMap;
   statusOptions: { value: MobileCaseUpdateStatus; label: string }[];
   timeline: { id: string; title: string; body: string | null; createdAt: string; actorName: string | null }[];
 };
@@ -99,10 +100,55 @@ export type MobileCaseCreateInput = {
   vehicleModel?: string;
   manualPickupAddress?: string;
   manualDestinationAddress?: string;
+  /** Mutually exclusive with the same target's manual address. */
+  pickup?: MobileCasePlaceSelection | null;
+  destination?: MobileCasePlaceSelection | null;
   incidentDescription?: string;
   note?: string;
   priority?: MobileCasePriority;
   jobTypes?: MobileCaseJobType[];
+};
+export type MobileCasePlaceSelection = {
+  label: string;
+  address: string;
+  lat: number;
+  lng: number;
+  provider: "google_places" | "manual" | "approximate";
+  placeId?: string;
+};
+export type MobileCaseMapLocation = {
+  id: string;
+  label: string;
+  address: string;
+  point: { lat: number; lng: number } | null;
+  source: "google_places" | "manual" | "approximate" | "client_gps" | "unknown";
+  accuracyMeters: number | null;
+  capturedAt: string | null;
+};
+export type MobileCaseMap = {
+  pickup: MobileCaseMapLocation | null;
+  destination: MobileCaseMapLocation | null;
+  clientLocation: MobileCaseMapLocation | null;
+};
+export type MobileCaseOwnerInput = {
+  mutationId: string;
+  expectedUpdatedAt: string;
+  ownerId: string;
+};
+export type MobileCaseOwnerContext = MobileScope & {
+  caseId: string;
+  caseRevision: string;
+  owner: MobileCaseSummary["owner"];
+  available: boolean;
+  capabilities: { take: boolean; assign: boolean };
+  targets: { id: string; name: string }[];
+};
+export type MobileCaseOwnerAssigned = MobileScope & {
+  caseId: string;
+  mutationId: string;
+  committedRevision: string;
+  ownerId: string;
+  refreshRequired: true;
 };
 export type MobileCaseCreated = MobileScope & {
   caseId: string;

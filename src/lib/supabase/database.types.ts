@@ -1671,6 +1671,8 @@ export type Database = {
       }>;
     };
     Functions: {
+      motorist_case_owner_version: { Args: Record<string, never>; Returns: number };
+      motorist_assign_case_owner: { Args: { p_organization_id: string; p_actor_id: string; p_actor_user_id: string; p_case_id: string; p_owner_id: string; p_expected_updated_at: string; p_mutation_id: string; p_fingerprint: string }; Returns: Json };
       motorist_active_call_snapshot_v1: { Args: { p_organization_id: string; p_environment: string }; Returns: Json };
       motorist_callback_queue_page_v1: { Args: { p_organization_id: string; p_cursor?: Json; p_limit?: number }; Returns: Json };
       motorist_diagnostics_ingest: { Args: {p_org:string;p_profile:string;p_environment:string;p_source:string;p_build:string;p_events:Json}; Returns:Json };
