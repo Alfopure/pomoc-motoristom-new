@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Keyboard, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAndroidBack } from "../lib/use-android-back";
 import type { MobileCaseDetailData, MobileCaseFilter, MobileCaseNoteAdded, MobileCaseSummary } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
 import { dialable, formatNumber, formatTime } from "../lib/display";
@@ -25,8 +26,8 @@ type Page = { kind: "handoffs"; id: string; draft: HandoffDraft } | { kind: "att
 
 /** Kept mounted under the authenticated workspace across tab changes. Reads
  * pause when hidden; unsaved input and a confirmed created ID stay in memory. */
-export function Cases({ api, environment, userId, profileId, active, onSelectNumber }: {
-  api: CasesApi; environment: string; userId: string; profileId: string; active: boolean; onSelectNumber: (number: string) => void;
+export function Cases({ api, environment, userId, profileId, active, onSelectNumber, onLeaveCases }: {
+  api: CasesApi; environment: string; userId: string; profileId: string; active: boolean; onSelectNumber: (number: string) => void; onLeaveCases?: () => void;
 }) {
   const queryClient = useQueryClient();
   const prefix = useMemo(() => ["mobile", environment, userId, "cases", profileId], [environment, userId, profileId]);
@@ -98,6 +99,7 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
       void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     }
   }
+  useAndroidBack(active && (page.kind === "detail" || page.kind === "list" && !!onLeaveCases), () => page.kind === "list" ? onLeaveCases?.() : showList());
   function showForm() { draft.newDraft(); setPage({ kind: "new" }); }
   return <View style={{ flex: 1 }}>
     {page.kind === "handoffs" ? <Handoffs draft={page.draft} active={active} onBack={() => showDetail(page.id)} />
@@ -107,9 +109,9 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
       search={search} ownerId={ownerId} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
       onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={setCategory} onOpen={showDetail}
       onNew={showForm} draftState={state} onReviewed={requestedAt => draft.reviewList(requestedAt)} />
-      : page.kind === "new" ? <CaseForm draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} />
+      : page.kind === "new" ? <CaseForm active={active} draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} />
         : page.kind === "edit" ? <CaseEditor edit={page.edit} active={active} onSaved={edited} onBack={() => showDetail(page.id)} />
-        : page.kind === "note" ? <CaseNoteForm draft={page.draft} onSaved={noteSaved} onBack={() => showDetail(page.id)} />
+        : page.kind === "note" ? <CaseNoteForm active={active} draft={page.draft} onSaved={noteSaved} onBack={() => showDetail(page.id)} />
         : <CaseDetail api={api} queryKey={prefix} active={active} id={page.id} created={state.created?.caseId === page.id ? state.created : null}
           onBack={showList} onHandoffs={() => openHandoffs(page.id)} onAttachments={() => setPage({ kind: "attachments", id: page.id })} onTasks={() => setPage({ kind: "tasks", id: page.id })} onSelectNumber={onSelectNumber} onEdit={openEditor} onNote={openNote} savedNote={page.note} onNoteUpdated={noteUpdated} />}
   </View>;
@@ -228,11 +230,13 @@ function Navigate({ label, address }: { label: string; address: string | null })
     })();
   }} />{error && <ErrorNotice message={error} />}</View>;
 }
-function CaseForm({ draft, state, onBack, onSubmit }: { draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: () => void }) {
+function CaseForm({ draft, state, active, onBack, onSubmit }: { active: boolean; draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: () => void }) {
   const saving = state.status === "saving", uncertain = state.status === "uncertain";
+  const back = () => { if (draft.snapshot().status !== "saving") onBack(); };
+  useAndroidBack(active, back, saving);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-      <Button label="Späť na prípady" onPress={onBack} secondary /><Text style={styles.heading}>Nový prípad</Text>
+      <Button label="Späť na prípady" onPress={back} disabled={saving} secondary /><Text style={styles.heading}>Nový prípad</Text>
       <Text style={styles.muted}>Môžete uložiť aj neúplný koncept. Údaje doplníte neskôr v dispečingu.</Text>
       {fields.map(field => <View key={field.key}><Text style={styles.label}>{field.label}</Text>
         <TextInput accessibilityLabel={field.label} value={state.input[field.key] ?? ""} onChangeText={value => draft.edit({ [field.key]: value })}
@@ -248,7 +252,7 @@ function CaseForm({ draft, state, onBack, onSubmit }: { draft: CaseDraft; state:
       <View><Text style={styles.label}>Priorita</Text><View style={s.choices}>{priorities.map(item => <Choice key={item.value} label={item.label}
         selected={state.input.priority === item.value} disabled={saving} onPress={() => draft.edit({ priority: item.value })} />)}</View></View>
       {state.error && <ErrorNotice message={state.error} />}
-      {uncertain && <><Button label="Skontrolovať zoznam prípadov" onPress={onBack} secondary />
+      {uncertain && <><Button label="Skontrolovať zoznam prípadov" onPress={back} secondary />
         {state.reviewedList && <Button label="Prípad som nenašiel – povoliť opakovanie" onPress={() => draft.allowRetry()} secondary />}</>}
       <Button label={saving ? "Ukladám prípad…" : "Uložiť prípad"} disabled={saving || uncertain || state.status === "saved"} onPress={() => { Keyboard.dismiss(); onSubmit(); }} />
     </ScrollView>

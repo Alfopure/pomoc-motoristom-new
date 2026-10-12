@@ -225,7 +225,24 @@ podpisy s lokálnym syntetickým JWKS, expiráciu, cudzie prostredie, deaktivác
 profilu a minimalizáciu DTO. Nenahrádzajú fyzickú skúšku prihlásenia,
 Keychain/Keystore ani budúceho obojstranného audia.
 
-Pri zlyhaní siete odhlásenie ukáže chybu a vyžaduje zopakovanie, kým Supabase
-potvrdí lokálne odhlásenie. V tejto fáze sa neimplementuje vlastná offline
-revokácia. Fyzické prijatie základnej appky aj živého telefonovania sa
+Pred odhlásením sa odpojí mobilný telefón. Ak sa odpojenie nepodarí, prihlásenie
+zostane zachované a možno zopakovať odhlásenie. Supabase môže odstrániť lokálnu
+reláciu aj pri chybe serverového odhlásenia. Aplikácia vtedy na prihlasovacej
+obrazovke oznámi dokončené miestne odhlásenie a nepotvrdený serverový výsledok;
+miestne odstránenie musí potvrdiť auth udalosť, nie samotná chyba. Nové
+prihlásenie zruší starú spätnú väzbu. Vlastná offline revokácia sa
+neimplementuje. Fyzické prijatie základnej appky aj živého telefonovania sa
 zaznamenáva samostatne od úspešného exportu.
+
+Androidové systémové tlačidlo Späť používa návrat z aktuálnej obrazovky.
+Počas ukladania sa návrat spotrebuje bez opustenia formulára; pri neistom
+výsledku ostáva pôvodný príkaz v pamäti. Z prehľadu prípadov, histórie
+a účtu sa používateľ vráti do ústredne. Fyzická skúška tlačidla aj gesta
+na Androide zostáva samostatnou akceptáciou.
+
+Prvé jednoznačné odmietnutie editora pre neprihlásenie, prístup alebo chýbajúci
+prípad možno obnoviť až po úspešnom načítaní aktuálneho detailu a vedomom
+porovnaní/prebázovaní alebo zahodení konceptu. Neskoršia chyba neistého zápisu
+ani nesúlad identity príkazu nepovolia novú operáciu. Výber príloh odstraňuje
+overené pracovné kópie z cache po zachytení bajtov, aj pri odmietnutí súboru;
+pôvodné súbory mimo cache neodstraňuje a opakovanie používa zachytené bajty.

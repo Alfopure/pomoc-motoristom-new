@@ -55,6 +55,43 @@ describe("revision-safe mobile editor", () => {
     f.edit.edit({ note: "Must stay frozen" }); await f.edit.save(); expect(f.uuid).toHaveBeenCalledTimes(1);
     expect(f.api.update.mock.calls[2][1]).toBe(f.api.update.mock.calls[0][1]); expect(f.api.update.mock.calls[2][1].note).toBe("Original");
   });
+  it.each([401, 403, 404])("recovers an initial definitive %i only after a fresh scoped read and explicit rebase", async status => {
+    const f = fixture(); f.api.update.mockRejectedValueOnce(new MobileApiError("Denied", status));
+    f.edit.edit({ note: "Preserve local delta" }); await f.edit.save();
+    expect(f.edit.snapshot()).toMatchObject({ status: "blocked", canRecover: true });
+    f.edit.rebase(); await f.edit.save(); expect(f.api.update).toHaveBeenCalledTimes(1);
+    f.api.detail.mockResolvedValue({ ...scope, case: { ...source, updatedAt: "2026-10-11T12:04:00.000001Z", editable: { ...source.editable, contactName: "New server name" } } });
+    await f.edit.refresh(); expect(f.edit.snapshot().status).toBe("blocked");
+    expect(f.edit.snapshot().input.contactName).toBe(source.editable.contactName);
+    f.edit.rebase(); expect(f.edit.snapshot()).toMatchObject({ status: "editing", input: { note: "Preserve local delta", contactName: "New server name" } });
+    await f.edit.save(); expect(f.api.update.mock.calls[1][1]).toEqual({ note: "Preserve local delta", expectedUpdatedAt: "2026-10-11T12:04:00.000001Z", mutationId: "00000000-0000-4000-8000-000000000003" });
+  });
+  it("preserves the exact uncertain command even after a typed revision conflict", async () => {
+    const f = fixture(); f.api.update.mockRejectedValueOnce(new MobileApiError("Unknown", 0)).mockRejectedValueOnce(new MobileApiError("Conflict", 409, "CASE_REVISION_CONFLICT"));
+    f.edit.edit({ note: "Original uncertain" }); await f.edit.save(); await f.edit.save();
+    expect(f.edit.snapshot()).toMatchObject({ status: "uncertain", canRecover: false });
+    await f.edit.refresh(); f.edit.rebase(); await f.edit.save();
+    expect(f.api.detail).not.toHaveBeenCalled(); expect(f.api.update.mock.calls[2][1]).toBe(f.api.update.mock.calls[0][1]); expect(f.uuid).toHaveBeenCalledTimes(1);
+  });
+  it("keeps denied recovery blocked, and explicitly discards only after an authorized fresh read", async () => {
+    const f = fixture(); f.api.update.mockRejectedValueOnce(new MobileApiError("Denied", 403)); f.edit.edit({ note: "Keep" }); await f.edit.save();
+    f.api.detail.mockRejectedValueOnce(new MobileApiError("Still denied", 403)); await f.edit.refresh(); f.edit.reload();
+    expect(f.edit.snapshot()).toMatchObject({ status: "blocked", input: { note: "Keep" }, latest: null });
+    await f.edit.refresh(); f.edit.reload(); expect(f.edit.snapshot()).toMatchObject({ status: "editing", input: source.editable });
+    await f.edit.save(); expect(f.api.update).toHaveBeenCalledTimes(1);
+  });
+  it.each([new MobileApiError("Environment", 409, "environment_mismatch"), new MobileApiError("Mismatch", 422, "CASE_MUTATION_MISMATCH"), new MobileApiError("Unknown conflict", 409)])("cannot recover a protocol/identity denial %j", async error => {
+    const f = fixture(); f.api.update.mockRejectedValueOnce(error); f.edit.edit({ note: "Keep" }); await f.edit.save();
+    expect(f.edit.snapshot()).toMatchObject({ status: "blocked", canRecover: false });
+    await f.edit.refresh(); f.edit.rebase(); f.edit.reload(); await f.edit.save();
+    expect(f.api.detail).not.toHaveBeenCalled(); expect(f.api.update).toHaveBeenCalledTimes(1);
+  });
+  it("does not rebase a denied editor during a pending recovery read or after account disposal", async () => {
+    const f = fixture(); f.api.update.mockRejectedValueOnce(new MobileApiError("Denied", 403)); f.edit.edit({ note: "Keep" }); await f.edit.save();
+    let resolve!: (value: unknown) => void; f.api.detail.mockReturnValue(new Promise(done => { resolve = done; })); const reading = f.edit.refresh();
+    f.edit.rebase(); f.edit.reload(); expect(f.edit.snapshot().status).toBe("blocked"); f.edit.dispose(); resolve({ ...scope, case: source }); await reading;
+    expect(f.edit.snapshot().latest).toBeNull(); expect(f.edit.snapshot().input.note).toBe("Keep");
+  });
   it("retains local changes on conflict; explicit rebase keeps unrelated latest server fields", async () => {
     const f = fixture(); f.api.update.mockRejectedValueOnce(new MobileApiError("Conflict", 409, "CASE_REVISION_CONFLICT"));
     f.edit.edit({ note: "Local note" }); await f.edit.save(); expect(f.edit.snapshot().status).toBe("conflict");

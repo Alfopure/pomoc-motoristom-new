@@ -4,7 +4,7 @@ import type { CasesApi } from "./api";
 
 type Editable = MobileCaseDetailData["editable"];
 export type EditState = { base: MobileCaseDetailData; input: Editable; status: "editing" | "saving" | "uncertain" | "conflict" | "blocked" | "committed" | "saved";
-  error: string | null; receipt: MobileCaseUpdated | null; latest: MobileCaseDetailData | null; refreshing: boolean };
+  error: string | null; receipt: MobileCaseUpdated | null; latest: MobileCaseDetailData | null; refreshing: boolean; canRecover: boolean };
 const writableStatuses = ["open", "completed_assisted", "completed_no_assistance", "waiting_for_docs", "cancelled", "futile_trip"];
 export function changedFields(base: Editable, input: Editable): Partial<Editable> {
   return Object.fromEntries(Object.keys(base).filter(key => JSON.stringify(base[key as keyof Editable]) !== JSON.stringify(input[key as keyof Editable]))
@@ -25,7 +25,7 @@ export class CaseEdit {
   private read: AbortController | null = null;
   private pending: MobileCaseUpdateInput | null = null;
   constructor(private api: Pick<CasesApi, "update" | "detail">, source: MobileCaseDetailData, private uuid: () => string) {
-    this.state = { base: source, input: { ...source.editable, jobTypes: [...source.editable.jobTypes] }, status: "editing", error: null, receipt: null, latest: null, refreshing: false };
+    this.state = { base: source, input: { ...source.editable, jobTypes: [...source.editable.jobTypes] }, status: "editing", error: null, receipt: null, latest: null, refreshing: false, canRecover: false };
   }
   snapshot = () => this.state;
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
@@ -52,40 +52,42 @@ export class CaseEdit {
       this.pending = null; this.update({ status: "committed", receipt });
     } catch (error) {
       if (this.disposed) return;
-      if (error instanceof MobileApiError && error.status === 409 && error.code === "CASE_REVISION_CONFLICT") {
-        this.pending = null; this.update({ status: "conflict", error: "Prípad medzitým zmenil kolega. Vaše úpravy zostali zachované. Načítajte aktuálne údaje a porovnajte ich." });
-      } else if (reconciling || !(error instanceof MobileApiError) || [0, 408, 429].includes(error.status) || error.status >= 500) {
+      if (reconciling || !(error instanceof MobileApiError) || [0, 408, 429].includes(error.status) || error.status >= 500) {
         this.update({ status: "uncertain", error: "Výsledok uloženia nie je potvrdený. Údaje sú uzamknuté; overiť môžete iba tú istú požiadavku." });
+      } else if (error.status === 409 && error.code === "CASE_REVISION_CONFLICT") {
+        this.pending = null; this.update({ status: "conflict", error: "Prípad medzitým zmenil kolega. Vaše úpravy zostali zachované. Načítajte aktuálne údaje a porovnajte ich." });
       } else if ([401, 403, 404, 409].includes(error.status) || error.code === "CASE_MUTATION_MISMATCH") {
-        this.update({ status: "blocked", error: error.message });
+        this.update({ status: "blocked", error: error.message, canRecover: [401, 403, 404].includes(error.status) && !["environment_mismatch", "CASE_MUTATION_MISMATCH"].includes(error.code ?? "") });
       } else { this.pending = null; this.update({ status: "editing", error: error.message }); }
     }
   }
   async refresh() {
-    if (this.disposed || !this.active || this.read || !["conflict", "committed"].includes(this.state.status)) return;
+    if (this.disposed || !this.active || this.read || (!["conflict", "committed"].includes(this.state.status) && !(this.state.status === "blocked" && this.state.canRecover))) return;
     const phase = this.state.status;
-    const read = new AbortController(); this.read = read; this.update({ refreshing: true, error: null });
+    const read = new AbortController(); this.read = read; this.update({ refreshing: true, error: null, latest: null });
     try {
       const result = await this.api.detail(this.state.base.id, read.signal);
       if (this.disposed || read.signal.aborted || this.state.status !== phase) return;
       if (phase === "committed" && this.state.receipt && revisionBefore(result.case.updatedAt, this.state.receipt.committedRevision)) {
         throw new MobileApiError("Detail ešte nezobrazuje potvrdenú revíziu. Obnovte uložený detail.", 502);
       }
-      if (phase === "conflict") this.update({ latest: result.case });
+      if (phase === "conflict" || phase === "blocked") this.update({ latest: result.case });
       else this.update({ base: result.case, input: { ...result.case.editable, jobTypes: [...result.case.editable.jobTypes] }, status: "saved" });
     } catch (error) {
       if (!this.disposed && !read.signal.aborted) this.update({ error: error instanceof MobileApiError ? error.message : "Aktuálne údaje sa nepodarilo načítať." });
     } finally { if (this.read === read) { this.read = null; this.update({ refreshing: false }); } }
   }
   rebase() {
-    if (this.disposed || this.read || this.state.status !== "conflict" || !this.state.latest) return;
+    if (this.disposed || this.read || (this.state.status !== "conflict" && !(this.state.status === "blocked" && this.state.canRecover)) || !this.state.latest) return;
     const changes = changedFields(this.state.base.editable, this.state.input), latest = this.state.latest;
-    this.update({ base: latest, input: { ...latest.editable, ...changes }, latest: null, status: "editing", error: null });
+    this.pending = null;
+    this.update({ base: latest, input: { ...latest.editable, ...changes }, latest: null, status: "editing", error: null, canRecover: false });
   }
   reload() {
-    if (this.disposed || this.read || this.state.status !== "conflict" || !this.state.latest) return;
+    if (this.disposed || this.read || (this.state.status !== "conflict" && !(this.state.status === "blocked" && this.state.canRecover)) || !this.state.latest) return;
     const latest = this.state.latest;
-    this.update({ base: latest, input: { ...latest.editable, jobTypes: [...latest.editable.jobTypes] }, latest: null, status: "editing", error: null });
+    this.pending = null;
+    this.update({ base: latest, input: { ...latest.editable, jobTypes: [...latest.editable.jobTypes] }, latest: null, status: "editing", error: null, canRecover: false });
   }
   setActive(active: boolean) { this.active = active; if (!active && this.read) { this.read.abort(); this.read = null; this.update({ refreshing: false }); } }
   dispose() { this.disposed = true; this.read?.abort(); this.read = null; this.listeners.clear(); }

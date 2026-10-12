@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
@@ -16,6 +16,8 @@ import { createCasesApi } from "./src/cases/api";
 import { Cases } from "./src/cases/ui";
 import { CallPanel } from "./src/voice/ui";
 import type { DispatchPhone, PhoneState } from "./src/voice/phone";
+import { SessionLogout, type LogoutState } from "./src/lib/logout";
+import { useAndroidBack } from "./src/lib/use-android-back";
 
 type Tab = "console" | "history" | "cases" | "account";
 type Category = "all" | "missed" | "received" | "outbound";
@@ -46,6 +48,9 @@ export default function App() {
 function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () => void }) {
   const [supabase] = useState(() => createMobileSupabase(config));
   const { client } = supabase;
+  const [logout] = useState(() => new SessionLogout(() => client.auth.signOut({ scope: "local" })));
+  const logoutState = useSyncExternalStore(logout.subscribe, logout.snapshot, logout.snapshot);
+  useEffect(() => () => logout.dispose(), [logout]);
   const [queryClient] = useState(() => new QueryClient({ defaultOptions: { queries: {
     staleTime: 15_000, gcTime: 5 * 60_000,
     retry: (count, error) => count < 1 && !(error instanceof MobileApiError && [401, 403, 409, 502].includes(error.status)),
@@ -60,9 +65,10 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
   useEffect(() => {
     let alive = true;
     let observedEvent = false;
-    const { data: { subscription } } = client.auth.onAuthStateChange((_event, next) => {
+    const { data: { subscription } } = client.auth.onAuthStateChange((event, next) => {
       if (!alive) return;
       observedEvent = true;
+      logout.observe(event, next?.user.id ?? null);
       if (previousUser.current !== (next?.user.id ?? null)) queryClient.clear();
       previousUser.current = next?.user.id ?? null;
       setSession(next); setBooting(false);
@@ -70,11 +76,11 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
     void client.auth.getSession().then(({ data, error }) => {
       if (!alive) return;
       if (error) setBootError(true);
-      if (!observedEvent) { setSession(data.session); previousUser.current = data.session?.user.id ?? null; }
+      if (!observedEvent) { setSession(data.session); previousUser.current = data.session?.user.id ?? null; logout.observe("INITIAL_SESSION", previousUser.current); }
       setBooting(false);
     }).catch(() => { if (alive) { setBootError(true); setBooting(false); } });
     return () => { alive = false; subscription.unsubscribe(); };
-  }, [client, queryClient]);
+  }, [client, queryClient, logout]);
   useEffect(() => {
     const update = (state: string) => {
       const foreground = state === "active";
@@ -108,18 +114,19 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
         setResetting(true); setResetError(false);
         void supabase.clearStoredSession().then(onReset).catch(() => { setResetError(true); setResetting(false); });
       }} />
-    </View> : session ? <Workspace key={config.environment + ":" + session.user.id} config={config} client={client} api={api} active={active} userId={session.user.id} />
-      : <SignIn client={client} config={config} />}
+    </View> : session ? <Workspace key={config.environment + ":" + session.user.id} config={config} client={client} api={api} active={active} userId={session.user.id}
+      logoutState={logoutState} onLogout={disconnect => logout.run(disconnect)} />
+      : <SignIn client={client} config={config} logoutState={logoutState} />}
   </QueryClientProvider>;
 }
 
-function SignIn({ client, config }: { client: SupabaseClient; config: MobileConfig }) {
+function SignIn({ client, config, logoutState }: { client: SupabaseClient; config: MobileConfig; logoutState: LogoutState }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   async function login() {
-    if (busy || !email.trim() || !password) return;
+    if (busy || logoutState.busy || !email.trim() || !password) return;
     setBusy(true); setError(null);
     try {
       const { error: denied } = await client.auth.signInWithPassword({ email: email.trim(), password });
@@ -133,11 +140,13 @@ function SignIn({ client, config }: { client: SupabaseClient; config: MobileConf
       <View style={{ gap: 8, marginBottom: 14 }}><Text style={styles.heading}>Váš dispečing vo vrecku</Text>
         <Text style={styles.text}>Prihláste sa svojím účtom Linky pomoci.</Text></View>
       <View><Text style={styles.label}>E-mail</Text><TextInput accessibilityLabel="E-mail" value={email} onChangeText={setEmail} style={styles.input}
-        autoCapitalize="none" autoCorrect={false} keyboardType="email-address" autoComplete="email" textContentType="username" editable={!busy} /></View>
+        autoCapitalize="none" autoCorrect={false} keyboardType="email-address" autoComplete="email" textContentType="username" editable={!busy && !logoutState.busy} /></View>
       <View><Text style={styles.label}>Heslo</Text><TextInput accessibilityLabel="Heslo" value={password} onChangeText={setPassword} style={styles.input}
-        secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="current-password" textContentType="password" editable={!busy} returnKeyType="go" onSubmitEditing={() => { void login(); }} /></View>
+        secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="current-password" textContentType="password" editable={!busy && !logoutState.busy} returnKeyType="go" onSubmitEditing={() => { void login(); }} /></View>
+      {logoutState.message && <ErrorNotice message={logoutState.message} />}
+      {logoutState.busy && <Text style={styles.muted}>Dokončujem odhlásenie…</Text>}
       {error && <ErrorNotice message={error} />}
-      <Button label={busy ? "Prihlasujem…" : "Prihlásiť sa"} disabled={busy || !email.trim() || !password} onPress={() => { void login(); }} />
+      <Button label={busy ? "Prihlasujem…" : "Prihlásiť sa"} disabled={busy || logoutState.busy || !email.trim() || !password} onPress={() => { void login(); }} />
       <Button label="Zabudnuté heslo" secondary onPress={() => {
         void Linking.openURL(config.apiOrigin + "/auth/forgot-password?email=" + encodeURIComponent(email.trim())).catch(() => setError("Stránku na obnovu hesla sa nepodarilo otvoriť."));
       }} />
@@ -145,13 +154,13 @@ function SignIn({ client, config }: { client: SupabaseClient; config: MobileConf
   </KeyboardAvoidingView>;
 }
 
-function Workspace({ config, client, api, active, userId }: { config: MobileConfig; client: SupabaseClient; api: MobileApi; active: boolean; userId: string }) {
+function Workspace({ config, client, api, active, userId, logoutState, onLogout }: { config: MobileConfig; client: SupabaseClient; api: MobileApi; active: boolean; userId: string;
+  logoutState: LogoutState; onLogout: (disconnect: () => Promise<void>) => Promise<void> }) {
   const [tab, setTab] = useState<Tab>("console");
   const [number, setNumber] = useState("");
   const [category, setCategory] = useState<Category>("all");
   const [search, setSearch] = useState("");
-  const [logoutError, setLogoutError] = useState<string | null>(null);
-  const [loggingOut, setLoggingOut] = useState(false);
+  useAndroidBack(active && tab !== "console" && tab !== "cases", () => setTab("console"));
   const key = ["mobile", config.environment, userId];
   // First authenticated snapshot must also load during a PushKit cold launch.
   // Periodic reads still stop when iOS suspends the app.
@@ -166,20 +175,15 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
   }) : null, [config, client, userId, profileId]);
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   async function logout() {
-    if (loggingOut) return;
-    setLoggingOut(true); setLogoutError(null);
-    try {
-      await phone?.disconnect();
-      const { error } = await client.auth.signOut({ scope: "local" });
-      if (error) setLogoutError("Odhlásenie sa nepodarilo potvrdiť. Skúste znova.");
-    } catch { setLogoutError("Odhlásenie sa nepodarilo. Skúste znova."); }
-    finally { setLoggingOut(false); }
+    const currentPhone = phone?.snapshot();
+    if (currentPhone?.call || currentPhone?.termination) return;
+    await onLogout(async () => { await phone?.disconnect(); });
   }
   if (me.isPending) return <Loading label="Overujem prístup do dispečingu…" />;
   if (!identity) return <View style={styles.content}>
     <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />
-    {logoutError && <ErrorNotice message={logoutError} />}
-    <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={loggingOut} secondary />
+    {logoutState.message && <ErrorNotice message={logoutState.message} />}
+    <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={logoutState.busy || Boolean(phoneState.call || phoneState.termination)} secondary />
   </View>;
   return <View style={{ flex: 1 }}>
     <CallPanel phone={phone} state={phoneState} />
@@ -193,13 +197,13 @@ function Workspace({ config, client, api, active, userId }: { config: MobileConf
           <Text style={styles.muted}>{({ dispatcher: "Dispečer", senior_dispatcher: "Vedúci dispečer", manager: "Manažér", admin: "Administrátor" })[identity.profile.role]}</Text>
         </Card><Card><Text style={styles.label}>Prostredie</Text><Text style={styles.text}>{config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"}</Text>
           <Text style={styles.muted}>Verzia 0.1.0</Text></Card>
-        {logoutError && <ErrorNotice message={logoutError} />}
+        {logoutState.message && <ErrorNotice message={logoutState.message} />}
         {(phoneState.call || phoneState.termination) && <Text style={styles.muted}>Pred odhlásením ukončite hovor.</Text>}
-        <Button label={loggingOut ? "Odhlasujem…" : "Odhlásiť sa"} disabled={loggingOut || Boolean(phoneState.call || phoneState.termination)} onPress={() => { void logout(); }} secondary />
+        <Button label={logoutState.busy ? "Odhlasujem…" : "Odhlásiť sa"} disabled={logoutState.busy || Boolean(phoneState.call || phoneState.termination)} onPress={() => { void logout(); }} secondary />
       </ScrollView>}
     {casesApi && <View style={tab === "cases" ? { flex: 1 } : { display: "none" }}>
       <Cases key={identity.profileId} api={casesApi} environment={config.environment} userId={userId} profileId={identity.profileId}
-        active={active && tab === "cases"} onSelectNumber={value => { setNumber(value); setTab("console"); }} />
+        active={active && tab === "cases"} onLeaveCases={() => setTab("console")} onSelectNumber={value => { setNumber(value); setTab("console"); }} />
     </View>}
     <View accessibilityRole="tablist" style={s.tabs}>{tabs.map(item => <Pressable key={item.id} accessibilityRole="tab" accessibilityLabel={item.label}
       accessibilityState={{ selected: tab === item.id }} onPress={() => setTab(item.id)} style={s.tab}>
@@ -243,7 +247,7 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
         { text: "Zrušiť", style: "cancel" }, { text: "Prevziať", onPress: () => { void phone?.connect(true); } },
       ])} />}
     </Card> : <View style={s.notice}><Text style={[styles.label, { marginBottom: 2 }]}>Systémové hovory</Text>
-      <Text style={styles.muted}>Telefonovanie a zvonenie pri zamknutom telefóne pripravujeme vo vlastnej aplikácii Linka pomoci. Tento Expo náhľad slúži na prihlásenie, ústredňu a históriu.</Text></View>}
+      <Text style={styles.muted}>Táto zostava podporuje prihlásenie, ústredňu, históriu a prácu s prípadmi. Systémové telefonovanie potrebuje samostatnú natívnu zostavu a overenie na telefóne.</Text></View>}
     <Card><Text style={styles.subheading}>Nový hovor</Text><TextInput accessibilityLabel="Telefónne číslo" placeholder="Telefónne číslo" placeholderTextColor={colors.muted}
       keyboardType="phone-pad" maxLength={40} value={number} onChangeText={onNumber} style={styles.input} />
       <Button label={phoneState.dialing ? "Vytáčam…" : "Zavolať"} disabled={!phone || phoneState.registration !== "registered" || !dialable(number) || phoneState.dialing || Boolean(phoneState.call || phoneState.termination)}
