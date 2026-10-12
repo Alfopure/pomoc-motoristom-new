@@ -106,6 +106,7 @@ export type CallCenterCall = {
   direction: "inbound" | "outbound" | "internal";
   callerNumber: string;
   callerName?: string;
+  contactName?: string;
   calledNumber: string;
   receivedNumber?: string;
   destinationNumber?: string;

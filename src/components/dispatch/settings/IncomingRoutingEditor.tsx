@@ -9,7 +9,10 @@ import { parseIncomingFlow, type IncomingFlow } from "@/lib/telephony/incoming-f
 import { formatPhoneNumberForDisplay } from "@/lib/telephony/phone";
 import { ConfigRequestError, loadRoutingConfig, saveRoutingConfig, type RoutingConfigResponse } from "./config-client";
 import { initialIncomingLineId } from "./incoming-routing-model";
-import { emptyIncomingFlow, incomingFlowChanges, incomingFlowsMatch, incomingFlowSummary, legacyIncomingFlow, validateIncomingFlowDraft, type FlowDrafts } from "./incoming-flow-model";
+import { emptyIncomingFlow, incomingFlowChanges, incomingFlowSummary, legacyIncomingFlow, validateIncomingFlowDraft, type FlowDrafts } from "./incoming-flow-model";
+import { LinePropertiesEditor } from "./LinePropertiesEditor";
+import { lineProperties, lineWorkspaceChanges, workspaceChangesMatch, type LineProperties, type LinePropertyDrafts } from "./line-workspace-model";
+import { validateLineTransfers } from "@/lib/telephony/line-transfers";
 import { IncomingFlowSteps } from "./IncomingFlowSteps";
 import { IncomingFlowMonitor } from "./IncomingFlowMonitor";
 import { LegacyIncomingRoutingEditor } from "./LegacyIncomingRoutingEditor";
@@ -55,6 +58,7 @@ function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
   const [view, setView] = useState<"settings" | "live">("settings");
   const [baseline, setBaseline] = useState(document);
   const [drafts, setDrafts] = useState<FlowDrafts>({});
+  const [propertyDrafts, setPropertyDrafts] = useState<LinePropertyDrafts>({});
   const [lineId, setLineId] = useState(() => initialIncomingLineId(document, target));
   const [saving, setSaving] = useState(false);
   const [uncertain, setUncertain] = useState(false);
@@ -67,17 +71,24 @@ function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
     setPreviousTarget(target);
     if (target?.lineId) setLineId(initialIncomingLineId(baseline, target));
   }
-  const changes = useMemo(() => incomingFlowChanges(drafts, baseline), [drafts, baseline]);
+  const changes = useMemo(() => baseline.capabilities?.lineWorkspace ? lineWorkspaceChanges(drafts, propertyDrafts, baseline) : incomingFlowChanges(drafts, baseline), [drafts, propertyDrafts, baseline]);
   const dirty = changes.length > 0;
   const pendingChanges = useRef(false);
   useEffect(() => { pendingChanges.current = dirty || saving || uncertain; }, [dirty, saving, uncertain]);
   const line = baseline.lines.find(candidate => candidate.id === lineId) ?? baseline.lines[0];
+  const displayedProperties = line ? propertyDrafts[line.id] ?? lineProperties(line) : null;
   const lineIndex = line ? baseline.lines.indexOf(line) : -1;
   const legacy = useMemo(() => line ? legacyIncomingFlow(baseline, line) : null, [baseline, line]);
   const flow = line ? drafts[line.id] ?? line.incomingFlow ?? legacy?.flow ?? null : null;
   const usingLegacy = Boolean(line && !drafts[line.id] && !line.incomingFlow);
   const locked = !canEdit || saving || uncertain || Boolean(remote);
-  const issues = useMemo(() => changes.flatMap(change => validateIncomingFlowDraft(change.flow, { ...baseline, lines: baseline.lines.map(candidate => ({ ...candidate, incomingFlow: drafts[candidate.id] ?? candidate.incomingFlow })) }).map(issue => ({ ...issue, path: `${change.id}.${issue.path}`, message: `${baseline.lines.find(candidate => candidate.id === change.id)?.label ?? "Linka"}: ${issue.message}` }))), [changes, baseline, drafts]);
+  const issues = useMemo(() => {
+    const candidate = { ...baseline, lines: baseline.lines.map(line => ({ ...line, ...propertyDrafts[line.id], incomingFlow: drafts[line.id] ?? line.incomingFlow })) };
+    const issues = changes.flatMap(change => change.flow ? validateIncomingFlowDraft(change.flow, candidate).map(issue => ({ ...issue, path: `${change.id}.${issue.path}`, message: `${baseline.lines.find(line => line.id === change.id)?.label ?? "Linka"}: ${issue.message}` })) : []);
+    issues.push(...validateLineTransfers(candidate));
+    for (const [id, properties] of Object.entries(propertyDrafts)) if (!properties.label.trim()) issues.push({ path: id, code: "label_required", message: "Doplň názov linky." });
+    return issues.filter((issue, index) => issues.findIndex(candidate => candidate.message === issue.message) === index);
+  }, [changes, baseline, drafts, propertyDrafts]);
   useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
   useEffect(() => {
     if (!dirty && !uncertain) return;
@@ -90,19 +101,24 @@ function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
     pendingChanges.current = true;
     setDrafts(current => ({ ...current, [line.id]: next })); setError(null); setNotice(null);
   }
+  function updateProperties(next: LineProperties) {
+    if (!line || locked || !baseline.capabilities?.lineWorkspace) return;
+    pendingChanges.current = true;
+    setPropertyDrafts(current => ({ ...current, [line.id]: next })); setError(null); setNotice(null);
+  }
   function accept(response: RoutingConfigResponse) {
     pendingChanges.current = false;
-    setBaseline(response.document); setDrafts({}); setRememberedNumbers({}); setRemote(null); setUncertain(false); onSaved(response);
+    setBaseline(response.document); setDrafts({}); setPropertyDrafts({}); setRememberedNumbers({}); setRemote(null); setUncertain(false); onSaved(response);
   }
   function discard() {
     pendingChanges.current = false;
     if (remote) setBaseline(remote);
-    setDrafts({}); setRememberedNumbers({}); setRemote(null); setUncertain(false); setError(null); setNotice(null);
+    setDrafts({}); setPropertyDrafts({}); setRememberedNumbers({}); setRemote(null); setUncertain(false); setError(null); setNotice(null);
   }
   async function verify(): Promise<boolean> {
     try {
       const latest = await loadRoutingConfig("incoming");
-      if (incomingFlowsMatch(changes, latest.document)) {
+      if (workspaceChangesMatch(changes, latest.document)) {
         accept(latest); setError(null); setNotice("Uložený stav je overený. Postupy zodpovedajú tvojim zmenám."); return true;
       }
       setRemote(latest.document); setUncertain(false);
@@ -116,7 +132,7 @@ function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
     let accepted = false;
     pendingChanges.current = true; setSaving(true); setError(null); setNotice(null);
     try {
-      const response = await saveRoutingConfig("incomingFlow", { version: baseline.routingVersion, snapshotId: baseline.snapshotId, lines: changes.map(change => ({ ...change, flow: parseIncomingFlow(change.flow) })) });
+      const response = await saveRoutingConfig("incomingFlow", { version: baseline.routingVersion, snapshotId: baseline.snapshotId, lines: changes.map(change => ({ ...change, flow: change.flow ? parseIncomingFlow(change.flow) : null })) });
       accept(response); accepted = true;
       setNotice(`Postupy sú uložené. Zmena platí pre nové hovory.${response.warning ? ` ${response.warning}` : ""}`);
       return true;
@@ -140,17 +156,20 @@ function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
     setLineId(baseline.lines[(lineIndex + direction + baseline.lines.length) % baseline.lines.length].id);
   }
   return <section className={styles.editor} aria-label="Prichádzajúce hovory">
-    <header className={styles.heading}><h2>Cesta prichádzajúceho hovoru</h2><p>Ľudia v jednom kroku zvonia naraz. Jednotlivé kroky idú postupne.</p></header>
+    <header className={styles.heading}><h2>Linky a smerovanie</h2><p>Vyber linku, uprav jej údaje a nastav, komu a v akom poradí bude zvoniť.</p></header>
+    <div className={styles.lineWorkspace}><nav className={styles.lineList} aria-label="Zoznam liniek">{baseline.lines.map(candidate => <button key={candidate.id} type="button" aria-current={candidate.id === line?.id ? "page" : undefined} onClick={() => setLineId(candidate.id)}><strong>{propertyDrafts[candidate.id]?.label ?? candidate.label}</strong><span>{formatPhoneNumberForDisplay(candidate.phoneNumber)}</span><small>{(propertyDrafts[candidate.id]?.active ?? candidate.active) ? "Aktívna" : "Vypnutá"}{changes.some(change => change.id === candidate.id) ? " · Neuložené" : ""}</small></button>)}</nav><div className={styles.lineDetail}>
     {line ? <div className={styles.lineSelector}>
-      <div className={styles.lineMain}><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(-1)} aria-label="Predchádzajúca linka"><ChevronLeft size={24} aria-hidden="true" /></button><div className={styles.lineIdentity} aria-live="polite"><p>{line.label}</p><strong>{formatPhoneNumberForDisplay(line.phoneNumber)}</strong><small>Linka {lineIndex + 1} z {baseline.lines.length}{!line.active ? " · Vypnutá" : ""}{drafts[line.id] && changes.some(change => change.id === line.id) ? " · Neuložené zmeny" : ""}</small></div><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(1)} aria-label="Nasledujúca linka"><ChevronRight size={24} aria-hidden="true" /></button></div>
-      {baseline.lines.length > 1 && <nav className={styles.lineDots} aria-label="Vybrať linku">{baseline.lines.map(candidate => <button key={candidate.id} type="button" aria-current={candidate.id === line.id} aria-label={`${candidate.label}, ${formatPhoneNumberForDisplay(candidate.phoneNumber)}`} onClick={() => setLineId(candidate.id)}><span /></button>)}</nav>}
+      <div className={styles.lineMain}><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(-1)} aria-label="Predchádzajúca linka"><ChevronLeft size={24} aria-hidden="true" /></button><div className={styles.lineIdentity} aria-live="polite"><p>{displayedProperties?.label ?? line.label}</p><strong>{formatPhoneNumberForDisplay(line.phoneNumber)}</strong><small>Linka {lineIndex + 1} z {baseline.lines.length}{!line.active ? " · Vypnutá" : ""}{changes.some(change => change.id === line.id) ? " · Neuložené zmeny" : ""}</small></div><button type="button" className={styles.iconButton} disabled={baseline.lines.length < 2} onClick={() => nextLine(1)} aria-label="Nasledujúca linka"><ChevronRight size={24} aria-hidden="true" /></button></div>
+
     </div> : <SettingsNotice>Nie je dostupná žiadna linka. Najprv ju pridaj v nastavení čísel.</SettingsNotice>}
+    {line && displayedProperties && <LinePropertiesEditor lineId={line.id} value={displayedProperties} document={baseline} disabled={locked || !baseline.capabilities?.lineWorkspace} hasFlow={!usingLegacy} onChange={updateProperties} />}
+    {line && <h3 className="text-base font-semibold">Cesta prichádzajúceho hovoru</h3>}
     {line && <div className={styles.viewTabs} role="group" aria-label="Zobrazenie postupu"><button type="button" aria-pressed={view === "settings"} onClick={() => setView("settings")}><Settings2 size={15} aria-hidden="true" />Nastavenie{dirty && <span className={styles.statusDot} aria-label="Neuložené zmeny" />}</button><button type="button" aria-pressed={view === "live"} onClick={() => setView("live")}><GitBranch size={15} aria-hidden="true" />Sledovať hovory</button></div>}
     {view === "live" && line && <IncomingFlowMonitor key={line.id} lineId={line.id} savedFlow={line.incomingFlow ?? null} dirty={dirty && Boolean(drafts[line.id])} />}
     {error && <SettingsNotice tone="error">{error}</SettingsNotice>}
     {notice && !dirty && <SettingsNotice tone="success">{notice}</SettingsNotice>}
     {uncertain && <button type="button" disabled={saving} onClick={() => void verifySavedState()} className={styles.button}>Overiť uložený stav</button>}
-    {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="min-h-11 cursor-pointer font-semibold">Porovnať uložené postupy a vlastný návrh</summary><div className="grid gap-4 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: baseline }].map((entry, index) => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{changes.map(change => { const compared = entry.document.lines.find(candidate => candidate.id === change.id); const value = index === 1 ? change.flow : compared?.incomingFlow; return <p key={change.id} className="mt-2 break-words text-xs leading-6"><strong>{compared?.label ?? "Odstránená linka"}:</strong> {value ? incomingFlowSummary(value, entry.document) : compared ? "Pôvodné smerovanie podľa plánu" : "Linka už nie je dostupná"}</p>; })}</div>)}</div><p className="mt-3 text-xs">Pred novou úpravou načítaj uložený stav. Vlastné hodnoty si môžeš skopírovať zo zachovaného návrhu.</p><button type="button" className={`${styles.button} mt-3`} onClick={discard}>Zahodiť návrh a načítať uložené</button></details>}
+    {remote && <details open className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm"><summary className="min-h-11 cursor-pointer font-semibold">Porovnať uložené postupy a vlastný návrh</summary><div className="grid gap-4 md:grid-cols-2">{[{ title: "Aktuálne uložené", document: remote }, { title: "Tvoj zachovaný návrh", document: baseline }].map((entry, index) => <div key={entry.title}><h3 className="font-semibold">{entry.title}</h3>{changes.map(change => { const compared = entry.document.lines.find(candidate => candidate.id === change.id); const value = index === 1 ? change.flow ?? change.expectedFlow : compared?.incomingFlow; return <p key={change.id} className="mt-2 break-words text-xs leading-6"><strong>{compared?.label ?? "Odstránená linka"}:</strong> {value ? incomingFlowSummary(value, entry.document) : compared ? "Pôvodné smerovanie podľa plánu" : "Linka už nie je dostupná"}</p>; })}</div>)}</div><p className="mt-3 text-xs">Pred novou úpravou načítaj uložený stav. Vlastné hodnoty si môžeš skopírovať zo zachovaného návrhu.</p><button type="button" className={`${styles.button} mt-3`} onClick={discard}>Zahodiť návrh a načítať uložené</button></details>}
     {view === "settings" && <>
     {line && usingLegacy && <div className={styles.legacyNotice}>
       <strong>{legacy?.flow ? "Uložené pôvodné smerovanie" : "Táto linka používa pôvodné nastavenie"}</strong>
@@ -163,7 +182,7 @@ function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
       <IncomingFlowSteps flow={flow} document={baseline} lineId={line!.id} disabled={locked || usingLegacy} onChange={updateFlow} rememberedNumbers={rememberedNumbers} rememberNumber={(key, number) => setRememberedNumbers(current => ({ ...current, [key]: number }))} />
       <p className={styles.note}>Zvonia iba dostupní operátori a pripojené zariadenia. Pauza, obsadenosť a kapacita organizácie sa uplatnia aj v tomto postupe.</p>
     </>}
-    {line && <div className={styles.links}><button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "numbers", lineId: line.id })}><Settings2 size={14} aria-hidden="true" />Nastavenie linky</button>{line.businessHoursId && <button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: line.id, businessHoursId: line.businessHoursId! })}><Clock3 size={14} aria-hidden="true" />Otváracie hodiny sa uplatnia pred postupom</button>}{line.ivrMenuId && <button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "ivr", lineId: line.id, ivrMenuId: line.ivrMenuId! })}>Hlasové menu</button>}</div>}
+    {line && <div className={styles.links}>{line.businessHoursId && <button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "hours", lineId: line.id, businessHoursId: line.businessHoursId! })}><Clock3 size={14} aria-hidden="true" />Otváracie hodiny sa uplatnia pred postupom</button>}{line.ivrMenuId && <button type="button" className={styles.textButton} onClick={() => onNavigate({ section: "telephony", tab: "ivr", lineId: line.id, ivrMenuId: line.ivrMenuId! })}>Hlasové menu</button>}</div>}
     <div className={styles.saveBar} data-dirty={dirty}>
       <p role="status">{dirty ? <span className={styles.statusDot} /> : <Check size={15} aria-hidden="true" />}{dirty ? `Neuložené zmeny: ${changes.length} ${changes.length === 1 ? "linka" : changes.length < 5 ? "linky" : "liniek"}` : "Všetky zmeny sú uložené"}</p>
       <div className={styles.saveButtons}><button type="button" disabled={!dirty || saving || uncertain} className={styles.button} onClick={() => { if (window.confirm("Zahodiť všetky rozpracované zmeny postupov?")) discard(); }}><Undo2 size={15} aria-hidden="true" />Zahodiť</button><button type="button" disabled={locked || !dirty || issues.length > 0 || !baseline.snapshotId} className={`${styles.button} ${styles.primary}`} onClick={() => void save()}>{saving ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Save size={15} aria-hidden="true" />}Uložiť zmeny</button></div>
@@ -172,5 +191,6 @@ function UnifiedIncomingRoutingEditor({ document, canEdit, target, onSaved, onNa
       {issues.length > 0 && <div className="basis-full"><SettingsIssueList issues={issues} /></div>}
     </div>
     </>}
+    </div></div>
   </section>;
 }

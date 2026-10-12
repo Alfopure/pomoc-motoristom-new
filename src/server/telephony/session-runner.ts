@@ -363,12 +363,17 @@ async function loadRoutingConfiguration(deps: SessionRunnerDeps, session: Sessio
     if (paused.error || personal.error) throw new Error("flow pause routing load failed");
     // Preserve nominated colleagues once, while keeping explicit application and
     // personal-number choices intact. Subsequent events use the frozen members.
-    ringPlan = materialiseIncomingFlow(parseIncomingFlow(lineMetadata.incoming_flow), now, {
+    const incomingFlow = parseIncomingFlow(lineMetadata.incoming_flow);
+    const pausedRouting = {
       pausedProfileIds: new Set((paused.data ?? []).map(row => row.profile_id)),
       routing: (personal.data ?? []).map(row => ({ profileId: row.profile_id, mode: row.pause_routing_mode,
         defaultMobileNumber: row.default_mobile_number, forwardProfileId: row.pause_forward_profile_id, forwardNumber: row.pause_forward_number })),
       destinationAllowlist: settings.raw?.destination_allowlist ?? ["SK", "CZ"],
-    });
+    };
+    if (incomingFlow.steps.some(step => step.type === "line")) {
+      const { materialiseLineFlow } = await import("./routing/line-flow");
+      ringPlan = materialiseLineFlow(entrySnapshot ?? await readRuntimeRoutingSnapshot(admin, organizationId), session.line_id!, now, pausedRouting);
+    } else ringPlan = materialiseIncomingFlow(incomingFlow, now, pausedRouting);
   }
   if (inboundRouting) {
     const planIds = new Set<string>();

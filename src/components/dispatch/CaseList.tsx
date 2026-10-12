@@ -9,11 +9,15 @@ import { caseAssistanceServiceName, formatDateTime, formatTime } from "@/lib/dis
 import type { CaseSortState } from "./CaseTable";
 import { useLayoutPreview } from "./LayoutPreview";
 import { CaseAccessBoundary, CaseDraftActivity } from "./CaseCollaborationProvider";
+import { CaseStatusFilter } from "./CaseStatusFilter";
+import type { CaseStatusSelection } from "./case-status-filter";
 
 type CenterView = "map" | "table" | "tasks" | "notes";
 
 export type CaseFilters = {
-  status: "all" | CaseStatus;
+  status: CaseStatusSelection;
+  statuses?: CaseStatus[];
+  statusTouched?: boolean;
   priority: "all" | CasePriority;
   ownerId: "all" | string;
   sourceType: "all" | NonNullable<DispatchCase["sourceType"]>;
@@ -42,22 +46,6 @@ type CaseListProps = {
   onToggleCenterView: () => void;
 };
 
-const statusOptions: CaseStatus[] = [
-  "new",
-  "triage",
-  "open",
-  "waiting_for_client",
-  "scheduled",
-  "assigned",
-  "dispatched",
-  "in_progress",
-  "waiting_for_docs",
-  "completed_assisted",
-  "completed_no_assistance",
-  "rejected",
-  "cancelled",
-  "futile_trip",
-];
 const priorityOptions: CasePriority[] = ["urgent", "high", "normal", "low"];
 type CaseSourceType = NonNullable<DispatchCase["sourceType"]>;
 const sourceOptions: CaseSourceType[] = ["client", "assistance", "samoplatca", "partner", "internal"];
@@ -122,7 +110,7 @@ export function CaseList({
             <FileText size={13} strokeWidth={2.4} />
           </span>
           <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold tracking-tight text-zinc-950 lg:text-xs">Aktívne prípady</h2>
+            <h2 className="truncate text-base font-semibold tracking-tight text-zinc-950 lg:text-xs">{filters.status === "active" ? "Aktívne prípady" : "Prípady"}</h2>
             <p className="text-xs font-medium text-zinc-500 lg:text-[10px] lg:leading-3">
               {cases.length} z {totalCases}
             </p>
@@ -188,12 +176,7 @@ export function CaseList({
         {filterOpen && (
           <div className="mt-3 grid gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-2">
             <div className="grid grid-cols-2 gap-2">
-              <FilterSelect
-                label="Stav"
-                value={filters.status}
-                onChange={(value) => onFiltersChange({ ...filters, status: value as CaseFilters["status"] })}
-                options={[["all", "Všetky stavy"], ...statusOptions.map((status) => [status, caseStatusLabels[status]] as const)]}
-              />
+              <CaseStatusFilter filters={filters} onChange={onFiltersChange} />
               <FilterSelect
                 label="Priorita"
                 value={filters.priority}

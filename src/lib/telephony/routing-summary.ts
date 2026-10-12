@@ -37,6 +37,7 @@ function describeFlow(flow: IncomingFlow, document: RoutingDocument, target: Rou
     }
     if (step.type === "external") return { label: `${index + 1}. Záložné číslo`, compact: `${step.number} (najviac ${step.seconds} s)`,
       sentence: `Systém skúsi číslo ${step.number}, najviac ${step.seconds} s.` };
+    if (step.type === "line") { const destination = document.lines.find(line => line.id === step.lineId); return { label: `${index + 1}. Naša linka`, compact: `presmerovať na ${destination?.label ?? "nedostupnú linku"}`, sentence: `Hovor pokračuje podľa smerovania linky ${destination?.label ?? "nedostupná"} (${destination?.phoneNumber ?? ""}).` }; }
     const references = step.stepIds.map(id => flow.steps.findIndex(candidate => candidate.id === id) + 1).join(", ");
     return { label: `${index + 1}. Opakovanie`, compact: `kroky ${references} ešte ${step.times}×`,
       sentence: `Znovu vykoná kroky ${references} v tomto poradí, ešte ${step.times}×. Potom pokračuje ďalej.` };
@@ -48,8 +49,8 @@ function describeFlow(flow: IncomingFlow, document: RoutingDocument, target: Rou
   }[flow.ending];
   const endingShort = { hangup: "ukončenie hovoru", hangup_message: "záverečná hláška a ukončenie", callback_prompt: "ponuka spätného volania" }[flow.ending];
   return {
-    sentence: [...steps.map(step => step.compact), endingShort].join(" → "),
-    branches: [...steps.map(step => ({ label: step.label, sentence: step.sentence })), { label: "Ak nikto neprevezme hovor", sentence: ending }]
+    sentence: [...steps.map(step => step.compact), ...(flow.steps.at(-1)?.type === "line" ? [] : [endingShort])].join(" → "),
+    branches: [...steps.map(step => ({ label: step.label, sentence: step.sentence })), ...(flow.steps.at(-1)?.type === "line" ? [] : [{ label: "Ak nikto neprevezme hovor", sentence: ending }])]
       .map(step => ({ ...step, target, navigationLabel: "Nastavenie postupu" })),
   };
 }

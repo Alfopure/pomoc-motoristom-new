@@ -23,7 +23,7 @@ const flow: IncomingFlow = { version: 1, ending: "hangup_message", steps: [
   { id: stepIds[2], type: "repeat", stepIds: [stepIds[0]], times: 1 },
 ] };
 function fixture(): RoutingDocument {
-  return { ...structuredClone(routingFixture), snapshotId: "0".repeat(32), capabilities: { ...routingFixture.capabilities!, unifiedIncomingFlow: true },
+  return { ...structuredClone(routingFixture), snapshotId: "0".repeat(32), capabilities: { ...routingFixture.capabilities!, unifiedIncomingFlow: true, lineWorkspace: true },
     lines: [ { ...routingFixture.lines[0], incomingFlow: structuredClone(flow) }, { ...routingFixture.lines[0], id: extraIds.secondLine, label: "Asistenčná linka", phoneNumber: "+421232408701", incomingFlow: structuredClone(flow) } ] };
 }
 type Api = { mode?: "conflict" | "lost-response" | "readonly"; writes: Array<{ lines: Array<{ id: string; flow: IncomingFlow; expectedFlow: IncomingFlow | null }> }>; document?: RoutingDocument };
@@ -39,7 +39,7 @@ async function boot(page: Page, width = 1440, api: Api = { writes: [] }) {
     if (url.pathname === "/api/telephony/config/incoming-flow" && route.request().method() === "PUT") {
       const payload = route.request().postDataJSON(); api.writes.push(payload);
       if (api.mode === "conflict") return route.fulfill({ status: 409, json: { code: "stale_document", error: "Nastavenia medzitým zmenil kolega." } });
-      document = { ...document, routingVersion: document.routingVersion + 1, lines: document.lines.map(line => ({ ...line, incomingFlow: payload.lines.find((change: { id: string }) => change.id === line.id)?.flow ?? line.incomingFlow })) };
+      document = { ...document, routingVersion: document.routingVersion + 1, lines: document.lines.map(line => ({ ...line, ...payload.lines.find((change: { id: string; patch?: object }) => change.id === line.id)?.patch, incomingFlow: payload.lines.find((change: { id: string }) => change.id === line.id)?.flow ?? line.incomingFlow })) };
       if (api.mode === "lost-response") return route.abort("failed");
       return route.fulfill({ json: { document, canEdit: true } });
     }
@@ -107,6 +107,37 @@ test("legacy routes stay read-only until explicit conversion and saving", async 
   await expect(page.getByText("Táto linka používa pôvodné nastavenie")).toBeVisible();
   expect(api.writes).toHaveLength(0);
   await page.getByRole("button", { name: "Pripraviť nový postup" }).click();
+  await expect(page.getByRole("button", { name: "Uložiť zmeny", exact: true })).toBeDisabled();
+  expect(api.writes).toHaveLength(0);
+});
+
+test("line properties and internal transfer share one save, and drafts survive selection", async ({ page }) => {
+  const api: Api = { writes: [] }; await boot(page, 1440, api);
+  await page.getByLabel("Názov linky", { exact: true }).fill("Odťahovka");
+  await page.getByLabel("Partner", { exact: true }).fill("Allianz");
+  await page.getByRole("button", { name: "Pridať ďalší krok", exact: true }).click();
+  await page.getByRole("button", { name: "Presmerovať na našu linku", exact: false }).click();
+  await page.getByLabel("Cieľová linka", { exact: true }).selectOption(extraIds.secondLine);
+  await page.getByRole("button", { name: "Nasledujúca linka", exact: true }).click();
+  await page.getByLabel("Partner", { exact: true }).fill("Druhý partner");
+  await page.getByRole("button", { name: "Predchádzajúca linka", exact: true }).click();
+  await expect(page.getByLabel("Názov linky", { exact: true })).toHaveValue("Odťahovka");
+  await expect(page.getByLabel("Cieľová linka", { exact: true })).toHaveValue(extraIds.secondLine);
+  await page.getByRole("button", { name: "Uložiť zmeny", exact: true }).click();
+  await expect(page.getByText("Postupy sú uložené.", { exact: false })).toBeVisible();
+  expect(api.writes).toHaveLength(1);
+  expect(api.writes[0].lines).toHaveLength(2);
+  expect(api.writes[0].lines[0]).toMatchObject({ patch: { label: "Odťahovka", partnerName: "Allianz" }, flow: { steps: expect.arrayContaining([{ id: expect.any(String), type: "line", lineId: extraIds.secondLine }]) } });
+  expect(api.writes[0].lines[1]).toMatchObject({ flow: null, patch: { partnerName: "Druhý partner" } });
+  await page.screenshot({ path: path.join(shotDir, "line-workspace-desktop.png"), fullPage: true });
+});
+test("circular line routing blocks saving with a clear error", async ({ page }) => {
+  const document = fixture(); document.lines[1].incomingFlow = { version: 1, ending: "hangup", steps: [{ id: stepIds[0], type: "line", lineId: ids.line }] };
+  const api: Api = { writes: [], document }; await boot(page, 390, api);
+  await page.getByRole("button", { name: "Pridať ďalší krok", exact: true }).click();
+  await page.getByRole("button", { name: "Presmerovať na našu linku", exact: false }).click();
+  await page.getByLabel("Cieľová linka", { exact: true }).selectOption(extraIds.secondLine);
+  await expect(page.getByText("Presmerovanie liniek vytvára kruh.", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "Uložiť zmeny", exact: true })).toBeDisabled();
   expect(api.writes).toHaveLength(0);
 });

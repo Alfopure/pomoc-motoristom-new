@@ -57,6 +57,7 @@ import { HeaderCallbackMenu } from "./HeaderCallbackMenu";
 import { invalidateCallbackQueue } from "@/lib/telephony/callback-queue-store";
 import { CallCenterModule } from "./CallCenterModule";
 import { HeaderLiveCallsMenu } from "./LiveCallOverview";
+import { matchesCaseStatus } from "./case-status-filter";
 import { CaseDirectory } from "./CaseDirectory";
 import { CaseList, type CaseFilters } from "./CaseList";
 import { SmsComposerDialog } from "./SmsComposerDialog";
@@ -176,7 +177,7 @@ const defaultCaseFilters: CaseFilters = {
   ownerId: "all",
   priority: "all",
   sourceType: "all",
-  status: "all",
+  status: "active",
 };
 
 const priorityRank: Record<DispatchCase["priority"], number> = {
@@ -725,13 +726,14 @@ function DispatchConsoleContent({
   );
 
   const callsByCaseId = useMemo(() => latestCallByCaseId(visibleCallCenterCalls), [visibleCallCenterCalls]);
+  const effectiveCaseFilters = useMemo(() => caseSearch.trim() && !caseFilters.statusTouched && caseFilters.status === "active" ? { ...caseFilters, status: "all" as const } : caseFilters, [caseFilters, caseSearch]);
   const filteredCases = useMemo(() => {
     const branchesById = new Map(branches.map((branch) => [branch.id, branch]));
     const assetsById = new Map(fleetAssets.map((asset) => [asset.id, asset]));
     const operatorsById = new Map(effectiveOperators.map((operator) => [operator.id, operator]));
 
     return dispatchCases
-      .filter((caseItem) => caseMatchesFilters(caseItem, caseFilters))
+      .filter((caseItem) => caseMatchesFilters(caseItem, effectiveCaseFilters))
       .filter((caseItem) =>
         caseMatchesSearch({
           assetsById,
@@ -743,8 +745,7 @@ function DispatchConsoleContent({
         }),
       )
       .sort((left, right) => compareCases(left, right, caseSort, callsByCaseId, operatorsById, branchesById, assetsById));
-  }, [branches, callsByCaseId, caseFilters, caseSearch, caseSort, dispatchCases, effectiveOperators, fleetAssets]);
-  const filteredActiveCases = useMemo(() => filteredCases.filter(isActiveDispatchCase), [filteredCases]);
+  }, [branches, callsByCaseId, effectiveCaseFilters, caseSearch, caseSort, dispatchCases, effectiveOperators, fleetAssets]);
   const activeCasesTotal = useMemo(() => dispatchCases.filter(isActiveDispatchCase).length, [dispatchCases]);
   const activeFilterCount = [
     caseSearch.trim(),
@@ -2429,7 +2430,7 @@ function DispatchConsoleContent({
             branches={branches}
             calls={visibleCallCenterCalls}
             cases={filteredCases}
-            filters={caseFilters}
+            filters={effectiveCaseFilters}
             onClearFilters={clearCaseFilters}
             onFiltersChange={setCaseFilters}
             onNewCase={() => startNewCase()}
@@ -2505,8 +2506,8 @@ function DispatchConsoleContent({
             activeFilterCount={activeFilterCount}
             assistanceServices={assistanceServiceOptions}
             centerView={centerView}
-            cases={filteredActiveCases}
-            filters={caseFilters}
+            cases={filteredCases}
+            filters={effectiveCaseFilters}
             onChangePriority={(caseId, priority) => void changeCasePriority(caseId, priority)}
             onClearFilters={clearCaseFilters}
             onFiltersChange={setCaseFilters}
@@ -2519,7 +2520,7 @@ function DispatchConsoleContent({
             priorityChangeCaseId={priorityChangeCaseId}
             search={caseSearch}
             sort={caseSort}
-            totalCases={activeCasesTotal}
+            totalCases={dispatchCases.length}
           />
           </div>
           <div className="mobile-dispatch-workspace lg:contents">
@@ -2541,7 +2542,7 @@ function DispatchConsoleContent({
             caseItem={workspaceCase}
             callLinkCandidates={callLinkCandidates}
             commanderVehicles={commanderVehicles}
-            cases={filteredActiveCases}
+            cases={filteredCases}
             centerView={centerView}
             focusedTaskId={focusedTaskId}
             mapModel={mapModel}
@@ -2551,7 +2552,7 @@ function DispatchConsoleContent({
             partnerDirectory={partnerDirectory}
             priceRule={activePriceRule}
             sort={caseSort}
-            totalCases={activeCasesTotal}
+            totalCases={dispatchCases.length}
             visibleCalls={visibleCallCenterCalls}
             viewerProfileId={viewerProfileId}
             workspaceKind={workspace.kind}
@@ -3625,7 +3626,7 @@ function safeRandomId() {
 }
 
 function caseMatchesFilters(caseItem: DispatchCase, filters: CaseFilters) {
-  if (filters.status !== "all" && caseItem.status !== filters.status) {
+  if (!matchesCaseStatus(caseItem.status, filters.status, filters.statuses)) {
     return false;
   }
   if (filters.priority !== "all" && caseItem.priority !== filters.priority) {
@@ -3841,7 +3842,7 @@ function toDispatchCall(call: DispatchCall | CallCenterCall): DispatchCall {
     id: call.id,
     status: toDispatchCallStatus(call.status),
     callerNumber: outbound ? call.destinationNumber ?? call.calledNumber : call.callerNumber,
-    callerName: outbound ? undefined : call.callerName,
+    callerName: call.contactName ?? (outbound ? undefined : call.callerName),
     calledNumber: call.calledNumber,
     receivedNumber: call.receivedNumber,
     destinationNumber: call.destinationNumber,

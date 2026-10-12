@@ -63,12 +63,13 @@ export function CallQueuePanel({
         const elapsed = Number.isFinite(startedAt)
           ? Math.max(call.waitSeconds ?? 0, Math.floor((now - startedAt) / 1_000))
           : call.waitSeconds ?? 0;
-        const callerName = call.callerName?.trim();
+        const callerName = (call.contactName ?? call.callerName)?.trim();
+        const callerNumber = call.direction === "outbound" ? call.calledNumber : call.callerNumber;
         const pickup = pickupState(call);
         return (
           <div key={call.id} className="min-w-0 rounded-lg border border-amber-200 bg-white px-3 py-2 shadow-sm">
             <div className="flex min-w-0 items-center justify-between gap-2">
-              <span className="truncate text-sm font-bold text-zinc-950">{callerName || call.callerNumber}</span>
+              <span className="truncate text-sm font-bold text-zinc-950">{callerName || callerNumber}</span>
               <span className="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-zinc-600">
                 <Clock3 size={12} aria-hidden="true" />
                 {formatWaitingDuration(elapsed)}
@@ -76,7 +77,7 @@ export function CallQueuePanel({
             </div>
             <div className="mt-1 flex min-w-0 items-center gap-2 text-xs">
               <span className="min-w-0 flex-1 truncate text-zinc-600">
-                {callerName ? call.callerNumber : call.lineLabel ?? "Prichádzajúci hovor"}
+                {callerName ? callerNumber : call.lineLabel ?? "Prichádzajúci hovor"}
               </span>
               <span className={`shrink-0 rounded-full px-2 py-0.5 font-bold ${
                 station ? "bg-yellow-100 text-yellow-900"
