@@ -14,4 +14,4 @@ In a VM with an existing Chromium binary:
 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium pnpm exec playwright test --config playwright.towing.config.ts
 ```
 
-The eight cases use synthetic contacts, a mocked session and mocked HTTP endpoints. The offline case uses real browser IndexedDB, reloads pending work, and confirms foreground synchronization order. Screenshots and runner artifacts go under `.context`. They establish desktop Chromium behavior at a 360px viewport, not physical Android or iPhone PWA acceptance, live TEST integration, or deployment readiness.
+The sixteen cases use synthetic contacts, a mocked session and mocked HTTP endpoints. The offline case uses real browser IndexedDB, reloads pending work, and confirms foreground synchronization order. Screenshots and runner artifacts go under `.context`. They establish desktop Chromium behavior at a 360px viewport, not physical Android or iPhone PWA acceptance, live TEST integration, or deployment readiness.

@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Camera, Check, FileDown, MapPin, Phone, Plus, Save, Trash2 } from "lucide-react";
 import type { TowingCommand, TowingFields, TowingLine, TowingOrder, TowingWorkspace } from "@/domain/towing/types";
 import { towingClient, documentUrl, fileUrl, deliveryStatus } from "./client";
 import { Button, Field, Notice, Panel, Select, TextArea } from "./primitives";
 import { OrderFields } from "./OrderFields";
-import { billingLabels, dateTime, euro, inputMoney, navigationUrl, orderTitle, parseCents, paymentLabels, workLabels, workTone } from "./model";
+import { billingLabels, dateTime, euro, inputMoney, navigationUrl, orderTitle, parseCents, paymentLabels, towingFieldsPatch, towingPriceLinesKey, workLabels, workTone } from "./model";
 import styles from "./towing.module.css";
 import { calculateTowingLine } from "@/domain/towing/money";
 import { prepareTowingImage } from "./images";
@@ -25,21 +25,21 @@ export function OrderDetail({ order, workspace, send, run, busy, onBack }: { ord
   const [driverId, setDriverId] = useState(order.driverId ?? "");
   const [conflict, setConflict] = useState(false);
   const previousOrder = useRef(order);
-  const serializeFields = (value: TowingFields) => JSON.stringify(value, (_key, item) => item === null ? undefined : item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
+  const fieldsEqual = useCallback((first: TowingFields, second: TowingFields) => !Object.keys(towingFieldsPatch(first, second, driver)).length, [driver]);
   useEffect(() => {
     const previous = previousOrder.current;
     if (previous.revision === order.revision) return;
-    const fieldsEdited = serializeFields(fields) !== serializeFields(previous.fields);
-    if (!fieldsEdited || serializeFields(fields) === serializeFields(order.fields)) setFields(order.fields);
-    else if (serializeFields(previous.fields) !== serializeFields(order.fields)) setConflict(true);
+    const fieldsEdited = !fieldsEqual(fields, previous.fields);
+    if (!fieldsEdited || fieldsEqual(fields, order.fields)) setFields(order.fields);
+    else if (!fieldsEqual(previous.fields, order.fields)) setConflict(true);
     if (officeNotes === (previous.officeNotes ?? "") || officeNotes === (order.officeNotes ?? "")) setOfficeNotes(order.officeNotes ?? "");
     else if (previous.officeNotes !== order.officeNotes) setConflict(true);
     if (collection === inputMoney(previous.authorizedCollectionCents) || collection === inputMoney(order.authorizedCollectionCents)) setCollection(inputMoney(order.authorizedCollectionCents));
     else if (previous.authorizedCollectionCents !== order.authorizedCollectionCents) setConflict(true);
     setDriverId(order.driverId ?? "");
     previousOrder.current = order;
-  }, [collection, fields, officeNotes, order]);
-  const dirty = serializeFields(fields) !== serializeFields(order.fields) || officeNotes !== (order.officeNotes ?? "") || collection !== inputMoney(order.authorizedCollectionCents);
+  }, [collection, fields, fieldsEqual, officeNotes, order]);
+  const dirty = !fieldsEqual(fields, order.fields) || officeNotes !== (order.officeNotes ?? "") || collection !== inputMoney(order.authorizedCollectionCents);
   const canEdit = driver || caps.includes("operate");
   const blocked = busy || dirty || conflict;
   const base = { targetId: order.id, expectedRevision: order.revision, ...(driver ? { assignmentGeneration: order.assignmentGeneration } : {}) };
@@ -47,8 +47,8 @@ export function OrderDetail({ order, workspace, send, run, busy, onBack }: { ord
   const save = async () => {
     const amount = collection === "" ? null : parseCents(collection);
     if (!driver && collection !== "" && amount === null) return;
-    const driverFields = Object.fromEntries(["startedAt", "finishedAt", "driverNotes", "performedQuantity", "photoException", "destination"].map(key => [key, fields[key as keyof TowingFields] ?? null]));
-    await change("update_order", driver ? { fields: driverFields } : { fields: Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value ?? null])), officeNotes, authorizedCollectionCents: amount }, "Údaje zákazky sú uložené.");
+    const patch = towingFieldsPatch(fields, order.fields, driver);
+    await change("update_order", driver ? { fields: patch } : { fields: patch, officeNotes, authorizedCollectionCents: amount }, "Údaje zákazky sú uložené.");
   };
   const tabs = [{ id: "details", label: "Údaje" }, { id: "photos", label: `Fotografie (${order.attachments.filter(attachment => attachment.status !== "abandoned").length})` }, ...(!driver && caps.includes("price") ? [{ id: "price", label: "Nacenenie" }] : []), ...(driver || caps.includes("bill") ? [{ id: "payments", label: "Úhrady" }] : []), ...(!driver && caps.includes("documents") ? [{ id: "documents", label: "Doklady" }] : []), ...(!driver ? [{ id: "history", label: "História" }] : [])];
   return <>
@@ -70,7 +70,7 @@ export function OrderDetail({ order, workspace, send, run, busy, onBack }: { ord
         {driver && <div className={styles.actions}><a className={styles.button} href={`/vodic/offline?orderId=${encodeURIComponent(order.id)}`}>Pripraviť na prácu offline</a></div>}{driver && <Panel title="Priebeh práce"><p className={styles.muted}>Dokončenie potvrdí server po kontrole údajov, fotografií a prijatých úhrad.</p><div className={styles.actions}>{order.workStatus === "assigned" && <Button primary disabled={blocked} onClick={() => void change("start", {}, "Začiatok práce je potvrdený.")}>Začať prácu</Button>}<Button primary disabled={blocked || !["in_progress", "needs_changes", "assigned"].includes(order.workStatus)} onClick={() => void change("submit", { receiptIds: (order.payments ?? []).filter(payment => payment.driverId === workspace.actor.id).map(payment => payment.receiptId) }, "Dokončenie je potvrdené. Zákazka bola odovzdaná kancelárii.")}><Check size={17} /> Dokončiť a odovzdať</Button></div></Panel>}
       </>}
       {tab === "photos" && <Photos key={order.revision} order={order} fields={fields} setFields={setFields} blocked={blocked} run={run} driver={driver} change={change} />}
-      {tab === "price" && <Pricing key={order.revision} order={order} workspace={workspace} blocked={blocked} change={change} />}
+      {tab === "price" && <Pricing key={order.id} order={order} workspace={workspace} blocked={blocked} change={change} />}
       {tab === "payments" && <Payments key={order.revision} order={order} workspace={workspace} blocked={blocked} change={change} />}
       {tab === "documents" && <Documents key={order.revision} order={order} workspace={workspace} blocked={blocked} run={run} />}
       {tab === "history" && <Panel title="História zákazky">{order.events?.length ? order.events.map(event => <div key={event.id} className={styles.photo}><span>{dateTime(event.createdAt)}</span><strong>{eventLabels[event.action] ?? event.action}</strong><span className={styles.muted}>{workspace.members.find(member => member.id === event.actorId)?.displayName ?? "Kancelária"}</span></div>) : <p className={styles.muted}>Zatiaľ bez ďalších udalostí.</p>}</Panel>}
@@ -112,18 +112,32 @@ type Change = (type: TowingCommand["type"], payload: Record<string, unknown>, su
 
 function Pricing({ order, workspace, blocked, change }: { order: TowingOrder; workspace: TowingWorkspace; blocked: boolean; change: Change }) {
   const [lines, setLines] = useState<TowingLine[]>(order.lines ?? []);
-  const [taxDate, setTaxDate] = useState(workspace.taxDate ?? "");
+  const [taxDate, setTaxDate] = useState(order.taxDate ?? (order.lines?.length ? "" : workspace.taxDate ?? ""));
   const [reason, setReason] = useState("");
+  const [conflict, setConflict] = useState(false);
+  const baseline = useRef({ revision: order.revision, lines: order.lines ?? [], date: order.taxDate ?? "" });
+  useEffect(() => {
+    const previous = baseline.current;
+    if (previous.revision === order.revision) return;
+    const matches = (values: TowingLine[], date: string) => towingPriceLinesKey(lines) === towingPriceLinesKey(values) && taxDate === date;
+    const serverLines = order.lines ?? []; const serverDate = order.taxDate ?? "";
+    if (matches(previous.lines, previous.date) || matches(serverLines, serverDate)) {
+      setLines(serverLines); setTaxDate(serverDate); setConflict(false);
+    } else if (towingPriceLinesKey(previous.lines) !== towingPriceLinesKey(serverLines) || previous.date !== serverDate) setConflict(true);
+    baseline.current = { revision: order.revision, lines: serverLines, date: serverDate };
+  }, [lines, order, taxDate]);
   let total = 0; let valid = lines.length > 0;
   for (const line of lines) { try { total += calculateTowingLine(line).totalCents; if (!line.description.trim() || !line.unit.trim()) valid = false; } catch { valid = false; } }
-  const saved = JSON.stringify(lines) === JSON.stringify(order.lines ?? []);
+  const saved = towingPriceLinesKey(lines) === towingPriceLinesKey(order.lines ?? []) && taxDate === order.taxDate;
   const update = (index: number, patch: Partial<TowingLine>) => setLines(lines.map((line, lineIndex) => index === lineIndex ? { ...line, ...patch } : line));
   return <Panel title="Položkové nacenenie">
     {!workspace.taxConfigured && <Notice>Daňové nastavenie organizácie chýba. Návrh môžete uložiť; finálnu cenu a nacenený doklad schváľte až po potvrdení nastavenia správcom.</Notice>}
+    {Boolean(order.lines?.length) && !order.taxDate && <Notice kind="error">Pri uloženom nacenení chýba overený daňový dátum. Doplňte a uložte správny dátum pred schválením ceny.</Notice>}
+    {conflict && <Notice kind="error">Nacenenie sa medzičasom zmenilo na serveri. Vaše položky a dátum ostali zachované. Porovnajte ich pred ďalším uložením.<details className={styles.details}><summary>Aktuálne nacenenie zo servera (verzia {order.revision})</summary><p>Daňový dátum: {order.taxDate || "chýba"}</p>{order.lines?.map(line => <p key={line.id}>{line.description} · {line.quantity} {line.unit} · {line.unitPrice} € bez dane · daň {line.taxRate} %</p>)}</details><div className={styles.actions}><Button onClick={() => { setLines(order.lines ?? []); setTaxDate(order.taxDate ?? ""); setConflict(false); }}>Prevziať serverové nacenenie</Button><Button onClick={() => setConflict(false)}>Nacenenie som porovnal(a), zachovať moje úpravy</Button></div></Notice>}
     <Field label="Dátum pre daňové pravidlá" type="date" value={taxDate} onChange={event => setTaxDate(event.target.value)} />
     <div style={{ marginTop: 22 }}>{lines.map((line, index) => <div key={line.id} className={styles.line}><Field label={`Položka ${index + 1}`} value={line.description} onChange={event => update(index, { description: event.target.value })} /><Field label="Množstvo" inputMode="decimal" value={line.quantity} onChange={event => update(index, { quantity: event.target.value.replace(",", ".") })} /><Field label="Jednotka" value={line.unit} onChange={event => update(index, { unit: event.target.value })} /><Field label="Cena bez dane (€)" inputMode="decimal" value={line.unitPrice} onChange={event => update(index, { unitPrice: event.target.value.replace(",", ".") })} /><Select label="Daň (%)" value={line.taxRate} onChange={event => update(index, { taxRate: event.target.value })}><option value="">Vyberte sadzbu</option>{workspace.taxRates.map(rate => <option key={rate} value={rate}>{rate} %</option>)}</Select><Button aria-label={`Odstrániť položku ${index + 1}`} disabled={blocked} onClick={() => setLines(lines.filter((_, lineIndex) => index !== lineIndex))}><Trash2 size={17} /></Button></div>)}</div>
     <div className={styles.row}><Button disabled={blocked} onClick={() => setLines([...lines, { id: crypto.randomUUID(), description: "", quantity: "1", unit: "", unitPrice: "", taxRate: "" }])}><Plus size={17} /> Pridať položku</Button><strong>Spolu s daňou: {valid ? euro(total) : "doplňte položky"}</strong></div>
-    <div className={styles.actions}><Button primary disabled={blocked || !valid || !taxDate} onClick={() => void change("set_lines", { lines, taxDate }, "Cenové položky sú uložené.")}><Save size={17} /> Uložiť nacenenie</Button><Button disabled={blocked || !saved || !valid || !workspace.taxConfigured || order.workStatus !== "submitted"} onClick={() => void change("approve_price", {}, "Cena bola schválená. Zákazka je pripravená na fakturáciu.")}><Check size={17} /> Schváliť cenu a pripraviť</Button></div>
+    <div className={styles.actions}><Button primary disabled={blocked || conflict || !valid || !taxDate} onClick={() => void change("set_lines", { lines, taxDate }, "Cenové položky sú uložené.")}><Save size={17} /> Uložiť nacenenie</Button><Button disabled={blocked || conflict || !saved || !valid || !workspace.taxConfigured || order.workStatus !== "submitted"} onClick={() => void change("approve_price", {}, "Cena bola schválená. Zákazka je pripravená na fakturáciu.")}><Check size={17} /> Schváliť cenu a pripraviť</Button></div>
     {workspace.actor.capabilities.includes("bill") && <details className={styles.details}><summary>Zákazka bez fakturácie</summary><TextArea label="Dôvod bez fakturácie" value={reason} onChange={event => setReason(event.target.value)} /><Button disabled={blocked || !reason.trim()} onClick={() => void change("not_required", { reason }, "Dôvod bez fakturácie je zaevidovaný.")}>Potvrdiť bez fakturácie</Button></details>}
   </Panel>;
 }
@@ -148,8 +162,11 @@ function Payments({ order, workspace, blocked, change }: { order: TowingOrder; w
 
 function Invoice({ order, blocked, change }: { order: TowingOrder; blocked: boolean; change: Change }) {
   const [number, setNumber] = useState(""); const [date, setDate] = useState(""); const [amount, setAmount] = useState(""); const [reason, setReason] = useState("");
-  const id = useRef(crypto.randomUUID()); const cents = parseCents(amount); const previous = order.invoices?.at(-1);
-  return <Panel title="Externá faktúra"><p className={styles.muted}>Tu evidujete doklad vystavený v účtovnom systéme.</p>{order.invoices?.map(invoice => <div key={invoice.id} className={styles.photo}><strong>{invoice.number}</strong><span>{invoice.date}</span><strong>{euro(invoice.amountCents)}</strong>{invoice.supersedesId && <span className={styles.badge}>Nahrádzajúci doklad</span>}</div>)}<div className={styles.grid3} style={{ marginTop: 20 }}><Field label="Číslo externého dokladu" value={number} onChange={event => setNumber(event.target.value)} /><Field label="Dátum dokladu" type="date" value={date} onChange={event => setDate(event.target.value)} /><Field label="Celková suma (€)" inputMode="decimal" value={amount} onChange={event => setAmount(event.target.value)} /></div>{previous && <TextArea label="Dôvod nahradenia predchádzajúcej faktúry" value={reason} onChange={event => setReason(event.target.value)} />}<div className={styles.actions}><Button primary disabled={blocked || !number.trim() || !date || cents === null || (Boolean(previous) && !reason.trim())} onClick={() => void change("set_invoice", { id: id.current, number, date, amountCents: cents, ...(previous ? { supersedesId: previous.id, reason } : {}) }, "Externá faktúra je zaevidovaná.")}>Zaevidovať externú faktúru</Button></div></Panel>;
+  const id = useRef(crypto.randomUUID()); const cents = parseCents(amount);
+  const currentInvoices = (order.invoices ?? []).filter(invoice => !order.invoices?.some(replacement => replacement.supersedesId === invoice.id));
+  const ambiguous = currentInvoices.length > 1 || (Boolean(order.invoices?.length) && currentInvoices.length === 0);
+  const previous = currentInvoices.length === 1 ? currentInvoices[0] : undefined;
+  return <Panel title="Externá faktúra"><p className={styles.muted}>Tu evidujete doklad vystavený v účtovnom systéme.</p>{ambiguous && <Notice kind="error">Nie je možné jednoznačne určiť aktuálnu externú faktúru. Pred ďalším dokladom musí kancelária overiť jej históriu.</Notice>}{order.invoices?.map(invoice => <div key={invoice.id} className={styles.photo}><strong>{invoice.number}</strong><span>{invoice.date}</span><strong>{euro(invoice.amountCents)}</strong>{invoice.supersedesId && <span className={styles.badge}>Nahrádzajúci doklad</span>}</div>)}<div className={styles.grid3} style={{ marginTop: 20 }}><Field label="Číslo externého dokladu" value={number} onChange={event => setNumber(event.target.value)} /><Field label="Dátum dokladu" type="date" value={date} onChange={event => setDate(event.target.value)} /><Field label="Celková suma (€)" inputMode="decimal" value={amount} onChange={event => setAmount(event.target.value)} /></div>{previous && <TextArea label="Dôvod nahradenia predchádzajúcej faktúry" value={reason} onChange={event => setReason(event.target.value)} />}<div className={styles.actions}><Button primary disabled={blocked || ambiguous || !number.trim() || !date || cents === null || (Boolean(previous) && !reason.trim())} onClick={() => void change("set_invoice", { id: id.current, number, date, amountCents: cents, ...(previous ? { supersedesId: previous.id, reason } : {}) }, "Externá faktúra je zaevidovaná.")}>Zaevidovať externú faktúru</Button></div></Panel>;
 }
 
 function Corrections({ order, workspace, blocked, change }: { order: TowingOrder; workspace: TowingWorkspace; blocked: boolean; change: Change }) {

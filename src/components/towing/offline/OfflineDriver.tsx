@@ -6,6 +6,7 @@ import { parseEuroCents } from '@/domain/towing/money';
 import type { TowingFields } from '@/domain/towing/types';
 import { towingClient } from '../client';
 import { prepareTowingImage } from '../images';
+import { towingFieldsPatch } from '../model';
 import { accessOrder, synchronize, type DriverAccess } from './sync';
 import { editOrder, enqueue, lockScope, pendingSummary, readOrders, readReceiptEvidence, rememberOrder, scopesForUser, type OfflineEntry, type OfflineIdentity, type OfflineOrder, type ReceiptEvidence } from './store';
 
@@ -167,7 +168,7 @@ function OfflineOrderForm({ identity, record, busy, refresh }: { identity: Offli
   }
   function saveFields(event: FormEvent) {
     event.preventDefault();
-    const allowed = { startedAt: fields.startedAt ?? '', finishedAt: fields.finishedAt ?? '', destination: fields.destination ?? '', driverNotes: fields.driverNotes ?? '', performedQuantity: fields.performedQuantity ?? '', photoException: fields.photoException ?? '' };
+    const allowed = towingFieldsPatch(fields, initialFields);
     void save(makeEntry('fields', 'update_order', { fields: allowed }));
   }
   async function savePhoto() {

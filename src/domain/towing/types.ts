@@ -26,7 +26,7 @@ export interface TowingOrder {
   driverId: string | null; workStatus: TowingWorkStatus; billingStatus: TowingBillingStatus; paymentStatus: TowingPaymentStatus;
   fields: TowingFields; authorizedCollectionCents: number | null; receivedCents: number; dueCents: number | null;
   reconciliationRequired: boolean; createdAt: string; updatedAt: string; attachments: TowingAttachment[];
-  officeNotes?: string; lines?: TowingLine[]; documents?: TowingDocument[]; payments?: TowingPayment[]; invoices?: TowingInvoice[]; events?: TowingEvent[]; reconciliations?: TowingReconciliation[];
+  officeNotes?: string; taxDate?: string | null; lines?: TowingLine[]; documents?: TowingDocument[]; payments?: TowingPayment[]; invoices?: TowingInvoice[]; events?: TowingEvent[]; reconciliations?: TowingReconciliation[];
 }
 export interface TowingEvent { id: string; action: string; actorId: string; createdAt: string; payload: Record<string, unknown> }
 export interface TowingCashAccount { id: string; driverId: string | null; balanceCents: number; reservedCents: number; revision: number }
