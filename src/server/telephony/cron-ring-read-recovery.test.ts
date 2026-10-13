@@ -13,6 +13,7 @@ vi.mock("./routing/ring-plan", async importOriginal => ({
 }));
 
 const timeout = "overdue session scan failed: AbortError: un-owned read exceeded 10000 ms";
+const orphanTimeout = "orphan leg scan failed: AbortError: un-owned read exceeded 10000 ms";
 const clean = () => ({ checked: 0, swept: [], deferred: [], errors: [], yielded: [], drained: [] });
 async function openReadIncident(h: ReturnType<typeof createTelephonyHarness>, context: Record<string, unknown> = { job: RING_SWEEP_JOB }, error = timeout) {
   return recordTelephonyIncident(h.deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error: new Error(error), context, now: h.now() });
@@ -25,12 +26,15 @@ beforeEach(() => {
 });
 
 describe("ring sweep read incident recovery", () => {
-  it("recovers its isolated scan timeout after a later complete clean sweep, without call activity", async () => {
+  it.each([
+    { scan: "overdue sessions", target: "sweep" as const, message: timeout },
+    { scan: "orphan legs", target: "orphans" as const, message: orphanTimeout },
+  ])("recovers its isolated $scan timeout after a later complete clean sweep, without call activity", async ({ target, message }) => {
     const h = createTelephonyHarness();
-    maintenance.sweep.mockRejectedValueOnce(new Error(timeout));
+    maintenance[target].mockRejectedValueOnce(new Error(message));
     expect(await runRingSweep(h.deps)).toMatchObject({ status: "failed" });
     expect(h.rows("motorist_job_incidents")[0]).toMatchObject({ status: "open", consecutive_failures: 1,
-      last_error_safe: `${new Error(timeout)} {"job":"telephony.ring.sweep"}` });
+      last_error_safe: `${new Error(message)} {"job":"telephony.ring.sweep"}` });
     h.advance(5 * 60_000);
     expect(await runRingSweep(h.deps)).toMatchObject({ status: "ok", detail: { readIncidentRecovered: true } });
     expect(h.rows("motorist_job_incidents")[0]).toMatchObject({ status: "recovered", recovered_at: h.now().toISOString() });
@@ -39,6 +43,8 @@ describe("ring sweep read incident recovery", () => {
 
   it.each([
     { name: "session-specific scan failure", context: { job: RING_SWEEP_JOB, sessionId: "call-1" }, error: timeout },
+    { name: "session-specific orphan scan failure", context: { job: RING_SWEEP_JOB, sessionId: "call-1" }, error: orphanTimeout },
+    { name: "orphan close failure", context: { job: RING_SWEEP_JOB }, error: "orphan leg close failed: AbortError: un-owned read exceeded 10000 ms" },
     { name: "provider reconciliation", context: { job: "telephony.telnyx.reconcile" }, error: timeout },
     { name: "command failure", context: { job: RING_SWEEP_JOB }, error: "Telnyx rejected hangup" },
     { name: "owned database timeout", context: { job: RING_SWEEP_JOB }, error: "owned database request exceeded 4000 ms" },
@@ -69,9 +75,9 @@ describe("ring sweep read incident recovery", () => {
     expect(h.rows("motorist_job_incidents")[0].status).toBe("open");
   });
 
-  it("does not clear a command failure recorded during the sweep at the same timestamp", async () => {
+  it.each([timeout, orphanTimeout])("does not clear a concurrent command failure at the same timestamp after %s", async error => {
     const h = createTelephonyHarness();
-    await openReadIncident(h);
+    await openReadIncident(h, { job: RING_SWEEP_JOB }, error);
     const before = h.rows("motorist_job_incidents")[0].updated_at;
     maintenance.sweep.mockImplementation(async () => {
       await recordTelephonyIncident(h.deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands,

@@ -5,6 +5,7 @@ import { nativeVoiceTestEnabled } from "@/lib/app-environment";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { telephonyStabilityEnabled } from "./stability";
 import { UNOWNED_READ_MS } from "./ownership";
+import { createTransientReadRetry } from "@/server/transient-read";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { CallerMatch } from "@/data/dispatch-types";
@@ -277,10 +278,22 @@ export async function loadActiveCallsCached(
 
 export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveCallRows> {
   const { admin, organizationId } = deps;
+  // One verification read for this shared pass, including concurrent polls and
+  // all compatibility queries. Never retry the full pass or serve stale rows.
+  const read = createTransientReadRetry();
   if (process.env.TELEPHONY_ACTIVE_SNAPSHOT_V1_ENABLED === "true") {
-    const { data, error } = await admin.rpc("motorist_active_call_snapshot_v1", {
-      p_organization_id: organizationId, p_environment: deps.environment,
-    }).abortSignal(AbortSignal.timeout(UNOWNED_READ_MS));
+    const { data, error } = await read(async signal => {
+      // This specific STABLE RPC only reads: the SQL fixture verifies it in a
+      // read-only transaction. Keep POST (no implicit GET retries) and its 10 s
+      // deadline, using AbortError to identify only our own read timeout.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new DOMException(`un-owned read exceeded ${UNOWNED_READ_MS} ms`, "AbortError")), UNOWNED_READ_MS);
+      try {
+        return await admin.rpc("motorist_active_call_snapshot_v1", {
+          p_organization_id: organizationId, p_environment: deps.environment,
+        }).abortSignal(AbortSignal.any([signal, controller.signal]));
+      } finally { clearTimeout(timer); }
+    });
     // A timeout or installation error must not multiply load with eight more
     // reads. Activation follows verification of this RPC on the exact project.
     if (error) throw new Error(`active call snapshot failed: ${error.message}`);
@@ -288,7 +301,7 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
     const keys = ["sessions", "legs", "attempts", "presence", "devices", "lines", "operatorSettings", "callRows"] as const;
     if (!keys.every(key => Array.isArray(data[key]))) throw new Error("incomplete active call snapshot");
     const rows = data as unknown as Omit<ActiveCallRows, "callIdBySession"> & { callRows: Array<{ id: string; session_id: string | null }> };
-    const mobileDevices = await readNativeDevices(deps);
+    const mobileDevices = await readNativeDevices(deps, read);
     return {
       contactNames: await loadCallContactNames(admin, organizationId, rows.sessions.filter(session => session.direction !== "internal").map(session => session.direction === "outbound" ? session.called_number : session.caller_number), 300),
       sessions: rows.sessions, legs: rows.legs, attempts: rows.attempts,
@@ -299,12 +312,12 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
   }
 
   const [sessionsResult, presenceResult, devicesResult, linesResult, operatorSettingsResult, mobileDevices] = await Promise.all([
-    admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).in("state", ACTIVE_STATES).order("started_at", { ascending: true }),
-    admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId),
-    admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment),
-    admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId),
-    admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId),
-    readNativeDevices(deps),
+    read(signal => admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).in("state", ACTIVE_STATES).order("started_at", { ascending: true }).abortSignal(signal)),
+    read(signal => admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId).abortSignal(signal)),
+    read(signal => admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment).abortSignal(signal)),
+    read(signal => admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).abortSignal(signal)),
+    read(signal => admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId).abortSignal(signal)),
+    readNativeDevices(deps, read),
   ]);
   if (sessionsResult.error) throw new Error(`active sessions load failed: ${sessionsResult.error.message}`);
   if (presenceResult.error) throw new Error(`presence load failed: ${presenceResult.error.message}`);
@@ -317,12 +330,12 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
 
   const [legsResult, attemptsResult, callRowsResult] = sessionIds.length
     ? await Promise.all([
-        admin.from("motorist_call_legs").select("*").in("session_id", sessionIds).is("ended_at", null),
-        admin.from("motorist_ring_attempts").select("*").in("session_id", sessionIds).eq("result", "offered"),
+        read(signal => admin.from("motorist_call_legs").select("*").in("session_id", sessionIds).is("ended_at", null).abortSignal(signal)),
+        read(signal => admin.from("motorist_ring_attempts").select("*").in("session_id", sessionIds).eq("result", "offered").abortSignal(signal)),
         // The console links a live call to a case and stores its outcome
         // through the existing `motorist_calls` routes, which are keyed on the
         // log row, not on the session.
-        admin.from("motorist_calls").select("id, session_id").in("session_id", sessionIds),
+        read(signal => admin.from("motorist_calls").select("id, session_id").in("session_id", sessionIds).abortSignal(signal)),
       ])
     : [
         { data: [] as LegRow[], error: null },
@@ -349,10 +362,10 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
   };
 }
 
-async function readNativeDevices(deps: ActiveCallsDeps): Promise<DeviceRow[]> {
+async function readNativeDevices(deps: ActiveCallsDeps, read: ReturnType<typeof createTransientReadRetry>): Promise<DeviceRow[]> {
   if (!nativeVoiceTestEnabled()) return [];
-  const result = await deps.admin.from("motorist_operator_mobile_devices").select("*")
-    .eq("organization_id", deps.organizationId).eq("environment", deps.environment);
+  const result = await read(signal => deps.admin.from("motorist_operator_mobile_devices").select("*")
+    .eq("organization_id", deps.organizationId).eq("environment", deps.environment).abortSignal(signal));
   if (result.error) throw new Error(`mobile devices load failed: ${result.error.message}`);
   return result.data ?? [];
 }

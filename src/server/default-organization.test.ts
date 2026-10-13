@@ -36,9 +36,61 @@ describe("default organisation", () => {
 
   it("does not remember a deactivated organisation as resolved", async () => {
     const [row] = fake.db.insert("motorist_organizations", { slug: "pomoc-motoristom", name: "PM", active: false });
-    await expect(resolveDefaultOrganizationId()).rejects.toThrow();
+    fake.db.log.length = 0;
+    await expect(resolveDefaultOrganizationId()).rejects.toMatchObject({ message: "Organizácia nie je nakonfigurovaná.", status: 500 });
+    expect(lookups()).toBe(1);
 
     fake.db.update("motorist_organizations", { active: true }, candidate => candidate.id === row.id);
     await expect(resolveDefaultOrganizationId()).resolves.toBe(row.id);
+    expect(lookups()).toBe(2);
+  });
+
+  it("verifies a transient timeout once and caches only the successful lookup", async () => {
+    const [row] = fake.db.insert("motorist_organizations", { slug: "pomoc-motoristom", name: "PM", active: true });
+    fake.db.log.length = 0;
+    fake.db.failNext("motorist_organizations", "select", {
+      message: "AbortError: un-owned read exceeded 10000 ms", code: "", details: null, hint: null,
+    });
+
+    expect(await resolveDefaultOrganizationId()).toBe(row.id);
+    expect(await resolveDefaultOrganizationId()).toBe(row.id);
+    expect(lookups()).toBe(2);
+    expect(fake.db.log.every(query => query.operation === "select")).toBe(true);
+  });
+
+  it("preserves the public failure after both reads time out without caching it", async () => {
+    const [row] = fake.db.insert("motorist_organizations", { slug: "pomoc-motoristom", name: "PM", active: true });
+    fake.db.log.length = 0;
+    const failure = { message: "AbortError: un-owned read exceeded 10000 ms", code: "", details: null, hint: null };
+    fake.db.failNext("motorist_organizations", "select", failure);
+    fake.db.failNext("motorist_organizations", "select", failure);
+
+    await expect(resolveDefaultOrganizationId()).rejects.toMatchObject({ message: "Organizáciu sa nepodarilo overiť.", status: 500 });
+    expect(lookups()).toBe(2);
+    expect(await resolveDefaultOrganizationId()).toBe(row.id);
+    expect(lookups()).toBe(3);
+    expect(fake.db.log.every(query => query.operation === "select")).toBe(true);
+  });
+
+  it("does not retry or cache a missing organisation", async () => {
+    await expect(resolveDefaultOrganizationId()).rejects.toMatchObject({ message: "Organizácia nie je nakonfigurovaná.", status: 500 });
+    expect(lookups()).toBe(1);
+    const [row] = fake.db.insert("motorist_organizations", { slug: "pomoc-motoristom", name: "PM", active: true });
+    expect(await resolveDefaultOrganizationId()).toBe(row.id);
+    expect(lookups()).toBe(2);
+  });
+
+  it.each([
+    { code: "42501", message: "permission denied" },
+    { code: "PGRST205", message: "table missing from schema cache" },
+  ])("does not retry or cache a permanent database error: $code", async failure => {
+    const [row] = fake.db.insert("motorist_organizations", { slug: "pomoc-motoristom", name: "PM", active: true });
+    fake.db.log.length = 0;
+    fake.db.failNext("motorist_organizations", "select", { ...failure, details: null, hint: null });
+    await expect(resolveDefaultOrganizationId()).rejects.toMatchObject({ message: "Organizáciu sa nepodarilo overiť.", status: 500 });
+    expect(lookups()).toBe(1);
+    expect(await resolveDefaultOrganizationId()).toBe(row.id);
+    expect(lookups()).toBe(2);
+    expect(fake.db.log.every(query => query.operation === "select")).toBe(true);
   });
 });

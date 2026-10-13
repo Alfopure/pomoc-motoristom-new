@@ -91,7 +91,10 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
 // it adds no runtime dependency or I/O to the webhook path.
 // Reviewed increase 57 → 58: the pure archived-line metadata predicate keeps
 // transferred numbers out of new inbound calls; it has no imports or I/O.
-const MAX_MODULES = 58;
+// Reviewed increase 58 → 59: the bounded transient-read helper adds only
+// function definitions and reuses the existing ownership module. It performs
+// no import-time I/O and adds no package or heavy application dependency.
+const MAX_MODULES = 59;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);

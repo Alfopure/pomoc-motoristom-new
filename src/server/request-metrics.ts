@@ -72,7 +72,14 @@ export function observeDatabaseTimeout(signal?: AbortSignal | null): () => void 
   if (!signal) return () => {};
   const scope = requests.getStore();
   const aborted = () => {
-    if (scope && !scope.finished && (signal.reason as { name?: unknown } | null)?.name === "TimeoutError") scope.dbAborts += 1;
+    const reason = signal.reason as { name?: unknown; message?: unknown } | null;
+    // These internal deadlines deliberately use AbortError to stop the
+    // PostgREST retry loop. Preserve timeout counts without logging the reason
+    // or treating arbitrary caller cancellation as a database timeout.
+    const deadline = reason?.name === "TimeoutError" || reason?.name === "AbortError" &&
+      typeof reason.message === "string" && (/^un-owned read exceeded \d+ ms$/.test(reason.message) ||
+        reason.message === "Read verification exceeded its deadline" || reason.message === "Incident recovery read expired");
+    if (scope && !scope.finished && deadline) scope.dbAborts += 1;
   };
   if (signal.aborted) aborted();
   else signal.addEventListener("abort", aborted, { once: true });

@@ -43,9 +43,12 @@ export type TelephonyIncidentResult = { recorded: boolean; incidentId: string | 
 type RingSweepReadIncident = Pick<Database["public"]["Tables"]["motorist_job_incidents"]["Row"],
   "incident_id" | "job_name" | "opened_at" | "updated_at" | "consecutive_failures" | "last_error_safe">;
 
-const RING_SWEEP_READ_TIMEOUT = 'Error: overdue session scan failed: AbortError: un-owned read exceeded 10000 ms {"job":"telephony.ring.sweep"}';
+const RING_SWEEP_READ_TIMEOUTS = new Set([
+  'Error: overdue session scan failed: AbortError: un-owned read exceeded 10000 ms {"job":"telephony.ring.sweep"}',
+  'Error: orphan leg scan failed: AbortError: un-owned read exceeded 10000 ms {"job":"telephony.ring.sweep"}',
+]);
 
-/** Only this isolated pre-effect scan failure is proved recovered by a later complete sweep. */
+/** Only these isolated read failures are proved recovered by a later complete sweep. */
 export async function loadRingSweepReadIncident(admin: AdminClient): Promise<RingSweepReadIncident | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new DOMException("Incident recovery read expired", "AbortError")), 1_000);
@@ -54,7 +57,7 @@ export async function loadRingSweepReadIncident(admin: AdminClient): Promise<Rin
       .select("incident_id, job_name, opened_at, updated_at, consecutive_failures, last_error_safe")
       .eq("job_name", TELEPHONY_INCIDENT_JOBS.commands).eq("status", "open").abortSignal(controller.signal).maybeSingle();
     const row = result.data;
-    return !result.error && row?.consecutive_failures === 1 && row.last_error_safe === RING_SWEEP_READ_TIMEOUT
+    return !result.error && row?.consecutive_failures === 1 && RING_SWEEP_READ_TIMEOUTS.has(row.last_error_safe ?? "")
       ? row : null;
   } catch { return null; }
   finally { clearTimeout(timer); }
@@ -63,7 +66,7 @@ export async function loadRingSweepReadIncident(admin: AdminClient): Promise<Rin
 /** Caller must supply its pre-sweep snapshot, only after a complete clean sweep. */
 export async function recoverRingSweepReadIncident(admin: AdminClient, snapshot: RingSweepReadIncident, now: Date): Promise<boolean> {
   if (snapshot.job_name !== TELEPHONY_INCIDENT_JOBS.commands || snapshot.consecutive_failures !== 1 ||
-    snapshot.last_error_safe !== RING_SWEEP_READ_TIMEOUT) return false;
+    snapshot.last_error_safe === null || !RING_SWEEP_READ_TIMEOUTS.has(snapshot.last_error_safe)) return false;
   try {
     const recovered = await admin.from("motorist_job_incidents")
       .update({ status: "recovered", recovered_at: now.toISOString(), updated_at: now.toISOString() })
