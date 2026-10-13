@@ -3,7 +3,8 @@
 Samostatná natívna aplikácia Expo 57 / React Native 0.86 pre iPhone a Android.
 Web a jeho telefonovanie zostávajú v koreňovom Next.js projekte. Mobil má vlastný
 `package-lock.json`, Node 24 a TypeScript 6; nie je súčasťou pnpm workspace.
-Z webu importuje iba vymazateľné TypeScript typy z `src/lib/mobile-api.ts`.
+Z webu importuje TypeScript typy a čisté spoločné definície stavov a filtrov
+prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
 
 ## Rozsah tejto verzie
 
@@ -46,6 +47,21 @@ Skutočné audio, APNs a systémové zvonenie na zamknutom zariadení zatiaľ
 nie sú prijaté ako funkčné. Android hlas/FCM nasleduje po iPhone pilote.
 
 Rozhranie používa žltú `#FCD703`, čierne tlačidlá a zinc/sivé plochy webu.
+Plávajúce spodné menu zachováva päť sekcií a používa natívny Liquid Glass
+na podporovanom iOS 26+. Dostupnosť modulu aj systémového API sa overí
+pred importom natívneho pohľadu. Starší iPhone s dostupným BlurView má
+rozmazaný povrch; Android, web a zostava bez týchto modulov čitateľný
+nepriehľadný povrch. Nastavenie **Znížiť priehľadnosť** má prednosť;
+**Znížiť pohyb** vypne interaktívny sklenený efekt. Voľby sa zohľadnia
+aj po návrate z nastavení. Zväčšené písmo zachová prístup ku všetkým
+záložkám posúvaním lišty; obsah rezervuje priestor aj pre spodný bezpečný
+okraj. Klávesnica dočasne skryje menu a po zatvorení ho obnoví.
+
+GlassEffect 57.0.4 a BlurView 57.0.3 sú súčasťou Expo Go SDK 57.
+Vlastná natívna zostava ich potrebuje zahrnúť pri novom buildovaní;
+staršia zostava má bezpečný nepriehľadný povrch.
+Podmienky natívneho efektu popisuje [dokumentácia Expo](https://docs.expo.dev/versions/latest/sdk/glass-effect/).
+
 Kontrakt úložiska, obnova a fyzické skúšky sú v [konceptoch](../docs/mobile/drafts.md).
 Priradenie, mapové hranice a TEST akceptácia sú v
 [samostatnom postupe](../docs/mobile/case-owner-map.md). WebView 13.16.1
@@ -114,7 +130,7 @@ npx eas-cli@24.12.1 build --platform android --profile test
 ```
 
 Pred odovzdaním skontrolovať dokončený build, source commit, package
-`sk.linkapomoci.dispecing.test`, podpis a TEST konfiguráciu. APK testuje M1;
+`sk.linkapomoci.dispecing.test`, podpis a TEST konfiguráciu aj obsah konkrétneho zdroja;
 úspešný build nedokazuje fyzické prihlásenie, audio ani zvonenie.
 
 ## iPhone TEST náhľad
@@ -123,6 +139,18 @@ Majiteľ má na fyzické skúšky iPhone. Aktuálny náhľad možno otvoriť v *
 pre SDK 57 a prihlásiť sa TEST operátorským účtom. Expo Go musí byť prihlásené
 do Expo účtu `alfopure`, ktorý vlastní organizáciu `linkapomoci`; tento Expo
 login je odlišný od následného operátorského prihlásenia v aplikácii.
+
+Odovzdaný QR smeruje na **publikovanú skupinu EAS Update**. Jej balík
+poskytuje Expo, takže ostáva dostupný aj po vypnutí tohto workspace
+a vývojového servera. Pri opätovnom otvorení použite uložený QR alebo
+záznam v Expo Go. Odkaz skupiny označuje konkrétnu aktualizáciu; ďalšia
+vydaná verzia dostane nový overený QR. Stav backendu a kompatibilita
+nainštalovaného Expo Go so SDK 57 sa overujú samostatne. Dočasný lokálny
+Metro server slúži iba na vývoj.
+
+iOS riadi vykonávanie aplikácie na pozadí. Pri uspanej aplikácii sa
+periodické čítanie zastaví a po návrate sa obnoví. Systémové prichádzajúce
+hovory na zamknutom iPhone ostávajú samostatnou natívnou funkciou.
 
 Publikovanie používa iba EAS `preview` a samostatnú vetvu `iphone-m1-test`:
 

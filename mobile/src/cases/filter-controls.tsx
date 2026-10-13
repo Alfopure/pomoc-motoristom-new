@@ -33,6 +33,6 @@ export function CaseFilterControls({ active, status, priority, onStatus, onPrior
   </>;
 }
 const s = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", padding: 20 },
-  modal: { backgroundColor: colors.white, borderRadius: 20, padding: 20, gap: 14, maxHeight: "85%" },
+  backdrop: { flex: 1, backgroundColor: "rgba(20,20,28,0.32)", justifyContent: "center", padding: 20 },
+  modal: { backgroundColor: colors.white, borderRadius: 28, padding: 22, gap: 16, maxHeight: "85%" },
 });

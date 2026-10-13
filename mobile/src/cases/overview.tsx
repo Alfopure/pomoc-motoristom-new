@@ -26,7 +26,7 @@ export function CaseOverview({ api, queryKey, active, pendingFilter, onSelect }:
   </View>;
 }
 const s = StyleSheet.create({
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  card: { flexGrow: 1, flexBasis: "45%", padding: 14, minHeight: 84, borderRadius: 16, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border, gap: 4 },
-  count: { color: colors.ink, fontSize: 26, fontWeight: "700" },
+  grid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  card: { flexGrow: 1, flexBasis: "45%", padding: 18, minHeight: 106, borderRadius: 22, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border, gap: 6 },
+  count: { color: colors.ink, fontSize: 32, fontWeight: "700", letterSpacing: -1 },
 });
