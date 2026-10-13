@@ -10,6 +10,7 @@ import { parseTowingCommand } from './service';
 import sharp from 'sharp';
 import { verifyTowingFile, verifyTowingImage } from './files';
 import { renderTowingPdf } from './pdf-template';
+import { serviceLabels } from '@/components/towing/model';
 const userId='10000000-0000-4000-8000-000000000001';
 const orgId='20000000-0000-4000-8000-000000000001';
 const memberId='30000000-0000-4000-8000-000000000001';
@@ -33,6 +34,22 @@ describe('towing HTTP isolation',()=>{
  it('maps DB revision conflicts without revealing SQL payload',async()=>{mocks.rpc.mockImplementation(async(name:string)=>name==='motorist_towing_actor'?{data:actor,error:null}:{data:null,error:{code:'PT409',message:'secret contact'}});const response=await command(request('/api/towing/commands',{commandId,type:'start',targetId:orderId,expectedRevision:1,assignmentGeneration:3,payload:{}}));expect(response.status).toBe(409);expect(JSON.stringify(await response.json())).not.toContain('secret contact');});
 });
 describe('file and PDF boundary',()=>{
+ it('renders the authenticated TEST baseline with Slovak labels and its explicit synthetic no-contact reason',()=>{
+   const html = renderTowingPdf({number:'Z-TEST-ACCEPTANCE',version:1,kind:'work',fields:{serviceType:'tow',subjectType:'vehicle',subjectDescription:'TEST AKCEPTÁCIA 2026-10-13 – BEZ REÁLNEHO ZÁKAZNÍKA',pickup:'TEST miesto A – syntetická nakládka',destination:'TEST miesto B – syntetické odovzdanie',noContactReason:'Syntetická akceptačná skúška, bez reálneho zákazníka.'}},'synthetic-snapshot-hash');
+   expect(html).toContain('<th>Výkon</th><td>Odťah</td>');
+   expect(html).toContain('<th>Typ predmetu</th><td>Vozidlo</td>');
+   expect(html).toContain('Syntetická akceptačná skúška, bez reálneho zákazníka.');
+   expect(html).not.toContain('<td>tow</td>'); expect(html).not.toContain('<td>vehicle</td>');
+ });
+ it('keeps PDF service labels aligned with every service offered by the office UI',()=>{
+   for (const serviceType of Object.keys(serviceLabels) as (keyof typeof serviceLabels)[]) {
+     const html = renderTowingPdf({number:'Z-TEST-LABELS',kind:'work',fields:{serviceType,subjectType:'material',subjectDescription:'Syntetický predmet',pickup:'Test'}},'hash');
+     expect(html).toContain(`<th>Výkon</th><td>${serviceLabels[serviceType]}</td>`);
+     expect(html).toContain('<th>Typ predmetu</th><td>Materiál</td>');
+   }
+   const machine = renderTowingPdf({number:'Z-TEST-MACHINE',kind:'work',fields:{serviceType:'transport',subjectType:'machine',subjectDescription:'Syntetický stroj',pickup:'Test'}},'hash');
+   expect(machine).toContain('<th>Typ predmetu</th><td>Stroj</td>');
+ });
  it('rejects HEIC, fake declared types and malformed PDF',()=>{expect(()=>verifyTowingFile(Buffer.from('not pdf'),'application/pdf')).toThrow();expect(()=>verifyTowingFile(Buffer.from('%PDF-1.7\n%%EOF'),'image/heic')).toThrow();expect(()=>parseTowingCommand({commandId,type:'start',targetId:'../order',payload:{}})).toThrow();});
  it('decodes complete photos and rejects header-only or corrupt pixel streams',async()=>{
    const png = await sharp({create:{width:2,height:2,channels:3,background:'#ffcc00'}}).png().toBuffer();
