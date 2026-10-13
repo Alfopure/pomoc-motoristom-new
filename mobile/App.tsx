@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { Phone, History as HistoryIcon, UserRound, FolderOpen, ClipboardList, type LucideIcon } from "lucide-react-native";
+import Svg, { Defs, LinearGradient as SvgGradient, Rect, Stop } from "react-native-svg";
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { ArrowDownLeft, ArrowUpRight, LockKeyhole, Mail, Phone, PhoneCall, Search } from "lucide-react-native";
 import { QueryClient, QueryClientProvider, focusManager, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import type { MobileMe } from "../src/lib/mobile-api";
@@ -20,16 +21,11 @@ import { CallPanel } from "./src/voice/ui";
 import type { DispatchPhone, PhoneState } from "./src/voice/phone";
 import { SessionLogout, type LogoutState } from "./src/lib/logout";
 import { useAndroidBack } from "./src/lib/use-android-back";
+import { GlassTabBar, type DispatchTab } from "./src/ui/navigation";
+import { NAVIGATION_CONTENT_BOTTOM, navigationContentBottom } from "./src/ui/theme";
 
-type Tab = "console" | "history" | "cases" | "tasks" | "account";
+type Tab = DispatchTab;
 type Category = "all" | "missed" | "received" | "outbound";
-const tabs: { id: Tab; label: string; icon: LucideIcon }[] = [
-  { id: "console", label: "Ústredňa", icon: Phone },
-  { id: "history", label: "História", icon: HistoryIcon },
-  { id: "cases", label: "Prípady", icon: FolderOpen },
-  { id: "tasks", label: "Moje úlohy", icon: ClipboardList },
-  { id: "account", label: "Účet", icon: UserRound },
-];
 const categories: { id: Category; label: string }[] = [
   { id: "all", label: "Všetky" }, { id: "missed", label: "Zmeškané" },
   { id: "received", label: "Prijaté" }, { id: "outbound", label: "Odchádzajúce" },
@@ -41,11 +37,17 @@ export default function App() {
   const [setup] = useState(() => {
     try { return { config: readMobileConfig() }; } catch { return { config: null }; }
   });
-  return <SafeAreaProvider><StatusBar style="dark" /><SafeAreaView style={styles.page}>
+  return <SafeAreaProvider><StatusBar style="dark" /><View style={styles.page}>
+    <Svg pointerEvents="none" width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" style={StyleSheet.absoluteFill}>
+      <Defs><SvgGradient id="dispatch-background" x1="0" y1="0" x2="0" y2="1">
+        <Stop offset="0" stopColor="#FFFDF7" /><Stop offset="0.42" stopColor="#F5F6F8" /><Stop offset="1" stopColor="#EDF0F4" />
+      </SvgGradient></Defs><Rect width="100" height="100" fill="url(#dispatch-background)" />
+    </Svg>
+    <SafeAreaView edges={["top", "left", "right"]} style={[styles.page, { backgroundColor: "transparent" }]}>
     {setup.config ? <ConfiguredApp key={generation} config={setup.config} onReset={() => setGeneration(value => value + 1)} /> : <View style={styles.content}>
       <Text style={styles.heading}>Linka pomoci</Text><ErrorNotice message="Aplikácia ešte nie je nastavená. Obráťte sa na správcu." />
     </View>}
-  </SafeAreaView></SafeAreaProvider>;
+  </SafeAreaView></View></SafeAreaProvider>;
 }
 
 function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () => void }) {
@@ -113,8 +115,8 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
   }), [config, client, authScope]);
 
   return <QueryClientProvider client={queryClient}>
-    <View style={s.brand}><View style={s.brandMark}><Text style={s.brandInitial}>L</Text></View>
-      <Text style={s.brandName}>Linka pomoci</Text>
+    <View style={s.brand}><View style={s.brandMark}><Phone size={20} strokeWidth={2.3} color={colors.ink} accessible={false} /></View>
+      <View style={s.brandText}><Text style={s.brandName}>Linka pomoci</Text><Text style={s.brandCaption}>Mobilný dispečing</Text></View>
       {config.environment === "test" && <Text style={s.testBadge}>TEST</Text>}
     </View>
     {booting ? <Loading label="Obnovujem prihlásenie…" /> : bootError ? <View style={styles.content}>
@@ -136,6 +138,8 @@ function SignIn({ client, config, logoutState }: { client: SupabaseClient; confi
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [durableDrafts] = useState(supportsDurableDrafts);
+  const passwordInput = useRef<TextInput>(null);
+  const insets = useSafeAreaInsets();
   async function login() {
     if (busy || logoutState.busy || !email.trim() || !password) return;
     setBusy(true); setError(null);
@@ -147,21 +151,33 @@ function SignIn({ client, config, logoutState }: { client: SupabaseClient; confi
     finally { setBusy(false); }
   }
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={[styles.content, { flexGrow: 1, justifyContent: "center" }]}>
-      <View style={{ gap: 8, marginBottom: 14 }}><Text style={styles.heading}>Váš dispečing vo vrecku</Text>
-        <Text style={styles.text}>Prihláste sa svojím účtom Linky pomoci.</Text></View>
-      <View><Text style={styles.label}>E-mail</Text><TextInput accessibilityLabel="E-mail" value={email} onChangeText={setEmail} style={styles.input}
-        autoCapitalize="none" autoCorrect={false} keyboardType="email-address" autoComplete="email" textContentType="username" editable={!busy && !logoutState.busy} /></View>
-      <View><Text style={styles.label}>Heslo</Text><TextInput accessibilityLabel="Heslo" value={password} onChangeText={setPassword} style={styles.input}
-        secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="current-password" textContentType="password" editable={!busy && !logoutState.busy} returnKeyType="go" onSubmitEditing={() => { void login(); }} /></View>
-      {logoutState.message && <ErrorNotice message={logoutState.message} />}
-      {logoutState.busy && <Text style={styles.muted}>Dokončujem odhlásenie…</Text>}
-      {error && <ErrorNotice message={error} />}
-      <Button label={busy ? "Prihlasujem…" : "Prihlásiť sa"} disabled={busy || logoutState.busy || !email.trim() || !password} onPress={() => { void login(); }} />
-      <Button label="Zabudnuté heslo" secondary onPress={() => {
-        void Linking.openURL(config.apiOrigin + "/auth/forgot-password?email=" + encodeURIComponent(email.trim())).catch(() => setError("Stránku na obnovu hesla sa nepodarilo otvoriť."));
-      }} />
-      <Text style={styles.muted}>{durableDrafts ? "Aplikácia podporuje chránené uloženie rozpísaných formulárov." : "Koncepty v tomto náhľade ostávajú iba do zatvorenia aplikácie."}</Text>
+    <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={[styles.content, s.signInContent, { paddingBottom: Math.max(28, insets.bottom + 16) }]}>
+      <View style={s.signInHero}>
+        <View style={s.signInEmblem}><PhoneCall size={38} strokeWidth={1.8} color={colors.ink} accessible={false} /></View>
+        <Text accessibilityRole="header" style={s.signInHeading}>Váš dispečing vo vrecku</Text>
+        <Text style={[styles.muted, s.signInDescription]}>Prihláste sa svojím účtom Linky pomoci.</Text>
+      </View>
+      <Card>
+        <View><Text style={styles.label}>E-mail</Text><View style={s.inputWrap}>
+          <View pointerEvents="none" style={s.inputIcon}><Mail size={19} color={colors.muted} accessible={false} /></View>
+          <TextInput accessibilityLabel="E-mail" placeholder="vas@email.sk" placeholderTextColor={colors.muted} value={email} onChangeText={setEmail} style={[styles.input, s.inputWithIcon]}
+            selectionColor={colors.brand} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" autoComplete="email" textContentType="username" editable={!busy && !logoutState.busy}
+            returnKeyType="next" onSubmitEditing={() => passwordInput.current?.focus()} />
+        </View></View>
+        <View><Text style={styles.label}>Heslo</Text><View style={s.inputWrap}>
+          <View pointerEvents="none" style={s.inputIcon}><LockKeyhole size={19} color={colors.muted} accessible={false} /></View>
+          <TextInput ref={passwordInput} accessibilityLabel="Heslo" placeholder="Vaše heslo" placeholderTextColor={colors.muted} value={password} onChangeText={setPassword} style={[styles.input, s.inputWithIcon]}
+            selectionColor={colors.brand} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="current-password" textContentType="password" editable={!busy && !logoutState.busy} returnKeyType="go" onSubmitEditing={() => { void login(); }} />
+        </View></View>
+        {logoutState.message && <ErrorNotice message={logoutState.message} />}
+        {logoutState.busy && <Text style={styles.muted}>Dokončujem odhlásenie…</Text>}
+        {error && <ErrorNotice message={error} />}
+        <Button label={busy ? "Prihlasujem…" : "Prihlásiť sa"} disabled={busy || logoutState.busy || !email.trim() || !password} onPress={() => { void login(); }} />
+        <Button label="Zabudnuté heslo" secondary onPress={() => {
+          void Linking.openURL(config.apiOrigin + "/auth/forgot-password?email=" + encodeURIComponent(email.trim())).catch(() => setError("Stránku na obnovu hesla sa nepodarilo otvoriť."));
+        }} />
+      </Card>
+      <Text style={[styles.muted, s.signInFootnote]}>{durableDrafts ? "Aplikácia podporuje chránené uloženie rozpísaných formulárov." : "Koncepty v tomto náhľade ostávajú iba do zatvorenia aplikácie."}</Text>
     </ScrollView>
   </KeyboardAvoidingView>;
 }
@@ -174,6 +190,9 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   const [search, setSearch] = useState("");
   const [logoutError, setLogoutError] = useState<string | null>(null), [logoutBusy, setLogoutBusy] = useState(false);
   const preparingLogout = useRef(false);
+  const { fontScale } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
   useAndroidBack(active && tab !== "console" && tab !== "cases" && tab !== "tasks", () => setTab("console"));
   const key = ["mobile", config.environment, userId];
   // First authenticated snapshot must also load during a PushKit cold launch.
@@ -210,7 +229,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={logoutBusy || logoutState.busy || Boolean(phoneState.call || phoneState.termination)} secondary />
     {logoutError && <Button label="Odhlásiť bez neuložených zmien" onPress={logoutWithoutSaving} disabled={logoutBusy || logoutState.busy || Boolean(phoneState.call || phoneState.termination)} secondary />}
   </View>;
-  return <View style={{ flex: 1 }}>
+  return <View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
     <CallPanel phone={phone} state={phoneState} />
     {me.isError && <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />}
     {tab === "console" ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} />
@@ -220,10 +239,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     <DraftWorkspace key={identity.profileId} config={config} client={client} identity={identity} userId={userId} liveUser={liveUser} active={active} tab={tab} onTab={setTab}
       onSelectNumber={value => { setNumber(value); setTab("console"); }} logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} />
-    <View accessibilityRole="tablist" style={s.tabs}>{tabs.map(item => <Pressable key={item.id} accessibilityRole="tab" accessibilityLabel={item.label}
-      accessibilityState={{ selected: tab === item.id }} onPress={() => setTab(item.id)} style={s.tab}>
-      <View style={[s.tabIcon, tab === item.id && s.tabIconSelected]}><item.icon size={22} color={tab === item.id ? colors.ink : colors.muted} /></View><Text style={[s.tabLabel, tab === item.id && s.selected]}>{item.label}</Text>
-    </Pressable>)}</View>
+    <GlassTabBar selected={tab} onSelect={setTab} />
   </View>;
 }
 
@@ -236,12 +252,15 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
     try { await phone.presence(status); await query.refetch(); } catch { /* Phone displays the authorized action's error. */ }
     finally { setChangingPresence(false); }
   }
-  return <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
+  return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { void query.refetch(); }} />}>
-    <View style={{ gap: 4 }}><Text style={styles.heading}>Ústredňa</Text><Text style={styles.muted}>{me.profile.displayName}</Text></View>
+    <View style={s.screenHeading}><Text accessibilityRole="header" style={styles.heading}>Ústredňa</Text><Text style={styles.muted}>{me.profile.displayName}</Text></View>
     {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} /> : query.data && <>
-      <Card><Text style={styles.label}>Váš stav v ústredni</Text><View style={styles.row}><View style={[s.dot, { backgroundColor: query.data.presence.status === "available" ? colors.success : colors.muted }]} />
-        <Text style={styles.subheading}>{presenceLabels[query.data.presence.status]}</Text></View>
+      <Card style={s.presenceCard}><Text style={styles.label}>Váš stav v ústredni</Text><View style={styles.row}>
+        <View style={[s.presenceIndicator, { backgroundColor: query.data.presence.status === "available" ? "#E1F5EC" : colors.surfaceMuted }]}>
+          <View style={[s.dot, { backgroundColor: query.data.presence.status === "available" ? colors.success : colors.muted }]} />
+        </View><Text style={s.presenceTitle}>{presenceLabels[query.data.presence.status]}</Text></View>
         <Text style={styles.muted}>Aktualizované {formatTime(query.data.checkedAt)}</Text>
         {phoneState.registration === "registered" && <View style={styles.row}>{(["available", "paused"] as const).map(status => <View key={status} style={{ flex: 1 }}>
           <Button label={presenceLabels[status]} secondary disabled={changingPresence || Boolean(phoneState.call || phoneState.termination) || query.data.presence.status === status}
@@ -263,12 +282,14 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
       ])} />}
     </Card> : <View style={s.notice}><Text style={[styles.label, { marginBottom: 2 }]}>Systémové hovory</Text>
       <Text style={styles.muted}>Táto zostava podporuje prihlásenie, ústredňu, históriu a prácu s prípadmi. Systémové telefonovanie potrebuje samostatnú natívnu zostavu a overenie na telefóne.</Text></View>}
-    <Card><Text style={styles.subheading}>Nový hovor</Text><TextInput accessibilityLabel="Telefónne číslo" placeholder="Telefónne číslo" placeholderTextColor={colors.muted}
-      keyboardType="phone-pad" maxLength={40} value={number} onChangeText={onNumber} style={styles.input} />
+    <Card><View style={styles.row}><View style={s.smallEmblem}><PhoneCall size={20} color={colors.ink} accessible={false} /></View><Text style={styles.subheading}>Nový hovor</Text></View>
+      <TextInput accessibilityLabel="Telefónne číslo" placeholder="Telefónne číslo" placeholderTextColor={colors.muted}
+      selectionColor={colors.brand} keyboardType="phone-pad" maxLength={40} value={number} onChangeText={onNumber} style={[styles.input, s.phoneInput]} />
       <Button label={phoneState.dialing ? "Vytáčam…" : "Zavolať"} disabled={!phone || phoneState.registration !== "registered" || !dialable(number) || phoneState.dialing || Boolean(phoneState.call || phoneState.termination)}
         onPress={() => { void phone?.dial(number.trim()); }} />
     </Card>
-  </ScrollView>;
+    </ScrollView>
+  </KeyboardAvoidingView>;
 }
 
 function History({ api, me, queryKey, active, category, onCategory, search, onSearch, onSelect }: {
@@ -287,22 +308,29 @@ function History({ api, me, queryKey, active, category, onCategory, search, onSe
   const denied = query.error instanceof MobileApiError && [401, 403, 409, 502].includes(query.error.status);
   const showCalls = !pendingSearch && !denied && !(query.isError && !query.isFetchNextPageError);
   const calls = [...new Map(query.data?.pages.flatMap(page => page.calls).map(call => [call.id, call]) ?? []).values()];
-  return <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
+  return <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { void query.refetch(); }} />}>
-    <Text style={styles.heading}>História hovorov</Text>
-    <TextInput accessibilityLabel="Hľadať hovory" placeholder="Číslo alebo meno" placeholderTextColor={colors.muted} value={search} onChangeText={onSearch} maxLength={160} style={styles.input} autoCorrect={false} />
+    <Text accessibilityRole="header" style={styles.heading}>História hovorov</Text>
+    <View style={s.inputWrap}><View pointerEvents="none" style={s.inputIcon}><Search size={20} color={colors.muted} accessible={false} /></View>
+      <TextInput accessibilityLabel="Hľadať hovory" placeholder="Číslo alebo meno" placeholderTextColor={colors.muted} value={search} onChangeText={onSearch} maxLength={160} style={[styles.input, s.inputWithIcon]} autoCorrect={false} selectionColor={colors.brand} />
+    </View>
     <View style={s.filters}>{categories.map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityState={{ selected: item.id === category }}
-      onPress={() => onCategory(item.id)} style={[s.filter, item.id === category && s.filterSelected]}><Text style={[styles.muted, item.id === category && { color: colors.white }]}>{item.label}</Text></Pressable>)}</View>
+      onPress={() => onCategory(item.id)} style={({ pressed }) => [s.filter, item.id === category && s.filterSelected, pressed && { opacity: 0.75 }]}>
+      <Text style={[s.filterText, item.id === category && { color: colors.white }]}>{item.label}</Text></Pressable>)}</View>
     {pendingSearch || query.isPending ? <Loading /> : query.isError && !query.isFetchNextPageError || denied ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} />
       : showCalls && <>{calls.length === 0 && <Card><Text style={styles.text}>Žiadne hovory pre tento výber.</Text></Card>}
-        {calls.map(call => <Card key={call.id}><View style={[styles.row, { justifyContent: "space-between" }]}>
-          <Text style={[styles.muted, { color: call.status === "missed" ? colors.danger : colors.ink }]}>{call.direction === "outbound" ? "Odchádzajúci" : call.direction === "internal" ? "Interný" : "Prichádzajúci"}</Text>
-          <Text style={styles.muted}>{formatTime(call.startedAt)}</Text></View>
-          <Text style={styles.subheading}>{call.name || formatNumber(call.number)}</Text>
-          {call.name && <Text style={styles.text}>{formatNumber(call.number)}</Text>}
+        {calls.map(call => {
+          const DirectionIcon = call.direction === "outbound" ? ArrowUpRight : call.direction === "internal" ? Phone : ArrowDownLeft;
+          return <Card key={call.id}><View style={[styles.row, { alignItems: "flex-start" }]}>
+            <View style={[s.callIcon, call.status === "missed" && s.missedIcon]}><DirectionIcon size={23} strokeWidth={1.9} color={call.status === "missed" ? colors.danger : colors.ink} accessible={false} /></View>
+            <View style={{ flex: 1, gap: 5 }}><Text style={styles.subheading}>{call.name || formatNumber(call.number)}</Text>
+              {call.name && <Text style={styles.text}>{formatNumber(call.number)}</Text>}
+              <View style={s.callMeta}><Text style={[styles.muted, { color: call.status === "missed" ? colors.danger : colors.muted }]}>{call.direction === "outbound" ? "Odchádzajúci" : call.direction === "internal" ? "Interný" : "Prichádzajúci"}</Text>
+                <Text style={styles.muted}>{formatTime(call.startedAt)}</Text></View>
+            </View></View>
           <Text style={styles.muted}>{callStatus(call.status)} · {call.lineLabel}{call.durationSeconds === null ? "" : " · " + Math.floor(call.durationSeconds / 60) + ":" + String(Math.floor(call.durationSeconds % 60)).padStart(2, "0")}</Text>
           {dialable(call.number) && <Button label="Vybrať číslo" secondary onPress={() => { if (call.number) onSelect(call.number); }} />}
-        </Card>)}
+        </Card>; })}
         {query.isFetchNextPageError && <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.fetchNextPage(); }} />}
         {query.hasNextPage && !query.isFetchNextPageError && <Button label={query.isFetchingNextPage ? "Načítavam…" : "Ďalšie hovory"} secondary disabled={query.isFetchingNextPage} onPress={() => { void query.fetchNextPage(); }} />}
       </>}
@@ -310,20 +338,34 @@ function History({ api, me, queryKey, active, category, onCategory, search, onSe
 }
 
 const s = StyleSheet.create({
-  brand: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, paddingVertical: 14, borderTopWidth: 5, borderTopColor: colors.brand, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.white },
-  brandMark: { width: 32, height: 32, borderRadius: 10, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center" },
-  brandInitial: { color: colors.ink, fontWeight: "800", fontSize: 22 },
-  brandName: { fontSize: 17, fontWeight: "700", color: colors.ink, flex: 1 },
-  testBadge: { color: colors.ink, backgroundColor: colors.brand, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, fontWeight: "700", fontSize: 11 },
-  tabs: { flexDirection: "row", backgroundColor: colors.white, paddingVertical: 9, borderTopWidth: 1, borderTopColor: colors.border },
-  tab: { flex: 1, alignItems: "center", justifyContent: "center", gap: 3, minHeight: 50 },
-  tabIcon: { paddingHorizontal: 14, paddingVertical: 5, borderRadius: 10 },
-  tabIconSelected: { backgroundColor: colors.brand },
-  tabLabel: { color: colors.muted, fontSize: 12, fontWeight: "600" },
-  selected: { color: colors.ink },
+  brand: { flexDirection: "row", alignItems: "center", gap: 11, paddingHorizontal: 22, paddingVertical: 12 },
+  brandMark: { width: 40, height: 40, borderRadius: 14, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center" },
+  brandText: { flex: 1, gap: 2 },
+  brandName: { fontSize: 17, fontWeight: "700", letterSpacing: -0.4, color: colors.ink },
+  brandCaption: { fontSize: 12, color: colors.muted, fontWeight: "500" },
+  testBadge: { color: colors.ink, backgroundColor: "#FFF4AF", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12, fontWeight: "700", fontSize: 10, letterSpacing: 0.8 },
+  signInContent: { flexGrow: 1, justifyContent: "center", gap: 22 },
+  signInHero: { gap: 12, paddingBottom: 4 },
+  signInEmblem: { width: 76, height: 76, borderRadius: 25, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center", marginBottom: 8 },
+  signInHeading: { fontSize: 36, lineHeight: 42, letterSpacing: -1.3, fontWeight: "700", color: colors.ink },
+  signInDescription: { fontSize: 16, lineHeight: 24 },
+  signInFootnote: { textAlign: "center", fontSize: 12, lineHeight: 19, paddingHorizontal: 10 },
+  screenHeading: { gap: 5, paddingBottom: 2 },
+  inputWrap: { position: "relative" },
+  inputIcon: { position: "absolute", left: 16, top: 0, bottom: 0, justifyContent: "center", zIndex: 1 },
+  inputWithIcon: { paddingLeft: 46 },
+  phoneInput: { fontSize: 21, letterSpacing: 0.3, minHeight: 60, fontVariant: ["tabular-nums"] },
+  smallEmblem: { width: 36, height: 36, borderRadius: 12, backgroundColor: "#FFF5B8", alignItems: "center", justifyContent: "center" },
+  presenceCard: { backgroundColor: "#FEFEFB" },
+  presenceIndicator: { width: 34, height: 34, borderRadius: 17, alignItems: "center", justifyContent: "center" },
+  presenceTitle: { fontSize: 25, fontWeight: "600", letterSpacing: -0.6, color: colors.ink, flexShrink: 1 },
   dot: { width: 10, height: 10, borderRadius: 5 },
-  notice: { backgroundColor: colors.notice, borderWidth: 1, borderColor: colors.noticeBorder, borderRadius: 14, padding: 16, gap: 5 },
-  filters: { flexDirection: "row", gap: 7, flexWrap: "wrap" },
-  filter: { borderRadius: 18, backgroundColor: colors.surfaceMuted, paddingHorizontal: 12, paddingVertical: 8 },
+  notice: { backgroundColor: "#FFFBEA", borderWidth: 1, borderColor: "#F3E8BC", borderRadius: 22, padding: 18, gap: 6 },
+  callIcon: { width: 44, height: 44, borderRadius: 16, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
+  missedIcon: { backgroundColor: "#FFF0EF" },
+  callMeta: { flexDirection: "row", flexWrap: "wrap", gap: 5, columnGap: 12 },
+  filters: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+  filter: { borderRadius: 22, minHeight: 44, backgroundColor: "#EDEFF2", paddingHorizontal: 15, paddingVertical: 11, alignItems: "center", justifyContent: "center" },
+  filterText: { fontSize: 14, fontWeight: "600", color: colors.muted },
   filterSelected: { backgroundColor: colors.ink },
 });
