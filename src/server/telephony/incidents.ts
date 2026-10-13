@@ -40,6 +40,41 @@ export function describeIncidentError(error: unknown, context?: Record<string, u
 
 export type TelephonyIncidentResult = { recorded: boolean; incidentId: string | null; consecutiveFailures: number; error: string | null };
 
+type RingSweepReadIncident = Pick<Database["public"]["Tables"]["motorist_job_incidents"]["Row"],
+  "incident_id" | "job_name" | "opened_at" | "updated_at" | "consecutive_failures" | "last_error_safe">;
+
+const RING_SWEEP_READ_TIMEOUT = 'Error: overdue session scan failed: AbortError: un-owned read exceeded 10000 ms {"job":"telephony.ring.sweep"}';
+
+/** Only this isolated pre-effect scan failure is proved recovered by a later complete sweep. */
+export async function loadRingSweepReadIncident(admin: AdminClient): Promise<RingSweepReadIncident | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new DOMException("Incident recovery read expired", "AbortError")), 1_000);
+  try {
+    const result = await admin.from("motorist_job_incidents")
+      .select("incident_id, job_name, opened_at, updated_at, consecutive_failures, last_error_safe")
+      .eq("job_name", TELEPHONY_INCIDENT_JOBS.commands).eq("status", "open").abortSignal(controller.signal).maybeSingle();
+    const row = result.data;
+    return !result.error && row?.consecutive_failures === 1 && row.last_error_safe === RING_SWEEP_READ_TIMEOUT
+      ? row : null;
+  } catch { return null; }
+  finally { clearTimeout(timer); }
+}
+
+/** Caller must supply its pre-sweep snapshot, only after a complete clean sweep. */
+export async function recoverRingSweepReadIncident(admin: AdminClient, snapshot: RingSweepReadIncident, now: Date): Promise<boolean> {
+  if (snapshot.job_name !== TELEPHONY_INCIDENT_JOBS.commands || snapshot.consecutive_failures !== 1 ||
+    snapshot.last_error_safe !== RING_SWEEP_READ_TIMEOUT) return false;
+  try {
+    const recovered = await admin.from("motorist_job_incidents")
+      .update({ status: "recovered", recovered_at: now.toISOString(), updated_at: now.toISOString() })
+      .eq("incident_id", snapshot.incident_id).eq("job_name", snapshot.job_name).eq("status", "open")
+      .eq("opened_at", snapshot.opened_at).eq("updated_at", snapshot.updated_at)
+      .eq("consecutive_failures", snapshot.consecutive_failures).eq("last_error_safe", snapshot.last_error_safe)
+      .select("incident_id");
+    return !recovered.error && Boolean(recovered.data?.length);
+  } catch { return false; }
+}
+
 export async function recordTelephonyIncident(admin: AdminClient, input: TelephonyIncidentInput): Promise<TelephonyIncidentResult> {
   const now = (input.now ?? new Date()).toISOString();
   // A new failure invalidates the "this job is clean" memo, so the next clean

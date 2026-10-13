@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { runTelephonyAlerts, type TelephonyAlertDeps } from "./alerts";
-import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
+import { loadRingSweepReadIncident, recordTelephonyIncident, recoverRingSweepReadIncident, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import type { InboundHangupRecovery } from "./inbound-hangup-recovery";
 import { closeOrphanLegs, closeStaleRingAttempts, sweepOverdueRingSteps } from "./routing/ring-plan";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
@@ -171,6 +171,9 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
   if (!deps.telnyx) {
     return { job: RING_SWEEP_JOB, status: "skipped", detail: { reason: "not_configured" } };
   }
+  // An idle exchange executes no successful call transition to close its old
+  // scan incident. Snapshot that exact read failure before doing fresh work.
+  const readIncident = await loadRingSweepReadIncident(deps.admin);
   try {
     // Bounded at the loop head only (never mid-run): what does not fit is
     // reported as deferred and picked up by the next tick.
@@ -201,6 +204,9 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
     // (global partial unique index), so it must be terminalised too.
     const attempts = await closeStaleRingAttempts(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) });
     if (attempts.length > 0) deps.logger?.({ level: "warn", scope: "cron", job: RING_SWEEP_JOB, staleAttemptsClosed: attempts.length });
+    const readIncidentRecovered = Boolean(readIncident && result.errors.length === 0 && result.deferred.length === 0 &&
+      result.yielded.length === 0 && orphans.awaitingHangup.length === 0 &&
+      await recoverRingSweepReadIncident(deps.admin, readIncident, nowOf(deps)));
     return {
       job: RING_SWEEP_JOB,
       status: result.errors.length > 0 ? "failed" : "ok",
@@ -213,6 +219,7 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
         orphanLegsClosed: orphans.closed.length,
         orphanLegsAwaitingHangup: orphans.awaitingHangup.length,
         staleAttemptsClosed: attempts.length,
+        readIncidentRecovered,
         errors: result.errors,
       },
     };
