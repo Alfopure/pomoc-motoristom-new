@@ -1,5 +1,6 @@
-import type { TowingBillingStatus, TowingFields, TowingOrder, TowingPaymentStatus, TowingServiceType, TowingWorkStatus } from "@/domain/towing/types";
+import type { TowingBillingStatus, TowingFields, TowingLine, TowingOrder, TowingPaymentStatus, TowingServiceType, TowingWorkStatus } from "@/domain/towing/types";
 import { parseEuroCents } from "@/domain/towing/money";
+import { towingDriverFieldNames } from "@/domain/towing/validation";
 
 export const workLabels: Record<TowingWorkStatus, string> = { draft: "Nepridelené", assigned: "Pridelené", in_progress: "Prebieha", submitted: "Na kontrolu", needs_changes: "Na doplnenie", cancelled: "Stornované" };
 export const billingLabels: Record<TowingBillingStatus, string> = { not_ready: "Nenacenené", ready: "Pripravené na fakturáciu", invoiced: "Fakturované", not_required: "Bez fakturácie" };
@@ -25,3 +26,18 @@ export function isoDateInput(value: string) { return value ? new Date(value).toI
 export function workTone(status: TowingWorkStatus) { return status === "draft" || status === "needs_changes" ? "amber" : status === "cancelled" ? "red" : status === "submitted" ? "green" : "blue"; }
 export function orderTitle(order: TowingOrder) { return [order.fields.plate, order.fields.subjectDescription].filter(Boolean).join(" · ") || serviceLabels[order.fields.serviceType]; }
 export function navigationUrl(place: string) { return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(place)}`; }
+
+const derivedFields = new Set(["startSource", "parkingName", "parkingAddress", "assistancePartnerName"]);
+function fieldValue(value: unknown) {
+  return JSON.stringify(value, (_key, item) => item === null ? undefined : item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
+}
+
+/** Omit unchanged timestamps and server-derived provenance from operational edits. */
+export function towingFieldsPatch(fields: Partial<TowingFields>, previous: TowingFields, driver = true): Record<string, unknown> {
+  const names = driver ? towingDriverFieldNames : Object.keys(fields).filter(key => !derivedFields.has(key)) as (keyof TowingFields)[];
+  return Object.fromEntries(names.filter(key => fieldValue(fields[key]) !== fieldValue(previous[key])).map(key => [key, fields[key] ?? null]));
+}
+
+export function towingPriceLinesKey(lines: readonly TowingLine[]) {
+  return JSON.stringify(lines.map(({ id, description, quantity, unit, unitPrice, taxRate }) => ({ id, description, quantity, unit, unitPrice, taxRate })));
+}

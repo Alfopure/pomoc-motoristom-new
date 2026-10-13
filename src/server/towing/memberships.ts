@@ -1,5 +1,6 @@
 import 'server-only';
 import { randomUUID, createHash } from 'node:crypto';
+import type { User } from '@supabase/supabase-js';
 import type { TowingMember, TowingRole } from '@/domain/towing/types';
 import { buildAppUrl, escapeHtml, getEmailConfig, sendEmailWithOutcome } from '@/server/email-delivery';
 import { assertRateLimit, requestIp } from '@/server/rate-limit';
@@ -20,6 +21,53 @@ function roles(value: unknown): TowingRole[] {
 }
 function displayName(value: unknown) {
   if (typeof value !== 'string' || !value.trim() || value.length > 160) throw new TowingError('invalid_input',400,'Zadajte meno používateľa.'); return value.trim();
+}
+/** An Auth account can outlive a failed membership transaction. Its recovery is
+ * bound to this exact server-authorized invite, never merely to an email match. */
+async function provisionInviteAccount(admin: ReturnType<typeof towingAdmin>, actor: TowingMember, commandId: string,
+  membershipId: string, recipient: string, name: string, assignedRoles: TowingRole[]) {
+  // UUID identity is case-insensitive; keep the exact original envelope below
+  // for provenance checks without deriving another account from its casing.
+  const digest = createHash('sha256').update(JSON.stringify(['motorist-towing-invite-v1', actor.organizationId.toLowerCase(), actor.id.toLowerCase(), commandId.toLowerCase()])).digest();
+  digest[6] = (digest[6] & 15) | 128; digest[8] = (digest[8] & 63) | 128;
+  const hex = digest.toString('hex').slice(0,32);
+  const userId = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+  const provenance = { version: 1, organizationId: actor.organizationId, actorId: actor.id, commandId, membershipId,
+    payloadHash: createHash('sha256').update(JSON.stringify({ membershipId, email: recipient, displayName: name, roles: assignedRoles })).digest('hex') };
+  const unavailable = () => new TowingError('unavailable',503,'Prípravu účtu sa nepodarilo overiť. Zopakujte rovnaký pokus.');
+  const conflict = () => new TowingError('account_unavailable',409,'Účet sa nepodarilo pripraviť. Správca musí overiť existujúci prístup.');
+  const verify = (user: User) => {
+    const metadata = user.app_metadata;
+    const stored = metadata?.towing_invite;
+    if (user.id !== userId || user.email?.toLowerCase() !== recipient || metadata?.motorist_module !== 'towing' || metadata?.towing_only !== true
+      || !stored || typeof stored !== 'object' || Array.isArray(stored)
+      || Object.entries(provenance).some(([key,value]) => stored[key] !== value)) throw conflict();
+    return user.id;
+  };
+  const lookup = async () => {
+    let result: Awaited<ReturnType<typeof admin.auth.admin.getUserById>>;
+    try { result = await admin.auth.admin.getUserById(userId); } catch { throw unavailable(); }
+    if (result.error) {
+      if (result.error.status === 404 && !result.data.user) return null;
+      throw unavailable();
+    }
+    if (!result.data.user) throw unavailable();
+    return result.data.user;
+  };
+  const previous = await lookup();
+  if (previous) return verify(previous);
+  let created: Awaited<ReturnType<typeof admin.auth.admin.createUser>> | undefined;
+  try {
+    created = await admin.auth.admin.createUser({ id: userId, email: recipient, email_confirm: true,
+      app_metadata: { motorist_module: 'towing', towing_only: true, towing_invite: provenance }, user_metadata: { display_name: name } });
+  } catch { /* The provider may have committed before its response was lost. */ }
+  if (!created?.error && created?.data.user) return verify(created.data.user);
+  // A concurrent identical attempt or a lost provider ACK can only recover this
+  // deterministic ID with the original service-owned provenance intact.
+  const recovered = await lookup();
+  if (recovered) return verify(recovered);
+  if (created?.error?.status && created.error.status >= 400 && created.error.status < 500) throw conflict();
+  throw unavailable();
 }
 async function sendAccessLink(recipient: string, name: string, key: string, authUserId: string) {
   const admin = towingAdmin();
@@ -77,9 +125,7 @@ export async function manageTowingMembership(actor: TowingMember, input: Record<
     if (previous.data?.auth_user_id) userId = previous.data.auth_user_id;
     else if (office.data?.user_id) userId = office.data.user_id;
     else {
-      const created = await admin.auth.admin.createUser({email:recipient,email_confirm:true,app_metadata:{motorist_module:'towing',towing_only:true},user_metadata:{display_name:name}});
-      if (created.error || !created.data.user) throw new TowingError('account_unavailable',409,'Účet sa nepodarilo pripraviť. Správca musí overiť existujúci prístup.');
-      userId = created.data.user.id;
+      userId = await provisionInviteAccount(admin, actor, commandId, id, recipient, name, assignedRoles);
     }
   }
   const result = await executeTowingCommand(actor,{commandId,type:'set_member',targetId:id,payload:{userId,email:recipient,displayName:name,roles:assignedRoles,

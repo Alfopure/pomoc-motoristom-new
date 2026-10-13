@@ -1,6 +1,8 @@
 import { test, expect, type Page } from "@playwright/test";
 import { build } from "esbuild";
 import path from "node:path";
+import { calculateTowingLine } from "../src/domain/towing/money";
+import { towingCompletionProblems } from "../src/domain/towing/validation";
 import type { TowingCommand, TowingOrder, TowingWorkspace } from "../src/domain/towing/types";
 
 const driverId = "11111111-1111-4111-8111-111111111111";
@@ -9,7 +11,7 @@ const orderId = "33333333-3333-4333-8333-333333333333";
 const branchId = "44444444-4444-4444-8444-444444444444";
 function fixture(view: "office" | "driver", count = 1): TowingWorkspace {
   const driver = { id: driverId, userId: driverId, organizationId: orgId, displayName: "Testovací vodič", roles: ["driver"] as const, capabilities: ["drive"] as const, active: true, version: 1 };
-  const orders: TowingOrder[] = Array.from({ length: count }, (_, index) => ({ id: index ? `${String(index + 10).padStart(8, "0")}-3333-4333-8333-333333333333` : orderId, number: `Z-2026-${String(index + 1).padStart(4, "0")}`, sourceCaseId: null, revision: 1, assignmentGeneration: 1, driverId, workStatus: "in_progress", billingStatus: "not_ready", paymentStatus: "unpriced", fields: { serviceType: "tow", subjectType: "vehicle", subjectDescription: "Škoda Octavia", plate: "TEST01", pickup: "Bratislava, Testovacia 1", destination: "Žilina, Testovací servis", contact: "+421900000001", branchId, startedAt: "2026-10-13T09:00:00Z" }, authorizedCollectionCents: 10000, receivedCents: 0, dueCents: null, reconciliationRequired: false, createdAt: "2026-10-13T09:00:00Z", updatedAt: "2026-10-13T09:00:00Z", attachments: [], ...(view === "office" ? { lines: [], payments: [], documents: [], invoices: [], events: [] } : {}) }));
+  const orders: TowingOrder[] = Array.from({ length: count }, (_, index) => ({ id: index ? `${String(index + 10).padStart(8, "0")}-3333-4333-8333-333333333333` : orderId, number: `Z-2026-${String(index + 1).padStart(4, "0")}`, sourceCaseId: null, revision: 1, assignmentGeneration: 1, driverId, workStatus: "in_progress", billingStatus: "not_ready", paymentStatus: "unpriced", fields: { serviceType: "tow", subjectType: "vehicle", subjectDescription: "Škoda Octavia", plate: "TEST01", pickup: "Bratislava, Testovacia 1", destination: "Žilina, Testovací servis", contact: "+421900000001", branchId, startedAt: "2026-10-13T09:00:00Z", startSource: "assignment" }, authorizedCollectionCents: 10000, receivedCents: 0, dueCents: null, reconciliationRequired: false, createdAt: "2026-10-13T09:00:00Z", updatedAt: "2026-10-13T09:00:00Z", attachments: [], ...(view === "office" ? { lines: [], payments: [], documents: [], invoices: [], events: [] } : {}) }));
   return { view, actor: view === "driver" ? { ...driver, roles: [...driver.roles], capabilities: [...driver.capabilities] } : { id: "55555555-5555-4555-8555-555555555555", userId: "55555555-5555-4555-8555-555555555555", organizationId: orgId, displayName: "Testovací správca", roles: ["manager"], capabilities: ["operate", "price", "bill", "cash", "correct", "members", "documents", "report"], active: true, version: 1 }, orders, members: view === "office" ? [{ ...driver, roles: [...driver.roles], capabilities: [...driver.capabilities] }] : [], branches: [{ id: branchId, name: "Testovacia pobočka" }], fleet: [], totalCount: count, summary: { approvedCents: 0, invoicedCents: 0, receivedCents: 0, dueCents: 0 }, cashAccounts: [{ id: "66666666-6666-4666-8666-666666666666", driverId, balanceCents: 0, reservedCents: 0, revision: 1 }, { id: "77777777-7777-4777-8777-777777777777", driverId: null, balanceCents: 0, reservedCents: 0, revision: 1 }], handovers: [], taxConfigured: true, taxRates: ["5"], taxDate: "2026-10-13" };
 }
 
@@ -31,13 +33,14 @@ async function mount(page: Page, workspace: TowingWorkspace, handle?: (command: 
       if (failure?.error) return route.fulfill({ status: failure.status ?? 422, json: { error: failure.error } });
       const order = workspace.orders.find(item => item.id === command.targetId);
       if (command.type === "create_order") { workspace.orders.push({ ...fixture("office").orders[0], id: command.targetId, fields: command.payload.fields as TowingOrder["fields"], workStatus: "draft", driverId: null }); workspace.totalCount = workspace.orders.length; }
-      if (order && command.type === "update_order") { order.fields = { ...order.fields, ...command.payload.fields as object }; order.revision++; }
+      if (order && command.type === "update_order") { order.fields = { ...order.fields, ...command.payload.fields as object }; if (Object.hasOwn(command.payload.fields as object, "startedAt")) order.fields.startSource = "manual"; order.revision++; }
+      if (order && command.type === "set_lines") { order.lines = (command.payload.lines as NonNullable<TowingOrder["lines"]>).map(line => ({ ...calculateTowingLine(line), taxRate: line.taxRate, unitPrice: line.unitPrice, unit: line.unit, quantity: line.quantity, description: line.description, id: line.id })); order.taxDate = command.payload.taxDate as string; order.revision++; }
       if (order && command.type === "receive_payment" && !order.payments?.some(payment => payment.receiptId === command.payload.receiptId)) { const amount = command.payload.amountCents as number; order.receivedCents += amount; order.payments = [...order.payments ?? [], { id: command.commandId, receiptId: command.payload.receiptId as string, amountCents: amount, method: "cash", driverId, createdAt: "2026-10-13T10:00:00Z" }]; } // Cash updates its own aggregate, not the operational revision.
-      if (order && command.type === "submit") { workspace.orders = workspace.orders.filter(item => item.id !== order.id); workspace.totalCount = workspace.orders.length; }
+      if (order && command.type === "submit") { const problems = towingCompletionProblems(order); if (problems.length) return route.fulfill({ status: 400, json: { error: problems.join(" ") } }); workspace.orders = workspace.orders.filter(item => item.id !== order.id); workspace.totalCount = workspace.orders.length; }
       if (failure?.abort) return route.abort("failed");
       return route.fulfill({ json: { commandId: command.commandId, targetId: command.targetId, revision: order?.revision ?? 1, ...(command.type === "reconcile_receipt" ? { result: { reconciliationStatus: command.payload.receiptId ? "resolved" : "open" } } : {}) } });
     }
-    if (url.pathname.includes("/attachments")) { const order = workspace.orders[0]; order.attachments.push({ id: "88888888-8888-4888-8888-888888888888", kind: "work", name: "test.png", mimeType: "image/png", size: 10, status: "ready", createdAt: "2026-10-13T10:00:00Z" }); order.revision++; return route.fulfill({ json: { commandId: /name="commandId"\r\n\r\n([^\r\n]+)/.exec(route.request().postDataBuffer()!.toString("utf8"))?.[1], targetId: order.id, revision: order.revision } }); }
+    if (url.pathname.includes("/attachments")) { const order = workspace.orders[0]; const form = route.request().postDataBuffer()!.toString("utf8"); const formField = (name: string) => new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r\\n]+)`).exec(form)?.[1]; order.attachments.push({ id: formField("attachmentId")!, kind: formField("kind") as "work" | "handover" | "scan", name: "test.png", mimeType: "image/png", size: 10, status: "ready", createdAt: "2026-10-13T10:00:00Z" }); order.revision++; return route.fulfill({ json: { commandId: /name="commandId"\r\n\r\n([^\r\n]+)/.exec(route.request().postDataBuffer()!.toString("utf8"))?.[1], targetId: order.id, revision: order.revision } }); }
     if (url.pathname.endsWith("/email")) return route.fulfill({ json: { result: { status: options?.emailStatus ?? "accepted" } } });
     if (url.pathname.endsWith("/reports")) return route.fulfill({ json: { from: url.searchParams.get("from"), to: url.searchParams.get("to"), performance: { count: 3, amountCents: 15000 }, invoices: { count: 2, amountCents: 10000 }, receipts: { count: 4, amountCents: 7500 }, daily: [{ date: "2026-10-13", performanceCents: 15000, invoicedCents: 10000, receivedCents: 7500 }] } });
     return route.fulfill({ status: 404, json: { error: "Not fixture endpoint" } });
@@ -69,6 +72,10 @@ test("driver at 360px edits, receives cash and completes only after server ackno
   await page.getByLabel("Fotografia alebo súbor").setInputFiles({ name: "test.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6A2sAAAAASUVORK5CYII=", "base64") });
   await page.getByRole("button", { name: "Nahrať a potvrdiť" }).click();
   await expect(page.getByRole("status").first()).toContainText("Súbor je uložený");
+  await page.getByLabel("Typ prílohy", { exact: true }).selectOption("handover");
+  await page.getByLabel("Fotografia alebo súbor").setInputFiles({ name: "handover.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6A2sAAAAASUVORK5CYII=", "base64") });
+  await page.getByRole("button", { name: "Nahrať a potvrdiť" }).click();
+  await expect(page.getByRole("tab", { name: "Fotografie (2)", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "Údaje", exact: true }).click();
   await page.getByRole("button", { name: "Dokončiť a odovzdať" }).click();
   await expect(page.getByRole("heading", { name: "Moje zákazky", exact: true })).toBeVisible();
@@ -167,4 +174,115 @@ test("manager records an unknown receipt exception without inventing a receipt U
   await expect(page.getByRole("status").first()).toContainText("Finančný zápis sa nevytvoril");
   const reconcile = commands.find(command => command.type === "reconcile_receipt")!; expect(reconcile.payload).not.toHaveProperty("receiptId"); expect(reconcile.targetId).toBe(orderId);
   expect(workspace.orders[0].receivedCents).toBe(0);
+});
+
+
+test("saving driver notes preserves assignment start provenance; editing the start explicitly stays conflict-free", async ({ page }) => {
+  const workspace = fixture("driver"); const { commands } = await mount(page, workspace);
+  await page.getByRole("button", { name: "Otvoriť zákazku" }).click();
+  await page.getByLabel("Poznámka vodiča", { exact: true }).fill("Poznámka bez zmeny začiatku");
+  await page.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
+  await expect(page.getByRole("status").first()).toContainText("Údaje zákazky sú uložené");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(commands[0].payload.fields).toEqual({ driverNotes: "Poznámka bez zmeny začiatku" });
+  expect(workspace.orders[0].fields.startSource).toBe("assignment");
+  await page.getByLabel("Skutočný začiatok · prevzatý z pridelenia", { exact: true }).fill("2026-10-13T09:15");
+  await page.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
+  await expect(page.getByLabel("Skutočný začiatok", { exact: true })).toHaveValue("2026-10-13T09:15");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(commands[1].payload.fields).toEqual({ startedAt: "2026-10-13T09:15:00.000Z" });
+  expect(workspace.orders[0].fields.startSource).toBe("manual");
+  await expect(page.getByRole("button", { name: "Uložiť údaje", exact: true })).toBeDisabled();
+});
+
+
+test("reopened pricing keeps its own saved tax date and refuses to approve an unsaved date change", async ({ page }) => {
+  const workspace = fixture("office"); const order = workspace.orders[0]; order.workStatus = "submitted"; order.taxDate = "2026-09-01";
+  order.lines = [{ id: "99999999-9999-4999-8999-999999999999", description: "Testovací výkon", quantity: "1", unit: "ks", unitPrice: "10", taxRate: "5" }];
+  const { commands } = await mount(page, workspace);
+  await page.getByRole("button", { name: "Otvoriť Z-2026-0001" }).click(); await page.getByRole("tab", { name: "Nacenenie", exact: true }).click();
+  const date = page.getByLabel("Dátum pre daňové pravidlá", { exact: true });
+  await expect(date).toHaveValue("2026-09-01");
+  await date.fill("2026-09-15"); await expect(page.getByRole("button", { name: "Schváliť cenu a pripraviť" })).toBeDisabled();
+  await page.getByRole("button", { name: "Uložiť nacenenie" }).click();
+  await expect(date).toHaveValue("2026-09-15");
+  expect(commands[0].payload.taxDate).toBe("2026-09-15");
+  await expect(page.getByRole("button", { name: "Schváliť cenu a pripraviť" })).toBeEnabled();
+});
+
+test("existing price lines with an unverified tax date require explicit correction instead of a configuration default", async ({ page }) => {
+  const workspace = fixture("office"); workspace.orders[0].workStatus = "submitted";
+  workspace.orders[0].lines = [{ id: "99999999-9999-4999-8999-999999999999", description: "Testovací výkon", quantity: "1", unit: "ks", unitPrice: "10", taxRate: "5" }];
+  await mount(page, workspace); await page.getByRole("button", { name: "Otvoriť Z-2026-0001" }).click(); await page.getByRole("tab", { name: "Nacenenie", exact: true }).click();
+  await expect(page.getByLabel("Dátum pre daňové pravidlá", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("alert")).toContainText("chýba overený daňový dátum");
+  await expect(page.getByRole("button", { name: "Schváliť cenu a pripraviť" })).toBeDisabled();
+});
+
+test("replacement invoice identifies the current predecessor independently of history array order", async ({ page }) => {
+  const workspace = fixture("office"); const current = "99999999-9999-4999-8999-999999999999"; const old = "88888888-8888-4888-8888-888888888888";
+  workspace.orders[0].invoices = [{ id: current, number: "NEW", date: "2026-10-13", amountCents: 12000, supersedesId: old }, { id: old, number: "OLD", date: "2026-10-12", amountCents: 10000 }];
+  const { commands } = await mount(page, workspace); await page.getByRole("button", { name: "Otvoriť Z-2026-0001" }).click(); await page.getByRole("tab", { name: "Úhrady", exact: true }).click();
+  await page.getByLabel("Číslo externého dokladu", { exact: true }).fill("REPLACEMENT"); await page.getByLabel("Dátum dokladu", { exact: true }).fill("2026-10-14"); await page.getByLabel("Celková suma (€)", { exact: true }).fill("130.00"); await page.getByLabel("Dôvod nahradenia predchádzajúcej faktúry", { exact: true }).fill("Testovací opravný doklad");
+  await page.getByRole("button", { name: "Zaevidovať externú faktúru" }).click();
+  expect(commands.find(command => command.type === "set_invoice")?.payload.supersedesId).toBe(current);
+});
+
+test("transport completion remains open when handover evidence is missing, then completes after its acknowledged upload", async ({ page }) => {
+  const workspace = fixture("driver"); const order = workspace.orders[0]; order.fields.finishedAt = "2026-10-13T11:00:00Z";
+  order.attachments = [{ id: "88888888-8888-4888-8888-888888888888", kind: "work", name: "work.png", mimeType: "image/png", size: 10, status: "ready", createdAt: "2026-10-13T10:00:00Z" }];
+  const { commands } = await mount(page, workspace); await page.getByRole("button", { name: "Otvoriť zákazku" }).click();
+  await page.getByRole("button", { name: "Dokončiť a odovzdať" }).click();
+  await expect(page.getByRole("alert")).toContainText("fotografiu odovzdania");
+  await expect(page.getByRole("button", { name: "Späť na zákazky", exact: true })).toBeVisible();
+  await expect(page.getByText("Dokončenie je potvrdené.", { exact: false })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Fotografie (1)", exact: true }).click(); await page.getByLabel("Typ prílohy", { exact: true }).selectOption("handover");
+  await page.getByLabel("Fotografia alebo súbor").setInputFiles({ name: "handover.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6A2sAAAAASUVORK5CYII=", "base64") });
+  await page.getByRole("button", { name: "Nahrať a potvrdiť" }).click(); await expect(page.getByRole("tab", { name: "Fotografie (2)", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "Údaje", exact: true }).click(); await page.getByRole("button", { name: "Dokončiť a odovzdať" }).click();
+  await expect(page.getByRole("heading", { name: "Moje zákazky", exact: true })).toBeVisible();
+  expect(commands.filter(command => command.type === "submit")).toHaveLength(2);
+  expect(workspace.orders).toHaveLength(0);
+});
+
+test("ambiguous external invoice history blocks a replacement instead of choosing an arbitrary predecessor", async ({ page }) => {
+  const workspace = fixture("office"); workspace.orders[0].invoices = [{ id: "99999999-9999-4999-8999-999999999999", number: "A", date: "2026-10-13", amountCents: 12000 }, { id: "88888888-8888-4888-8888-888888888888", number: "B", date: "2026-10-12", amountCents: 10000 }];
+  await mount(page, workspace); await page.getByRole("button", { name: "Otvoriť Z-2026-0001" }).click(); await page.getByRole("tab", { name: "Úhrady", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("jednoznačne určiť aktuálnu externú faktúru");
+  await page.getByLabel("Číslo externého dokladu", { exact: true }).fill("REPLACEMENT"); await page.getByLabel("Dátum dokladu", { exact: true }).fill("2026-10-14"); await page.getByLabel("Celková suma (€)", { exact: true }).fill("130.00");
+  await expect(page.getByRole("button", { name: "Zaevidovať externú faktúru" })).toBeDisabled();
+});
+
+
+test("SQL-enriched reordered pricing acknowledgement permits approval without requiring another save", async ({ page }) => {
+  const workspace = fixture("office"); workspace.orders[0].workStatus = "submitted";
+  const { commands } = await mount(page, workspace); await page.getByRole("button", { name: "Otvoriť Z-2026-0001" }).click(); await page.getByRole("tab", { name: "Nacenenie", exact: true }).click();
+  await page.getByRole("button", { name: "Pridať položku", exact: true }).click();
+  await page.getByLabel("Položka 1", { exact: true }).fill("Testovací výkon"); await page.getByLabel("Jednotka", { exact: true }).fill("ks"); await page.getByLabel("Cena bez dane (€)", { exact: true }).fill("10.0050"); await page.getByLabel("Daň (%)", { exact: true }).selectOption("5");
+  await page.getByRole("button", { name: "Uložiť nacenenie" }).click();
+  await expect(page.getByRole("button", { name: "Schváliť cenu a pripraviť" })).toBeEnabled();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(workspace.orders[0].lines?.[0]).toMatchObject({ netCents: 1001, taxCents: 50, totalCents: 1051 });
+  await page.getByRole("button", { name: "Schváliť cenu a pripraviť" }).click();
+  expect(commands.filter(command => command.type === "set_lines")).toHaveLength(1);
+  expect(commands.at(-1)?.type).toBe("approve_price");
+});
+
+test("newer server price and tax date preserve the local draft until an explicit comparison", async ({ page }) => {
+  const workspace = fixture("office"); const order = workspace.orders[0]; order.workStatus = "submitted"; order.taxDate = "2026-09-01";
+  order.lines = [{ id: "99999999-9999-4999-8999-999999999999", description: "Pôvodný výkon", quantity: "1", unit: "ks", unitPrice: "10", taxRate: "5" }];
+  let rejected = true;
+  const { commands } = await mount(page, workspace, command => {
+    if (command.type === "set_lines" && rejected) { order.lines![0].description = "Novší výkon zo servera"; order.lines![0].unitPrice = "12"; order.taxDate = "2026-09-03"; order.revision = 2; return { status: 409, error: "Nacenenie sa zmenilo." }; } return {};
+  });
+  await page.getByRole("button", { name: "Otvoriť Z-2026-0001" }).click(); await page.getByRole("tab", { name: "Nacenenie", exact: true }).click();
+  await page.getByLabel("Položka 1", { exact: true }).fill("Moja rozpísaná položka"); await page.getByLabel("Dátum pre daňové pravidlá", { exact: true }).fill("2026-09-02");
+  await page.getByRole("button", { name: "Uložiť nacenenie" }).click(); await page.getByRole("button", { name: "Načítať aktuálne údaje" }).click();
+  await expect(page.getByLabel("Položka 1", { exact: true })).toHaveValue("Moja rozpísaná položka"); await expect(page.getByLabel("Dátum pre daňové pravidlá", { exact: true })).toHaveValue("2026-09-02");
+  await expect(page.getByRole("button", { name: "Uložiť nacenenie" })).toBeDisabled(); await page.getByText("Aktuálne nacenenie zo servera (verzia 2)", { exact: true }).click();
+  await expect(page.getByText("Novší výkon zo servera", { exact: false })).toBeVisible(); await expect(page.getByText("Daňový dátum: 2026-09-03", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Nacenenie som porovnal(a), zachovať moje úpravy" }).click(); rejected = false;
+  await page.getByRole("button", { name: "Uložiť nacenenie" }).click();
+  await expect(page.getByRole("button", { name: "Schváliť cenu a pripraviť" })).toBeEnabled();
+  expect(commands[1].expectedRevision).toBe(2); expect(commands[1].payload.taxDate).toBe("2026-09-02");
 });

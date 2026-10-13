@@ -2,11 +2,12 @@ import { test, expect } from "@playwright/test";
 import { build } from "esbuild";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { towingCompletionProblems } from "../src/domain/towing/validation";
 import type { TowingCommand, TowingWorkspace } from "../src/domain/towing/types";
 
 const orderId = "33333333-3333-4333-8333-333333333333";
 const driverId = "11111111-1111-4111-8111-111111111111";
-const workspace: TowingWorkspace = { actor: { id: driverId, userId: driverId, organizationId: "22222222-2222-4222-8222-222222222222", displayName: "Testovací vodič", roles: ["driver"], capabilities: ["drive"], active: true, version: 1 }, view: "driver", orders: [{ id: orderId, number: "Z-TEST-0001", sourceCaseId: null, revision: 1, assignmentGeneration: 1, driverId, workStatus: "in_progress", billingStatus: "not_ready", paymentStatus: "unpriced", fields: { serviceType: "tow", subjectType: "vehicle", subjectDescription: "Testovacie vozidlo", pickup: "Testovacia nakládka", destination: "Testovací servis", startedAt: "2026-10-13T09:00:00Z" }, authorizedCollectionCents: 10000, receivedCents: 0, dueCents: null, reconciliationRequired: false, createdAt: "2026-10-13T09:00:00Z", updatedAt: "2026-10-13T09:00:00Z", attachments: [] }], members: [], branches: [], fleet: [], cashAccounts: [{ id: "66666666-6666-4666-8666-666666666666", driverId, balanceCents: 0, reservedCents: 0, revision: 1 }], handovers: [], taxConfigured: false, taxRates: [], taxDate: null };
+const workspace: TowingWorkspace = { actor: { id: driverId, userId: driverId, organizationId: "22222222-2222-4222-8222-222222222222", displayName: "Testovací vodič", roles: ["driver"], capabilities: ["drive"], active: true, version: 1 }, view: "driver", orders: [{ id: orderId, number: "Z-TEST-0001", sourceCaseId: null, revision: 1, assignmentGeneration: 1, driverId, workStatus: "in_progress", billingStatus: "not_ready", paymentStatus: "unpriced", fields: { serviceType: "tow", subjectType: "vehicle", subjectDescription: "Testovacie vozidlo", pickup: "Testovacia nakládka", destination: "Testovací servis", startedAt: "2026-10-13T09:00:00Z", startSource: "assignment", branchId: "77777777-7777-4777-8777-777777777777", contact: "Syntetický kontakt" }, authorizedCollectionCents: 10000, receivedCents: 0, dueCents: null, reconciliationRequired: false, createdAt: "2026-10-13T09:00:00Z", updatedAt: "2026-10-13T09:00:00Z", attachments: [{ id: "88888888-8888-4888-8888-888888888888", kind: "work", name: "online-work.png", mimeType: "image/png", size: 100, status: "ready", createdAt: "2026-10-13T09:00:00Z" }] }], members: [], branches: [], fleet: [], cashAccounts: [{ id: "66666666-6666-4666-8666-666666666666", driverId, balanceCents: 0, reservedCents: 0, revision: 1 }], handovers: [], taxConfigured: false, taxRates: [], taxDate: null };
 
 let javascript = ""; let css = "";
 test.beforeAll(async () => {
@@ -28,10 +29,10 @@ test("360px offline work survives reload and foreground sync orders fields, phot
       const command = route.request().postDataJSON() as TowingCommand; commands.push(command); phases.push(command.type);
       if (command.type === "update_order") { state.orders[0].fields = { ...state.orders[0].fields, ...command.payload.fields as object }; state.orders[0].revision++; }
       if (command.type === "receive_payment") { state.orders[0].receivedCents += Number(command.payload.amountCents); state.cashAccounts[0].balanceCents += Number(command.payload.amountCents); state.cashAccounts[0].revision++; }
-      if (command.type === "submit") { state.orders[0].workStatus = "submitted"; state.orders[0].revision++; }
+      if (command.type === "submit") { const problems = towingCompletionProblems(state.orders[0]); if (problems.length) return route.fulfill({ status: 400, json: { error: problems.join(" ") } }); state.orders[0].workStatus = "submitted"; state.orders[0].revision++; }
       return route.fulfill({ json: { commandId: command.commandId, targetId: command.targetId, revision: state.orders[0].revision } });
     }
-    if (url.pathname.endsWith("/attachments")) { phases.push("upload"); state.orders[0].revision++; return route.fulfill({ json: { revision: state.orders[0].revision, targetId: orderId, commandId: /name="commandId"\r\n\r\n([^\r\n]+)/.exec(route.request().postDataBuffer()!.toString("utf8"))?.[1] } }); }
+    if (url.pathname.endsWith("/attachments")) { phases.push("upload"); state.orders[0].attachments.push({ id: "99999999-9999-4999-8999-999999999999", kind: "handover", name: "handover.png", mimeType: "image/png", size: 100, status: "ready", createdAt: "2026-10-13T11:00:00Z" }); state.orders[0].revision++; return route.fulfill({ json: { revision: state.orders[0].revision, targetId: orderId, commandId: /name="commandId"\r\n\r\n([^\r\n]+)/.exec(route.request().postDataBuffer()!.toString("utf8"))?.[1] } }); }
     return route.fulfill({ status: 404, json: { error: "Not a synthetic test endpoint" } });
   });
   const boot = async () => {
@@ -64,5 +65,7 @@ test("360px offline work survives reload and foreground sync orders fields, phot
   await expect(page.getByText("Všetky odoslané záznamy sú potvrdené.", { exact: true })).toBeVisible();
   expect(phases).toEqual(["update_order", "upload", "receive_payment", "submit"]);
   expect(state.orders[0].receivedCents).toBe(2000);
+  expect(commands.find(command => command.type === "update_order")?.payload.fields).toEqual({ driverNotes: "Práca uložená bez signálu.", finishedAt: "2026-10-13T11:00:00.000Z" });
+  expect(state.orders[0].fields.startSource).toBe("assignment");
   expect(commands.find(command => command.type === "submit")?.payload.receiptIds).toEqual([commands.find(command => command.type === "receive_payment")?.payload.receiptId]);
 });

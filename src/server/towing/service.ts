@@ -48,6 +48,23 @@ export async function loadTowingWorkspace(actor: TowingMember, view: 'office' | 
   if (view === 'driver') {
     data.orders = data.orders.map(order => projectTowingDriverOrder(order,actor));
     data.members = []; data.taxRates = []; data.taxDate = null; data.taxConfigured = false;
+  } else if (data.orders.length) {
+    // The original RPC omits this persisted pricing date. Read only the rows it
+    // authorized, and require the same revision so concurrent pricing cannot
+    // combine an older set of lines with a newer date.
+    const dates = await towingAdmin().from('motorist_towing_orders')
+      .select('id,revision,tax_date').eq('organization_id', actor.organizationId)
+      .in('id', data.orders.map(order => order.id));
+    mapRpcError(dates.error);
+    if (!Array.isArray(dates.data)) throw new TowingError('unavailable',503,'Dátumy nacenenia nie sú dostupné.');
+    const byId = new Map(dates.data.map(row => [row.id, row]));
+    data.orders = data.orders.map(order => {
+      const row = byId.get(order.id);
+      if (!row || row.revision !== order.revision) throw new TowingError('revision_conflict',409,'Zákazka sa počas načítania zmenila. Obnovte zoznam.');
+      if (row.tax_date !== null && (typeof row.tax_date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(row.tax_date)))
+        throw new TowingError('unavailable',503,'Dátum nacenenia nie je dostupný.');
+      return { ...order, taxDate: row.tax_date };
+    });
   }
   return data;
 }
