@@ -13,6 +13,8 @@ export async function signOutCurrentSession(
   navigate: (href: string) => void = (href) => window.location.replace(href),
   disablePush: () => Promise<void> = disableCurrentDevicePush,
 ): Promise<void> {
+  const { prepareTowingSignOut } = await import('@/components/towing/offline/logout');
+  await prepareTowingSignOut();
   // Revoke while the session can still authenticate the endpoint deletion.
   // This prevents another operator on a shared device receiving our alerts.
   await disablePush();

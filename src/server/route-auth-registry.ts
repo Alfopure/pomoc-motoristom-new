@@ -31,6 +31,16 @@ export type RouteAuthEntry = {
 };
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
+  "towing/workspace": { class: "session", note: "Isolated auth.users towing membership; capability and own assignment projection, no legacy profile role." },
+  "towing/access": { class: "session", note: "Identity-bound driver access/lease; explicit verified revocation codes." },
+  "towing/commands": { class: "session", note: "Same-origin, current towing capability, atomic revision and command receipts." },
+  "towing/orders/[id]/attachments": { class: "session", note: "Own assignment or office capability; private verified file proxy." },
+  "towing/orders/[id]/documents": { class: "session", note: "Towing document capability, immutable version and private download." },
+  "towing/orders/[id]/email": { class: "session", note: "Towing document capability, explicit recipient/version and deduplicated delivery." },
+  "towing/memberships": { class: "session", note: "Towing members capability; isolated onboarding without legacy driver profiles." },
+  "towing/sources": { class: "session", note: "Towing operate capability; bounded case snapshot choices in own organization." },
+  "towing/reports": { class: "session", note: "Towing report capability; bounded UTC performance, invoice and receipt periods." },
+  "towing/auth/forgot-password": { class: "public", note: "Same-origin, throttled non-enumerating recovery for existing towing accounts only." },
   "mobile/v1/me": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "mobile/v1/drafts/scope": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Private verified organization scope for account-bound device drafts and expected-organization fencing." },
   "mobile/v1/tasks": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Bounded current-actor assigned or reviewer task overview; no arbitrary actor selection." },

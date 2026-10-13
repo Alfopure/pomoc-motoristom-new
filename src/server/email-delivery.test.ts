@@ -169,3 +169,25 @@ describe("email-delivery", () => {
     expect(requestOrigin(undefined)).toBeUndefined();
   });
 });
+
+describe('bounded document email delivery',()=>{
+  afterEach(()=>{vi.unstubAllGlobals();vi.unstubAllEnvs();});
+  it('preserves TEST recipient guard with attached PDF and no provider request',async()=>{
+    Object.entries(TEST_ENV).forEach(([key,value])=>vi.stubEnv(key,value));
+    const fetchMock=vi.fn();vi.stubGlobal('fetch',fetchMock);
+    const {sendEmailWithOutcome}=await import('./email-delivery');
+    const result=await sendEmailWithOutcome({...TEST_MESSAGE,to:'customer@example.net',attachments:[{filename:'list.pdf',content:Buffer.from('%PDF-test').toString('base64'),contentType:'application/pdf'}]});
+    expect(result.status).toBe('disabled');expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it('reports uncertain network outcome and keeps provider idempotency and attachment bytes',async()=>{
+    Object.entries(TEST_ENV).forEach(([key,value])=>vi.stubEnv(key,value));
+    const fetchMock=vi.fn<typeof fetch>().mockRejectedValue(new DOMException('timed out','TimeoutError'));vi.stubGlobal('fetch',fetchMock);
+    const {sendEmailWithOutcome}=await import('./email-delivery');
+    const content=Buffer.from('%PDF-test').toString('base64');
+    const result=await sendEmailWithOutcome({...TEST_MESSAGE,idempotencyKey:'towing-exact-version',attachments:[{filename:'list.pdf',content,contentType:'application/pdf'}]});
+    expect(result.status).toBe('unknown');
+    const init=fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);expect(init.headers).toMatchObject({'Idempotency-Key':'towing-exact-version'});
+    expect(JSON.parse(String(init.body)).attachments).toEqual([{filename:'list.pdf',content,content_type:'application/pdf'}]);
+  });
+});

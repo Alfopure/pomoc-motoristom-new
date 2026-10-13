@@ -11,7 +11,7 @@ type ForgotPasswordResponse = {
   message?: string;
 };
 
-export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: string }) {
+export function ForgotPasswordForm({ initialEmail = "", towing = false }: { initialEmail?: string; towing?: boolean }) {
   const [email, setEmail] = useState(initialEmail);
   const [submittedEmail, setSubmittedEmail] = useState("");
   const [status, setStatus] = useState<ResetState>("idle");
@@ -38,7 +38,7 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
     setError(null);
 
     try {
-      const response = await fetch("/api/auth/forgot-password", {
+      const response = await fetch(towing ? "/api/towing/auth/forgot-password" : "/api/auth/forgot-password", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: normalizedEmail }),
@@ -67,7 +67,7 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-base font-black text-zinc-950">PM</div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Pomoc motoristom</p>
-                <p className="text-sm font-semibold text-zinc-950">Dispečing</p>
+                <p className="text-sm font-semibold text-zinc-950">{towing ? "Zákazky odťahovej služby" : "Dispečing"}</p>
               </div>
             </div>
             <h1 className="text-2xl font-semibold text-zinc-950">Obnova hesla</h1>
@@ -79,7 +79,7 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
               <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800" role="status">
                 Ak účet existuje, odkaz na obnovu hesla príde na {submittedEmail}.
               </div>
-              <Link className="flex h-10 items-center justify-center rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white transition hover:bg-zinc-800" href="/">
+              <Link className="flex h-10 items-center justify-center rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white transition hover:bg-zinc-800" href={towing ? "/vodic" : "/"}>
                 Späť na prihlásenie
               </Link>
               <button
@@ -123,7 +123,7 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
           )}
 
           {status !== "sent" ? (
-            <Link className="mt-4 block w-full text-center text-sm font-semibold text-zinc-700 transition hover:text-zinc-950" href="/">
+            <Link className="mt-4 block w-full text-center text-sm font-semibold text-zinc-700 transition hover:text-zinc-950" href={towing ? "/vodic" : "/"}>
               Späť na prihlásenie
             </Link>
           ) : null}

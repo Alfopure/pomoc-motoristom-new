@@ -1,4 +1,5 @@
 import { connection } from "next/server";
+import { redirect } from "next/navigation";
 import { layoutPreviewEnabled } from "@/components/dispatch/layout-preview-policy";
 import { MotoristLogin } from "@/components/auth/MotoristLogin";
 import { DispatchConsole } from "@/components/dispatch/DispatchConsole";
@@ -6,13 +7,17 @@ import { loadDispatchData } from "@/data/dispatch-repository";
 import { getDefaultMotoristAuthState } from "@/server/api-auth";
 import { getAppVersion } from "@/server/app-version";
 import { getAppRelease } from "@/server/app-release";
+import { getTowingAuthState, towingEnabled, towingLoginDestination } from "@/server/towing/auth";
 
 export default async function Home() {
   await connection();
   const authState = await getDefaultMotoristAuthState();
   const appRelease = getAppRelease();
+  const towingState = towingEnabled() ? await getTowingAuthState() : null;
+  const towingHref = towingState?.authorized ? towingLoginDestination(towingState.actor) : undefined;
 
   if (!authState.authorized) {
+    if (towingHref) redirect(towingHref);
     return <MotoristLogin message={authState.message} appRelease={appRelease} />;
   }
 
@@ -29,6 +34,7 @@ export default async function Home() {
       viewerOrganizationId={authState.profile?.organizationId}
       viewerProfileId={authState.profile?.profileId}
       viewerRole={authState.profile?.role}
+      towingHref={towingHref}
     />
   );
 }

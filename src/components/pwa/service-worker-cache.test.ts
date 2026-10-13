@@ -10,10 +10,13 @@ function workerFixture() {
   const handlers: Record<string, (event: Record<string, unknown>) => void> = {};
   const put = vi.fn<(request: Request, response: Response) => Promise<void>>().mockResolvedValue(undefined);
   const addAll = vi.fn<(paths: string[]) => Promise<void>>().mockResolvedValue(undefined);
-  const cache = { put, addAll };
   const match = vi.fn<(request: Request | string) => Promise<Response | undefined>>().mockResolvedValue(undefined);
+  const cachedMatch = vi.fn<(request: Request | string) => Promise<Response | undefined>>().mockImplementation(async request =>
+    typeof request === "string" && request.startsWith("/__pm-public-shell-ready") ? new Response("ready") : match(request));
+  const deleteEntry = vi.fn<(request: string) => Promise<boolean>>().mockResolvedValue(true);
+  const cache = { put, addAll, match: cachedMatch, delete: deleteEntry };
   const open = vi.fn<(name: string) => Promise<typeof cache>>().mockResolvedValue(cache);
-  const keys = vi.fn<() => Promise<string[]>>().mockResolvedValue(["pm-dispatch-shell-old"]);
+  const keys = vi.fn<() => Promise<string[]>>().mockResolvedValue(["pm-dispatch-shell-oldest", "pm-dispatch-shell-old"]);
   const deleteCache = vi.fn<(name: string) => Promise<boolean>>().mockResolvedValue(true);
   const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response("network asset"));
   const skipWaiting = vi.fn().mockResolvedValue(undefined);
@@ -47,7 +50,7 @@ function workerFixture() {
     };
   }
 
-  return { dispatch, match, open, put, addAll, keys, deleteCache, fetch, skipWaiting, claim };
+  return { dispatch, match, cachedMatch, open, put, addAll, keys, deleteCache, deleteEntry, fetch, skipWaiting, claim };
 }
 
 const failureModes = ["throws", "rejects"] as const;
@@ -172,20 +175,59 @@ describe("service worker lifecycle with unavailable cache storage", () => {
     });
   }
 
-  it("removes an old cache while retaining the current cache", async () => {
+  it("retains the current and previous shell and unrelated caches", async () => {
     const fixture = workerFixture();
     await fixture.dispatch("install").complete();
     const currentCacheName = fixture.open.mock.calls[0]![0];
-    fixture.keys.mockResolvedValueOnce(["pm-dispatch-shell-old", currentCacheName]);
+    fixture.keys.mockResolvedValueOnce(["pm-dispatch-shell-oldest", "pm-dispatch-shell-old", currentCacheName, "another-app-cache"]);
 
     await fixture.dispatch("activate").complete();
-    expect(fixture.deleteCache).toHaveBeenCalledExactlyOnceWith("pm-dispatch-shell-old");
+    expect(fixture.deleteCache).toHaveBeenCalledExactlyOnceWith("pm-dispatch-shell-oldest");
     expect(fixture.claim).toHaveBeenCalledOnce();
+  });
+  it("preserves every prior shell if the new install lacks a completed public shell", async () => {
+    const fixture = workerFixture();
+    fixture.addAll.mockRejectedValueOnce(new TypeError("Offline update"));
+    await fixture.dispatch("install").complete();
+    fixture.cachedMatch.mockResolvedValueOnce(undefined);
+    await fixture.dispatch("activate").complete();
+    expect(fixture.deleteCache).not.toHaveBeenCalled();
+    expect(fixture.claim).toHaveBeenCalledOnce();
+  });
+  it("preloads the driver shell's static JS and CSS before marking it usable", async () => {
+    const fixture = workerFixture();
+    fixture.match.mockResolvedValueOnce(new Response('<script src="/_next/static/driver.js"></script><link href="/_next/static/app.css" rel="stylesheet">'));
+    await fixture.dispatch("install").complete();
+    expect(fixture.addAll).toHaveBeenNthCalledWith(2, ["/_next/static/driver.js", "/_next/static/app.css"]);
+    expect(fixture.put.mock.calls.at(-1)?.[0]).toMatch(/public-shell-ready/);
+  });
+  it("invalidates an existing ready marker before a same-version update that fails", async () => {
+    const fixture = workerFixture();
+    fixture.addAll.mockRejectedValueOnce(new TypeError("Offline update"));
+    await fixture.dispatch("install").complete();
+    expect(fixture.deleteEntry).toHaveBeenCalledExactlyOnceWith("/__pm-public-shell-ready-v6");
+    expect(fixture.deleteEntry.mock.invocationCallOrder[0]).toBeLessThan(fixture.addAll.mock.invocationCallOrder[0]!);
+    expect(fixture.put).not.toHaveBeenCalled();
   });
 });
 
 describe("service worker navigation fallback", () => {
   const request = { method: "GET", url: `${origin}/`, mode: "navigate" };
+  it("routes driver navigations to the public driver shell without caching private HTML", async () => {
+    const fixture = workerFixture();
+    fixture.fetch.mockRejectedValueOnce(new TypeError("Offline"));
+    fixture.match.mockResolvedValueOnce(new Response("public driver shell"));
+    const event = fixture.dispatch("fetch", { request: { ...request, url: `${origin}/vodic?orderId=private` } });
+    expect(await (await event.response)?.text()).toBe("public driver shell");
+    expect(fixture.match).toHaveBeenCalledExactlyOnceWith("/vodic/offline");
+    expect(fixture.put).not.toHaveBeenCalled();
+  });
+  it("never caches RSC payloads even for the public shell path", () => {
+    const fixture = workerFixture();
+    const event = fixture.dispatch("fetch", { request: new Request(`${origin}/vodic/offline?_rsc=abc`, { headers: { RSC: "1" } }) });
+    expect(event.respondWith).not.toHaveBeenCalled();
+    expect(fixture.put).not.toHaveBeenCalled();
+  });
 
   it("uses the network for authenticated pages without caching their content", async () => {
     const fixture = workerFixture();

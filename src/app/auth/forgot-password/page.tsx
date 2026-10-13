@@ -6,12 +6,12 @@ export const metadata: Metadata = {
 };
 
 type ForgotPasswordPageProps = {
-  searchParams: Promise<{ email?: string | string[] }>;
+  searchParams: Promise<{ email?: string | string[]; module?: string }>;
 };
 
 export default async function ForgotPasswordPage({ searchParams }: ForgotPasswordPageProps) {
   const params = await searchParams;
   const email = Array.isArray(params.email) ? params.email[0] : params.email;
 
-  return <ForgotPasswordForm initialEmail={email ?? ""} />;
+  return <ForgotPasswordForm initialEmail={email ?? ""} towing={params.module === "towing"} />;
 }
