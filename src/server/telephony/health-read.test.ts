@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHealthReadRetry, HEALTH_READ_RETRY_MS } from "./health-read";
+import { sessionOwnership, type Ownership } from "./ownership";
 
 type Result = { data: number[] | null; error: { message: string; code: string } | null };
 const timeout: Result = { data: null, error: { message: "AbortError: un-owned read exceeded 10000 ms", code: "" } };
@@ -52,6 +53,16 @@ describe("bounded monitoring read verification", () => {
     const query = vi.fn().mockReturnValueOnce(request({ data: null, error: { message: "TypeError: fetch failed", code: "" } }))
       .mockReturnValueOnce(request(success));
     expect(await createHealthReadRetry()(query)).toEqual(success);
+  });
+
+  it.each([timeout.error, { message: "TypeError: fetch failed", code: "" }])("never repeats reads in a session ownership scope ($message)", async error => {
+    const failure = { data: null, error };
+    const query = vi.fn(() => request(failure));
+    // The guard must exclude ownership before interpreting the failure, even
+    // when an unexpected future caller enters a lease scope with this helper.
+    const result = await sessionOwnership.run({} as Ownership, () => createHealthReadRetry()(query));
+    expect(result).toEqual(failure);
+    expect(query).toHaveBeenCalledOnce();
   });
 
   it("aborts verification at one second without continuing another attempt", async () => {

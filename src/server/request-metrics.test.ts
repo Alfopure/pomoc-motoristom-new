@@ -74,6 +74,23 @@ describe("request metrics", () => {
     expect(logger.mock.calls[0][0]).toMatchObject({ dbAborts: 1 });
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private|deadline|cancellation/);
   });
+  it.each([
+    "un-owned read exceeded 10000 ms",
+    "Read verification exceeded its deadline",
+    "Incident recovery read expired",
+  ])("counts the internal AbortError deadline without logging its reason: %s", async message => {
+    const logger = vi.fn();
+    await withRequestMetrics("call.active", async () => {
+      const controller = new AbortController();
+      const detach = observeDatabaseTimeout(controller.signal);
+      controller.abort(new DOMException(message, "AbortError"));
+      detach();
+      return Response.json({});
+    }, { logger });
+    expect(logger.mock.calls[0][0]).toMatchObject({ dbAborts: 1 });
+    expect(JSON.stringify(logger.mock.calls)).not.toContain(message);
+  });
+
   it("keeps overlapping requests isolated and never records request or response data", async () => {
     const logger = vi.fn();
     let release!: () => void;

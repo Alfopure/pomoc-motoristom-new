@@ -27,7 +27,7 @@ function makeChainableQuery() {
     single: async () => single,
     then: (resolve: (v: unknown) => unknown) => Promise.resolve(list).then(resolve),
   };
-  for (const method of ["select", "eq", "neq", "in", "is", "not", "gte", "lte", "gt", "lt", "order", "limit", "range", "or", "filter", "match", "contains", "overlaps", "insert", "update", "upsert", "delete"]) {
+  for (const method of ["select", "eq", "neq", "in", "is", "not", "gte", "lte", "gt", "lt", "order", "limit", "range", "or", "filter", "match", "contains", "overlaps", "insert", "update", "upsert", "delete", "abortSignal"]) {
     query[method] = () => query;
   }
   return query;
