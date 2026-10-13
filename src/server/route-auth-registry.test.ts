@@ -53,6 +53,7 @@ describe("route-auth-registry", () => {
   it("PUBLIC_ROUTES contains exactly the intentional public routes", () => {
     expect([...PUBLIC_ROUTES].sort()).toEqual([
       "auth/forgot-password",
+      "towing/auth/forgot-password",
       "health/live",
       "health/ready",
       "public/location-links/[token]",

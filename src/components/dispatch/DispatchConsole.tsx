@@ -240,6 +240,7 @@ function DispatchConsoleContent({
   viewerOrganizationId,
   viewerProfileId,
   viewerRole,
+  towingHref,
 }: {
   initialData: DispatchData;
   layoutPreviewEnabled?: boolean;
@@ -251,6 +252,7 @@ function DispatchConsoleContent({
   viewerProfileId?: string;
   /** The signed-in profile's role; only supervision is gated on it in the console. */
   viewerRole?: AppRole;
+  towingHref?: "/zakazky" | "/vodic";
 }) {
   const { mode: layoutMode } = useLayoutPreview();
   const updateAvailable = useAppUpdate(appVersion);
@@ -2200,6 +2202,7 @@ function DispatchConsoleContent({
           displayName={signedInName}
           email={viewerEmail}
           role={viewerRole}
+          towingHref={towingHref}
           signingOut={isSigningOut}
           onSignOut={requestSignOut}
           onRefresh={requestAppRefresh}
@@ -2771,6 +2774,7 @@ function AccountMenu({
   appRelease,
   role,
   signingOut,
+  towingHref,
 }: {
   displayName: string;
   email?: string;
@@ -2781,6 +2785,7 @@ function AccountMenu({
   appRelease: AppRelease;
   role?: AppRole;
   signingOut: boolean;
+  towingHref?: "/zakazky" | "/vodic";
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -2863,6 +2868,7 @@ function AccountMenu({
             </span>
           </div>
           <div className="border-t border-zinc-200 p-2">
+            {towingHref && <a href={towingHref} className="flex min-h-11 items-center rounded-lg px-2.5 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">Zákazky odťahovej služby</a>}
             {(role === "manager" || role === "admin") && <a href="/monitor" target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)}
               className="flex min-h-11 items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100">Monitor prevádzky <span className="ml-auto text-xs font-normal">↗</span></a>}
             <ReportProblemButton className="min-h-11 w-full rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100" />

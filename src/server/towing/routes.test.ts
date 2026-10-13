@@ -1,0 +1,44 @@
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import type { TowingMember, TowingWorkspace } from '@/domain/towing/types';
+const mocks = vi.hoisted(() => ({getUser:vi.fn(),rpc:vi.fn(),admin:vi.fn()}));
+vi.mock('@/lib/supabase/server',()=>({createSupabaseServerClient:async()=>({auth:{getUser:mocks.getUser}})}));
+vi.mock('./client',()=>({towingAdmin:()=>({rpc:mocks.rpc})}));
+import { GET as workspace } from '@/app/api/towing/workspace/route';
+import { POST as command } from '@/app/api/towing/commands/route';
+import { GET as access } from '@/app/api/towing/access/route';
+import { parseTowingCommand } from './service';
+import sharp from 'sharp';
+import { verifyTowingFile, verifyTowingImage } from './files';
+import { renderTowingPdf } from './pdf-template';
+const userId='10000000-0000-4000-8000-000000000001';
+const orgId='20000000-0000-4000-8000-000000000001';
+const memberId='30000000-0000-4000-8000-000000000001';
+const orderId='40000000-0000-4000-8000-000000000001';
+const commandId='50000000-0000-4000-8000-000000000001';
+const actor:TowingMember={id:memberId,userId,organizationId:orgId,displayName:'Šofér',roles:['driver'],capabilities:['drive'],active:true,version:2};
+function data():TowingWorkspace { return {actor,view:'driver',orders:[{id:orderId,number:'Z-1',sourceCaseId:'legacy-case',revision:1,assignmentGeneration:3,driverId:memberId,workStatus:'assigned',billingStatus:'not_ready',paymentStatus:'unpriced',fields:{serviceType:'tow',subjectType:'vehicle',subjectDescription:'Auto',pickup:'A'},officeNotes:'SECRET',lines:[],documents:[],events:[],authorizedCollectionCents:10000,receivedCents:0,dueCents:null,reconciliationRequired:false,createdAt:'now',updatedAt:'now',attachments:[]}],members:[actor],branches:[],fleet:[],cashAccounts:[],handovers:[],taxConfigured:true,taxRates:['23'],taxDate:'2026-10-13'}; }
+function request(path:string, body?:unknown, headers:Record<string,string>={}) { return new Request(`https://test.dispecing.linkapomoci.sk${path}`,{...(body!==undefined?{method:'POST',body:JSON.stringify(body)}:{}),headers:{origin:'https://test.dispecing.linkapomoci.sk','content-type':'application/json',...headers}}); }
+beforeEach(()=>{vi.stubEnv('MOTORIST_TOWING_ENABLED','true');mocks.getUser.mockResolvedValue({data:{user:{id:userId}},error:null});mocks.rpc.mockImplementation(async(name:string)=>name==='motorist_towing_actor'?{data:actor,error:null}:name==='motorist_towing_workspace'?{data:data(),error:null}:name==='motorist_towing_access'?{data:{order:{...data().orders[0],officeNotes:undefined,lines:undefined,documents:undefined,events:undefined},cashAccount:null},error:null}:{data:{commandId,targetId:orderId,revision:2},error:null});});
+afterEach(()=>{vi.unstubAllEnvs();vi.clearAllMocks();});
+describe('towing HTTP isolation',()=>{
+ it('fails closed with flag off before session or schema access',async()=>{vi.stubEnv('MOTORIST_TOWING_ENABLED','false');const response=await workspace(request('/api/towing/workspace?view=driver'));expect(response.status).toBe(404);expect(mocks.getUser).not.toHaveBeenCalled();expect(mocks.rpc).not.toHaveBeenCalled();expect(response.headers.get('cache-control')).toContain('no-store');});
+ it('requires a signed session and does not honor old dev bypass',async()=>{vi.stubEnv('MOTORIST_DEV_AUTH_BYPASS','true');mocks.getUser.mockResolvedValue({data:{user:null},error:null});expect((await workspace(request('/api/towing/workspace?view=driver'))).status).toBe(401);expect(mocks.rpc).not.toHaveBeenCalled();});
+ it('rejects identity change before membership lookup or revocation response',async()=>{const response=await access(request(`/api/towing/access?orderId=${orderId}&assignmentGeneration=3`,undefined,{'x-towing-user':'another-user'}));expect(response.status).toBe(401);expect(await response.json()).toMatchObject({code:'identity_changed'});expect(mocks.rpc).not.toHaveBeenCalled();});
+ it('does not fall back to dispatch auth or data when schema missing',async()=>{mocks.rpc.mockResolvedValue({data:null,error:{code:'42883'}});expect((await workspace(request('/api/towing/workspace?view=driver'))).status).toBe(503);});
+ it('strips office data even for a dual-role driver response',async()=>{const response=await workspace(request('/api/towing/workspace?view=driver'));const body=await response.json();expect(body.orders[0]).not.toHaveProperty('officeNotes');expect(body.orders[0]).not.toHaveProperty('lines');expect(body.orders[0]).not.toHaveProperty('documents');expect(body.orders[0].sourceCaseId).toBeNull();expect(body.members).toEqual([]);expect(body.taxRates).toEqual([]);expect(body).not.toHaveProperty('dispatchData');expect(mocks.rpc.mock.calls[1][1]).toMatchObject({p_user_id:userId,p_organization_id:orgId,p_membership_version:2,p_filters:{limit:50,offset:0}});});
+ it('rejects cross-origin and missing-origin mutation before auth',async()=>{for(const origin of ['https://evil.example','']) {const response=await command(request('/api/towing/commands',{commandId,type:'start',targetId:orderId,payload:{}},{origin}));expect(response.status).toBe(403);}expect(mocks.getUser).not.toHaveBeenCalled();});
+ it('rejects actor injection, internal commands and oversize bodies',async()=>{for(const input of [{commandId,type:'document_result',targetId:orderId,payload:{}},{commandId,type:'start',targetId:orderId,payload:{organizationId:orgId}},{commandId,type:'start',targetId:orderId,payload:{},userId}]) {expect((await command(request('/api/towing/commands',input))).status).toBe(400);}expect((await command(request('/api/towing/commands',{data:'x'.repeat(256001)}))).status).toBe(413);expect(mocks.rpc.mock.calls.every(([name])=>name==='motorist_towing_actor')).toBe(true);});
+ it('returns explicit assignment revocation only after identity/membership verification',async()=>{mocks.rpc.mockImplementation(async(name:string)=>name==='motorist_towing_actor'?{data:actor,error:null}:{data:null,error:{code:'PT403'}});const response=await access(request(`/api/towing/access?orderId=${orderId}&assignmentGeneration=4`,undefined,{'x-towing-user':userId}));expect(response.status).toBe(403);expect(await response.json()).toMatchObject({code:'assignment_revoked'});});
+ it('issues a bounded lease and returns own assignment',async()=>{const response=await access(request(`/api/towing/access?orderId=${orderId}&assignmentGeneration=3`));expect(response.status).toBe(200);const body=await response.json();expect(body.actor.userId).toBe(userId);expect(body.lease.expiresAt-body.lease.issuedAt).toBe(12*60*60*1000);expect(body.order).not.toHaveProperty('officeNotes');});
+ it('maps DB revision conflicts without revealing SQL payload',async()=>{mocks.rpc.mockImplementation(async(name:string)=>name==='motorist_towing_actor'?{data:actor,error:null}:{data:null,error:{code:'PT409',message:'secret contact'}});const response=await command(request('/api/towing/commands',{commandId,type:'start',targetId:orderId,expectedRevision:1,assignmentGeneration:3,payload:{}}));expect(response.status).toBe(409);expect(JSON.stringify(await response.json())).not.toContain('secret contact');});
+});
+describe('file and PDF boundary',()=>{
+ it('rejects HEIC, fake declared types and malformed PDF',()=>{expect(()=>verifyTowingFile(Buffer.from('not pdf'),'application/pdf')).toThrow();expect(()=>verifyTowingFile(Buffer.from('%PDF-1.7\n%%EOF'),'image/heic')).toThrow();expect(()=>parseTowingCommand({commandId,type:'start',targetId:'../order',payload:{}})).toThrow();});
+ it('decodes complete photos and rejects header-only or corrupt pixel streams',async()=>{
+   const png = await sharp({create:{width:2,height:2,channels:3,background:'#ffcc00'}}).png().toBuffer();
+   await expect(verifyTowingImage(png,'image/png')).resolves.toBeUndefined();
+   await expect(verifyTowingImage(png.subarray(0,32),'image/png')).rejects.toMatchObject({status:415});
+   await expect(verifyTowingImage(png,'image/jpeg')).rejects.toMatchObject({status:415});
+ });
+ it('keeps all 50 lines and long Slovak content, escapes HTML and leaves signatures blank',()=>{const lines=Array.from({length:50},(_,index)=>({id:String(index),description:`Riadok ${index} žľťšť ${'Dlhý slovenský popis '.repeat(30)}`,quantity:'1.000',unit:'ks',unitPrice:'10.0000',taxRate:'0',totalCents:1000}));const html=renderTowingPdf({number:'Z-50',kind:'priced',fields:{serviceType:'tow',subjectType:'vehicle',subjectDescription:'<script>alert(1)</script>',pickup:'Bratislava'},lines,totalCents:50000},'hash');for(const line of lines)expect(html).toContain(line.description);expect(html).toContain('&lt;script&gt;');expect(html).not.toContain('<script>');expect(html).toContain('Objednávateľ<br>Meno:<br>Podpis:');expect(html).toContain('Príjemca<br>Meno:<br>Podpis:');expect(html).toContain('Dopravca<br>Meno:<br>Podpis:');expect(html).not.toMatch(/slice\(|truncate|line-clamp/);});
+});

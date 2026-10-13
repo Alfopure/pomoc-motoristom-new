@@ -1,0 +1,28 @@
+"use client";
+
+import { useRef, useState } from "react";
+import type { TowingMember, TowingRole, TowingWorkspace } from "@/domain/towing/types";
+import { towingClient, deliveryStatus } from "./client";
+import type { RunOperation } from "./OrderDetail";
+import { Button, Field, Notice, Panel } from "./primitives";
+import styles from "./towing.module.css";
+
+const roleNames: Record<TowingRole, string> = { driver: "Vodič", dispatch: "Dispečer", billing: "Fakturácia", manager: "Správca" };
+const descriptions: Record<TowingRole, string> = { driver: "Vlastné zákazky, fotografie a hotovosť", dispatch: "Zákazky, priradenie, kontrola a nacenenie", billing: "Faktúry, platby a prevzatie hotovosti", manager: "Správa, opravy a prístupy" };
+
+export function Members({ workspace, busy, run }: { workspace: TowingWorkspace; busy: boolean; run: RunOperation }) {
+  const [selected, setSelected] = useState<TowingMember | null>(null); const [creating, setCreating] = useState(false);
+  return <><div className={styles.titleRow} style={{ marginTop: 24 }}><div><h1 className={styles.title}>Prístupy a vodiči</h1><p className={styles.subtitle}>Človek môže mať kombináciu oprávnení. Vodičské rozhranie vždy zobrazuje iba jeho prácu.</p></div><Button primary onClick={() => { setCreating(true); setSelected(null); }}>Pozvať používateľa</Button></div><Panel title="Členovia modulu"><div className={styles.stack}>{workspace.members.map(member => <div key={member.id} className={styles.row} style={{ padding: "14px 0", borderBottom: "1px solid #e7e9ed" }}><div><strong>{member.displayName}</strong><div className={styles.actions} style={{ marginTop: 5 }}>{member.roles.map(role => <span className={styles.badge} key={role}>{roleNames[role]}</span>)}<span className={styles.badge} data-tone={member.active ? "green" : "red"}>{member.active ? "Aktívny" : "Deaktivovaný"}</span></div></div><Button onClick={() => { setSelected(member); setCreating(false); }}>Upraviť prístup</Button></div>)}</div></Panel>{(creating || selected) && <MemberForm key={selected ? `${selected.id}:${selected.version}` : "new"} member={selected} busy={busy} run={run} onDone={() => { setSelected(null); setCreating(false); }} />}</>;
+}
+
+function MemberForm({ member, busy, run, onDone }: { member: TowingMember | null; busy: boolean; run: RunOperation; onDone: () => void }) {
+  const [name, setName] = useState(member?.displayName ?? ""); const [email, setEmail] = useState(""); const [roles, setRoles] = useState<TowingRole[]>(member?.roles ?? ["driver"]); const [active, setActive] = useState(member?.active ?? true);
+  const membershipId = useRef(member?.id ?? crypto.randomUUID()); const attempts = useRef(new Map<string, string>());
+  const execute = async (action: "invite" | "update" | "reset") => {
+    const payload = action === "reset" ? { action, membershipId: membershipId.current } : { action, membershipId: membershipId.current, displayName: name, roles, ...(member ? { userId: member.userId, active, expectedVersion: member.version, ...(email ? { email } : {}) } : { email }) };
+    const key = JSON.stringify(payload); let commandId = attempts.current.get(key); if (!commandId) { commandId = crypto.randomUUID(); attempts.current.set(key, commandId); }
+    const message = action === "invite" ? "Pozvanie bolo spracované. Prijatie poskytovateľom nepreukazuje doručenie do schránky." : action === "reset" ? "Požiadavka na obnovu prístupu bola spracovaná." : "Prístup používateľa bol upravený.";
+    if (await run(key, async () => { const result = await towingClient.members({ ...payload, commandId }); const status = deliveryStatus(result); if (action !== "update" && status !== "accepted") throw new Error(status === "failed" || status === "disabled" ? "Prístup bol pripravený, ale správa nebola odoslaná. Skontrolujte konfiguráciu a príjemcu." : "Prístup bol spracovaný, výsledok odoslania správy je však neznámy. Pred ďalším pokusom ho overte."); return result; }, message)) onDone();
+  };
+  return <Panel title={member ? `Prístup: ${member.displayName}` : "Pozvanie nového používateľa"}><div className={styles.grid}><Field label="Zobrazované meno" value={name} onChange={event => setName(event.target.value)} /><Field label={member ? "E-mail (len ak sa mení)" : "E-mail pre pozvanie"} type="email" value={email} onChange={event => setEmail(event.target.value)} /></div><div className={styles.grid} style={{ marginTop: 16 }}>{(Object.keys(roleNames) as TowingRole[]).map(role => <label key={role} className={styles.check}><input type="checkbox" checked={roles.includes(role)} onChange={event => setRoles(event.target.checked ? [...roles, role] : roles.filter(item => item !== role))} /><span><strong>{roleNames[role]}</strong><br /><small className={styles.muted}>{descriptions[role]}</small></span></label>)}</div>{member && <label className={styles.check}><input type="checkbox" checked={active} onChange={event => setActive(event.target.checked)} /> Aktívne členstvo</label>}{!active && <Notice kind="error">Deaktivácia zablokuje nové operácie a prístup k prideleným zákazkám. Potvrdené peniaze a história zostanú zachované.</Notice>}<div className={styles.actions}><Button primary disabled={busy || !name.trim() || !roles.length || (!member && !email.includes("@"))} onClick={() => void execute(member ? "update" : "invite")}>{member ? "Uložiť prístup" : "Odoslať pozvanie"}</Button>{member && <Button disabled={busy || !active} onClick={() => void execute("reset")}>Poslať obnovu prístupu</Button>}<Button disabled={busy} onClick={onDone}>Zavrieť</Button></div></Panel>;
+}

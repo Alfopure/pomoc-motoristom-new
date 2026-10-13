@@ -109,6 +109,8 @@ const routeFiles = findRouteFiles(API_ROOT);
 
 describe("API route auth enumeration (fail-closed)", () => {
   beforeAll(() => {
+    // Exercise towing authorization while enabled, rather than its disabled 404.
+    process.env.MOTORIST_TOWING_ENABLED = "true";
     for (const name of BEARER_SECRET_ENV) {
       process.env[name] = `test-${name.toLowerCase()}`;
     }

@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { loginDestination } from "./login-destination";
 
 describe("loginDestination", () => {
+  it("accepts only the two explicit towing entries", () => {
+    expect(loginDestination("https://app.example/vodic", "/vodic")).toBe("/vodic");
+    expect(loginDestination("https://app.example/zakazky", "/zakazky")).toBe("/zakazky");
+    expect(loginDestination("https://app.example/", "/vodic?next=https://other.example")).toBe("/");
+  });
   it("preserves a server-selected guide chapter and its step after sign-in", () => {
     expect(loginDestination("https://copy.example/navod/plany-zvonenia#poradie", "/navod/plany-zvonenia")).toBe("/navod/plany-zvonenia#poradie");
   });

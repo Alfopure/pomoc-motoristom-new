@@ -29,6 +29,12 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   serverExternalPackages: ["@sparticuz/chromium", "playwright-core"],
   outputFileTracingIncludes: {
+    "/api/towing/orders/*/documents": [
+      "./node_modules/@sparticuz/chromium/bin/**/*",
+      `${playwrightRuntime}/browsers.json`,
+      `${playwrightRuntime}/lib/**/*`,
+      "./src/assets/pdf-fonts/**/*",
+    ],
     "/api/cases/*/pdf": [
       "./node_modules/@sparticuz/chromium/bin/**/*",
       `${playwrightRuntime}/browsers.json`,

@@ -1,12 +1,25 @@
-const CACHE_NAME = "pm-dispatch-shell-v5";
-const APP_SHELL_PATHS = ["/offline", "/icon-192", "/icon", "/apple-icon", "/manifest.webmanifest"];
+const CACHE_NAME = "pm-dispatch-shell-v6";
+const APP_SHELL_PATHS = ["/offline", "/vodic/offline", "/vodic.webmanifest", "/icon-192", "/icon", "/apple-icon", "/manifest.webmanifest"];
+const SHELL_READY = "/__pm-public-shell-ready-v6";
 
 self.addEventListener("install", function (event) {
   self.skipWaiting();
   event.waitUntil((async function () {
     try {
       const cache = await caches.open(CACHE_NAME);
+      // A same-version reinstall must not retain an old readiness marker while
+      // replacing HTML whose new chunks may fail to download.
+      await cache.delete(SHELL_READY);
       await cache.addAll(APP_SHELL_PATHS);
+      const shell = await cache.match("/vodic/offline");
+      if (!shell) return;
+      // Keep the public shell's initial JS/CSS together. Private HTML and RSC
+      // are never followed; these URLs are only immutable Next static assets.
+      const html = await shell.text();
+      const assets = [...html.matchAll(/(?:src|href)=["'](\/_next\/static\/[^"']+)["']/g)]
+        .map(function (match) { return match[1].replaceAll("&amp;", "&"); });
+      if (assets.length) await cache.addAll([...new Set(assets)]);
+      await cache.put(SHELL_READY, new Response("ready"));
     } catch {
       // Unavailable storage must not prevent this worker's fixes from installing.
     }
@@ -17,8 +30,13 @@ self.addEventListener("activate", function (event) {
   event.waitUntil((async function () {
     try {
       const keys = await caches.keys();
+      const current = await caches.open(CACHE_NAME);
+      const ready = await current.match(SHELL_READY);
+      // A failed install/partial quota write must never erase the last working
+      // offline shell. Retain the preceding version and its loaded chunks too.
+      const previous = keys.filter(function (key) { return key.startsWith("pm-dispatch-shell-") && key !== CACHE_NAME; }).at(-1);
       await Promise.all(keys.filter(function (key) {
-        return key !== CACHE_NAME;
+        return ready && key.startsWith("pm-dispatch-shell-") && key !== CACHE_NAME && key !== previous;
       }).map(function (key) {
         return caches.delete(key);
       }));
@@ -35,6 +53,7 @@ self.addEventListener("fetch", function (event) {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
+  if (url.searchParams.has("_rsc") || request.headers?.get("rsc") === "1" || request.headers?.get("accept")?.includes("text/x-component")) return;
 
   if (request.mode === "navigate") {
     event.respondWith(networkNavigationOrOffline(request));
@@ -53,7 +72,20 @@ async function networkNavigationOrOffline(request) {
     return await fetch(request);
   } catch {
     try {
-      const offline = await caches.match("/offline");
+      const path = new URL(request.url).pathname;
+      const offlinePath = path === "/vodic" || path.startsWith("/vodic/") ? "/vodic/offline" : "/offline";
+      const current = await caches.open(CACHE_NAME);
+      const ready = await current.match(SHELL_READY);
+      let offline = ready ? await current.match(offlinePath) : undefined;
+      if (!offline) {
+        const previous = (await caches.keys()).filter(function (key) {
+          return key.startsWith("pm-dispatch-shell-") && key !== CACHE_NAME;
+        }).reverse();
+        for (const key of previous) {
+          offline = await (await caches.open(key)).match(offlinePath);
+          if (offline) break;
+        }
+      }
       if (offline) return offline;
     } catch {
       // The offline page may also be unavailable when browser storage fails.

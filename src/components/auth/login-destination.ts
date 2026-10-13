@@ -1,6 +1,7 @@
-/** Only server-selected guide paths can replace the normal sign-in destination. */
+/** Only explicitly allowlisted local destinations may replace the default. */
 export function loginDestination(currentUrl: string, guidePath?: string): string {
   const current = new URL(currentUrl);
+  if (guidePath === "/vodic" || guidePath === "/zakazky") return guidePath;
   if (guidePath && /^\/navod(?:\/[a-z0-9-]+)?$/.test(guidePath)) {
     return `${guidePath}${current.hash}`;
   }

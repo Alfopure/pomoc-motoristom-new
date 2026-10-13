@@ -49,7 +49,11 @@ export function MotoristLogin({ message, returnTo, appRelease }: { message: stri
   }
 
   const isWorking = status === "working";
-  const forgotPasswordHref = email.trim() ? `/auth/forgot-password?email=${encodeURIComponent(email.trim().toLowerCase())}` : "/auth/forgot-password";
+  const towing = returnTo === "/vodic" || returnTo === "/zakazky";
+  const resetParams = new URLSearchParams();
+  if (email.trim()) resetParams.set("email", email.trim().toLowerCase());
+  if (towing) resetParams.set("module", "towing");
+  const forgotPasswordHref = `/auth/forgot-password${resetParams.size ? `?${resetParams}` : ""}`;
 
   return (
     <main className="auth-app-shell flex min-h-screen items-center justify-center bg-zinc-100 px-4 py-10 text-zinc-950">
@@ -61,7 +65,7 @@ export function MotoristLogin({ message, returnTo, appRelease }: { message: stri
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-base font-black text-zinc-950">PM</div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Pomoc motoristom</p>
-                <p className="text-sm font-semibold text-zinc-950">Dispečing</p>
+                <p className="text-sm font-semibold text-zinc-950">{towing ? "Zákazky odťahovej služby" : "Dispečing"}</p>
               </div>
             </div>
             <h1 className="text-2xl font-semibold text-zinc-950">Prihlásenie</h1>
