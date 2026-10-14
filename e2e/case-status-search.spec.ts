@@ -23,24 +23,39 @@ async function boot(page: Page) {
   await expect(page.getByTestId("dispatch-console")).toHaveAttribute("data-hydrated", "true");
   return page.getByTestId("dispatch-case-list");
 }
-test("default active view searches completed and cancelled cases without a history tab", async ({ page }) => {
+test("board searches every status even after selecting active and normalizes plate separators", async ({ page }) => {
   const list = await boot(page);
   await expect(list.locator("[data-case-number]")).toHaveCount(1);
-  await list.getByRole("textbox").fill("QA123AB");
+  await list.getByRole("button", { name: "Filtre", exact: true }).click();
+  await list.getByLabel("Stav", { exact: true }).selectOption("active");
+  await list.getByRole("textbox").fill("qa-123 ab");
   await expect(list.locator('[data-case-number="PM-2026-9002"]')).toBeVisible();
+  await expect(list.getByLabel("Stav", { exact: true })).toHaveValue("all");
+  await expect(list.getByLabel("Stav", { exact: true })).toBeDisabled();
+  await expect(list.getByText("Vyhľadáva sa vo všetkých stavoch.")).toBeVisible();
   await list.getByRole("textbox").fill("Spoločný kontakt");
   await expect(list.locator("[data-case-number]")).toHaveCount(2);
+  await page.screenshot({ path: ".context/case-status-search.png", fullPage: true });
+  await list.getByRole("textbox").fill("");
+  await expect(list.getByLabel("Stav", { exact: true })).toHaveValue("active");
+  await expect(list.getByLabel("Stav", { exact: true })).toBeEnabled();
+  await expect(list.locator("[data-case-number]")).toHaveCount(1);
+});
+
+test("search temporarily widens selected statuses and clearing it restores the selection", async ({ page }) => {
+  const list = await boot(page);
   await list.getByRole("button", { name: "Filtre", exact: true }).click();
   await list.getByLabel("Stav", { exact: true }).selectOption("selected");
   await list.getByRole("checkbox", { name: "Vybavené", exact: true }).check();
   await expect(list.locator("[data-case-number]")).toHaveCount(1);
   await list.getByRole("checkbox", { name: "Zrušené", exact: true }).check();
   await expect(list.locator("[data-case-number]")).toHaveCount(2);
-  await list.getByLabel("Stav", { exact: true }).selectOption("active");
-  await expect(list.locator("[data-case-number]")).toHaveCount(0);
-  await list.getByRole("textbox").fill("9002");
-  await expect(list.locator("[data-case-number]")).toHaveCount(0);
-  await list.getByLabel("Stav", { exact: true }).selectOption("all");
-  await expect(list.locator('[data-case-number="PM-2026-9002"]')).toBeVisible();
-  await page.screenshot({ path: ".context/case-status-search.png", fullPage: true });
+  await list.getByRole("textbox").fill("9001");
+  await expect(list.locator('[data-case-number="PM-2026-9001"]')).toBeVisible();
+  await expect(list.getByLabel("Stav", { exact: true })).toHaveValue("all");
+  await list.getByRole("textbox").fill("");
+  await expect(list.getByLabel("Stav", { exact: true })).toHaveValue("selected");
+  await expect(list.getByRole("checkbox", { name: "Vybavené", exact: true })).toBeChecked();
+  await expect(list.getByRole("checkbox", { name: "Zrušené", exact: true })).toBeChecked();
+  await expect(list.locator("[data-case-number]")).toHaveCount(2);
 });

@@ -176,7 +176,7 @@ export function CaseList({
         {filterOpen && (
           <div className="mt-3 grid gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-2">
             <div className="grid grid-cols-2 gap-2">
-              <CaseStatusFilter filters={filters} onChange={onFiltersChange} />
+              <CaseStatusFilter filters={filters} onChange={onFiltersChange} searching={Boolean(search.trim())} />
               <FilterSelect
                 label="Priorita"
                 value={filters.priority}
