@@ -20,7 +20,6 @@ type Props = {
   lookupRequest?: number;
   required?: boolean;
   manualInsurerEntry?: boolean;
-  autoFillEmptyFields?: boolean;
   disabled?: boolean;
   plateError?: string;
   vinError?: string;
@@ -70,22 +69,10 @@ export function VehicleLookupControl(props: Props) {
       });
       if (currentIdentity.current !== requestedIdentity || controller.signal.aborted) return;
       setProposal(result);
-      const latest = currentProps.current;
-      const matchesIdentity = !result.conflict && !lookupIdentityConflict(result.snapshot.result, { plate: latest.plate, vin: latest.vin, country });
-      if (latest.autoFillEmptyFields && !latest.disabled && matchesIdentity) {
-        const automaticPatch = emptyVehicleFieldPatch(result.snapshot.result, { ...latest.values, plate: latest.plate, vin: latest.vin });
-        if (!preferredVehicleFacts(result.snapshot.result).insuranceStatus) delete automaticPatch.insurer;
-        // Filling a verified missing identifier changes the controlled inputs.
-        // Keep this result available for reviewing conflicts/partial suggestions.
-        if (Object.keys(automaticPatch).length) {
-          setStateIdentity(`${latest.contextKey}:${country}:${normalizeVehicleIdentifier(automaticPatch.plate ?? latest.plate)}:${normalizeVehicleIdentifier(automaticPatch.vin ?? latest.vin)}`);
-          latest.onApply(automaticPatch, result.snapshot);
-        }
-      }
       // Workspaces retain hidden editors. Keep their completed lookups available
       // without opening a modal over the screen the dispatcher moved to.
       const origin = control.current;
-      setExpanded(Boolean((!latest.autoFillEmptyFields || !matchesIdentity) && origin?.getClientRects().length && !origin.closest('[inert], [aria-hidden="true"], [hidden]') && getComputedStyle(origin).visibility !== "hidden"));
+      setExpanded(Boolean(origin?.getClientRects().length && !origin.closest('[inert], [aria-hidden="true"], [hidden]') && getComputedStyle(origin).visibility !== "hidden"));
     } catch (caught) {
       if (currentIdentity.current === requestedIdentity && request.current === controller) setError(controller.signal.aborted ? "Dohľadávanie trvalo príliš dlho. Skúste neskôr alebo overte údaje pri zdroji." : (caught as Error).message);
     } finally {
@@ -154,7 +141,7 @@ export function VehicleLookupControl(props: Props) {
       {error && <p role="alert" className="mt-2 rounded-md bg-amber-50 p-2 text-xs text-amber-900">{error}</p>}
       {snapshot && <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50">
         <button type="button" onClick={event => { opener.current = event.currentTarget; setExpanded(true); }} aria-haspopup="dialog" className="flex w-full items-center justify-between gap-3 rounded-lg p-3 text-left hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-yellow-500">
-          <span className="min-w-0"><span className="block text-sm font-semibold">{proposal ? props.autoFillEmptyFields && !conflict ? "Dohľadané údaje vozidla" : "Dohľadané údaje · návrh" : "Uložené overenie vozidla"}</span>
+          <span className="min-w-0"><span className="block text-sm font-semibold">{proposal ? "Dohľadané údaje · návrh" : "Uložené overenie vozidla"}</span>
             <span className="mt-0.5 block text-xs text-zinc-600">{[facts.make?.value, facts.model?.value].filter(Boolean).join(" ") || "Zobraziť detail vozidla"} · {vehicleLookupDate(snapshot.result.fetchedAt, true)}</span>
             <span className={`mt-1 block text-xs ${conflict ? "font-medium text-amber-900" : "text-zinc-700"}`}>{conflict ? "Identita nesúhlasí · PZP vozidla nepotvrdené" : <>PZP: {facts.insuranceStatus?.value ?? (country === "CZ" ? "neoverené" : "nepotvrdené")}{facts.insurer && ` · ${facts.insurer.value}`} · k {vehicleLookupDate(snapshot.result.query.checkedForDate)}</>}</span>
             {country === "CZ" && <span className="mt-1 block text-xs text-zinc-700">Diaľničná známka: {facts.vignetteStatus?.value ?? "neoverená"}{facts.vignetteValidUntil && ` · do ${vehicleLookupDate(facts.vignetteValidUntil.value)}`}</span>}
