@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 import { isolateBrowserRequests } from "./browser-isolation";
 import type { DispatchData } from "../src/data/dispatch-types";
 import type { VehicleFacts, VehicleLookupInput, VehicleLookupResponse } from "../src/lib/vehicle-lookup";
@@ -169,8 +169,15 @@ function deferred() {
   return { promise, release };
 }
 
+async function openLookupDetails(control: Locator) {
+  const dialog = control.getByRole("dialog", { name: /^Detail vozidla/ });
+  if (!await dialog.isVisible()) await control.getByRole("button", { name: /Dohľadané údaje|Uložené overenie vozidla/ }).click();
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
 for (const width of [1280, 390]) {
-  test(`new case accepts only explicit proposals and preserves manual edits at ${width}px`, async ({ page }) => {
+  test(`new case fills matched empty fields immediately and preserves manual edits at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     const gate = deferred();
     const api = await sandboxApi(page, async (input) => { await gate.promise; return lookupResponse(input); });
@@ -181,10 +188,15 @@ for (const width of [1280, 390]) {
     await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
     await expect.poll(() => api.lookupInputs.length).toBe(1);
     await page.getByLabel("Značka", { exact: true }).fill("Ručne počas čakania");
+    await page.getByLabel("Poisťovňa PZP", { exact: true }).fill("Ručne potvrdená poisťovňa");
     gate.release();
-    await expect(control.getByRole("button", { name: acceptName })).toBeVisible();
-    const dialog = control.getByRole("dialog", { name: /^Detail vozidla/ });
-    await expect(dialog).toBeVisible();
+    await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Fixture model");
+    await expect(control.getByLabel("VIN", { exact: true })).toHaveValue(syntheticVin);
+    await expect(page.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("Ručne potvrdená poisťovňa");
+    await expect(control.getByRole("dialog")).toHaveCount(0);
+    expect(api.writes).toHaveLength(0);
+    if (width === 1280) await page.screenshot({ path: ".context/vehicle-lookup-autofill.png", fullPage: true });
+    const dialog = await openLookupDetails(control);
     const technical = dialog.getByRole("region", { name: "Technické údaje pre zásah" });
     await expect(technical).toContainText("1650");
     await expect(technical).toContainText("2200");
@@ -204,9 +216,7 @@ for (const width of [1280, 390]) {
     }
     await page.waitForTimeout(1_400); // Deliberately longer than the real 1,200 ms autosave debounce.
     expect(api.writes).toHaveLength(0);
-    await expect(page.getByLabel("Model", { exact: true })).toHaveValue("");
-    await expect(control.getByLabel("VIN", { exact: true })).toHaveValue("");
-    await control.getByRole("button", { name: acceptName }).click();
+    await dialog.getByRole("button", { name: "Zavrieť návrh dohľadania", exact: true }).click();
     await expect(page.getByLabel("Značka", { exact: true })).toHaveValue("Ručne počas čakania");
     await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Fixture model");
     await expect(control.getByLabel("VIN", { exact: true })).toHaveValue(syntheticVin);
@@ -215,7 +225,7 @@ for (const width of [1280, 390]) {
     await expect(page.getByLabel("Počet miest", { exact: true })).toHaveValue("5");
     await expect(page.getByLabel("Kategória", { exact: true })).toHaveValue("M1");
     await expect(page.getByLabel("Hmotnosť kg", { exact: true })).toHaveValue("1650");
-    await expect(page.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("Fixture poisťovňa");
+    await expect(page.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("Ručne potvrdená poisťovňa");
     await expect(page.getByLabel("Rok výroby", { exact: true })).toHaveValue("");
     expect(api.writes).toHaveLength(0);
     const bounds = await control.boundingBox();
@@ -232,7 +242,7 @@ for (const width of [1280, 390]) {
     expect(api.writes[0]).toMatchObject({ method: "POST", path: "/api/cases", body: {
       vehicleMake: "Ručne počas čakania", vehicleModel: "Fixture model", vin: syntheticVin,
       vehicleFuel: "Elektrina", vehicleBodyType: "Kombi", vehicleSeats: 5,
-      vehicleCategory: "M1", vehicleInsurer: "Fixture poisťovňa", weightKg: 1650,
+      vehicleCategory: "M1", vehicleInsurer: "Ručne potvrdená poisťovňa", weightKg: 1650,
     } });
     expect(api.writes[0].body.vehicleLookup).toEqual(lookupResponse(api.lookupInputs[0]).snapshot);
   });
@@ -252,7 +262,6 @@ test("changing vehicle identity clears lookup facts and allows a different VIN w
 
   await plate.fill(plateA);
   await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
-  await control.getByRole("button", { name: acceptName }).click();
   await expect(insurer).toHaveValue("Fixture poisťovňa");
   await expect(control.getByLabel("VIN", { exact: true })).toHaveValue(syntheticVin);
 
@@ -272,7 +281,6 @@ test("changing vehicle identity clears lookup facts and allows a different VIN w
   await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
   await expect.poll(() => api.lookupInputs.length).toBe(2);
   expect(api.lookupInputs[1].knownIdentity?.vin).toBe("");
-  await control.getByRole("button", { name: acceptName }).click();
   await expect(control.getByLabel("VIN", { exact: true })).toHaveValue(secondVin);
   await expect(page.getByLabel("Značka", { exact: true })).toHaveValue("Druhá značka");
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Druhý model");
@@ -288,7 +296,7 @@ test("changing vehicle identity clears lookup facts and allows a different VIN w
   expect(api.writes[0].body).toMatchObject({ licensePlate: plateB, vin: "WVWZZZ1JZXW000003", vehicleInsurer: "Ručne potvrdená poisťovňa", vehicleLookup: null });
 });
 
-test("VIN-linked insurer can be accepted when SKP still lists a different EČV", async ({ page }) => {
+test("VIN-linked insurer fills immediately when SKP still lists a different EČV", async ({ page }) => {
   const api = await sandboxApi(page, async (input) => {
     const response = lookupResponse(input);
     response.snapshot.result.sources[0].facts.plate = { value: plateB, quality: "reported" };
@@ -299,8 +307,7 @@ test("VIN-linked insurer can be accepted when SKP still lists a different EČV",
   const control = page.getByTestId("vehicle-lookup");
   await control.getByLabel("EČV", { exact: true }).fill(plateA);
   await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
-  await expect(control.getByText(`SKP uvádza EČV ${plateB}, technický zdroj ${plateA}.`, { exact: false })).toBeVisible();
-  await control.getByRole("button", { name: acceptName }).click();
+  await expect(control.getByRole("button", { name: /Dohľadané údaje vozidla/ })).toContainText(`SKP uvádza odlišné EČV ${plateB}; VIN sa zhoduje.`);
   await expect(control.getByLabel("EČV", { exact: true })).toHaveValue(plateA);
   await expect(control.getByLabel("VIN", { exact: true })).toHaveValue(syntheticVin);
   await expect(page.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("Fixture poisťovňa");
@@ -309,7 +316,7 @@ test("VIN-linked insurer can be accepted when SKP still lists a different EČV",
   expect(api.writes[0].body).toMatchObject({ licensePlate: plateA, vin: syntheticVin, vehicleInsurer: "Fixture poisťovňa" });
 });
 
-test("existing case proposal never autosaves; accepted snapshot survives save and ordinary edits", async ({ page }) => {
+test("existing case fills matched fields and autosaves the snapshot while preserving ordinary edits", async ({ page }) => {
   const api = await sandboxApi(page, async (input) => lookupResponse(input, { vin: { value: input.knownIdentity!.vin!, quality: "reported" } }));
   await openDashboard(page);
   await page.getByRole("button", { name: /^Detail prípadu / }).first().click();
@@ -321,15 +328,8 @@ test("existing case proposal never autosaves; accepted snapshot survives save an
   await expect(page.getByTestId("case-autosave-status")).toContainText("Uložené automaticky");
   api.writes.length = 0;
   await form.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
-  await expect(form.getByRole("button", { name: acceptName })).toBeVisible();
-  await page.waitForTimeout(1_400);
-  expect(api.writes).toHaveLength(0);
-  await expect(form.getByLabel("Model", { exact: true })).toHaveValue("");
-  await form.getByRole("button", { name: "Zavrieť návrh dohľadania", exact: true }).click();
-  await page.waitForTimeout(1_400);
-  expect(api.writes).toHaveLength(0);
-  await form.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
-  await form.getByRole("button", { name: acceptName }).click();
+  await expect(form.getByLabel("Model", { exact: true })).toHaveValue("Fixture model");
+  await expect(form.getByRole("dialog", { name: /^Detail vozidla/ })).toHaveCount(0);
   await expect.poll(() => api.writes.length).toBe(1);
   await expect(page.getByTestId("case-autosave-status")).toContainText("Uložené automaticky");
   expect(api.writes[0].body).toMatchObject({
@@ -351,7 +351,7 @@ test("existing case proposal never autosaves; accepted snapshot survives save an
   // Reopen the saved card from the case directory.
   await page.getByRole("row").filter({ hasText: "Fixture model" }).click();
   await expect(form).toBeVisible();
-  await expect(page.getByRole("button", { name: /Uložené overenie vozidla/ })).toBeVisible();
+  await expect(form.getByRole("button", { name: /Dohľadané údaje vozidla|Uložené overenie vozidla/ })).toBeVisible();
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Fixture model");
   await form.getByTestId("vehicle-lookup").getByLabel("EČV", { exact: true }).fill(plateB);
   await expect(form.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("");
@@ -404,7 +404,7 @@ test("changing A to B discards a delayed response and allows a clean second look
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("");
   expect(api.writes).toHaveLength(0);
   await page.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
-  await page.getByRole("button", { name: acceptName }).click();
+  await expect(page.getByLabel("VIN", { exact: true })).toHaveValue(syntheticVin);
   await expect(page.getByLabel("EČV", { exact: true })).toHaveValue(plateB);
   expect(api.lookupInputs.map((input) => input.value)).toEqual([plateA, plateB]);
 });
@@ -460,19 +460,72 @@ test("a conflicting VIN stays visible and cannot be accepted", async ({ page }) 
   expect(api.writes).toHaveLength(0);
 });
 
-test("VIN-only lookup explicitly fills a missing plate and leaves the entered VIN unchanged", async ({ page }) => {
+test("VIN-only lookup immediately fills a missing plate and leaves the entered VIN unchanged", async ({ page }) => {
   const api = await sandboxApi(page);
   await openDashboard(page); await openNewCase(page);
   await page.getByLabel("VIN", { exact: true }).fill(syntheticVin);
   await page.getByRole("button", { name: "Dohľadať podľa VIN", exact: true }).click();
-  await expect(page.getByRole("button", { name: acceptName })).toBeEnabled();
-  await expect(page.getByLabel("EČV", { exact: true })).toHaveValue("");
-  expect(api.lookupInputs[0]).toMatchObject({ kind: "vin", value: syntheticVin });
-  await page.getByRole("button", { name: acceptName }).click();
   await expect(page.getByLabel("EČV", { exact: true })).toHaveValue(plateA);
   await expect(page.getByLabel("VIN", { exact: true })).toHaveValue(syntheticVin);
+  await expect(page.getByRole("dialog", { name: /^Detail vozidla/ })).toHaveCount(0);
+  expect(api.lookupInputs[0]).toMatchObject({ kind: "vin", value: syntheticVin });
   expect(api.writes).toHaveLength(0);
 });
+
+test("exact plate PZP fills the main insurer field even when SKP returns no VIN", async ({ page }) => {
+  const api = await sandboxApi(page, async input => {
+    const response = lookupResponse(input);
+    response.snapshot.result.sources = [response.snapshot.result.sources[0]];
+    delete response.snapshot.result.sources[0].facts.vin;
+    return response;
+  });
+  await openDashboard(page); await openNewCase(page);
+  const control = page.getByTestId("vehicle-lookup");
+  await control.getByLabel("EČV", { exact: true }).fill(plateA);
+  await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+  await expect(page.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("Fixture poisťovňa");
+  await expect(control.getByLabel("VIN", { exact: true })).toHaveValue("");
+  await expect(control.getByRole("button", { name: /Dohľadané údaje vozidla/ })).toContainText("PZP: POISTENÉ");
+  await expect(control.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Uložiť rozpracované", exact: true }).click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(api.writes[0].body).toMatchObject({ licensePlate: plateA, vin: "", vehicleInsurer: "Fixture poisťovňa" });
+});
+
+test("unconfirmed insurance is not automatically imported as the case insurer", async ({ page }) => {
+  await sandboxApi(page, async input => {
+    const response = lookupResponse(input);
+    delete response.snapshot.result.sources[0].facts.insuranceStatus;
+    return response;
+  });
+  await openDashboard(page); await openNewCase(page);
+  const control = page.getByTestId("vehicle-lookup");
+  await control.getByLabel("EČV", { exact: true }).fill(plateA);
+  await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Fixture model");
+  await expect(page.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("");
+  await expect(control.getByRole("button", { name: /Dohľadané údaje vozidla/ })).toContainText("PZP: nepotvrdené");
+});
+
+for (const failure of ["network", "html"] as const) {
+  test(`lookup ${failure} failure shows a friendly reason and permits manual saving`, async ({ page }) => {
+    const api = await sandboxApi(page);
+    await page.route("**/api/vehicles/lookup", route => failure === "network"
+      ? route.abort("failed")
+      : route.fulfill({ status: 502, contentType: "text/html", body: "<html>Bad Gateway</html>" }));
+    await openDashboard(page); await openNewCase(page);
+    const control = page.getByTestId("vehicle-lookup");
+    await control.getByLabel("EČV", { exact: true }).fill(plateA);
+    await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+    await expect(control.getByRole("alert")).toContainText("Overenie vozidla sa nepodarilo dokončiť");
+    await expect(control.getByRole("alert")).toContainText("údaje môžete vyplniť ručne");
+    await expect(control).not.toContainText(/Failed to fetch|Unexpected token|Bad Gateway/);
+    await page.getByLabel("Poisťovňa PZP", { exact: true }).fill("Ručne overená poisťovňa");
+    await page.getByRole("button", { name: "Uložiť rozpracované", exact: true }).click();
+    await expect.poll(() => api.writes.length).toBe(1);
+    expect(api.writes[0].body).toMatchObject({ vehicleInsurer: "Ručne overená poisťovňa", vehicleLookup: null });
+  });
+}
 
 test("challenge and unavailable sources do not imply missing insurance or block manual saving", async ({ page }) => {
   const api = await sandboxApi(page, async (input) => {
@@ -484,6 +537,8 @@ test("challenge and unavailable sources do not imply missing insurance or block 
   await page.getByLabel("EČV", { exact: true }).fill(plateA);
   await page.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
   const control = page.getByTestId("vehicle-lookup");
+  await expect(control.getByTestId("skp-manual-fallback")).toContainText("stránka SKP vyžadovala ochrannú kontrolu");
+  await openLookupDetails(control);
   await expect(control.getByText("Vyžaduje ručné overenie", { exact: true })).toBeVisible();
   await expect(control.getByText("Zdroj sa nepodarilo overiť", { exact: true }).first()).toBeVisible();
   const manualFallback = page.getByRole("dialog").getByTestId("skp-manual-fallback");
@@ -517,6 +572,9 @@ test("shows source conflicts, accepts an explicit choice and flags a HAKA VIN mi
   const control = page.getByTestId("vehicle-lookup");
   await control.getByLabel("EČV", { exact: true }).fill(plateA);
   await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Fixture model");
+  await expect(page.getByLabel("Značka", { exact: true })).toHaveValue("");
+  await openLookupDetails(control);
   await expect(control.getByText("Značka · rozdielne údaje zdrojov")).toBeVisible();
   await expect(control.getByRole("alert")).toContainText("Identita hlásenia nesúhlasí");
   await expect(control).toContainText("raz za tri mesiace");
@@ -541,7 +599,7 @@ test("automatically retries a busy lookup without a second click", async ({ page
   await control.getByLabel("EČV", { exact: true }).fill(plateA);
   await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
   await expect(control.getByRole("status")).toContainText("Automaticky skúsim znova");
-  await expect(control.getByRole("button", { name: acceptName })).toBeEnabled();
+  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Fixture model");
   expect(attempts).toBe(2);
   expect(api.lookupInputs).toHaveLength(1);
 });
@@ -574,8 +632,9 @@ test("vehicle popup traps focus, closes without closing its case and reopens wit
   await expect(form).toBeVisible();
   const search = form.getByRole("button", { name: "Dohľadať podľa EČV", exact: true });
   await search.click();
-  const dialog = form.getByRole("dialog", { name: /^Detail vozidla/ });
-  await expect(dialog).toBeVisible();
+  await expect(form.getByRole("dialog", { name: /^Detail vozidla/ })).toHaveCount(0);
+  const reopen = form.getByRole("button", { name: /Dohľadané údaje vozidla/ });
+  const dialog = await openLookupDetails(form);
   await expect(dialog.getByRole("button", { name: "Zavrieť návrh dohľadania", exact: true })).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(dialog.getByRole("button", { name: acceptName })).toBeFocused();
@@ -584,14 +643,12 @@ test("vehicle popup traps focus, closes without closing its case and reopens wit
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(form).toBeVisible();
-  await expect(search).toBeFocused();
-  const reopen = form.getByRole("button", { name: /Dohľadané údaje · návrh/ });
+  await expect(reopen).toBeFocused();
   await reopen.click();
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Zavrieť návrh dohľadania", exact: true }).click();
   await expect(reopen).toBeFocused();
   expect(api.lookupInputs).toHaveLength(1);
-  expect(api.writes).toHaveLength(0);
 });
 
 
@@ -604,10 +661,11 @@ test("a lookup completed in a retained hidden editor does not open over another 
   await expect.poll(() => api.lookupInputs.length).toBe(1);
   await navigate(page, /^Úlohy/);
   gate.release();
-  await expect(page.getByTestId("vehicle-lookup").getByRole("button", { name: /Dohľadané údaje · návrh/, includeHidden: true })).toHaveCount(1);
+  await expect(page.getByTestId("vehicle-lookup").getByRole("button", { name: /Dohľadané údaje vozidla/, includeHidden: true })).toHaveCount(1);
   await expect(page.locator("dialog[open]")).toHaveCount(0);
   await page.getByRole("navigation", { name: "Hlavná navigácia" }).getByRole("button", { name: "Nástenka", exact: true }).click();
-  await page.getByRole("button", { name: /Dohľadané údaje · návrh/ }).click();
+  await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Fixture model");
+  await page.getByRole("button", { name: /Dohľadané údaje vozidla/ }).click();
   await expect(page.getByRole("dialog", { name: /^Detail vozidla/ })).toBeVisible();
   expect(api.lookupInputs).toHaveLength(1);
   expect(api.writes).toHaveLength(0);
@@ -625,11 +683,13 @@ test("partial VIN suggestions require explicit confirmation before filling field
   await openDashboard(page); await openNewCase(page);
   await page.getByLabel("VIN", { exact: true }).fill(syntheticVin);
   await page.getByRole("button", { name: "Dohľadať podľa VIN", exact: true }).click();
+  await openLookupDetails(page.getByTestId("vehicle-lookup"));
   const confirm = page.getByRole("checkbox", { name: /Zahrnúť aj návrhy z neúplného VIN/ });
   await expect(confirm).not.toBeChecked();
   await page.getByRole("button", { name: acceptName }).click();
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("");
   await page.getByRole("button", { name: "Dohľadať podľa VIN", exact: true }).click();
+  await openLookupDetails(page.getByTestId("vehicle-lookup"));
   await confirm.check();
   await page.getByRole("button", { name: acceptName }).click();
   await expect(page.getByLabel("Model", { exact: true })).toHaveValue("Návrh modelu");
@@ -724,11 +784,11 @@ test("case lookup uses the selected country and discards a Czech proposal on cou
   await control.getByLabel("EČV", { exact: true }).fill(plate);
   await expect(control.getByLabel("Krajina evidencie")).toHaveValue("CZ");
   await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
-  await expect(control.getByRole("dialog")).toBeVisible();
+  await expect(control.getByLabel("VIN", { exact: true })).toHaveValue(syntheticVin);
+  await expect(control.getByRole("dialog")).toHaveCount(0);
   expect(api.lookupInputs[0]).toMatchObject({ kind: "plate", country: "CZ", knownIdentity: { country: "CZ", plate } });
-  await control.getByRole("button", { name: "Zavrieť návrh dohľadania", exact: true }).click();
   await control.getByLabel("Krajina evidencie").selectOption("SK");
-  await expect(control.getByText("Dohľadané údaje · návrh", { exact: true })).toHaveCount(0);
+  await expect(control.getByRole("button", { name: /Dohľadané údaje|Uložené overenie vozidla/ })).toHaveCount(0);
   expect(api.writes).toHaveLength(0);
 });
 

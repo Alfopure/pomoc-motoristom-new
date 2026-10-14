@@ -728,7 +728,7 @@ function DispatchConsoleContent({
   );
 
   const callsByCaseId = useMemo(() => latestCallByCaseId(visibleCallCenterCalls), [visibleCallCenterCalls]);
-  const effectiveCaseFilters = useMemo(() => caseSearch.trim() && !caseFilters.statusTouched && caseFilters.status === "active" ? { ...caseFilters, status: "all" as const } : caseFilters, [caseFilters, caseSearch]);
+  const effectiveCaseFilters = useMemo(() => caseSearch.trim() ? { ...caseFilters, status: "all" as const } : caseFilters, [caseFilters, caseSearch]);
   const filteredCases = useMemo(() => {
     const branchesById = new Map(branches.map((branch) => [branch.id, branch]));
     const assetsById = new Map(fleetAssets.map((asset) => [asset.id, asset]));
@@ -751,7 +751,7 @@ function DispatchConsoleContent({
   const activeCasesTotal = useMemo(() => dispatchCases.filter(isActiveDispatchCase).length, [dispatchCases]);
   const activeFilterCount = [
     caseSearch.trim(),
-    caseFilters.status !== "all",
+    effectiveCaseFilters.status !== "all",
     caseFilters.priority !== "all",
     caseFilters.ownerId !== "all",
     caseFilters.sourceType !== "all",
@@ -3726,16 +3726,14 @@ function caseMatchesSearch({
     latestTimeline?.body,
   ];
 
-  // Interné číslo prípadu aj externé číslo asistenčnej služby sa hľadajú bez ohľadu na formát
-  // (pomlčky, lomky, medzery) — porovnáva sa iba alfanumerický zvyšok (P-06).
-  const caseNumberQuery = compactSearch(search);
+  // Vehicle and case identifiers match regardless of separators or letter case.
+  const identifierQuery = compactSearch(search);
   const externalReference = caseItem.customerDetails.assistanceReference;
-  const caseNumberMatches =
-    caseNumberQuery.length > 0 &&
-    (compactSearch(caseItem.caseNumber).includes(caseNumberQuery) ||
-      (externalReference ? compactSearch(externalReference).includes(caseNumberQuery) : false));
+  const identifierMatches = identifierQuery.length > 0 &&
+    [caseItem.caseNumber, externalReference, caseItem.vehicle.licensePlate, caseItem.vehicle.vin, asset?.licensePlate]
+      .some(value => Boolean(value && compactSearch(value).includes(identifierQuery)));
 
-  return caseNumberMatches || normalizeSearch(haystack.filter(Boolean).join(" ")).includes(query);
+  return identifierMatches || normalizeSearch(haystack.filter(Boolean).join(" ")).includes(query);
 }
 
 function compareCases(

@@ -124,7 +124,7 @@ export function CaseDirectory({
             />
           </label>
           <div id="directory-filters" className={`${filtersOpen ? "grid" : "hidden"} min-w-0 grid-cols-2 gap-2 md:col-span-2 lg:contents`}>
-          <CaseStatusFilter filters={filters} onChange={onFiltersChange} />
+          <CaseStatusFilter filters={filters} onChange={onFiltersChange} searching={Boolean(search.trim())} />
           <FilterSelect
             label="Priorita"
             value={filters.priority}
