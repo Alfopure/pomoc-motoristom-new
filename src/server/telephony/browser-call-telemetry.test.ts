@@ -24,6 +24,7 @@ function harness() {
     let result = rows[table] ?? [];
     const query = {
       select: () => query,
+      abortSignal: (signal: AbortSignal) => { expect(signal).toBeInstanceOf(AbortSignal); return query; },
       eq: (column: string, value: unknown) => { filters.push([table, "eq", column, value]); result = result.filter(row => row[column] === value); return query; },
       in: (column: string, values: unknown[]) => { filters.push([table, "in", column, values]); result = result.filter(row => values.includes(row[column])); return query; },
       then: (resolve: (value: unknown) => unknown) => Promise.resolve({ data: result, error: null }).then(resolve),
@@ -36,7 +37,7 @@ function harness() {
 describe("browser timing log authorization", () => {
   it("logs only exact legs owned by the actor in the organization and deployment environment", async () => {
     const h = harness();
-    await logBrowserCallObservations(h, "profile-1", [entry, ...["control-other", "control-other-org", "control-dev", "made-up"].map(callControlId => ({ ...entry, callControlId }))]);
+    expect(await logBrowserCallObservations(h, "profile-1", [entry, ...["control-other", "control-other-org", "control-dev", "made-up"].map(callControlId => ({ ...entry, callControlId }))])).toEqual([entry.id]);
     expect(h.logger).toHaveBeenCalledTimes(1);
     expect(h.logger).toHaveBeenCalledWith({ scope: "browser_call_timing", source: "browser", observationId: entry.id, pageId: entry.pageId,
       sessionId: "session-1", legId: "leg-1", environment: "production", phase: "ringtone_start", browserMonotonicMs: 1200, outcome: "ok", durationMs: 3 });
@@ -49,13 +50,13 @@ describe("browser timing log authorization", () => {
     await logBrowserCallObservations(h, "profile-1", []);
     expect(h.from).not.toHaveBeenCalled();
     h.from.mockImplementationOnce(() => { throw new Error("database unavailable"); });
-    await expect(logBrowserCallObservations(h, "profile-1", [entry])).resolves.toBeUndefined();
+    await expect(logBrowserCallObservations(h, "profile-1", [entry])).resolves.toEqual([]);
     expect(h.logger).not.toHaveBeenCalled();
   });
 
   it("isolates an asynchronously rejected log sink", async () => {
     const h = harness();
     h.logger.mockRejectedValue(new Error("log sink unavailable"));
-    await expect(logBrowserCallObservations(h, "profile-1", [entry])).resolves.toBeUndefined();
+    await expect(logBrowserCallObservations(h, "profile-1", [entry])).resolves.toEqual([]);
   });
 });

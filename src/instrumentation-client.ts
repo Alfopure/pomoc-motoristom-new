@@ -2,7 +2,30 @@ import { DIAGNOSTIC_LIMITS } from './lib/diagnostics/types';
 import { flushDiagnostics, recordDiagnostic } from './lib/diagnostics/client';
 import { captureDiagnosticError } from './lib/diagnostics/errors';
 import { flushDiagnosticExceptions } from './lib/diagnostics/sentry';
+import { startupDiagnostics } from './lib/diagnostics/startup';
 try {
+    startupDiagnostics.start();
+    const resumeStartupCheck = () => {
+        if (document.visibilityState === 'hidden') return;
+        document.removeEventListener('visibilitychange', resumeStartupCheck);
+        // A resumed tab gets a full foreground budget; background suspension
+        // is not evidence of failed hydration.
+        setTimeout(checkStartup, 30_000);
+    };
+    const checkStartup = () => {
+        try {
+            if (document.visibilityState === 'hidden') {
+                document.addEventListener('visibilitychange', resumeStartupCheck);
+                return;
+            }
+            if (!startupDiagnostics.timeout()) return;
+            startupDiagnostics.publish(recordDiagnostic);
+            const error = new Error('Application startup timeout');
+            error.name = 'TimeoutError';
+            captureDiagnosticError(error, 'ui_error');
+        } catch { /* Best effort, including before authentication/hydration. */ }
+    };
+    setTimeout(checkStartup, 30_000);
     window.addEventListener('error', (event: Event) => {
         if (event instanceof ErrorEvent) {
             captureDiagnosticError(event.error, 'ui_error', false, { filename: event.filename, lineno: event.lineno, colno: event.colno });

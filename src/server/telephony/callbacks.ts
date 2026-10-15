@@ -121,8 +121,8 @@ export async function loadCallbackQueue(
       .eq("organization_id", organizationId).in("status", ["done", "cancelled"])
       .gte("resolved_at", since).order("resolved_at", { ascending: false }).limit(20),
   ]);
-  if (openResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${openResult.error.message}`, 500);
-  if (resolvedResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${resolvedResult.error.message}`, 500);
+  if (openResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${openResult.error.message}`, 500, undefined, { cause: openResult.error });
+  if (resolvedResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${resolvedResult.error.message}`, 500, undefined, { cause: resolvedResult.error });
   const page = readPriorityPage(openResult.data, organizationId);
   const entries = page.entries.slice(0, CALLBACK_QUEUE_LIMIT);
   const openRows = entries.map(entry => entry.request);
@@ -143,7 +143,7 @@ export async function loadCallbackQueue(
       ? admin.from("motorist_call_sessions").select("id, metadata").eq("organization_id", organizationId).in("id", sessionIds)
       : Promise.resolve({ data: [], error: null }),
   ]);
-  if (sessions.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${sessions.error.message}`, 500);
+  if (sessions.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${sessions.error.message}`, 500, undefined, { cause: sessions.error });
   const lineById = new Map((lines.data ?? []).map((line) => [line.id, line]));
   const nameById = new Map((profiles.data ?? []).map((profile) => [profile.id, profile.display_name]));
   const metadataById = new Map((sessions.data ?? []).map((session) => [session.id, session.metadata]));
@@ -231,7 +231,7 @@ async function loadRequest(deps: CallbackQueueDeps, id: string): Promise<Callbac
     .eq("organization_id", deps.organizationId)
     .eq("id", id)
     .maybeSingle();
-  if (error) throw new CallActionError(`Požiadavku sa nepodarilo načítať: ${error.message}`, 500);
+  if (error) throw new CallActionError(`Požiadavku sa nepodarilo načítať: ${error.message}`, 500, undefined, { cause: error });
   if (!data) throw new CallActionError("Požiadavka na spätné volanie sa nenašla.", 404, "not_found");
   return data;
 }
@@ -249,7 +249,7 @@ async function present(deps: CallbackQueueDeps, row: CallbackRow): Promise<Callb
   const session = row.session_id
     ? await deps.admin.from("motorist_call_sessions").select("metadata").eq("organization_id", deps.organizationId).eq("id", row.session_id).maybeSingle()
     : null;
-  if (session?.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${session.error.message}`, 500);
+  if (session?.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${session.error.message}`, 500, undefined, { cause: session.error });
   return toCallbackPayload(row, { line, claimedByName: await claimantName(deps, row.claimed_by), sessionMetadata: session?.data?.metadata });
 }
 
@@ -322,7 +322,7 @@ export async function claimCallbackRequest(deps: CallbackQueueDeps, actor: CallA
   // Takeover targets the claimant we just read, so it is equally conditional:
   // whoever claims in between wins and the takeover is answered with 409.
   const claimed = await (row.claimed_by ? query.eq("claimed_by", row.claimed_by) : query.is("claimed_by", null)).select("*");
-  if (claimed.error) throw new CallActionError(`Prevzatie požiadavky zlyhalo: ${claimed.error.message}`, 500);
+  if (claimed.error) throw new CallActionError(`Prevzatie požiadavky zlyhalo: ${claimed.error.message}`, 500, undefined, { cause: claimed.error });
   const updated = (claimed.data ?? [])[0] as CallbackRow | undefined;
   if (!updated) {
     const fresh = await loadRequest(deps, id);
@@ -374,7 +374,7 @@ export async function resolveCallbackRequest(
   // to two dispatchers, one of whom then rings a person the queue already
   // records as settled.
   const updated = await (row.claimed_by ? query.eq("claimed_by", row.claimed_by) : query.is("claimed_by", null)).select("*");
-  if (updated.error) throw new CallActionError(`Uzavretie požiadavky zlyhalo: ${updated.error.message}`, 500);
+  if (updated.error) throw new CallActionError(`Uzavretie požiadavky zlyhalo: ${updated.error.message}`, 500, undefined, { cause: updated.error });
   const result = (updated.data ?? [])[0] as CallbackRow | undefined;
   if (!result) {
     const fresh = await loadRequest(deps, id);

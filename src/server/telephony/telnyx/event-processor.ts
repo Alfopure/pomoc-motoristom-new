@@ -9,9 +9,10 @@ import { isArchivedLine } from "../line-archive";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { effectsDeps, ownedSessionWork, runSessionEvent, SessionEventDeferredError, WEBHOOK_LEASE_WAIT_MS, type SessionRunnerDeps } from "../session-runner";
-import { sessionOwnership } from "../ownership";
+import { assertOwnership, sessionOwnership } from "../ownership";
 import { describeServiceError, SessionLeaseBusyError } from "../service-errors";
-import { recordCallEvent, type CommandOutcome } from "../state/effects";
+import { recordCallEvent, resumePendingEffects, type CommandOutcome } from "../state/effects";
+import { readPendingEffects } from "../state/continuation";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { lineInboundMode, toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
 import { readMeta } from "../state/types";
@@ -574,6 +575,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // The durable webhook ledger owns retry. Do not have every simultaneous
     // provider callback poll the same database lease while a control is waiting.
     let failedOwnerReplayEligible = false;
+    let setupRecovery: SessionRow | null = null;
     const result = await ownedSessionWork({ ...deps, leaseWaitMs: WEBHOOK_LEASE_WAIT_MS }, ownedSession.id, async () => {
       processingStarted = true;
       if (eventClass === "bookkeeping") {
@@ -616,6 +618,9 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
 
       if (run.apply.failed) {
         failedOwnerReplayEligible = await markWebhookEventFailed(deps.admin, event.id, run.apply.failure?.error ?? "command failed", { claimedAt: claim.claimedAt, logger: deps.logger });
+        if (!deps.ledgerReplay && !run.apply.failure?.callGone && run.session.writer_contract === 2 &&
+          run.session.direction === "inbound" && !run.session.answered_at && !run.session.ended_at &&
+          ["received", "greeting", "ivr"].includes(run.session.state)) setupRecovery = run.session;
         logResult(deps, event, claim, ownedSession.id, "failed", run.commands, started, now);
         return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "failed", commands: run.commands, notes: run.apply.notes, error: run.apply.failure?.error ?? null });
       }
@@ -640,6 +645,13 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       if (result.outcome === "processed" || result.outcome === "ignored") await replayCorrelatedEvents(deps, event, ownedSession);
       else if (failedOwnerReplayEligible && eventClass === "control" && deps.replayCorrelated !== false) {
         await replayReadySessionEvents(deps, ownedSession, event, true);
+        // The existing retained maintenance gets one prompt recovery, after
+        // queued customer hangups. Never wait five minutes for a pre-dispatch
+        // DB timeout, and never invent a new media/dial command to bypass the
+        // journal's accepted/unknown decision.
+        if (setupRecovery && Date.now() - ingressWall < INLINE_DRAIN_BUDGET_MS) {
+          await recoverInitialSetup(deps, setupRecovery, event.id, ingressWall + INLINE_DRAIN_BUDGET_MS);
+        }
       }
       if (eventClass === "control" && result.outcome === "processed") {
         await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.webhook, now());
@@ -839,6 +851,30 @@ export async function replayDeferredSessionEvents(deps: ProcessorDeps, sessionId
  */
 export async function drainCustomerTerminal(deps: ProcessorDeps, session: SessionRow): Promise<void> {
   await replayReadySessionEvents({ ...deps, replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, session, undefined, true);
+}
+
+async function recoverInitialSetup(deps: ProcessorDeps, known: SessionRow, eventId: string, deadline: number): Promise<void> {
+  try {
+    await ownedSessionWork({ ...deps, leaseWaitMs: 0 }, known.id, async () => {
+      const owner = sessionOwnership.getStore();
+      if (!owner || owner.contract !== 2) return;
+      owner.deadline = Math.min(owner.deadline, Date.now() + 8_000, deadline);
+      if (Date.now() >= owner.deadline) return;
+      const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId)
+        .eq("id", known.id).abortSignal(AbortSignal.timeout(3_000)).maybeSingle();
+      const session = fresh.data;
+      if (fresh.error || !session || session.answered_at || session.ended_at || session.termination_requested_at ||
+        !["received", "greeting", "ivr"].includes(session.state)) return;
+      const entries = readPendingEffects(session).entries;
+      if (entries.length !== 1 || entries[0].id !== eventId || !entries[0].commands.length ||
+        !entries[0].commands.every(command => ["answer", "playback_start", "gather"].includes(command.kind))) return;
+      await resumePendingEffects({ ...effectsDeps(deps), renewLease: () => assertOwnership() }, session);
+    }, { known, eventType: "setup_recovery" });
+  } catch {
+    // No second timer/worker and no recursive maintenance. The same durable
+    // effects and failed ledger remain for provider facts and the existing cron.
+    deps.logger?.({ level: "warn", scope: "webhook", sessionId: known.id, code: "setup_recovery_pending" });
+  }
 }
 
 async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow, current?: TelephonyEvent, customerTerminalOnly = false,

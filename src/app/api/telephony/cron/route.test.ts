@@ -64,6 +64,7 @@ const SUMMARY = {
   configured: true,
   ms: 4,
   jobs: [
+    ...["telephony.ledger.replay", "telephony.effects.recovery", "telephony.telnyx.reconcile", "telephony.ai-demo.cleanup"].map(job => ({ job, status: "ok", detail: {} })),
     { job: "telephony.ring.sweep", status: "ok", detail: { checked: 0, swept: 0, errors: [] } },
     { job: "telephony.sessions.stuck", status: "ok", detail: { stuck: 0 } },
     { job: "telephony.alerts", status: "ok", detail: { health: "ok", alerts: 0, sent: 0 } },
@@ -135,7 +136,7 @@ describe("GET /api/telephony/cron", () => {
     // The tail jobs are timed too, so the budget split is visible in the response.
     for (const job of body.jobs.slice(-4)) expect(job).toMatchObject({ ms: expect.any(Number), startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
     expect(createTelephonyDeps).toHaveBeenCalledWith({ sweepAfterEvent: false });
-    expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1", admin: heartbeatAdmin }, { cronStartedAt: expect.any(Number) });
+    expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1", admin: heartbeatAdmin, onJobError: expect.any(Function) }, { cronStartedAt: expect.any(Number) });
     expect(materializeDueTaskReminders).toHaveBeenCalledTimes(1);
     expect(materializeDuePauseEndingNotifications).toHaveBeenCalledTimes(1);
     expect(startCronMonitor).toHaveBeenCalledWith(Date.parse(body.startedAt));
@@ -168,7 +169,7 @@ describe("GET /api/telephony/cron", () => {
     expect(body.jobs.find((job: {job: string}) => job.job === "notifications.materialize")).toMatchObject({ job: "notifications.materialize", status: "failed", error: "reminders down" });
     expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 4);
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "degraded");
-    expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "degraded");
+    expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "auxiliary_degraded");
     consoleError.mockRestore();
   });
 
@@ -228,8 +229,31 @@ describe("GET /api/telephony/cron", () => {
     expect(runtime.jobs).toHaveLength(body.jobs.length);
     expect(JSON.stringify(runtime)).not.toContain("private database response");
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "degraded");
-    expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "degraded");
+    expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "auxiliary_degraded");
     log.mockRestore();
+  });
+
+
+  it("contains an unexpected recording failure, retains its original error and still runs diagnostics", async () => {
+    const failure = new Error("recording transport failed");
+    runRecordingProcessing.mockRejectedValue(failure);
+    const response = await GET(cronRequest(SECRET));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ status: "degraded", executionStatus: "degraded", readinessStatus: "auxiliary_degraded", failedJobs: ["telephony.recordings.process"] });
+    expect(runDiagnosticsMaintenance).toHaveBeenCalledOnce();
+    expect(deferServerError).toHaveBeenCalledWith(failure, { source: "cron", route: "/api/telephony/cron" });
+    expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "degraded");
+    expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "auxiliary_degraded");
+  });
+
+  it("never hides critical recovery failure behind an auxiliary failure", async () => {
+    runTelephonyCronJobs.mockResolvedValue({ ...SUMMARY, status: "degraded", jobs: SUMMARY.jobs.map(job => job.job === "telephony.effects.recovery"
+      ? { ...job, status: "failed", detail: { stageErrors: [{ stage: "wrap_up", error: "read unavailable" }] } } : job) });
+    runRecordingProcessing.mockResolvedValue({ job: "telephony.recordings.process", status: "failed", detail: {} });
+    const body = await (await GET(cronRequest(SECRET))).json();
+    expect(body).toMatchObject({ readinessStatus: "degraded", criticalFailedJobs: ["telephony.effects.recovery"], auxiliaryFailedJobs: ["telephony.recordings.process"] });
+    expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "degraded");
   });
 
   it("distinguishes a successfully suppressed alert from unhealthy telephony", async () => {

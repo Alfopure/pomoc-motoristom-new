@@ -5,6 +5,7 @@ import { addDiagnosticBreadcrumb, getDiagnosticUiContext, resetDiagnosticUiConte
 import { reserveDiagnosticAttempt } from './traffic';
 import { clearDiagnosticExceptions } from './sentry';
 import { createDiagnosticPersistence, type DiagnosticIdentity, type DiagnosticPersistence } from './persistence';
+import { startupDiagnostics } from './startup';
 export { setDiagnosticCallContext, retainDiagnosticCallContext } from './context';
 
 const QUEUE_PAYLOAD_BYTES = 107 * 1024; // Preserve the stricter payload budget below the 128 KiB ceiling.
@@ -323,6 +324,7 @@ catch {
 export function setDiagnosticIdentity(actor: DiagnosticIdentity | null): void {
     try {
         instance().setIdentity(actor);
+        if (actor) startupDiagnostics.publish(recordDiagnostic);
         if (!actor) {
             clearDiagnosticExceptions();
             try {

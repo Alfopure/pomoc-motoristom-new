@@ -86,9 +86,9 @@ export function observeDatabaseTimeout(signal?: AbortSignal | null): () => void 
   return () => signal.removeEventListener("abort", aborted);
 }
 
-export function requestTimingContext(): { request_id: string; ingress_at: string } | null {
+export function requestTimingContext(): { request_id: string; ingress_at: string; route: MeasuredRoute; database_timeouts: number } | null {
   const scope = requests.getStore();
-  return scope && !scope.finished ? { request_id: scope.id, ingress_at: scope.ingressAt } : null;
+  return scope && !scope.finished ? { request_id: scope.id, ingress_at: scope.ingressAt, route: scope.route, database_timeouts: scope.dbAborts } : null;
 }
 
 function newScope(route: MeasuredRoute, now: () => number, logger: RequestMetrics["logger"], parent?: RequestMetrics): RequestMetrics {

@@ -2001,7 +2001,7 @@ function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEve
     const answered = Boolean(b.session.answered_at);
     b.setState("ended").patchSession({ ended_at: at });
     b.call.status = answered ? "ended" : "abandoned_queue";
-    b.call.end_reason = appHangup ? "operator_hangup" : "abandoned_in_queue";
+    b.call.end_reason = appHangup ? "operator_hangup" : answered ? cause : "abandoned_in_queue";
     b.call.ended_at = at;
     if (!answered) b.callback({ source: "missed", callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id) });
     releaseTalkingOperators(b, answered);

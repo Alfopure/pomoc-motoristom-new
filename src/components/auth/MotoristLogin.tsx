@@ -4,6 +4,7 @@ import type { FormEvent } from "react";
 import { useState } from "react";
 import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { isExpectedLoginRejection } from "@/lib/diagnostics/auth-error";
 import { captureDiagnosticError } from "@/lib/diagnostics/errors";
 import { loginDestination } from "./login-destination";
 import { AppReleaseBadge } from "@/components/pwa/AppReleaseBadge";
@@ -32,16 +33,20 @@ export function MotoristLogin({ message, returnTo, appRelease }: { message: stri
     setStatus("working");
     setError(null);
 
-    const supabase = createSupabaseBrowserClient();
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: normalizedEmail,
-      password,
-    });
-
-    if (signInError) {
-      captureDiagnosticError(signInError);
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const { error: signInError } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
+      if (signInError) {
+        const expected = isExpectedLoginRejection(signInError);
+        if (!expected) captureDiagnosticError(signInError);
+        setStatus("error");
+        setError(expected ? "Prihlásenie zlyhalo. Skontroluj email a heslo." : "Prihlásenie sa nepodarilo dokončiť. Skús to znova o chvíľu.");
+        return;
+      }
+    } catch (error) {
+      captureDiagnosticError(error);
       setStatus("error");
-      setError("Prihlásenie zlyhalo. Skontroluj email a heslo.");
+      setError("Prihlásenie sa nepodarilo dokončiť. Skús to znova o chvíľu.");
       return;
     }
 

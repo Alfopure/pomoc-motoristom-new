@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { cronHeartbeatConfiguration, cronHeartbeatReady, CRON_HEARTBEAT_LIMITS, recordCronHeartbeat } from "./cron-heartbeat";
+import { cronHeartbeatConfiguration, cronHeartbeatReadiness, cronHeartbeatReady, CRON_HEARTBEAT_LIMITS, recordCronHeartbeat } from "./cron-heartbeat";
 
 const NOW = Date.parse("2026-10-06T20:00:00Z");
 const RELEASE = "a".repeat(40);
@@ -80,7 +80,7 @@ describe("stable deployment cron completion boundary", () => {
 });
 
 describe("bounded durable completion marker", () => {
-  it.each(["ok", "degraded", "failed"] as const)("records completed %s execution in one isolated row", async status => {
+  it.each(["ok", "auxiliary_degraded", "degraded", "failed"] as const)("records completed %s execution in one isolated row", async status => {
     expect(await recordCronHeartbeat(admin, NOW - 2_000, status, TEST_ENV)).toBe(true);
     expect(from).toHaveBeenCalledExactlyOnceWith("motorist_worker_status");
     expect(upsert).toHaveBeenCalledExactlyOnceWith({ instance_id: INSTANCE, deployment_version: RELEASE,
@@ -115,6 +115,26 @@ describe("bounded durable completion marker", () => {
 });
 
 describe("readiness of the completed existing cron", () => {
+
+  it("accepts a fresh explicitly auxiliary degradation, but not a stale one", async () => {
+    read.mockResolvedValue({ data: { ...healthy(), scheduler_status: "auxiliary_degraded" }, error: null });
+    expect(await cronHeartbeatReadiness(admin, TEST_ENV)).toEqual({ ready: true, reason: "auxiliary_degraded" });
+    vi.setSystemTime(NOW + CRON_HEARTBEAT_LIMITS.maxAgeMs);
+    expect(await cronHeartbeatReadiness(admin, TEST_ENV)).toEqual({ ready: false, reason: "heartbeat_stale" });
+  });
+
+  it.each(["degraded", "failed"])("identifies critical/legacy %s without exposing stored data", async scheduler_status => {
+    read.mockResolvedValue({ data: { ...healthy(), scheduler_status }, error: null });
+    expect(await cronHeartbeatReadiness(admin, TEST_ENV)).toEqual({ ready: false, reason: "critical_jobs_failed" });
+  });
+
+  it("distinguishes missing and unavailable markers with safe reason codes", async () => {
+    read.mockResolvedValue({ data: null, error: null });
+    expect(await cronHeartbeatReadiness(admin, TEST_ENV)).toEqual({ ready: false, reason: "heartbeat_missing" });
+    read.mockResolvedValue({ data: null, error: { message: "private SQL or token" } });
+    expect(await cronHeartbeatReadiness(admin, TEST_ENV)).toEqual({ ready: false, reason: "heartbeat_unavailable" });
+  });
+
   it("reads only its primary key and accepts a fresh success from the previous release", async () => {
     read.mockResolvedValue({ data: { ...healthy(), deployment_version: "b".repeat(40) }, error: null });
     expect(await cronHeartbeatReady(admin, TEST_ENV)).toBe(true);

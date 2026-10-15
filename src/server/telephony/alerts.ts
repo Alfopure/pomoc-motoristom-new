@@ -82,7 +82,7 @@ function scopedAlerts(alert: TelephonyAlert, checkedAt: string): TelephonyAlert[
   if (alert.check === "connections" && Array.isArray(alert.detail.entries)) {
     const entries = alert.detail.entries.filter((value) => {
       const entry = alertObject(value);
-      return ["unknown", "ended_without_confirmation"].includes(String(entry.outcome)) ||
+      return ["unknown", "ended_without_confirmation", "setup_failed"].includes(String(entry.outcome)) ||
         entry.outcome === "pending" && (typeof entry.failedAt !== "string" || Date.parse(checkedAt) - Date.parse(entry.failedAt) >= 30_000);
     });
     alert = { ...alert, detail: { ...alert.detail, entries, sessionIds: entries.map((entry) => alertObject(entry).sessionId) } };

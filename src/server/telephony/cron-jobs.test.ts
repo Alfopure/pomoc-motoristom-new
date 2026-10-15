@@ -5,7 +5,7 @@ import { CONNECTION_ID, createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@
 import { encodeClientState } from "./telnyx/client-state";
 import { processTelnyxEvent } from "./telnyx/event-processor";
 import { AI_DEMO_CLEANUP_JOB, ALERT_JOB, detectStuckSessions, EFFECTS_RECOVERY_JOB, LEDGER_PRUNE_JOB,
-  LEDGER_REPLAY_JOB, pruneWebhookLedger, RECONCILE_JOB, reconcileWithTelnyx, replayStalledWebhookEvents, REPLAY_BATCH_SIZE, RING_SWEEP_LIMIT, runRingSweep, runTelephonyCronJobs, RING_SWEEP_JOB, STUCK_SESSION_JOB } from "./cron-jobs";
+  LEDGER_REPLAY_JOB, LEDGER_PRUNE_BATCH_SIZE, pruneWebhookLedger, runPendingEffectRecovery, isolatedCronJob, RECONCILE_JOB, reconcileWithTelnyx, replayStalledWebhookEvents, REPLAY_BATCH_SIZE, RING_SWEEP_LIMIT, runRingSweep, runTelephonyCronJobs, RING_SWEEP_JOB, STUCK_SESSION_JOB } from "./cron-jobs";
 
 // A pass-through spy: every replay still runs the real processor, the cron's
 // call shape is just observable.
@@ -102,6 +102,138 @@ describe("telephony cron jobs", () => {
     expect(remaining).toEqual(["old-failed", "playback-1d", "playback-8d", "recent-processed"]);
     expect(h.db.find("motorist_telnyx_webhook_events", (row) => row.event_id === "playback-8d")?.payload).toBeNull();
     expect(h.db.find("motorist_telnyx_webhook_events", (row) => row.event_id === "playback-1d")?.payload).toEqual({ a: 1 });
+  });
+
+
+  it("recovers due terminal obligations and retains a critical failure when the wrap-up read fails", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    h.db.update("motorist_call_sessions", { termination_next_attempt_at: h.now().toISOString() }, row => row.id === sessionId);
+    h.db.failNext("motorist_operator_presence", "select", "wrap-up read unavailable");
+    const runSession = vi.fn(async () => {
+      h.db.update("motorist_call_sessions", { termination_next_attempt_at: null, pending_effects: null, effects_next_attempt_at: null }, row => row.id === sessionId);
+    });
+    const onJobError = vi.fn();
+    const result = await runPendingEffectRecovery({ ...h.deps, runSession, onJobError });
+    expect(result).toMatchObject({ status: "failed", detail: { checked: 1, wrapUp: null, presence: { errors: [] }, stageErrors: [{ stage: "wrap_up" }], errors: [] } });
+    expect(runSession).toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: "sweep" }));
+    expect(onJobError).toHaveBeenCalledWith(expect.objectContaining({ cause: expect.objectContaining({ message: "wrap-up read unavailable" }) }), EFFECTS_RECOVERY_JOB);
+  });
+
+  it("continues due termination recovery when another independent queue scan fails", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    h.db.update("motorist_call_sessions", { termination_next_attempt_at: h.now().toISOString() }, row => row.id === sessionId);
+    // No ended-session presence is a candidate; the first session SELECT is
+    // the pending-effects scan, independent of the fourth termination scan.
+    h.db.update("motorist_operator_presence", { status: "offline", current_session_id: null }, () => true);
+    h.db.failNext("motorist_call_sessions", "select", "effects scan unavailable");
+    const runSession = vi.fn(async () => {
+      h.db.update("motorist_call_sessions", { termination_next_attempt_at: null, pending_effects: null, effects_next_attempt_at: null }, row => row.id === sessionId);
+    });
+    const result = await runPendingEffectRecovery({ ...h.deps, runSession });
+    expect(result).toMatchObject({ status: "failed", detail: { checked: 1, stageErrors: [{ stage: "pending_effects" }], errors: [] } });
+    expect(runSession).toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: "sweep" }));
+  });
+
+
+  it("runs all independent jobs after a failed initial wrap-up read", async () => {
+    const h = createTelephonyHarness();
+    h.db.failNext("motorist_operator_presence", "select", "wrap-up unavailable");
+    const report = await runTelephonyCronJobs(h.deps);
+    expect(report.status).toBe("degraded");
+    expect(report.jobs).toHaveLength(8);
+    expect(report.jobs.find(job => job.job === EFFECTS_RECOVERY_JOB)).toMatchObject({ status: "failed", detail: { stageErrors: [{ stage: "wrap_up" }] } });
+    expect(report.jobs.find(job => job.job === ALERT_JOB)?.status).toBe("ok");
+    expect(report.jobs.find(job => job.job === LEDGER_PRUNE_JOB)?.status).toBe("ok");
+  });
+
+  it("preserves terminal-facts ordering after an unexpected replay abort while still running monitoring and retention", async () => {
+    const h = createTelephonyHarness();
+    const read = vi.spyOn(h.deps.admin, "from").mockImplementationOnce(() => { throw new Error("ledger transport unavailable"); });
+    const runSession = vi.fn();
+    const onJobError = vi.fn();
+    const report = await runTelephonyCronJobs({ ...h.deps, runSession, onJobError });
+    expect(report.jobs.find(job => job.job === LEDGER_REPLAY_JOB)).toMatchObject({ status: "failed", detail: { reason: "unexpected_job_failure" } });
+    for (const name of [RING_SWEEP_JOB, EFFECTS_RECOVERY_JOB, RECONCILE_JOB, STUCK_SESSION_JOB, AI_DEMO_CLEANUP_JOB]) {
+      expect(report.jobs.find(job => job.job === name)).toMatchObject({ status: "failed", detail: { reason: "terminal_replay_unavailable" } });
+    }
+    expect(runSession).not.toHaveBeenCalled();
+    expect(onJobError).toHaveBeenCalledWith(expect.any(Error), LEDGER_REPLAY_JOB);
+    expect(report.jobs.find(job => job.job === ALERT_JOB)?.status).toBe("ok");
+    expect(report.jobs.find(job => job.job === LEDGER_PRUNE_JOB)?.status).toBe("ok");
+    read.mockRestore();
+  });
+
+
+  it.each(["stalled", "deferred"] as const)("blocks dependent mutations when the %s ledger scan returns a database error", async scan => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    await h.inbound({ to: "+421232408718" });
+    h.advance(60_000); // A real ring sweep is due, not just an empty scheduler.
+    const original = h.db.takeInjectedError.bind(h.db);
+    let ledgerReads = 0;
+    const failure = { code: "57014", message: "ledger scan timeout", details: null, hint: null };
+    const read = vi.spyOn(h.db, "takeInjectedError").mockImplementation((table, operation) => {
+      if (table === "motorist_telnyx_webhook_events" && operation === "select" && ++ledgerReads === (scan === "stalled" ? 1 : 2)) return failure;
+      return original(table, operation);
+    });
+    const runSession = vi.fn();
+    const onJobError = vi.fn();
+    const report = await runTelephonyCronJobs({ ...h.deps, runSession, onJobError });
+    expect(report.status).toBe("degraded");
+    expect(report.jobs.find(job => job.job === LEDGER_REPLAY_JOB)).toMatchObject({ status: "failed", detail: { reason: "terminal_replay_unavailable" } });
+    for (const name of [RING_SWEEP_JOB, EFFECTS_RECOVERY_JOB, RECONCILE_JOB, STUCK_SESSION_JOB, AI_DEMO_CLEANUP_JOB]) {
+      expect(report.jobs.find(job => job.job === name)).toMatchObject({ status: "failed", detail: { reason: "terminal_replay_unavailable" } });
+    }
+    expect(runSession).not.toHaveBeenCalled();
+    expect(onJobError).toHaveBeenCalledWith(failure, LEDGER_REPLAY_JOB);
+    expect(report.jobs.find(job => job.job === ALERT_JOB)?.status).toBe("ok");
+    expect(report.jobs.find(job => job.job === LEDGER_PRUNE_JOB)?.status).toBe("ok");
+    read.mockRestore();
+  });
+
+  it("keeps independent recovery enabled after a scanned event fails replay", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    h.advance(60_000);
+    const old = new Date(h.now().getTime() - 120_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{ organization_id: ORG, event_id: "isolated-event-failure", event_type: "call.answered",
+      status: "failed", attempts: 1, received_at: old, occurred_at: old, payload: {} }]);
+    const runSession = vi.fn(async () => ({ outcome: "ignored" }));
+    const replayEvent = vi.fn(async () => ({ outcome: "failed", error: "individual event rejected" }));
+    const report = await runTelephonyCronJobs({ ...h.deps, runSession, replayEvent });
+    expect(report.jobs.find(job => job.job === LEDGER_REPLAY_JOB)).toMatchObject({ status: "failed", detail: { attempted: 1, failed: 1 } });
+    expect(report.jobs.find(job => job.job === RING_SWEEP_JOB)).toMatchObject({ status: "ok", detail: { swept: 1 } });
+    expect(runSession).toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: "sweep" }), expect.anything());
+    expect(report.jobs.some(job => job.detail.reason === "terminal_replay_unavailable")).toBe(false);
+  });
+
+  it("contains a thrown job and a broken observer without claiming recovery succeeded", async () => {
+    const error = new Error("critical job read failed");
+    const onJobError = vi.fn(() => { throw new Error("observer unavailable"); });
+    expect(await isolatedCronJob(EFFECTS_RECOVERY_JOB, async () => { throw error; }, { onJobError })).toMatchObject({
+      job: EFFECTS_RECOVERY_JOB, status: "failed", detail: { reason: "unexpected_job_failure" }, error: error.message, ms: expect.any(Number),
+    });
+    expect(onJobError).toHaveBeenCalledWith(error, EFFECTS_RECOVERY_JOB);
+  });
+
+  it("bounds each prune pass and drains the next oldest batch on the next tick", async () => {
+    const h = createTelephonyHarness();
+    const old = new Date(h.now().getTime() - 31 * DAY).toISOString();
+    const noisy = new Date(h.now().getTime() - 8 * DAY).toISOString();
+    const count = LEDGER_PRUNE_BATCH_SIZE + 3;
+    const rows = Array.from({ length: count }, (_, i) => ({ organization_id: ORG, event_id: `old-${String(i).padStart(4, "0")}`, event_type: "call.hangup", status: "processed", received_at: old, payload: {} }));
+    h.db.seed("motorist_telnyx_webhook_events", [...rows,
+      ...rows.map(row => ({ ...row, event_id: row.event_id.replace("old", "noisy"), event_type: "call.playback.ended", received_at: noisy })),
+      { ...rows[0], event_id: "foreign", organization_id: "other-org" },
+      { ...rows[0], event_id: "unprocessed", status: "failed" },
+    ]);
+    expect(await pruneWebhookLedger(h.deps)).toMatchObject({ status: "ok", detail: { deleted: LEDGER_PRUNE_BATCH_SIZE, payloadsCleared: LEDGER_PRUNE_BATCH_SIZE, moreDeletes: true, morePayloads: true } });
+    expect(h.db.find("motorist_telnyx_webhook_events", row => row.event_id === "old-0000")).toBeNull();
+    expect(h.db.find("motorist_telnyx_webhook_events", row => row.event_id === "old-0250")).toBeDefined();
+    expect(await pruneWebhookLedger(h.deps)).toMatchObject({ status: "ok", detail: { deleted: 3, payloadsCleared: 3, moreDeletes: false, morePayloads: false } });
+    expect(h.db.find("motorist_telnyx_webhook_events", row => row.event_id === "foreign")).toBeDefined();
+    expect(h.db.find("motorist_telnyx_webhook_events", row => row.event_id === "unprocessed")).toBeDefined();
   });
 
   it("replays abandoned and historically exhausted deliveries while preserving fresh claims", async () => {

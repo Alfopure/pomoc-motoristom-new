@@ -1,4 +1,4 @@
-import { measureRequestStep, withRequestMetrics, withBackgroundRequestMetrics } from "@/server/request-metrics";
+import { measureRequestStep, requestTimingContext, withRequestMetrics, withBackgroundRequestMetrics } from "@/server/request-metrics";
 import { after } from "next/server";
 import { createTelephonyDeps, notConfiguredResponse, telephonyLogger } from "@/server/telephony/runtime";
 import { getTelnyxConfig } from "@/server/telephony/telnyx/env";
@@ -10,6 +10,21 @@ export const dynamic = "force-dynamic";
 // Leave room to finish ledger/teardown writes during a provider or database
 // latency spike instead of killing an already-applied call transition at 30s.
 export const maxDuration = 60;
+
+/** Retained reporting stays outside the cold call-control import and response path. */
+function reportWebhookFailure(error: unknown, details: { sessionId?: string | null; eventId?: string | null; retryable: boolean; attempt?: number; status: number }) {
+  if (process.env.DIAGNOSTICS_SERVER_ERRORS_ENABLED !== "true") return;
+  const requestId = requestTimingContext()?.request_id;
+  try {
+    after(async () => {
+      try {
+        const { captureServerError } = await import("@/server/diagnostics/server-errors");
+        await captureServerError(error, { source: "telephony", route: "call.webhook", requestId, status: details.status,
+          callSessionId: details.sessionId ?? undefined, eventId: details.eventId ?? undefined, retryable: details.retryable, attempt: details.attempt });
+      } catch { /* Reporting cannot change provider acknowledgement or call control. */ }
+    });
+  } catch { /* No retained lifecycle; no detached background task. */ }
+}
 
 /**
  * Telnyx Call Control webhook (design §2.3).
@@ -52,6 +67,15 @@ export async function POST(request: Request) {
       const deps = await measureRequestStep("read", () => createTelephonyDeps({ config }));
       const result = await processTelnyxEvent({ ...deps, deferMaintenance: (work) => after(withBackgroundRequestMetrics(work)) }, envelope);
 
+      // Busy claims and pending correlation deliberately request provider retry.
+      // First technical failure and terminal unresolved outcomes need a signal;
+      // ordinary later redeliveries already have durable ledger/incident evidence.
+      if (result.outcome === "unresolved" || result.outcome === "failed" && (result.status === 200 || (result.claim?.attempts ?? 1) <= 1)) {
+        const code = result.outcome === "unresolved" ? "webhook_unresolved" : "webhook_processing_failed";
+        reportWebhookFailure(Object.assign(new Error(code), { code }), { sessionId: result.sessionId, eventId: result.eventId,
+          retryable: result.status >= 500, attempt: result.claim?.attempts, status: result.status });
+      }
+
       return Response.json(
         {
           ok: result.status === 200,
@@ -65,6 +89,7 @@ export async function POST(request: Request) {
         { status: result.status },
       );
     } catch (error) {
+      reportWebhookFailure(error, { retryable: true, status: 500 });
       telephonyLogger({ level: "error", scope: "webhook", message: "processing failed", error: error instanceof Error ? error.message : String(error) });
       return Response.json({ error: "processing_failed" }, { status: 500 });
     }

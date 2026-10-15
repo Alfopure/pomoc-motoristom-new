@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from "next";
 import { Poppins } from "next/font/google";
 import Script from "next/script";
 import { ServiceWorkerRegistration } from "@/components/pwa/ServiceWorkerRegistration";
+import { StartupDiagnostics } from "@/components/diagnostics/StartupDiagnostics";
 import "./globals.css";
 
 const poppins = Poppins({
@@ -53,6 +54,7 @@ export default function RootLayout({
       className={`${poppins.variable} h-full antialiased`}
     >
       <body className="min-h-full bg-zinc-100">
+        <StartupDiagnostics />
         {process.env.NODE_ENV === "development" && <DevelopmentCacheReset />}
         {process.env.NODE_ENV === "production" && <ServiceWorkerRegistration />}
         {resolveAppEnvironment() === "test" && (
