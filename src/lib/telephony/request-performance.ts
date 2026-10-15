@@ -1,9 +1,11 @@
 import { callPerformanceOperation, isCallPerformanceOperation, type CallPerformanceOperation } from "./performance-operation";
+import { browserPerformanceBuild, performanceBuild, performanceTimestamp } from "./performance-metadata";
 
 export type BrowserRequestPerformance = {
   id: string; operation: CallPerformanceOperation; ms: number;
   outcome: "ok" | "accepted" | "failed" | "timeout" | "cancelled";
   status?: number; requestId?: string;
+  clientBuild?: string; requestBuild?: string; startedAt?: string; completedAt?: string;
 };
 export const REQUEST_PERFORMANCE_BATCH_LIMIT = 16;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -17,12 +19,16 @@ export function readRequestPerformance(value: unknown): BrowserRequestPerformanc
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
     const row = item as Record<string, unknown>;
     if (typeof row.id !== "string" || !UUID.test(row.id) || seen.has(row.id) || !isCallPerformanceOperation(row.operation) ||
-      typeof row.ms !== "number" || !Number.isFinite(row.ms) || row.ms < 0 || row.ms > 120_000 ||
+      typeof row.ms !== "number" || !Number.isFinite(row.ms) || row.ms < 0 || row.ms > Number.MAX_SAFE_INTEGER ||
       typeof row.outcome !== "string" || !outcomes.has(row.outcome)) return [];
     seen.add(row.id);
     return [{ id: row.id, operation: row.operation, ms: Math.round(row.ms * 10) / 10, outcome: row.outcome as BrowserRequestPerformance["outcome"],
       ...(typeof row.status === "number" && Number.isInteger(row.status) && row.status >= 100 && row.status <= 599 ? { status: row.status } : {}),
-      ...(typeof row.requestId === "string" && UUID.test(row.requestId) ? { requestId: row.requestId } : {}) }];
+      ...(typeof row.requestId === "string" && UUID.test(row.requestId) ? { requestId: row.requestId } : {}),
+      ...(performanceBuild(row.clientBuild) ? { clientBuild: row.clientBuild as string } : {}),
+      ...(performanceBuild(row.requestBuild) ? { requestBuild: row.requestBuild as string } : {}),
+      ...(performanceTimestamp(row.startedAt) ? { startedAt: row.startedAt as string } : {}),
+      ...(performanceTimestamp(row.completedAt) ? { completedAt: row.completedAt as string } : {}) }];
   });
 }
 
@@ -33,7 +39,7 @@ export class RequestPerformanceQueue {
   constructor(private readonly now = () => performance.now()) {}
   record(row: BrowserRequestPerformance): void {
     const valid = readRequestPerformance([row])[0];
-    if (!valid) return;
+    if (!valid) { this.dropped++; return; }
     this.pending.push({ at: this.now(), row: valid });
     if (this.pending.length > 64) { this.pending.shift(); this.dropped++; }
   }
@@ -60,12 +66,15 @@ export function beginRequestPerformance(input: string, method?: string): (result
     const operation = callPerformanceOperation(input, method ?? "GET");
     if (!operation || typeof window === "undefined") return () => {};
     const started = performance.now();
+    const startedAt = new Date().toISOString();
+    const clientBuild = browserPerformanceBuild();
     const id = crypto.randomUUID();
     let finished = false;
     return result => {
       if (finished) return;
       finished = true;
-      try { requestPerformanceQueue().record({ ...result, id, operation, ms: performance.now() - started }); }
+      try { requestPerformanceQueue().record({ ...result, id, operation, ms: performance.now() - started,
+        clientBuild, startedAt, completedAt: new Date().toISOString() }); }
       catch { /* Optional telemetry must preserve the call result. */ }
     };
   } catch { return () => {}; }
