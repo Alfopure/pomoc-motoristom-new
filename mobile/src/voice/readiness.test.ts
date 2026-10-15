@@ -5,12 +5,24 @@ import type { MobileVoiceReadiness } from "../../../src/lib/mobile-api";
 
 const now = Date.parse("2026-10-15T13:00:00Z");
 const configuration: MobileVoiceReadiness = { ok: true, apiVersion: 1, environment: "test", profileId: "operator", checkedAt: new Date(now).toISOString(), nativeCallingEnabled: true, backgroundIncomingEnabled: true };
-const state: PhoneState = { supported: true, registration: "registered", takeoverRequired: false, call: null, termination: null, dialing: false, cancelingAttempt: false,
+const state: PhoneState = { nativeSyncPending: false, holdPhase: "idle", supported: true, registration: "registered", takeoverRequired: false, call: null, termination: null, dialing: false, cancelingAttempt: false,
   audioActive: false, muted: false, speaker: false, error: null, microphonePermission: "granted", pushRegistered: true,
   lastHeartbeatAt: new Date(now).toISOString(), heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null };
 const inspect = (changes: Partial<PhoneState> = {}, options: Partial<Parameters<typeof phoneReadiness>[0]> = {}) => phoneReadiness({ state: { ...state, ...changes }, configuration, presence: "available", now, ...options });
 
 describe("operator phone readiness", () => {
+  it("shows confirmed hold separately from an active conversation", () => {
+    expect(inspect({ call: { id: "call", sessionId: "session", state: "ACTIVE", number: null, outgoing: false, connected: true,
+      media: { version: 8, state: "held", canHold: true, callControlId: "leg" } } }).title).toBe("Hovor je podržaný");
+  });
+  it.each(["requesting", "pending", "uncertain"] as const)("does not promise a settled call while hold is %s", holdPhase => {
+    const result = inspect({ holdPhase, call: { id: "call", sessionId: "session", state: "ACTIVE", number: null, outgoing: false, connected: true } });
+    expect(result.title).toBe("Overujem stav podržania…"); expect(result.tone).toBe("warning"); expect(result.canConnect).toBe(false);
+  });
+  it("keeps system reconciliation pending after the server has settled", () => {
+    expect(inspect({ nativeSyncPending: true, call: { id: "call", sessionId: "session", state: "ACTIVE", number: null, outgoing: false, connected: true,
+      media: { version: 8, state: "active", canHold: true, callControlId: "leg" } } }).title).toBe("Overujem stav podržania…");
+  });
   it("does not infer native support from enabled backend flags", () => {
     const result = inspect({ supported: false });
     expect(result.canConnect).toBe(false); expect(result.tone).not.toBe("success");

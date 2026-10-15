@@ -882,6 +882,12 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
   // renews/fences at dispatch. Renewing again at each wrapper does not add a
   // stronger boundary, but serializes several DB requests ahead of each call.
   if (sessionOwnership.getStore()?.contract !== 2) await assertOwnership();
+  if (command.nativeHold && !["hangup", "recording_stop", "conference_leave"].includes(command.kind)) {
+    const { assertNativeHoldAuthority } = await import("../native-hold-authority");
+    const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
+    if (fresh.error || !fresh.data) throw new EffectsError("Native hold authority unavailable");
+    await assertNativeHoldAuthority(deps, fresh.data, command.nativeHold);
+  }
   const telnyx = requireTelnyx(deps);
   // Defense at the provider boundary: even a replayed/stale command cannot
   // promote an invited leg to audible audio or remove its provider mute.

@@ -1,7 +1,8 @@
 import { requireMobileActor } from "@/server/mobile/auth";
 import { mobileError, mobileJson, mobileScope } from "@/server/mobile/http";
-import { nativeVoiceDeps, requireNativeLease, requireNativeSession } from "@/server/mobile/voice";
+import { nativeVoiceDeps, requireNativeLease } from "@/server/mobile/voice";
 import { readJsonBody } from "@/server/telephony/runtime";
+import { readNativeCallStatus } from "@/server/mobile/voice-hold";
 
 export const runtime = "nodejs";
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
@@ -9,9 +10,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const actor = await requireMobileActor(request); const deps = await nativeVoiceDeps(actor, { cleanup: true });
     const body = await readJsonBody(request); const { id } = await context.params;
     await requireNativeLease(deps, actor, body.deviceSessionId, { cleanup: true });
-    const session = await requireNativeSession(deps, actor, id, { readOffer: true });
-    return mobileJson({ ...mobileScope(actor), sessionId: id, state: session.state,
-      connected: session.nativeConnected && Boolean(session.answered_at) && session.state === "talking" && !session.ended_at && !session.termination_requested_at,
-      ended: session.nativeEnded, terminationPending: Boolean(session.termination_requested_at && !session.ended_at) });
+    return mobileJson({ ...mobileScope(actor), ...await readNativeCallStatus(deps, actor, id, String(body.deviceSessionId)) });
   } catch (error) { return mobileError(error, "Stav hovoru sa nepodarilo overiť."); }
 }

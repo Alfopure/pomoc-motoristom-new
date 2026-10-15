@@ -1,0 +1,20 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { POST as change } from '@/app/api/mobile/v1/voice/calls/[id]/hold/route';
+import { POST as resolve } from '@/app/api/mobile/v1/voice/calls/[id]/hold/status/route';
+import { MutationError } from '@/server/mutation-error';
+const m = vi.hoisted(() => ({ actor: vi.fn(), deps: vi.fn(), change: vi.fn(), resolve: vi.fn() }));
+vi.mock('./auth', () => ({ requireMobileActor: m.actor, mobileEnvironment: () => 'test' }));
+vi.mock('./voice', () => ({ nativeVoiceDeps: m.deps }));
+vi.mock('./voice-hold', () => ({ changeNativeHold: m.change, resolveNativeHold: m.resolve }));
+const actor = { profileId: 'operator', organizationId: 'org', role: 'dispatcher' };
+const body = { deviceSessionId: '11111111-1111-4111-8111-111111111111', requestId: '22222222-2222-4222-8222-222222222222', callControlId: 'exact-control', held: true, expectedVersion: 5 };
+const context = { params: Promise.resolve({ id: '33333333-3333-4333-8333-333333333333' }) };
+const request = (text = JSON.stringify(body)) => new Request('https://test.dispecing.linkapomoci.sk/api/mobile/v1/voice/calls/id/hold', { method: 'POST', headers: { 'content-type': 'application/json' }, body: text });
+beforeEach(() => { vi.resetAllMocks(); m.actor.mockResolvedValue(actor); m.deps.mockResolvedValue({ mock: true }); m.change.mockResolvedValue({ operation: { outcome: 'pending' } }); m.resolve.mockResolvedValue({ operation: { outcome: 'not_found' } }); });
+describe('native hold routes', () => {
+    it.each([change, resolve])('auth precedes malformed body/configuration and denies cookie-only caller', async (route) => { m.actor.mockRejectedValue(new MutationError('denied', 401)); const r = await route(request('{'), context); expect(r.status).toBe(401); expect(r.headers.get('www-authenticate')).toBe('Bearer'); expect(r.headers.get('cache-control')).toBe('private, no-store'); expect(m.deps).not.toHaveBeenCalled(); expect(m.change).not.toHaveBeenCalled(); expect(m.resolve).not.toHaveBeenCalled(); });
+    it.each([change, resolve])('rejects malformed JSON before command service', async (route) => { const r = await route(request('{'), context); expect(r.status).toBe(400); expect(m.change).not.toHaveBeenCalled(); expect(m.resolve).not.toHaveBeenCalled(); });
+    it('sends exact immutable original only to change service with normal creation guard', async () => { const r = await change(request(), context); expect(r.status).toBe(200); expect(m.deps).toHaveBeenCalledWith(actor); expect(m.change).toHaveBeenCalledWith({ mock: true }, actor, (await context.params).id, body); expect(m.resolve).not.toHaveBeenCalled(); expect(r.headers.get('vary')).toContain('Authorization'); expect(await r.json()).toMatchObject({ ok: true, profileId: 'operator', operation: { outcome: 'pending' } }); });
+    it('resolves under cleanup configuration without invoking change service', async () => { const r = await resolve(request(), context); expect(r.status).toBe(200); expect(m.deps).toHaveBeenCalledWith(actor, { cleanup: true }); expect(m.resolve).toHaveBeenCalledWith({ mock: true }, actor, (await context.params).id, body); expect(m.change).not.toHaveBeenCalled(); expect(await r.json()).toMatchObject({ operation: { outcome: 'not_found' } }); });
+    it.each([change, resolve])('sanitizes unconfirmed provider/database errors', async (route) => { m.change.mockRejectedValue(new Error('secret')); m.resolve.mockRejectedValue(new Error('secret')); const r = await route(request(), context); expect(r.status).toBe(503); expect(await r.text()).not.toContain('secret'); });
+});

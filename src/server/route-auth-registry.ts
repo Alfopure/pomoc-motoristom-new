@@ -71,6 +71,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/voice/calls": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },
   "mobile/v1/voice/calls/[id]/end": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },
   "mobile/v1/voice/calls/[id]/status": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },
+  "mobile/v1/voice/calls/[id]/hold": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Immutable hold command under session ownership and exact accepted native endpoint." },
+  "mobile/v1/voice/calls/[id]/hold/status": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only immutable hold receipt and current journal-confirmed media; no provider dispatch." },
   "mobile/v1/voice/presence": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },
   "mobile/v1/voice/disconnect": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },
   diagnostics: {class: 'session', role: ['manager','admin']},

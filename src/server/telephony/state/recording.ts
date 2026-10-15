@@ -86,6 +86,7 @@ function mergeMetadata(result: ReduceResult, session: SessionRow): ReduceResult 
 function sequenceCommand(session: SessionRow, sequence: AnnouncementSequence): Command {
   const id = commandId({ sessionId: session.id, legId: sequence.callControlId, step: sequence.id, intent: `sequence:${sequence.index}:${sequence.speechRetry ? "tts" : "audio"}` });
   return { kind: "playback_start", commandId: id,
+    ...(sequence.continuation?.kind === "app" && sequence.continuation.nativeHold ? { nativeHold: sequence.continuation.nativeHold } : {}),
     leg: { callControlId: sequence.callControlId }, media: { key: sequence.keys[sequence.index] }, forceSpeech: sequence.speechRetry,
     clientState: { sid: session.id, role: "customer", intent: `seq:${id.replaceAll("-", "").slice(0, 24)}` } };
 }
@@ -196,6 +197,16 @@ function startBeforeAudio(result: ReduceResult, session: SessionRow, legs: LegRo
 
 /** Wrapper around the existing routing reducer. Only correlated media completions release audio. */
 export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: AttemptRow[], event: SessionEvent, context: RoutingContext, core: Core, reject: Reject, resumed = false): ReduceResult {
+  const result = reduceRecordingCore(session, legs, attempts, event, context, core, reject, resumed);
+  // Recording and announcement continuations can add commands after the core
+  // builder. Retain the original mobile endpoint fence on those commands too.
+  if (event.kind === "app" && event.nativeHold) {
+    result.commands = result.commands.map(command => ({ ...command, nativeHold: event.nativeHold }));
+  }
+  return result;
+}
+
+function reduceRecordingCore(session: SessionRow, legs: LegRow[], attempts: AttemptRow[], event: SessionEvent, context: RoutingContext, core: Core, reject: Reject, resumed = false): ReduceResult {
   let current = session;
   const state = policyState(session, context);
   if (state) current = patched(current, { recording: state });

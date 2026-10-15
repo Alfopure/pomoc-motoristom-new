@@ -210,6 +210,260 @@ for mismatch in ["control", "session"] {
   check("mismatched \(mismatch) cannot start colleague handle", !CXCallController.transactions.contains { $0.action is CXStartCallAction } && call.answerCount == 0)
   owner.disconnect()
 }
+// Server-mediated hold: controlled CallKit boundary, no HTTP/provider emulation.
+func heldRows(_ owner: LinkaPhone) -> [[String: Any]] { owner.snapshot()["pendingHolds"] as? [[String: Any]] ?? [] }
+func media(_ owner: LinkaPhone, _ id: UUID, _ state: String, _ version: Int = 1, _ capable: Bool = true) {
+  try! owner.syncMedia(callId: id.uuidString, sessionId: session, controlId: "fixture-control", state: state, version: version, canHold: capable)
+}
+func settle(_ owner: LinkaPhone, _ id: UUID, _ action: CXSetHeldCallAction, _ outcome: String, _ state: String, _ version: Int = 2) {
+  try! owner.resolveHold(callId: id.uuidString, sessionId: session, controlId: "fixture-control", actionId: action.uuid.uuidString, outcome: outcome, state: state, version: version, canHold: true)
+}
+func activeFixture() -> (LinkaPhone, UUID, Call) {
+  let owner = phone(), id = UUID(); let call = incoming(owner, id)
+  call.callState = .ACTIVE; owner.onCallStateUpdated(callState: .ACTIVE, callId: id)
+  CXCallController.transactions = []; return (owner, id, call)
+}
+do {
+  let (owner,id,call) = activeFixture()
+  let disabled = CXSetHeldCallAction(call:id,onHold:true); owner.provider(CXProvider.last,perform:disabled)
+  check("hold disabled before authoritative capability", disabled.failures == 1 && !call.isMuted)
+  media(owner,id,"active")
+  check("exact accepted capability reported to CallKit", CXProvider.last.updates[id]?.supportsHolding == true)
+  var events:[[String:Any]]=[]; owner.listen(owner:UUID()) { events.append($0) }
+  let action = CXSetHeldCallAction(call:id,onHold:true); owner.provider(CXProvider.last,perform:action)
+  check("hold waits server and immediately gates microphone", !action.isComplete && call.isMuted && heldRows(owner).first?["expectedVersion"] as? Int == 1)
+  check("heldRequested carries exact immutable identity", events.contains { $0["type"] as? String == "heldRequested" && $0["actionId"] as? String == action.uuid.uuidString && $0["callControlId"] as? String == "fixture-control" })
+  check("initial hold dispatch claimed exactly once", owner.claimHold(callId:id.uuidString,actionId:action.uuid.uuidString) && !owner.claimHold(callId:id.uuidString,actionId:action.uuid.uuidString))
+  media(owner,id,"active")
+  check("old active status cannot release claimed privacy", call.isMuted && !action.isComplete)
+  let opposite = CXSetHeldCallAction(call:id,onHold:false); owner.provider(CXProvider.last,perform:opposite)
+  check("opposite command cannot replace pending UUID", opposite.failures == 1 && heldRows(owner).first?["actionId"] as? String == action.uuid.uuidString)
+  settle(owner,id,action,"uncertain","pending")
+  check("uncertain media never fulfills action", action.fulfills == 0 && call.isMuted)
+  settle(owner,id,action,"confirmed","held")
+  check("same-version provider convergence fulfills hold", action.fulfills == 1 && call.isMuted && heldRows(owner).isEmpty)
+  let resume = CXSetHeldCallAction(call:id,onHold:false); owner.provider(CXProvider.last,perform:resume)
+  _ = owner.claimHold(callId:id.uuidString,actionId:resume.uuid.uuidString)
+  settle(owner,id,resume,"uncertain","pending",3)
+  check("resume lost response retains microphone privacy", call.isMuted && resume.fulfills == 0)
+  settle(owner,id,resume,"confirmed","active",3)
+  check("confirmed resume releases privacy after CallKit completion", resume.fulfills == 1 && !call.isMuted)
+  owner.disconnect()
+}
+for claimed in [false,true] {
+  let (owner,id,call) = activeFixture(); media(owner,id,"active")
+  let action = CXSetHeldCallAction(call:id,onHold:true); owner.provider(CXProvider.last,perform:action)
+  if claimed { _ = owner.claimHold(callId:id.uuidString,actionId:action.uuid.uuidString) }
+  action.timeoutDate = Date().addingTimeInterval(-1)
+  owner.provider(CXProvider.last,timedOutPerforming:action)
+  check("system hold timeout never completes expired action \(claimed)", action.fulfills == 0 && action.failures == 0)
+  check("system hold timeout never ends call \(claimed)", call.hangs == 0 && (owner.snapshot()["calls"] as? [[String:Any]])?.count == 1)
+  check("expired unclaimed action cannot start HTTP \(claimed)", !owner.claimHold(callId:id.uuidString,actionId:action.uuid.uuidString))
+  check("only claimed timeout retains exact uncertainty \(claimed)", claimed ? heldRows(owner).first?["phase"] as? String == "uncertain" : heldRows(owner).isEmpty)
+  if claimed { settle(owner,id,action,"confirmed","held"); check("late receipt never fulfills expired system action", action.fulfills == 0 && call.isMuted) }
+  owner.disconnect()
+}
+do {
+  let (owner,id,call) = activeFixture(); media(owner,id,"active")
+  let mute = CXSetMutedCallAction(call:id,muted:true); owner.provider(CXProvider.last,perform:mute)
+  media(owner,id,"held",2)
+  let mirror = CXCallController.transactions.last?.action as? CXSetHeldCallAction
+  if let mirror { owner.provider(CXProvider.last,perform:mirror) }
+  check("server hold mirror has no dispatch command", mirror?.fulfills == 1 && heldRows(owner).isEmpty)
+  media(owner,id,"active",3)
+  if let resume = CXCallController.transactions.last?.action as? CXSetHeldCallAction { owner.provider(CXProvider.last,perform:resume) }
+  check("server resume preserves user mute preference", call.isMuted && (owner.snapshot()["calls"] as? [[String:Any]])?.first?["muted"] as? Bool == true)
+  owner.disconnect()
+}
+do {
+  let (owner,id,old) = activeFixture(); media(owner,id,"active")
+  let action = CXSetHeldCallAction(call:id,onHold:true); owner.provider(CXProvider.last,perform:action)
+  _ = owner.claimHold(callId:id.uuidString,actionId:action.uuid.uuidString)
+  let replacement = Call(id,leg:old.telnyxLegId!); replacement.callState = .ACTIVE; TxClient.last.registry[id] = replacement
+  owner.onCallStateUpdated(callState:.ACTIVE,callId:id)
+  settle(owner,id,action,"confirmed","held")
+  check("ATTACH cannot fulfill old peer held action", action.fulfills == 0 && action.failures == 1)
+  check("ATTACH current peer receives privacy gate", replacement.isMuted)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"unavailable",0,false)
+  check("unsupported internal hold leaves ordinary microphone usable", !call.isMuted && CXProvider.last.updates[id]?.supportsHolding == false)
+  media(owner,id,"active",1)
+  let hold=CXSetHeldCallAction(call:id,onHold:true);owner.provider(CXProvider.last,perform:hold)
+  _=owner.claimHold(callId:id.uuidString,actionId:hold.uuid.uuidString)
+  media(owner,id,"unavailable",1,false)
+  check("unavailable after dispatched hold preserves privacy",call.isMuted)
+  settle(owner,id,hold,"rejected","active",2)
+  check("definite rejection restores active microphone and fails action",!call.isMuted && hold.failures == 1 && heldRows(owner).isEmpty)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  let hold=CXSetHeldCallAction(call:id,onHold:true);owner.provider(CXProvider.last,perform:hold)
+  _=owner.claimHold(callId:id.uuidString,actionId:hold.uuid.uuidString)
+  owner.onSocketDisconnected()
+  check("socket loss promptly fails live hold but retains UUID",hold.failures == 1 && heldRows(owner).first?["actionId"] as? String == hold.uuid.uuidString && call.isMuted)
+  check("socket loss disables new CallKit hold capability",CXProvider.last.updates[id]?.supportsHolding == false)
+  owner.onClientReady();settle(owner,id,hold,"confirmed","held")
+  check("receipt after disconnected action never fulfills old action",hold.fulfills == 0 && call.isMuted)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  var events=[[String:Any]]();owner.listen(owner:UUID()){events.append($0)}
+  let hold=CXSetHeldCallAction(call:id,onHold:true);owner.provider(CXProvider.last,perform:hold)
+  Timer.fire(12)
+  check("bounded local unclaimed timeout fails before Apple deadline",hold.failures == 1 && hold.fulfills == 0 && !call.isMuted)
+  check("unclaimed timeout clears JS requesting with exact cancellation",events.contains{$0["type"] as? String == "heldCancelled" && $0["actionId"] as? String == hold.uuid.uuidString})
+  check("unclaimed local timeout never ends call",call.hangs == 0 && heldRows(owner).isEmpty)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  let hold=CXSetHeldCallAction(call:id,onHold:true);owner.provider(CXProvider.last,perform:hold)
+  _=owner.claimHold(callId:id.uuidString,actionId:hold.uuid.uuidString)
+  Timer.fire(12)
+  check("bounded claimed timeout retains immutable uncertainty",hold.failures == 1 && heldRows(owner).first?["phase"] as? String == "uncertain" && call.isMuted)
+  settle(owner,id,hold,"confirmed","active",3)
+  check("historical accepted hold does not claim current held media",hold.fulfills == 0 && !call.isMuted && heldRows(owner).isEmpty)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  var events=[[String:Any]]();owner.listen(owner:UUID()){events.append($0)}
+  CXCallController.requestError=NSError(domain:"controlled-denial",code:1)
+  try! owner.requestHold(callId:id.uuidString,held:true);drain()
+  check("CallKit transaction rejection emits cancellation without media command",events.contains{$0["type"] as? String == "heldCancelled"} && heldRows(owner).isEmpty && !call.isMuted)
+  CXCallController.requestError=nil
+  try! owner.requestHold(callId:id.uuidString,held:true);Timer.fire(12)
+  check("accepted transaction with no delegate delivery has bounded cancellation",events.filter{$0["type"] as? String == "heldCancelled"}.count == 2 && heldRows(owner).isEmpty)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  var events=[[String:Any]]();owner.listen(owner:UUID()){events.append($0)}
+  media(owner,id,"held",2)
+  let old=CXCallController.transactions.last!.action as! CXSetHeldCallAction
+  media(owner,id,"active",3)
+  owner.provider(CXProvider.last,perform:old)
+  check("stale mirror callback never becomes new provider command",old.fulfills == 0 && heldRows(owner).isEmpty && !events.contains{$0["type"] as? String == "heldRequested"})
+  check("new active media ignores older held revision",!call.isMuted)
+  media(owner,id,"held",2)
+  check("older media cannot re-enable hold privacy",!call.isMuted)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  media(owner,id,"held",2)
+  let hold=CXCallController.transactions.last!.action as! CXSetHeldCallAction;owner.provider(CXProvider.last,perform:hold)
+  let userUnmute=CXSetMutedCallAction(call:id,muted:false);owner.provider(CXProvider.last,perform:userUnmute)
+  check("CallKit unmute cannot bypass held privacy or alter user preference",call.isMuted && (owner.snapshot()["calls"] as? [[String:Any]])?.first?["muted"] as? Bool == false)
+  CXCallController.requestError=NSError(domain:"controlled-mirror-denial",code:1)
+  media(owner,id,"active",3);drain()
+  check("resume mirror failure preserves held microphone barrier",call.isMuted)
+  CXCallController.requestError=nil;media(owner,id,"active",3)
+  let retry=CXCallController.transactions.last!.action as! CXSetHeldCallAction;owner.provider(CXProvider.last,perform:retry)
+  check("same-version fresh mirror retry releases only after CallKit success",retry.fulfills == 1 && !call.isMuted)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  let hold=CXSetHeldCallAction(call:id,onHold:true);owner.provider(CXProvider.last,perform:hold)
+  _=owner.claimHold(callId:id.uuidString,actionId:hold.uuid.uuidString)
+  var rejected=0
+  for (sid,control,action) in [(UUID().uuidString,"fixture-control",hold.uuid.uuidString),(session,"foreign",hold.uuid.uuidString),(session,"fixture-control",UUID().uuidString)] {
+    do {try owner.resolveHold(callId:id.uuidString,sessionId:sid,controlId:control,actionId:action,outcome:"confirmed",state:"active",version:2,canHold:true)} catch {rejected += 1}
+  }
+  check("foreign session control or command cannot release privacy",rejected == 3 && call.isMuted && !hold.isComplete)
+  owner.disconnect()
+  check("disconnect promptly fails hold and removes ledger",hold.failures == 1 && heldRows(owner).isEmpty)
+  do {try owner.resolveHold(callId:id.uuidString,sessionId:session,controlId:"fixture-control",actionId:hold.uuid.uuidString,outcome:"confirmed",state:"held",version:2,canHold:true)} catch {}
+  check("late disconnected receipt cannot fulfill action",hold.fulfills == 0)
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  try! owner.requestHold(callId:id.uuidString,held:true)
+  let requested=CXCallController.transactions.last!.action as! CXSetHeldCallAction
+  let competing=CXSetHeldCallAction(call:id,onHold:true);owner.provider(CXProvider.last,perform:competing)
+  owner.provider(CXProvider.last,perform:requested)
+  _=owner.claimHold(callId:id.uuidString,actionId:requested.uuid.uuidString)
+  Timer.fire(12)
+  check("competing system action cannot steal queued request or timeout",competing.failures == 1 && requested.failures == 1 && heldRows(owner).first?["phase"] as? String == "uncertain")
+  var blocked=false;do {try owner.dtmf(digits:"1")} catch {blocked=true}
+  check("native DTMF cannot bypass uncertain hold privacy",blocked && call.tones == 0)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  var events=[[String:Any]]();owner.listen(owner:UUID()){events.append($0)}
+  media(owner,id,"held",2)
+  let action=CXCallController.transactions.last!.action as! CXSetHeldCallAction
+  let pending=(owner.snapshot()["pendingSyncs"] as? [[String:Any]])?.first
+  check("mirror pending snapshot preserves exact private reconciliation identity",pending?["actionId"] as? String == action.uuid.uuidString && pending?["sessionId"] as? String == session && pending?["callControlId"] as? String == "fixture-control" && pending?["expectedVersion"] as? Int == 2)
+  events=[];media(owner,id,"held",2)
+  check("lost mirror event recovers from repeated same-version sync",events.count == 1 && events.first?["type"] as? String == "holdSyncPending" && events.first?["actionId"] as? String == action.uuid.uuidString)
+  check("pending mirror never claims native synchronization early",!events.contains{$0["type"] as? String == "holdSynced"} && call.isMuted)
+  owner.provider(CXProvider.last,perform:action)
+  check("only fulfilled exact mirror emits holdSynced",events.last?["type"] as? String == "holdSynced" && events.last?["actionId"] as? String == action.uuid.uuidString && action.fulfills == 1 && (owner.snapshot()["pendingSyncs"] as? [[String:Any]])?.isEmpty == true)
+  check("lost completion event recoverable through exact native held snapshot",(owner.snapshot()["calls"] as? [[String:Any]])?.first?["systemHeld"] as? Bool == true && (owner.snapshot()["calls"] as? [[String:Any]])?.first?["privacyHold"] as? Bool == true)
+
+  media(owner,id,"active",3)
+  let resume=CXCallController.transactions.last!.action as! CXSetHeldCallAction
+  resume.timeoutDate=Date().addingTimeInterval(-1);owner.provider(CXProvider.last,timedOutPerforming:resume)
+  check("mirror timeout failure carries exact identity and keeps privacy",events.last?["type"] as? String == "holdSyncFailed" && events.last?["sessionId"] as? String == session && events.last?["actionId"] as? String == resume.uuid.uuidString && call.isMuted && resume.failures == 0)
+  owner.provider(CXProvider.last,perform:resume)
+  check("late expired mirror cannot emit success or server command",events.last?["type"] as? String == "holdSyncFailed" && !events.contains{$0["type"] as? String == "heldRequested"})
+  owner.disconnect()
+}
+for viaApp in [false,true] {
+  let (owner,id,_)=activeFixture();media(owner,id,"active")
+  CXCallController.requestError=NSError(domain:"controlled-mirror-denial",code:1)
+  media(owner,id,"held",2);drain();CXCallController.requestError=nil
+  check("failed mirror keeps holding capability disabled until CallKit agrees \(viaApp)",CXProvider.last.updates[id]?.supportsHolding == false)
+  if viaApp {
+    var denied=false;do {try owner.requestHold(callId:id.uuidString,held:false)} catch {denied=true}
+    check("app cannot issue opposite provider command across unresolved system mismatch",denied)
+  } else {
+    let system=CXSetHeldCallAction(call:id,onHold:false);owner.provider(CXProvider.last,perform:system)
+    check("system cannot issue opposite provider command across unresolved mismatch",system.failures == 1 && heldRows(owner).isEmpty)
+  }
+  owner.disconnect()
+}
+do {
+  let owner=phone(),id=UUID()
+  let actual=Call(id,leg:UUID());actual.isMuted=true
+  TxClient.last.registry[id]=actual;owner.onIncomingCall(call:actual)
+  try! owner.authorize(callId:id.uuidString,sessionId:session,controlId:"fixture-control")
+  actual.callState = .ACTIVE;owner.onCallStateUpdated(callState:.ACTIVE,callId:id)
+  let stayedPrivate=actual.isMuted
+  media(owner,id,"active")
+  check("unknown ATTACH default mute releases only on first authoritative active media",stayedPrivate && !actual.isMuted)
+  owner.disconnect()
+}
+do {
+  let owner=phone(),id=UUID()
+  let call=Call(id,leg:UUID());call.isMuted=true
+  TxClient.last.registry[id]=call;owner.onIncomingCall(call:call)
+  try! owner.authorize(callId:id.uuidString,sessionId:session,controlId:"fixture-control")
+  call.callState = .ACTIVE;owner.onCallStateUpdated(callState:.ACTIVE,callId:id)
+  media(owner,id,"unavailable",1,false)
+  check("unavailable internal media cannot release unknown initial SDK mute",call.isMuted)
+  media(owner,id,"active",2,false)
+  check("positive internal active media releases initial mute without granting hold",!call.isMuted && CXProvider.last.updates[id]?.supportsHolding == false)
+  let action=CXSetHeldCallAction(call:id,onHold:true);owner.provider(CXProvider.last,perform:action)
+  check("positive internal audio still rejects system hold",action.failures == 1 && heldRows(owner).isEmpty)
+  owner.disconnect()
+}
+do {
+  let (owner,id,call)=activeFixture();media(owner,id,"active")
+  media(owner,id,"held",2)
+  let mirror=CXCallController.transactions.last!.action as! CXSetHeldCallAction
+  owner.provider(CXProvider.last,perform:mirror)
+  media(owner,id,"unavailable",3,false)
+  check("unavailable media cannot release settled held privacy",call.isMuted && (owner.snapshot()["calls"] as? [[String:Any]])?.first?["privacyHold"] as? Bool == true)
+  owner.disconnect()
+}
 let passed = checks.allSatisfy { $0["pass"] as? Bool == true }
 let report: [String: Any] = ["kind": "actual-LinkaPhone-methods-controlled-frameworks", "passed": passed, "checks": checks, "physicalDevice": false, "sdkNetworkingExecuted": false]
 print(String(data: try! JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), encoding: .utf8)!)

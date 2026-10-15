@@ -49,8 +49,11 @@ obnoviť klienta po `disconnect()`. Pri natívnom prebuild/build sa aplikuje cie
 CocoaPods úprava so zámkom, generačnou kontrolou a vymazaním konfigurácie
 pri odhlásení. Každý klient vlastní svoje sledovanie siete, takže zánik starého
 klienta nezastaví obnovu spojenia jeho náhrady. Plugin pred zápisom overuje verziu
-aj celý pôvodný/výsledný SHA256 oboch menených zdrojov;
+aj celý pôvodný/výsledný SHA256 všetkých štyroch menených zdrojov;
 neznámy SDK alebo zmenený hook zastaví build. Expo Go túto úpravu nenačítava.
+Úpravy `Call` a `Peer` zachovávajú stíšenie pred vytvorením náhradného audio
+spojenia aj počas SDK obnovovacích pulzov. Existujúca úprava `TxClient`
+zachováva rovnaký zámer iba pre presnú overenú ATTACH identitu.
 Pri budúcom SDK upgrade treba opravu znovu posúdiť a vykonať regresie.
 
 Lokálne JS a vykonané Swift skúšky používajú náhradné frameworky a sieť;
@@ -105,6 +108,10 @@ mobilnú reláciu. Chýbajúci záznam nepotvrdzuje, že hovor nevznikol.
 Nepotvrdené ukončenie ostáva blokujúce až do overenia ústredňou.
 História interných hovorov neponúka výber firemného čísla na spätné volanie;
 na nový interný hovor slúži overený zoznam kolegov.
+
+Podržanie externého hovoru má samostatný [popis potvrdenia, obnovy
+a ochrany mikrofónu](call-hold.md). Pripravené ovládanie a kontrolované skúšky
+treba doplniť nižšie uvedenou akceptáciou na fyzickom podpísanom iPhone.
 
 ## Manuálny test natívneho spustenia
 
@@ -185,6 +192,10 @@ call/session identitou a výsledkom; neukladať JWT, push payload ani telefónne
 | Neistý pokus, kolega sa stane nedostupný, ukončenie pokusu | Pôvodný pokus sa nestratí; ukončí sa iba jeho oprávnená mobilná relácia, bez ďalšieho vytáčania |
 | SDK operator leg ACTIVE, adresát stále zvoní | UI ešte neoznačí rozhovor za spojený |
 | Mikrofón/reproduktor/DTMF/ukončenie | Obojstranné audio; serverové 202 ostáva pending do potvrdenia |
+| Externý hovor, podržanie/obnovenie z appky aj systému | Zákazník počuje hudbu; CallKit a web zodpovedajú potvrdenému médiu; jeden provider príkaz |
+| Podržanie, strata odpovede, návrat z pozadia | Overenie pôvodnej akcie bez druhej mutácie; ukončenie zostáva dostupné |
+| Obnovenie pri strate HTTP odpovede alebo SDK ATTACH | Mikrofón sa neotvorí pred potvrdením aktívneho média a zosúladením CallKitu; používateľský mute sa zachová |
+| Timeout podržania / neskorá odpoveď starého hovoru | Živý hovor sa tým neukončí; stará akcia neovplyvní náhradnú vetvu ani nový hovor |
 | Odhlásenie, odobratý prístup, prevzatie na inom mobile | Starý mobil sa neprihlási, credential je revokovaný; web ostáva oddelený |
 | Wi-Fi ↔ mobilné dáta, výpadok siete, Bluetooth | Stav nevydáva neexistujúce spojenie za funkčný hovor |
 | Dočasná chyba `/me` počas hovoru | Overený rovnaký účet aj ovládanie hovoru ostanú dostupné s upozornením; 401/403/409/neplatný kontrakt prístup odoberú |
