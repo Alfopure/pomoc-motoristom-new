@@ -70,7 +70,7 @@ describe("bounded recovery of initial call setup", () => {
     // Persist the failure obligation even when its first audit INSERT is lost.
     h.db.failNext("motorist_call_events", "insert", "audit temporarily unavailable");
     await h.process(answer);
-    expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries[0].failureAudit?.recorded).not.toBe(true);
+    expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries[0].failureAudits?.[0].recorded).not.toBe(true);
     h.advance(52_000);
     const result = await h.legEvent(call.callControlId, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "caller" });
     expect(result.error).toBeFalsy();

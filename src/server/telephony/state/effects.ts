@@ -14,7 +14,7 @@ import { addTelephonyUsage } from "../usage";
 import { advanceRingStep, resolvePersonalRingMembers } from "../routing/ring-plan";
 import { authorizeOperatorDispatch, isPausedWithoutCall, reserveAnsweredOperator, transitionPresence } from "../routing/reservation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
-import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
+import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, failureAudits, failureAuditsComplete, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { isCallGoneError, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
@@ -717,20 +717,23 @@ export async function recordCallEvent(
   if (inserted.error && !isDuplicate(inserted.error)) fail("call event insert failed", inserted.error);
 }
 
-/** The original event can finish later; its first failure has a separate immutable identity. */
+/** The original event can finish later; each failed command has its own immutable identity. */
 async function flushFailureAudit(deps: EffectsDeps, session: SessionRow, entry: EffectContinuation): Promise<void> {
-  const failure = entry.failureAudit;
-  if (!failure || failure.recorded) return;
-  try {
-    await recordCallEvent(deps, { session, event: { ...entry.event, id: `${entry.id}:failure` }, handledStatus: "failed",
-      stateBefore: entry.stateBefore, stateAfter: failure.stateAfter, notes: ["durable command failure"],
-      commands: failure.commands, error: failure.error, failureAt: failure.at });
-    failure.recorded = true;
-  } catch (error) {
-    if (error instanceof SessionLeaseLostError) throw error;
-    // Audio and urgent teardown may proceed, but the continuation cannot be
-    // retired until this already-checkpointed obligation has been written.
-    deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "failure_audit_pending" });
+  for (const failure of failureAudits(entry)) {
+    if (failure.recorded) continue;
+    try {
+      const id = `${entry.id}:failure${failure.commandKey ? `:${failure.commandKey}` : ""}`;
+      await recordCallEvent(deps, { session, event: { ...entry.event, id }, handledStatus: "failed",
+        stateBefore: entry.stateBefore, stateAfter: failure.stateAfter, notes: ["durable command failure"],
+        commands: failure.commands, error: failure.error, failureAt: failure.at });
+      failure.recorded = true;
+    } catch (error) {
+      if (error instanceof SessionLeaseLostError) throw error;
+      // Audio and urgent teardown may proceed, but retirement must wait. Stop
+      // after one failed INSERT rather than exhausting the lease on audits.
+      deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "failure_audit_pending" });
+      return;
+    }
   }
 }
 
@@ -1817,6 +1820,19 @@ async function executeReduceResult(
   const outcomes: CommandOutcome[] = [];
   const compensated: string[] = [];
   let failure: ApplyResult["failure"] = null;
+  const rememberFailure = () => {
+    if (!input.continuation || !failure) return;
+    const failedKey = failure.command;
+    const command = commands.find(command => commandKey(command) === failedKey);
+    if (!command) return;
+    const id = "commandId" in command ? command.commandId : null;
+    if (failureAudits(input.continuation).some(audit => audit.commandKey === failedKey ||
+      !audit.commandKey && audit.commands.some(item => !item.ok && item.kind === command.kind && id && item.command_id === id))) return;
+    const outcome = outcomes.findLast(item => item.key === failedKey && !item.ok);
+    (input.continuation.failureAudits ??= []).push({ commandKey: failedKey, at: deps.now().toISOString(), stateAfter: session.state, error: failure.error,
+      commands: outcome ? auditCommandOutcomes([outcome]) : [{ kind: command.kind, ok: false, command_id: id, error: failure.error }] });
+    return true;
+  };
   // Provider calls of an overlapping run, started early and awaited in order.
   // Only the HTTP overlaps: validity, outcomes, checkpoints and every failure
   // branch below run exactly as they did when each call waited its turn.
@@ -2137,6 +2153,13 @@ async function executeReduceResult(
         continue;
       }
       failure = { command: key, error: message, callGone: isCallGoneError(error), ...(error instanceof CommandPrerequisiteRejectedError ? { prerequisiteRejected: true } : {}) };
+      if (input.continuation) {
+        rememberFailure();
+        // A compensation recursively resumes and can retire this entry. Its
+        // failure obligation must be durable before that successor can run.
+        session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
+        ctx.session = session;
+      }
       if (failure.callGone) {
         // The far end hung up a moment before the operator pressed the button.
         // Nothing is broken: the `call.hangup` webhook is already on its way (and
@@ -2246,6 +2269,10 @@ async function executeReduceResult(
   }
 
   if (input.continuation && !input.databaseOnly) {
+    if (rememberFailure()) {
+      session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
+      ctx.session = session;
+    }
     await flushFailureAudit(deps, session, input.continuation);
     if (!failure && !projectionError) {
       const history = readContactHistory(session);
@@ -2273,17 +2300,9 @@ async function executeReduceResult(
       }
     }
     input.continuation.attempts += 1;
-    if (failure && !input.continuation.failureAudit) {
-      const failedKey = failure.command;
-      const failedCommand = commands.find(command => commandKey(command) === failedKey);
-      input.continuation.failureAudit = { at: deps.now().toISOString(), stateAfter: session.state, error: failure.error,
-        commands: outcomes.some(command => !command.ok) ? auditCommandOutcomes(outcomes)
-          : failedCommand ? [{ kind: failedCommand.kind, ok: false, command_id: "commandId" in failedCommand ? failedCommand.commandId : null, error: failure.error }] : [] };
-    }
     input.continuation.lastError = projectionError ?? failure?.error ?? (continuationComplete(input.continuation) ? null : "mandatory effects pending");
     const continuation = input.continuation;
     session = await measureControlStage("finalize", () => checkpointEffects(deps, session.id, continuationComplete(continuation) ? null : continuation, continuation.id, session));
-    if (failure) await flushFailureAudit(deps, session, continuation);
     if (!continuationComplete(input.continuation) && !failure && !projectionError) failure = { command: "continuation", error: "mandatory effects pending", callGone: false };
   }
 
@@ -2404,7 +2423,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     const current = readPendingEffects(fresh.data).entries.find((item) => item.id === entry.id);
     if (!current) continue;
     if ((options.skipCompletedProjections || options.priorityEntryId && current.id !== options.priorityEntryId) &&
-      (!current.failureAudit || current.failureAudit.recorded) &&
+      failureAuditsComplete(current) &&
       !current.transition.contactChecks?.length &&
       current.databaseCursor >= criticalDatabaseEffectCount(current.transition) &&
       current.commands.every((command) => current.completedCommands.includes(commandKey(command)))) continue;
