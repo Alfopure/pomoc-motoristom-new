@@ -11,22 +11,25 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/supabase/env", () => ({ getSupabaseServiceEnv: mocks.serviceEnv }));
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: mocks.adminClient }));
-vi.mock("@/server/diagnostics/cron-heartbeat", () => ({ cronHeartbeatReady: mocks.cronReady }));
+vi.mock("@/server/diagnostics/cron-heartbeat", () => ({ cronHeartbeatReadiness: mocks.cronReady }));
 
 describe("health release identifiers", () => {
   beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.stubEnv("VERCEL_DEPLOYMENT_ID", "dpl_current");
     vi.stubEnv("DEPLOYMENT_VERSION", "old-manual-version");
     vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "current-commit");
     mocks.serviceEnv.mockReturnValue({});
     mocks.readinessQuery.mockResolvedValue({ error: null });
-    mocks.cronReady.mockResolvedValue(true);
+    mocks.cronReady.mockResolvedValue({ ready: true, reason: "ok" });
     mocks.adminClient.mockReturnValue({
       from: () => ({ select: () => ({ abortSignal: mocks.readinessQuery }) }),
     });
   });
 
   afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.resetAllMocks();
   });
@@ -79,12 +82,41 @@ describe("health release identifiers", () => {
   });
 
   it("returns generic 503 for an unhealthy cron even when the web/database are reachable", async () => {
-    mocks.cronReady.mockResolvedValue(false);
+    mocks.cronReady.mockResolvedValue({ ready: false, reason: "critical_jobs_failed" });
     const response = await getReady();
     expect(response.status).toBe(503);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     await expect(response.json()).resolves.toEqual({ status: "not_ready", version: "dpl_current", checkedAt: expect.any(String) });
     expect(mocks.cronReady).toHaveBeenCalledWith(mocks.adminClient.mock.results[0].value);
+  });
+
+
+  it("logs safe reasons while keeping the public failure generic", async () => {
+    mocks.readinessQuery.mockResolvedValue({ error: { message: "private SQL token" } });
+    mocks.cronReady.mockResolvedValue({ ready: false, reason: "heartbeat_stale" });
+    const response = await getReady();
+    expect(response.status).toBe(503);
+    const logged = JSON.parse(vi.mocked(console.warn).mock.calls.at(-1)![0]);
+    expect(logged).toMatchObject({ scope: "application-readiness", reason: "dependency_unavailable", database: "database_unavailable", cron: "heartbeat_stale" });
+    expect(JSON.stringify(logged)).not.toContain("private");
+    expect(await response.text()).not.toMatch(/heartbeat_stale|database_unavailable|private/);
+  });
+
+  it("remains ready for a completed cron with only auxiliary degradation", async () => {
+    mocks.cronReady.mockResolvedValue({ ready: true, reason: "auxiliary_degraded" });
+    expect((await getReady()).status).toBe(200);
+    expect(console.warn).not.toHaveBeenCalled();
+  });
+
+  it("bounds a stalled database transport at three seconds and aborts it", async () => {
+    vi.useFakeTimers();
+    mocks.readinessQuery.mockImplementation(() => new Promise(() => {}));
+    const response = getReady();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect((await response).status).toBe(503);
+    expect(mocks.readinessQuery.mock.calls[0][0].aborted).toBe(true);
+    expect(JSON.parse(vi.mocked(console.warn).mock.calls.at(-1)![0])).toMatchObject({ database: "database_timeout" });
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("contains an unexpected heartbeat exception without exposing internal state", async () => {

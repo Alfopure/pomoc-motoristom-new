@@ -105,6 +105,9 @@ export function replayRank(eventType: string): number {
 
 export const LEDGER_RETENTION_DAYS = 30;
 export const LEDGER_PAYLOAD_RETENTION_DAYS = 7;
+/** Both retention passes share one deadline and each touches at most this many rows. */
+export const LEDGER_PRUNE_BATCH_SIZE = 250;
+export const LEDGER_PRUNE_BUDGET_MS = DATABASE_REQUEST_MS;
 /** Event types whose payload is dropped early (high volume, no forensic value). */
 export const LEDGER_PAYLOAD_EVENT_TYPES = ["call.playback.started", "call.playback.ended", "call.cost", "call.speak.started", "call.speak.ended"];
 /** An expected interaction overdue by this long is reported as stuck. */
@@ -157,6 +160,8 @@ export type TelephonyCronDeps = SessionRunnerDeps & {
   replayEvent?: (envelope: unknown) => Promise<unknown>;
   /** Monotonic clock for deadlines/budgets (defaults to `Date.now`; `now` may be a frozen test clock). */
   clock?: () => number;
+  /** Retain unexpected failure evidence while continuing independent jobs. */
+  onJobError?: (error: unknown, job: string) => void;
 };
 
 function nowOf(deps: TelephonyCronDeps): Date {
@@ -233,8 +238,19 @@ export async function runRingSweep(deps: TelephonyCronDeps): Promise<TelephonyCr
 /** Runs inside the existing five-minute cron, including obligations on ended sessions. */
 export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
   const now = nowOf(deps).toISOString();
-  const wrapUp = await sweepExpiredWrapUp(deps);
-  const presence = await sweepEndedSessionPresence(deps);
+  const stageErrors: Array<{ stage: string; error: string }> = [];
+  const recoverPresence = async <T>(stage: string, run: () => Promise<T>): Promise<T | null> => {
+    try { return await run(); } catch (error) {
+      stageErrors.push({ stage, error: error instanceof Error ? error.message : String(error) });
+      reportJobError(deps.onJobError, error, EFFECTS_RECOVERY_JOB);
+      return null;
+    }
+  };
+  // A wrap-up read failure must not prevent terminal presence release or due
+  // hangups/effects from recovering. It still makes this critical job fail.
+  const wrapUp = await recoverPresence("wrap_up", () => sweepExpiredWrapUp(deps));
+  const presence = await recoverPresence("ended_presence", () => sweepEndedSessionPresence(deps));
+  const scanNames = ["pending_effects", "cancellations", "presence_pickups", "terminations"];
   const queries = await Promise.all([
     deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).not("pending_effects", "is", null)
       .lte("effects_next_attempt_at", now).order("effects_next_attempt_at").limit(REPLAY_BATCH_SIZE),
@@ -244,13 +260,20 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
       .lte("presence_pickup->>expiresAt", now).order("updated_at").limit(REPLAY_BATCH_SIZE),
     deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).not("termination_next_attempt_at", "is", null)
       .lte("termination_next_attempt_at", now).order("termination_next_attempt_at").limit(REPLAY_BATCH_SIZE),
-  ]);
-  const error = queries.find((query) => query.error)?.error;
-  if (error) {
-    if (!telephonyStabilityEnabled() && ["42703", "PGRST204"].includes(error.code)) return { job: EFFECTS_RECOVERY_JOB, status: "skipped", detail: { reason: "compatible_schema_not_installed" } };
-    return { job: EFFECTS_RECOVERY_JOB, status: "failed", detail: {}, error: error.message };
-  }
-  const sessions = [...new Map(queries.flatMap((query) => query.data ?? []).map((session) => [session.id, session])).values()];
+  ].map(query => Promise.resolve(query.abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS))).catch(error => {
+    return { data: null, error: Object.assign(new Error("Recovery scan failed", { cause: error }), { code: "" }) };
+  })));
+  if (!stageErrors.length && !telephonyStabilityEnabled() && queries.every(query => query.error && ["42703", "PGRST204"].includes(query.error.code)))
+    return { job: EFFECTS_RECOVERY_JOB, status: "skipped", detail: { reason: "compatible_schema_not_installed" } };
+  // A failed queue scan is still critical, but successful independent scans
+  // must retain their chance to recover pending hangups and cancellations.
+  queries.forEach((query, index) => {
+    if (query.error) {
+      stageErrors.push({ stage: scanNames[index], error: query.error.message });
+      reportJobError(deps.onJobError, query.error, EFFECTS_RECOVERY_JOB);
+    }
+  });
+  const sessions = [...new Map(queries.flatMap(query => query.error ? [] : query.data ?? []).map(session => [session.id, session])).values()];
   const errors: Array<{ sessionId: string; error: string }> = [];
   const scheduled: string[] = [];
   const inboundHangups: Array<InboundHangupRecovery & { sessionId: string }> = [];
@@ -284,7 +307,7 @@ export async function runPendingEffectRecovery(deps: TelephonyCronDeps): Promise
       }
     }
   }
-  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || wrapUp.errors.length || presence.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, scheduled, inboundHangups, wrapUp, presence } };
+  return { job: EFFECTS_RECOVERY_JOB, status: errors.length || stageErrors.length || wrapUp?.errors.length || presence?.errors.length ? "failed" : "ok", detail: { checked: sessions.length, errors, scheduled, inboundHangups, wrapUp, presence, stageErrors } };
 }
 
 export async function detectStuckSessions(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
@@ -470,40 +493,62 @@ function replayConnectionFilter(deps: TelephonyCronDeps): string | null {
 }
 
 export async function pruneWebhookLedger(deps: TelephonyCronDeps): Promise<TelephonyCronJobResult> {
-  // Builder-level signal: it also cuts the postgrest-js retry sleeps short.
-  const control = await deps.admin.from("motorist_job_controls").select("enabled").eq("job_name", LEDGER_PRUNE_JOB)
-    .abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
-  if (control.error) return { job: LEDGER_PRUNE_JOB, status: "failed", detail: {}, error: control.error.message };
-  if (control.data && control.data.enabled === false) {
-    return { job: LEDGER_PRUNE_JOB, status: "disabled", detail: { reason: "job_control_disabled" } };
-  }
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(new Error("ledger_prune_deadline")); }, LEDGER_PRUNE_BUDGET_MS);
+  });
+  const request = <T>(build: (signal: AbortSignal) => PromiseLike<T>): Promise<T> => {
+    controller.signal.throwIfAborted();
+    return Promise.race([Promise.resolve(build(controller.signal)), deadline]);
+  };
+  const detail: Record<string, unknown> = { deleted: 0, payloadsCleared: 0, batchSize: LEDGER_PRUNE_BATCH_SIZE };
+  try {
+    const control = await request(signal => deps.admin.from("motorist_job_controls").select("enabled").eq("job_name", LEDGER_PRUNE_JOB).abortSignal(signal).maybeSingle());
+    if (control.error) throw control.error;
+    if (control.data?.enabled === false) return { job: LEDGER_PRUNE_JOB, status: "disabled", detail: { reason: "job_control_disabled" } };
 
-  const now = nowOf(deps);
-  const day = 24 * 60 * 60 * 1000;
-  const deleteBefore = new Date(now.getTime() - (deps.ledgerRetentionDays ?? LEDGER_RETENTION_DAYS) * day).toISOString();
-  const payloadBefore = new Date(now.getTime() - (deps.payloadRetentionDays ?? LEDGER_PAYLOAD_RETENTION_DAYS) * day).toISOString();
+    const day = 24 * 60 * 60 * 1000;
+    const now = nowOf(deps).getTime();
+    const deleteBefore = new Date(now - (deps.ledgerRetentionDays ?? LEDGER_RETENTION_DAYS) * day).toISOString();
+    const payloadBefore = new Date(now - (deps.payloadRetentionDays ?? LEDGER_PAYLOAD_RETENTION_DAYS) * day).toISOString();
+    Object.assign(detail, { deleteBefore, payloadBefore });
+    // Select a stable, bounded batch, then repeat the retention guards on the
+    // mutation. Never offset a shrinking result set or retry a timed-out write.
+    const candidates = await request(signal => deps.admin.from("motorist_telnyx_webhook_events").select("event_id")
+      .eq("organization_id", deps.organizationId).eq("status", "processed").lt("received_at", deleteBefore)
+      .order("received_at").order("event_id").limit(LEDGER_PRUNE_BATCH_SIZE + 1).abortSignal(signal));
+    if (candidates.error) throw candidates.error;
+    const deleteIds = (candidates.data ?? []).slice(0, LEDGER_PRUNE_BATCH_SIZE).map(row => row.event_id);
+    detail.moreDeletes = (candidates.data?.length ?? 0) > LEDGER_PRUNE_BATCH_SIZE;
+    if (deleteIds.length) {
+      const deleted = await request(signal => deps.admin.from("motorist_telnyx_webhook_events").delete()
+        .eq("organization_id", deps.organizationId).eq("status", "processed").lt("received_at", deleteBefore)
+        .in("event_id", deleteIds).select("event_id").abortSignal(signal));
+      if (deleted.error) throw deleted.error;
+      detail.deleted = deleted.data?.length ?? 0;
+    }
 
-  const deleted = await deps.admin
-    .from("motorist_telnyx_webhook_events")
-    .delete()
-    .eq("organization_id", deps.organizationId)
-    .eq("status", "processed")
-    .lt("received_at", deleteBefore)
-    .select("event_id");
-  if (deleted.error) return { job: LEDGER_PRUNE_JOB, status: "failed", detail: {}, error: deleted.error.message };
-
-  const nulled = await deps.admin
-    .from("motorist_telnyx_webhook_events")
-    .update({ payload: null })
-    .eq("organization_id", deps.organizationId)
-    .eq("status", "processed")
-    .in("event_type", LEDGER_PAYLOAD_EVENT_TYPES)
-    .lt("received_at", payloadBefore)
-    .not("payload", "is", null)
-    .select("event_id");
-  if (nulled.error) return { job: LEDGER_PRUNE_JOB, status: "failed", detail: { deleted: (deleted.data ?? []).length }, error: nulled.error.message };
-
-  return { job: LEDGER_PRUNE_JOB, status: "ok", detail: { deleted: (deleted.data ?? []).length, payloadsCleared: (nulled.data ?? []).length, deleteBefore, payloadBefore } };
+    const payloads = await request(signal => deps.admin.from("motorist_telnyx_webhook_events").select("event_id")
+      .eq("organization_id", deps.organizationId).eq("status", "processed").in("event_type", LEDGER_PAYLOAD_EVENT_TYPES)
+      .lt("received_at", payloadBefore).not("payload", "is", null)
+      .order("received_at").order("event_id").limit(LEDGER_PRUNE_BATCH_SIZE + 1).abortSignal(signal));
+    if (payloads.error) throw payloads.error;
+    const payloadIds = (payloads.data ?? []).slice(0, LEDGER_PRUNE_BATCH_SIZE).map(row => row.event_id);
+    detail.morePayloads = (payloads.data?.length ?? 0) > LEDGER_PRUNE_BATCH_SIZE;
+    if (payloadIds.length) {
+      const nulled = await request(signal => deps.admin.from("motorist_telnyx_webhook_events").update({ payload: null })
+        .eq("organization_id", deps.organizationId).eq("status", "processed").in("event_type", LEDGER_PAYLOAD_EVENT_TYPES)
+        .lt("received_at", payloadBefore).not("payload", "is", null).in("event_id", payloadIds).select("event_id").abortSignal(signal));
+      if (nulled.error) throw nulled.error;
+      detail.payloadsCleared = nulled.data?.length ?? 0;
+    }
+    return { job: LEDGER_PRUNE_JOB, status: "ok", detail };
+  } catch (error) {
+    reportJobError(deps.onJobError, error, LEDGER_PRUNE_JOB);
+    return { job: LEDGER_PRUNE_JOB, status: "failed", detail: { ...detail, reason: controller.signal.aborted ? "deadline_exceeded" : "database_error" },
+      error: error instanceof Error ? error.message : "Ledger retention query failed" };
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 /**
@@ -713,39 +758,61 @@ export async function timedCronJob(run: () => Promise<TelephonyCronJobResult>, c
   return { ...result, startedAt: new Date(startedAt).toISOString(), ms: clock() - startedAt };
 }
 
+function reportJobError(observer: TelephonyCronDeps["onJobError"], error: unknown, job: string) {
+  try { observer?.(error, job); } catch { /* Diagnostic observers cannot stop recovery. */ }
+}
+
+/** Contains an unexpected exception, preserving the named failed job and its evidence. */
+export async function isolatedCronJob(job: string, run: () => Promise<TelephonyCronJobResult>, options: {
+  clock?: () => number; onJobError?: TelephonyCronDeps["onJobError"];
+} = {}): Promise<TelephonyCronJobResult> {
+  return timedCronJob(async () => {
+    try { return await run(); } catch (error) {
+      reportJobError(options.onJobError, error, job);
+      return { job, status: "failed", detail: { reason: "unexpected_job_failure" }, error: error instanceof Error ? error.message : "Unexpected cron job failure" };
+    }
+  }, options.clock);
+}
+
 export async function runTelephonyCronJobs(deps: TelephonyCronDeps, options: { cronStartedAt?: number } = {}): Promise<TelephonyCronSummary> {
   const clock = deps.clock ?? (() => Date.now());
   const cronStartedAt = options.cronStartedAt ?? clock();
   const started = nowOf(deps).getTime();
-  const timed = (run: () => Promise<TelephonyCronJobResult>) => timedCronJob(run, clock);
-  // Sequential on purpose: one cron run per tick, every promise awaited before
-  // the response. Terminal facts from the ledger go first, before anything that
-  // could close a leg synthetically or dial anybody.
-  const replay = await timed(() => replayStalledWebhookEvents(deps, { deadline: cronStartedAt + REPLAY_DEADLINE_MS }));
+  const timed = (job: string, run: () => Promise<TelephonyCronJobResult>) => isolatedCronJob(job, run, { clock, onJobError: deps.onJobError });
+  // Sequential: terminal facts precede any recovery that could dial or close a
+  // leg. An unexpected replay abort blocks dependent mutations, but monitoring
+  // and retention still run. Other failures do not discard independent jobs.
+  const replay = await timed(LEDGER_REPLAY_JOB, () => replayStalledWebhookEvents(deps, { deadline: cronStartedAt + REPLAY_DEADLINE_MS }));
+  const replayAborted = replay.detail.reason === "unexpected_job_failure";
+  const recover = (job: string, run: () => Promise<TelephonyCronJobResult>) => timed(job, () => replayAborted
+    ? Promise.resolve({ job, status: "failed", detail: { reason: "terminal_replay_unavailable" } }) : run());
   const reconciliationRead = createHealthReadRetry();
-  const candidates = deps.telnyx ? await reconciliationCandidates(deps, reconciliationRead) : undefined;
+  let candidates: ReconciliationCandidates | undefined;
+  if (deps.telnyx && !replayAborted) {
+    try { candidates = await reconciliationCandidates(deps, reconciliationRead); } catch (error) {
+      reportJobError(deps.onJobError, error, RECONCILE_JOB);
+      candidates = { sessions: [], remaining: 0, cutoff: nowOf(deps).toISOString(), error: "Reconciliation candidate read failed" };
+    }
+  }
   let providerVerification: ProviderVerification | undefined;
   const jobs = [
     replay,
-    await timed(() => runRingSweep(deps)),
-    await timed(() => runPendingEffectRecovery(deps)),
-    await timed(async () => {
+    await recover(RING_SWEEP_JOB, () => runRingSweep(deps)),
+    await recover(EFFECTS_RECOVERY_JOB, () => runPendingEffectRecovery(deps)),
+    await recover(RECONCILE_JOB, async () => {
       const result = await reconcileWithTelnyx(deps, candidates, reconciliationRead);
       providerVerification = result.verification;
       return result;
     }),
-    await timed(() => detectStuckSessions(deps)),
-    await timed(() => runAiDemoCleanupJob(deps, clock())),
-    await timed(() => runAlertJob(deps, providerVerification)),
-    await timed(() => pruneWebhookLedger(deps)),
+    await recover(STUCK_SESSION_JOB, () => detectStuckSessions(deps)),
+    await recover(AI_DEMO_CLEANUP_JOB, () => runAiDemoCleanupJob(deps, clock())),
+    await timed(ALERT_JOB, () => runAlertJob(deps, providerVerification)),
+    await timed(LEDGER_PRUNE_JOB, () => pruneWebhookLedger(deps)),
   ];
   const checkedAt = nowOf(deps);
   return {
     status: jobs.some((job) => job.status === "failed") ? "degraded" : "ok",
-    checkedAt: checkedAt.toISOString(),
-    organizationId: deps.organizationId,
-    configured: deps.config.configured,
-    ms: checkedAt.getTime() - started,
-    jobs,
+    checkedAt: checkedAt.toISOString(), organizationId: deps.organizationId, configured: deps.config.configured,
+    ms: checkedAt.getTime() - started, jobs,
   };
 }
