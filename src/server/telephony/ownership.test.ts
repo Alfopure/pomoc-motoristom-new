@@ -4,7 +4,7 @@ import type { Database } from "@/lib/supabase/database.types";
 
 import { createClient } from "@supabase/supabase-js";
 
-import { assertOwnership, ownershipRpc, sessionOwnership, telephonyDatabaseFetch, DATABASE_REQUEST_MS, SESSION_LEASE_MS, SESSION_WORK_MS, UNOWNED_READ_MS, type Ownership } from "./ownership";
+import { assertOwnership, ownershipRpc, sessionOwnership, telephonyDatabaseFetch, withTelephonyDatabaseBudget, DATABASE_REQUEST_MS, SESSION_LEASE_MS, SESSION_WORK_MS, UNOWNED_READ_MS, type Ownership } from "./ownership";
 import { SessionLeaseLostError } from "./service-errors";
 import { withRequestMetrics } from "@/server/request-metrics";
 
@@ -292,7 +292,7 @@ describe("database timeout observation", () => {
     vi.stubGlobal("fetch", fetch);
     const logger = vi.fn();
     await withRequestMetrics("call.action", async () => {
-      await expect(ownershipRpc(client(), "motorist_session_lease_acquire_v2", {})).rejects.toThrow("TimeoutError");
+      await expect(ownershipRpc(client(), "motorist_session_lease_acquire_v2", {})).rejects.toThrow("AbortError");
       return Response.json({}, { status: 500 });
     }, { logger });
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -334,5 +334,35 @@ describe("database timeout observation", () => {
       return Response.json({});
     }, { logger });
     expect(logger.mock.calls[0][0]).toMatchObject({ dbAborts: 0 });
+  });
+});
+
+describe("recoverable bookkeeping budget", () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it("bounds a hung PostgREST read without retries and restores the caller scope", async () => {
+    const fetch = vi.fn((_input: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init!.signal!;
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const client = createClient<Database>("https://x.supabase.co", "service-key", {
+      global: { fetch: telephonyDatabaseFetch }, auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const started = performance.now();
+    const result = await withTelephonyDatabaseBudget(40, () => withTelephonyDatabaseBudget(10_000, async () =>
+      await client.from("motorist_calls").select("id")));
+    expect(result.error?.message).toContain("AbortError");
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    // The finished history budget must not poison the next control's database work.
+    fetch.mockResolvedValue(Response.json([]));
+    expect((await client.from("motorist_calls").select("id")).error).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await expect(withTelephonyDatabaseBudget(0, () => telephonyDatabaseFetch("https://x.supabase.co/rest/v1/motorist_calls")))
+      .rejects.toThrow("bookkeeping budget exhausted");
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

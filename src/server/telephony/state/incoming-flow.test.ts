@@ -51,6 +51,19 @@ async function waiting() {
 }
 
 describe("unified incoming flow execution", () => {
+  it("rings the caller's operator app without also calling their own mobile back, including repeated offers", async () => {
+    const h = harness();
+    configure(h, { ...flow, steps: [{ ...ring, people: [{ profileId: PROFILES.o1, application: true, personalNumber: NUMBERS.customer }] },
+      { id: ids[2], type: "repeat", stepIds: [ring.id], times: 1 }] });
+    const call = await h.inbound({ to: NUMBERS.allianz, from: NUMBERS.customer });
+    expect(h.telnyx.of("dial")).toHaveLength(1);
+    const offered = h.openLegFor(call.sessionId, PROFILES.o1)!;
+    expect(offered.role).toBe("operator");
+    await h.legEvent(String(offered.telnyx_call_control_id), "call.hangup", { hangup_cause: "timeout" });
+    expect(h.telnyx.of("dial")).toHaveLength(2);
+    expect(h.telnyx.of("dial").every(dial => dial.params.to === "sip:gencred001@sip.telnyx.com")).toBe(true);
+  });
+
   it("runs ring → bounded wait → same person again → external number → hangup with fresh command identities", async () => {
     const { h, call, first } = await waiting();
     const firstDial = h.telnyx.of("dial")[0];

@@ -1,13 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/supabase/database.types";
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 import { createTelephonyHarness, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import type { FakeRow } from "@/test/fake-supabase";
 import { runPendingEffectRecovery } from "../cron-jobs";
 import { runSessionEvent } from "../session-runner";
+import { telephonyDatabaseFetch } from "../ownership";
 import { databaseEffectCount, readPendingEffects } from "./continuation";
-import { emptyTransition, readMeta, toJson, type SessionRow } from "./types";
+import { commandKey, emptyTransition, readMeta, toJson, type SessionRow } from "./types";
 
-afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 async function recordedCall() {
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
@@ -51,6 +54,60 @@ function removingEntry(h: TelephonyHarness, entryId: string): boolean {
 }
 
 describe("recorded control projection recovery with writer contract 2", () => {
+  it("releases HOLD behind a hung history request and lets UNHOLD pass the durable debt without duplicating audio", async () => {
+    const { h, sessionId } = await recordedCall();
+    // Exercise the real PostgREST transport: the fake database alone cannot
+    // prove a socket timeout or prevent postgrest-js's automatic GET retries.
+    let recovering = false;
+    const fetch = vi.fn((_input: unknown, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const signal = init!.signal!;
+      if (signal.aborted) { reject(signal.reason); return; }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const abort = () => { clearTimeout(timer); reject(signal.reason); };
+      signal.addEventListener("abort", abort, { once: true });
+      if (recovering) timer = setTimeout(() => {
+        signal.removeEventListener("abort", abort);
+        h.db.update("motorist_calls", JSON.parse(String(init!.body)), row => row.session_id === sessionId);
+        resolve(new Response(null, { status: 204 }));
+      }, 1_100);
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const stalled = createClient<Database>("https://x.supabase.co", "service-key", {
+      global: { fetch: telephonyDatabaseFetch }, auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const from = h.client.from.bind(h.client);
+    const fault = vi.spyOn(h.client, "from").mockImplementation(table => {
+      const query = from(table);
+      if (table === "motorist_calls") vi.spyOn(query, "update").mockImplementation(patch =>
+        stalled.from("motorist_calls").update(patch as Database["public"]["Tables"]["motorist_calls"]["Update"]) as unknown as ReturnType<typeof query.update>);
+      return query;
+    });
+    const started = performance.now();
+    await hold(h, sessionId, "bounded-history-hold");
+    expect(performance.now() - started).toBeLessThan(2_500);
+    expect(h.session(sessionId)).toMatchObject({ state: "held", lease_token: null });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const debt = pending(h, sessionId).find(entry => entry.lastError?.includes("AbortError"))!;
+    expect(debt).toBeDefined();
+    expect(debt.auditComplete).toBe(false);
+    expect(debt.commands.every(command => debt.completedCommands.includes(commandKey(command)))).toBe(true);
+
+    // History is still unavailable. The next user control must execute anyway.
+    await runSessionEvent(h.deps, sessionId, { kind: "app", type: "unhold", id: "unhold-past-history-debt", actorProfileId: PROFILES.o1, occurredAt: h.now().toISOString() });
+    expect(h.session(sessionId)).toMatchObject({ state: "talking", lease_token: null });
+    // Recovery may read conference participants; audio/recording mutations must not repeat.
+    const mutations = () => h.telnyx.calls.filter(call => !(call.method === "request" && call.params.method === "GET"));
+    const providerCalls = structuredClone(mutations());
+    // Recovery must also complete a write slower than the interactive budget.
+    recovering = true;
+    h.advance(5 * 60_000);
+    expect((await runPendingEffectRecovery(h.deps)).status).toBe("ok");
+    fault.mockRestore();
+    expect(pending(h, sessionId)).toEqual([]);
+    expect(audits(h, debt.id)).toHaveLength(1);
+    expect(mutations()).toEqual(providerCalls);
+  });
+
   it("replays a lost final checkpoint after projection and audit without duplicating provider work or the audit", async () => {
     const { h, sessionId } = await recordedCall();
     let eventId: string | null = null;

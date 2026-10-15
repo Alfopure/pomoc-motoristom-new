@@ -3,10 +3,20 @@ export class SessionLeaseLostError extends Error {
   // this transport refusal as a network failure and sleeps/retries a GET.
   readonly code = "ABORT_ERR";
 
-  constructor() {
-    super("session lease unavailable during effects");
+  constructor(message = "session lease unavailable during effects") {
+    super(message);
     this.name = "SessionLeaseLostError";
   }
+}
+
+/** PostgREST may serialize the transport's lease refusal into an error object. */
+export function isSessionLeaseLost(error: unknown): boolean {
+  if (error instanceof SessionLeaseLostError) return true;
+  if (!error || typeof error !== "object") return false;
+  const failure = error as { code?: unknown; message?: unknown };
+  if (typeof failure.message !== "string") return false;
+  return failure.code === "PT409" && /ownership|writer|lease|contract/.test(failure.message) ||
+    (!failure.code || failure.code === "ABORT_ERR") && /^SessionLeaseLostError:/.test(failure.message);
 }
 
 export class SessionConflictError extends Error {

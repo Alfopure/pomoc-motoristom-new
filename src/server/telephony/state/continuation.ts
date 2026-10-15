@@ -1,7 +1,7 @@
 import { measureRequestStep } from "@/server/request-metrics";
 import type { Json } from "@/lib/supabase/database.types";
 import type { EffectsDeps } from "./effects";
-import { SessionConflictError, SessionEventDeferredError, SessionLeaseLostError } from "../service-errors";
+import { isSessionLeaseLost, SessionConflictError, SessionEventDeferredError, SessionLeaseLostError } from "../service-errors";
 import { measureGuard, sessionOwnership } from "../ownership";
 import { isPausedWithoutCall } from "../routing/reservation";
 import { commandKey, readMeta, toJson, type Command, type Compensation, type ReduceResult, type SessionEvent, type SessionRow, type Transition } from "./types";
@@ -115,7 +115,7 @@ function stagingFailure(error: unknown): Error {
   const failure = error && typeof error === "object" ? error as { name?: unknown; code?: unknown; message?: unknown } : {};
   const message = typeof failure.message === "string" ? failure.message : String(error);
   const transportError = typeof failure.code !== "string" || failure.code.length === 0;
-  const interrupted = error instanceof SessionLeaseLostError || failure.code === "ABORT_ERR" || transportError && (failure.name === "AbortError" || failure.name === "TimeoutError"
+  const interrupted = isSessionLeaseLost(error) || failure.code === "ABORT_ERR" || transportError && (failure.name === "AbortError" || failure.name === "TimeoutError"
     // postgrest-js can wrap a renew refusal into the staging RPC's error text.
     || /(?:^|:\s*)(?:AbortError|TimeoutError):/.test(message));
   // This event cannot dispatch provider effects before its atomic stage returns.
@@ -170,6 +170,7 @@ async function checkpointOwnedEffects(deps: CheckpointDeps, sessionId: string, e
   for (let retry = 0; retry < 3; retry += 1) {
     const fresh = retry === 0 && known ? { data: known, error: null }
       : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).single();
+    if (isSessionLeaseLost(fresh.error)) throw new SessionLeaseLostError(fresh.error!.message);
     if (fresh.error || !fresh.data) throw new Error(`Effects checkpoint read failed: ${fresh.error?.message ?? "missing session"}`);
     const pending = readPendingEffects(fresh.data);
     if (!pending.entries.some((item) => item.id === entryId)) return fresh.data;
@@ -179,6 +180,7 @@ async function checkpointOwnedEffects(deps: CheckpointDeps, sessionId: string, e
       effects_next_attempt_at: entries.length ? new Date(deps.now().getTime() + 30_000).toISOString() : null,
       version: fresh.data.version + 1,
     }).eq("organization_id", deps.organizationId).eq("id", sessionId).eq("version", fresh.data.version).select("*").maybeSingle();
+    if (isSessionLeaseLost(updated.error)) throw new SessionLeaseLostError(updated.error!.message);
     if (updated.error) throw new Error(`Effects checkpoint failed: ${updated.error.message}`);
     if (updated.data) return updated.data;
   }

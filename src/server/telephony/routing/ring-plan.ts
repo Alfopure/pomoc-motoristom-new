@@ -277,6 +277,8 @@ export type RingStepPlanInput = {
   /** Existing v1 sessions may finish during rollback; new owned PSTN stays gated. */
   ownedPstnEnabled?: boolean;
   sessionId: string;
+  /** An inbound caller must never receive a simultaneous PSTN offer to itself. */
+  callerNumber?: string | null;
   now: Date;
   presence: EligibilityPresence[];
   devices: EligibilityDevice[];
@@ -289,7 +291,7 @@ export type RingStepPlanInput = {
   activeLegCount?: number;
 };
 
-export type RingStepSkip = { member: FrozenRingMember; reason: IneligibilityReason | "attempted" | "duplicate" | "capacity" | "fanout" | "feature_disabled" };
+export type RingStepSkip = { member: FrozenRingMember; reason: IneligibilityReason | "attempted" | "duplicate" | "capacity" | "fanout" | "feature_disabled" | "caller_loop" };
 
 export type RingStepPlanResult = {
   attempts: AttemptPlan[];
@@ -309,11 +311,16 @@ export function planRingStep(step: FrozenRingStep, input: RingStepPlanInput): Ri
   const skipped: RingStepSkip[] = [];
   const eligible: FrozenRingMember[] = [];
   const eligibleKeys = new Set<string>();
+  const callerNumber = normalizeE164(input.callerNumber);
 
   const endpoints = step.members.flatMap((member): FrozenRingMember[] => member.kind === "operator" && member.application && !member.applicationDevice
     ? [{ ...member, applicationDevice: "web" }, { ...member, applicationDevice: "mobile" }]
     : [member]);
   for (const member of endpoints.sort((left, right) => left.position - right.position)) {
+    if (member.kind === "external_number" && callerNumber && normalizeE164(member.externalNumber) === callerNumber) {
+      skipped.push({ member, reason: "caller_loop" });
+      continue;
+    }
     if (member.kind === "external_number" && (member.ownerProfileId || member.profileId) && !(input.ownedPstnEnabled ?? telephonyStabilityEnabled())) {
       skipped.push({ member, reason: "feature_disabled" });
       continue;
@@ -832,7 +839,7 @@ async function idleQueueCandidates(deps: SweepDeps, sessions: SessionRow[], now:
     })) };
     const escalation = settings.data?.queue_escalate_after_seconds ?? DEFAULT_ROUTING_SETTINGS.queueEscalateAfterSeconds;
     if (escalation > 0 && !queue.escalated_at && queue.idle_since && Date.parse(queue.idle_since) + escalation * 1000 <= now.getTime()) continue;
-    const input: RingStepPlanInput = { sessionId: session.id, now, ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(session),
+    const input: RingStepPlanInput = { sessionId: session.id, callerNumber: session.direction === "inbound" ? session.caller_number : null, now, ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(session),
       presence: toEligibilityPresence(presence.data ?? []), devices: toEligibilityDevices(devices.data ?? []),
       openOffers: (offers.data ?? []).filter(offer => offer.session_id !== session.id).map(offer => offer.profile_id).filter((id): id is string => Boolean(id)),
       attempted: new Set(), activeLegCount: legs.count ?? 0, maxConcurrentLegs: settings.data?.max_concurrent_legs ?? DEFAULT_ROUTING_SETTINGS.maxConcurrentLegs };
