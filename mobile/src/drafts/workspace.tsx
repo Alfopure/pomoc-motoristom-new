@@ -19,10 +19,15 @@ import { DraftNotSentError } from "./port";
 import { createDraftStorage } from "./storage";
 import { DraftVault, type DraftKind, type DraftScope, type StoredDraft } from "./vault";
 import { DraftAuthority, DraftScopeSuperseded } from "./authority";
+import type { MobileCallContextTarget } from "../../../src/lib/mobile-call-context";
+import { createCallContextApi } from "../call-context/api";
+import { CallContextPanel } from "../call-context/ui";
+import { customerCallNumber } from "../call-context/number";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
   active: boolean; tab: string; onTab: (tab: "cases" | "tasks" | "console" | "account") => void; onSelectNumber: (number: string) => void;
   toolsOpen: boolean; onCloseTools: () => void;
+  callTarget: MobileCallContextTarget | null; onCloseCallContext: () => void;
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; hasCall: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void };
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Prístup ku konceptom sa nepodarilo overiť.";
 
@@ -66,10 +71,11 @@ export function DraftWorkspace(props: Props) {
   const current = useMemo(() => () => organizationId !== null && authority.current(organizationId), [authority, organizationId]);
   const validate = useMemo(() => () => revalidate({ organizationId: organizationId ?? "", profileId: identity.profileId }), [revalidate, organizationId, identity.profileId]);
   const toolsVisible = props.toolsOpen && props.tab === "console";
-  const operationsVisible = toolsVisible || ["cases", "tasks", "account"].includes(props.tab);
+  const operationsVisible = toolsVisible || props.callTarget !== null || ["cases", "tasks", "account"].includes(props.tab);
   if (!verified) return operationsVisible ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.tab === "account" && <Account {...props} />}
     {toolsVisible && <Button label="Späť do ústredne" secondary onPress={props.onCloseTools} />}
+    {props.callTarget && <Button label="Späť na hovory" secondary onPress={props.onCloseCallContext} />}
     {query.isPending ? <Loading label="Overujem prístup k prípadom a konceptom…" /> : <View style={styles.content}><ErrorNotice message={errorText(authorityState.error ?? query.error)} onRetry={() => { void query.refetch(); }} /></View>}
   </ScrollView> : null;
   return <>
@@ -115,6 +121,7 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
     return () => { alive = false; opened?.close(); };
   }, [scope, attempt, current, revalidate]);
   const api = useMemo(() => createCasesApi(config, verified.profileId, getToken, undefined, verified.organizationId), [config, verified.profileId, verified.organizationId, getToken]);
+  const callApi = useMemo(() => createCallContextApi(config, verified.profileId, verified.organizationId, getToken, current), [config, verified.profileId, verified.organizationId, getToken, current]);
   const actorRoot = useMemo(() => ["mobile", config.environment, userId, verified.profileId, verified.organizationId], [config.environment, userId, verified.profileId, verified.organizationId]);
   const [caseRequest, setCaseRequest] = useState<CaseOpenRequest>(), [taskRequest, setTaskRequest] = useState<{ taskId: string; nonce: number }>();
   const request = useRef(0);
@@ -123,12 +130,22 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
       if (record.resourceId) { setTaskRequest({ taskId: record.resourceId, nonce: ++request.current }); props.onTab("tasks"); }
     } else { setCaseRequest({ kind: record.kind, id: record.resourceId, nonce: ++request.current }); props.onTab("cases"); }
   }
-  if (!vault) return ["cases", "tasks", "account"].includes(props.tab) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
+  const callContext = props.callTarget && <CallContextPanel key={props.callTarget.kind + ":" + props.callTarget.id} api={callApi} target={props.callTarget} active={props.active} current={current}
+    onBack={props.onCloseCallContext} onSelectNumber={props.onSelectNumber} onOpenCase={id => {
+      if (!current()) return;
+      setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onCloseCallContext(); props.onTab("cases");
+    }} onNewCase={number => {
+      if (!current()) return;
+      const phone = customerCallNumber("inbound", number);
+      if (!phone) return;
+      setCaseRequest({ kind: "case-call-create", id: null, number: phone, nonce: ++request.current }); props.onCloseCallContext(); props.onTab("cases");
+    }} />;
+  if (!vault) return <>{callContext}{["cases", "tasks", "account"].includes(props.tab) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.tab === "account" && <Account {...props} />}
     {error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading label="Načítavam miestne koncepty…" />}
-  </ScrollView> : null;
-  return <VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
-    onOpenCase={id => { setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onTab("cases"); }} onResume={resume} onDiscarded={() => { setCaseRequest(undefined); setTaskRequest(undefined); setEpoch(value => value + 1); }} />;
+  </ScrollView> : null}</>;
+  return <>{callContext}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
+    onOpenCase={id => { setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onTab("cases"); }} onResume={resume} onDiscarded={() => { setCaseRequest(undefined); setTaskRequest(undefined); setEpoch(value => value + 1); }} /></>;
 }
 
 function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; queryKey: string[]; caseRequest?: CaseOpenRequest; taskRequest?: { taskId: string; nonce: number };

@@ -1,3 +1,4 @@
+import { PhoneOverlayProvider } from "./src/ui/phone-overlays";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { StatusBar } from "expo-status-bar";
@@ -25,6 +26,8 @@ import { SessionLogout, type LogoutState } from "./src/lib/logout";
 import { useAndroidBack } from "./src/lib/use-android-back";
 import { GlassTabBar, type DispatchTab } from "./src/ui/navigation";
 import { NAVIGATION_CONTENT_BOTTOM, navigationContentBottom } from "./src/ui/theme";
+import type { MobileCallContextTarget } from "../src/lib/mobile-call-context";
+import { draftId } from "./src/drafts/port";
 
 type Tab = DispatchTab;
 type Category = "all" | "missed" | "received" | "outbound";
@@ -191,17 +194,25 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   const [category, setCategory] = useState<Category>("all");
   const [search, setSearch] = useState("");
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [callSelection, setCallSelection] = useState<{ target: MobileCallContextTarget; profileId: string; tab: Tab } | null>(null);
   const [logoutError, setLogoutError] = useState<string | null>(null), [logoutBusy, setLogoutBusy] = useState(false);
   const preparingLogout = useRef(false);
   const { fontScale } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
-  useAndroidBack(active && tab !== "console" && tab !== "cases" && tab !== "tasks", () => setTab("console"));
+  useAndroidBack(active && !callSelection && tab !== "console" && tab !== "cases" && tab !== "tasks", () => setTab("console"));
   const key = ["mobile", config.environment, userId];
   // First authenticated snapshot must also load during a PushKit cold launch.
   // Periodic reads still stop when iOS suspends the app.
   const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), refetchInterval: active ? 30_000 : false });
   const identity = usableMobileIdentity(me.data, me.error);
+  const callTarget = callSelection?.profileId === identity?.profileId && callSelection?.tab === tab ? callSelection?.target ?? null : null;
+  function selectTab(value: Tab) { setCallSelection(null); setTab(value); }
+  function openCallContext(target: MobileCallContextTarget) {
+    if (!identity || !draftId(target.id)) return;
+    setToolsOpen(false);
+    setCallSelection({ target: { ...target, id: target.id.toLowerCase() }, profileId: identity.profileId, tab });
+  }
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   async function logout(leaveUnsaved = false) {
     const currentPhone = phone?.snapshot();
@@ -234,20 +245,23 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   </View>;
   return <View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
     <CallPanel phone={phone} state={phoneState} />
+    <PhoneOverlayProvider blocked={Boolean(phoneState.call || phoneState.termination)} source={phone}>
     {me.isError && <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />}
-    {tab === "console" && !toolsOpen ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} onTools={() => setToolsOpen(true)} />
-      : tab === "history" ? <History api={api} me={identity} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
-        onSelect={value => { setNumber(value); setTab("console"); }} />
+    {tab === "console" && !toolsOpen && !callTarget ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} onTools={() => setToolsOpen(true)} onCallContext={openCallContext} />
+      : tab === "history" && !callTarget ? <History api={api} me={identity} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
+        onCallContext={openCallContext} onSelect={value => { setNumber(value); selectTab("console"); }} />
       : null}
-    <DraftWorkspace key={identity.profileId} config={config} client={client} identity={identity} userId={userId} liveUser={liveUser} active={active} tab={tab} onTab={setTab}
+    <DraftWorkspace key={identity.profileId} config={config} client={client} identity={identity} userId={userId} liveUser={liveUser} active={active} tab={tab} onTab={selectTab}
+      callTarget={callTarget} onCloseCallContext={() => setCallSelection(null)}
       toolsOpen={toolsOpen} onCloseTools={() => setToolsOpen(false)}
-      onSelectNumber={value => { setNumber(value); setTab("console"); }} logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy}
+      onSelectNumber={value => { setNumber(value); selectTab("console"); }} logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} />
-    <GlassTabBar selected={tab} onSelect={setTab} />
+    <GlassTabBar selected={tab} onSelect={selectTab} />
+    </PhoneOverlayProvider>
   </View>;
 }
 
-function Console({ api, me, queryKey, active, number, onNumber, phone, phoneState, onTools }: { api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; number: string; onNumber: (value: string) => void; phone: DispatchPhone | null; phoneState: PhoneState; onTools: () => void }) {
+function Console({ api, me, queryKey, active, number, onNumber, phone, phoneState, onTools, onCallContext }: { api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; number: string; onNumber: (value: string) => void; phone: DispatchPhone | null; phoneState: PhoneState; onTools: () => void; onCallContext: (target: MobileCallContextTarget) => void }) {
   const cache = useQueryClient();
   const [changingPresence, setChangingPresence] = useState(false);
   const query = useQuery({ queryKey: [...queryKey, "console", me.profileId], queryFn: ({ signal }) => api.console(me.profileId, signal), enabled: active, refetchInterval: active ? 30_000 : false });
@@ -280,8 +294,11 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
       {query.data.activeCalls.length > 0 && <><Text style={styles.subheading}>Hovory na vašom účte</Text>{query.data.activeCalls.map(call => <Card key={call.id}>
         <Text style={styles.subheading}>{call.name || formatNumber(call.number)}</Text><Text style={styles.text}>{callStatus(call.state)}</Text>
         <Text style={styles.muted}>{call.lineLabel ?? ""}</Text>
+        <Button label="Detail hovoru" secondary onPress={() => onCallContext({ kind: "session", id: call.id })} />
       </Card>)}</>}
     </>}
+    {phoneState.call && !query.data?.activeCalls.some(call => call.id === phoneState.call?.sessionId) && <Button label="Detail aktuálneho hovoru" secondary
+      onPress={() => { if (phoneState.call) onCallContext({ kind: "session", id: phoneState.call.sessionId }); }} />}
     <PhoneReadinessCard state={phoneState} configuration={readiness.data} configurationError={readiness.isError}
       presence={query.isError ? undefined : query.data?.presence.status} checking={readiness.isFetching || phoneState.checkingDiagnostics}
       onRefresh={refreshPhone} onConnect={() => { void phone?.connect(); }} onTakeover={() => Alert.alert("Prevziať telefón?", "Druhý mobil sa odpojí od ústredne.", [
@@ -306,9 +323,10 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
   </KeyboardAvoidingView>;
 }
 
-function History({ api, me, queryKey, active, category, onCategory, search, onSearch, onSelect }: {
+function History({ api, me, queryKey, active, category, onCategory, search, onSearch, onSelect, onCallContext }: {
   api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; category: Category; onCategory: (value: Category) => void;
   search: string; onSearch: (value: string) => void; onSelect: (number: string) => void;
+  onCallContext: (target: MobileCallContextTarget) => void;
 }) {
   const [debounced, setDebounced] = useState(search.trim());
   useEffect(() => { const timer = setTimeout(() => setDebounced(search.trim()), 300); return () => clearTimeout(timer); }, [search]);
@@ -343,6 +361,7 @@ function History({ api, me, queryKey, active, category, onCategory, search, onSe
                 <Text style={styles.muted}>{formatTime(call.startedAt)}</Text></View>
             </View></View>
           <Text style={styles.muted}>{callStatus(call.status)} · {call.lineLabel}{call.durationSeconds === null ? "" : " · " + Math.floor(call.durationSeconds / 60) + ":" + String(Math.floor(call.durationSeconds % 60)).padStart(2, "0")}</Text>
+          <Button label="Detail hovoru" secondary onPress={() => onCallContext({ kind: "call", id: call.id })} />
           {call.direction !== "internal" && dialable(call.number) && <Button label="Vybrať číslo" secondary onPress={() => { if (call.number) onSelect(call.number); }} />}
         </Card>; })}
         {query.isFetchNextPageError && <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.fetchNextPage(); }} />}
