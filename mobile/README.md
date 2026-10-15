@@ -25,6 +25,9 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   dispečera a WebView mapu s výberom adresy alebo bodu do formulára.
   Priradenie potrebuje schválenú atomickú databázovú funkciu; bez nej sa
   zobrazí ako nedostupné. Mapový výber sa uloží až spolu s prípadom.
+  Pri novom aj upravovanom mieste možno vedome získať polohu telefónu,
+  skontrolovať presnosť a zobraziť bod na mape pred potvrdením do formulára.
+  Ide o polohu dispečerovho telefónu; [podrobnosti a skúšky](../docs/mobile/device-location.md).
 - **Moje úlohy:** všetky vlastné otvorené úlohy, výber úloh na kontrolu,
   aj dokončené, vyhľadávanie podľa názvu a prechod na prípad.
 - **Účet:** meno, e-mail, rola, prostredie, miestne koncepty a odhlásenie.
@@ -61,6 +64,15 @@ GlassEffect 57.0.4 a BlurView 57.0.3 sú súčasťou Expo Go SDK 57.
 Vlastná natívna zostava ich potrebuje zahrnúť pri novom buildovaní;
 staršia zostava má bezpečný nepriehľadný povrch.
 Podmienky natívneho efektu popisuje [dokumentácia Expo](https://docs.expo.dev/versions/latest/sdk/glass-effect/).
+
+Jednorazové získanie polohy používa `expo-location` 57.0.21, súčasť Expo Go
+SDK 57. Žiadosť vznikne iba po stlačení používateľom a používa oprávnenie
+počas používania aplikácie. Pozadie, geofencing, motion ani lokalizačná
+foreground služba sa neaktivujú. Konfigurácia vlastnej zostavy výslovne
+vypína ich oprávnenia a nepotrebné iOS Always/motion popisy.
+Zmena natívnych oprávnení/modulov vyžaduje nový vlastný build; publikovanie
+Expo Go ho nenahrádza a staršie vlastné binárky nový dizajn/funkciu touto
+aktualizáciou nedostanú. Natívne OTA zostávajú vypnuté.
 
 Kontrakt úložiska, obnova a fyzické skúšky sú v [konceptoch](../docs/mobile/drafts.md).
 Priradenie, mapové hranice a TEST akceptácia sú v

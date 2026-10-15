@@ -32,11 +32,21 @@ const config: ExpoConfig = {
       },
     } : {}),
   },
-  android: { package: "sk.linkapomoci.dispecing" + suffix, blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"] },
+  android: { package: "sk.linkapomoci.dispecing" + suffix, blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.FOREGROUND_SERVICE_LOCATION", "android.permission.ACTIVITY_RECOGNITION", "com.google.android.gms.permission.ACTIVITY_RECOGNITION"] },
   plugins: ["expo-secure-store", "./plugins/with-draft-secure-store.cjs", ["expo-image-picker", {
     photosPermission: "Linka pomoci potrebuje prístup k vybranej fotografii na priloženie k prípadu.",
     cameraPermission: "Linka pomoci potrebuje fotoaparát na odfotografovanie prílohy prípadu.",
     microphonePermission: voiceProof ? "Linka pomoci potrebuje mikrofón na telefonovanie." : false,
+  }], ["expo-location", {
+    locationWhenInUsePermission: "Linka pomoci použije polohu telefónu iba na váš pokyn pri výbere miesta zásahu.",
+    locationAlwaysPermission: false,
+    locationAlwaysAndWhenInUsePermission: false,
+    motionUsagePermission: false,
+    isIosBackgroundLocationEnabled: false,
+    isAndroidBackgroundLocationEnabled: false,
+    isAndroidForegroundServiceEnabled: false,
+    isAndroidMotionActivityEnabled: false,
   }]],
   // Only the explicit Expo Go TEST preview is published. Native binaries do
   // not fetch OTA updates, and production cannot select this preview mode.
