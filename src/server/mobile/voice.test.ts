@@ -153,22 +153,26 @@ describe("native voice boundaries", () => {
     expect(nativeMobilePushReachable({ ...device, device_session_id: sessionId }, h.now())).toBe(false);
     h.advance(7 * 86_400_000); expect(nativeMobilePushReachable(device, h.now())).toBe(false);
   });
-  it("freezes web-to-colleague routing to the explicitly connected native TEST phone", async () => {
+  it("freezes both web and the explicitly connected native TEST colleague endpoints", async () => {
     const { deps, h } = fixture();
     await touchDevice(deps, { organizationId: ORG, profileId: actor.profileId, deviceSessionId: lease, registrationState: "registered", nativeVoipRegistered: true });
     h.advance(180_000); h.touchDevice(PROFILES.o2); h.touchDevice(actor.profileId);
     const result = await callColleague({ ...h.deps, rateLimiter: createRateLimiter() }, { profileId: PROFILES.o2, role: "dispatcher", displayName: "Web tester" },
       { targetProfileId: actor.profileId, requestId: legId });
     expect(h.session(result.sessionId).called_number).toBe("sip:native-test@sip.telnyx.com");
-    expect((h.session(result.sessionId).metadata as { internal: { target_sip: string } }).internal.target_sip).toBe("sip:native-test@sip.telnyx.com");
+    expect((h.session(result.sessionId).metadata as { internal: { endpoints: unknown[] } }).internal.endpoints).toEqual([
+      { device: "web", sipUri: expect.stringContaining("gencred001") }, { device: "mobile", sipUri: "sip:native-test@sip.telnyx.com" },
+    ]);
   });
   it("allows the ordinary native callee to finish internal-call cleanup after its leg ends", async () => {
     const { deps, h } = fixture();
     const result = await callColleague({ ...h.deps, rateLimiter: createRateLimiter() }, { profileId: PROFILES.o2, role: "dispatcher", displayName: "Web tester" },
       { targetProfileId: actor.profileId, requestId: legId });
     await h.legEvent(result.operatorLegCallControlId, "call.answered");
-    const callee = h.legs(result.sessionId).find(leg => leg.profile_id === actor.profileId)!;
+    const callee = h.legs(result.sessionId).find(leg => leg.profile_id === actor.profileId && leg.to_number === "sip:native-test@sip.telnyx.com")!;
     await h.legEvent(String(callee.telnyx_call_control_id), "call.answered");
+    const webLoser = h.legs(result.sessionId).find(leg => leg.profile_id === actor.profileId && leg.id !== callee.id)!;
+    await h.legEvent(String(webLoser.telnyx_call_control_id), "call.hangup", { hangup_cause: "originator_cancel" });
     h.db.update("motorist_call_legs", { ended_at: h.now().toISOString(), state: "ended" }, row => row.id === callee.id);
     expect(await requireNativeSession(deps, actor, result.sessionId)).toMatchObject({ nativeEnded: true });
     await expect(hangupCall({ ...h.deps, deviceKind: "web" }, actor, result.sessionId)).rejects.toMatchObject({ status: 403 });

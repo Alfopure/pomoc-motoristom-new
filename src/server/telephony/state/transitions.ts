@@ -325,7 +325,7 @@ class TransitionBuilder {
     const byLeg = view.find((attempt) => attempt.leg_id === leg.id);
     if (byLeg) return byLeg;
     const state = clientStateOf(leg);
-    if (state?.intent !== "ring" || state.step === undefined) return undefined;
+    if (!state || (state.intent !== "ring" && !(state.intent === "internal" && this.meta.internal?.endpoints?.length)) || state.step === undefined) return undefined;
     return view.find(
       (attempt) =>
         attempt.step_index === state.step &&
@@ -1499,7 +1499,7 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   b.call.status = "answered";
   b.call.answered_at = b.session.answered_at ?? opts.at;
   b.call.ring_seconds = secondsBetween(b.session.started_at, opts.at);
-  if (telephonyStabilityEnabled() || hasStabilityContract(b.session) || (leg.client_state as { autoAnswer?: boolean } | null)?.autoAnswer) {
+  if (telephonyStabilityEnabled() || hasStabilityContract(b.session) || b.meta.internal?.endpoints?.length || (leg.client_state as { autoAnswer?: boolean } | null)?.autoAnswer) {
     const caller = b.openLegs().find((other) => legIntent(other) === "internal_caller");
     if (!caller) throw new CallActionRejected("Volajúci už nie je pripojený.", 409);
     const bridgeId = b.cmdId(leg.telnyx_call_control_id, "bridge:mobile-internal");
@@ -1508,10 +1508,50 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
     b.compensate(bridgeId, "mobile internal connection failed", [hangupCmd(failed, leg, "mobile_bridge_failed")], failed.transition());
   }
   acceptDeviceLeg(b, leg);
+  const winningAttempt = b.attemptForLeg(leg);
+  for (const attempt of b.attemptsView()) {
+    if (attempt.profile_id === leg.profile_id && !isTerminalAttemptResult(attempt.result)) {
+      b.attempt(attempt.id, attempt.id === winningAttempt?.id
+        ? { result: "answered", answered_at: opts.at }
+        : { result: "cancelled", ended_at: opts.at });
+    }
+  }
   b.note("colleague answered → talking");
   if (leg.profile_id) b.guard = { profileId: leg.profile_id, offerToken: (leg.client_state as TelnyxClientState | null)?.offerToken,
     allowPaused: true, onRejected: { next: rejected.transition(), commands: rejected.commands } };
   return b.result();
+}
+
+/** Reuse durable endpoint dispatch; one refused endpoint cannot end its sibling. */
+function fanoutInternalColleague(b: TransitionBuilder, caller: LegRow): ReduceResult {
+  const internal = b.meta.internal!;
+  const endpoints = internal.endpoints!;
+  const step = 0;
+  const attempts: RingFanout["attempts"] = endpoints.map((endpoint, position) => ({
+    stepIndex: step, ringGroupId: null, memberKind: "operator", profileId: internal.target_profile_id,
+    externalNumber: null, position, ringSecs: INTERNAL_TIMEOUT_SECS, application: true, applicationDevice: endpoint.device,
+  }));
+  const dials: DialCommand[] = endpoints.map(endpoint => ({
+    kind: "dial", commandId: b.cmdId(`${internal.target_profile_id}:${endpoint.device}`, "dial:internal"),
+    to: endpoint.sipUri, from: b.ctx.fromNumber ?? b.session.caller_number ?? "", role: "operator",
+    profileId: internal.target_profile_id, externalNumber: null,
+    clientState: { sid: b.session.id, role: "operator", operatorId: internal.target_profile_id, intent: "internal", step, ...(endpoint.device === "mobile" ? { applicationDevice: "mobile" as const } : {}) },
+    linkTo: caller.telnyx_call_control_id, timeoutSecs: INTERNAL_TIMEOUT_SECS, colleagueCall: true,
+    ...(internal.caller_display ? { fromDisplayName: internal.caller_display } : {}),
+    attempt: { stepIndex: step, profileId: internal.target_profile_id, externalNumber: null, applicationDevice: endpoint.device },
+  }));
+  b.setState("ringing").patchMeta({ ring: { ...(b.meta.ring ?? {}), mode: "internal", active_step: null } });
+  b.cmd({ kind: "ring_fanout", internal: true, step, guard: null, attempts, dials,
+    ringingProfileIds: [internal.target_profile_id], deadlineAt: stepDeadline(b.ctx.now, INTERNAL_TIMEOUT_SECS) });
+  const failed = b.fork();
+  failed.setState("failed").patchSession({ ended_at: b.nowIso });
+  failed.call.status = "failed";
+  failed.call.end_reason = "dial_failed";
+  for (const profileId of [internal.by, internal.target_profile_id]) {
+    failed.presenceChange({ profileId, status: "available", sessionId: null, onlyIfSession: b.session.id, reason: "all colleague endpoints failed" });
+  }
+  b.compensate(`ring_fanout:${step}`, "all colleague endpoints failed → hang up caller", [hangupCmd(b, caller, "dial_failed")], failed.transition());
+  return b.note("own leg answered → dialing colleague application endpoints").result();
 }
 
 /** The operator's own WebRTC leg answered (click-to-call / internal call) → dial the far end and bridge with ringback. */
@@ -1529,6 +1569,7 @@ function canDirectConnectOutbound(b: TransitionBuilder): boolean {
 function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): ReduceResult {
   if (b.session.state !== "received") return b.note("own leg answered outside received").result();
   const meta = b.meta;
+  if (intent !== "outbound" && meta.internal?.endpoints?.length) return fanoutInternalColleague(b, leg);
   let dial: DialCommand;
   if (intent === "outbound") {
     const outbound = meta.outbound;
@@ -1850,6 +1891,8 @@ function colleagueStillInvited(b: TransitionBuilder, leg: LegRow): boolean {
   if (!leg.profile_id) return false;
   if (b.openLegs().some((other) => other.profile_id === leg.profile_id && legIntent(other) === "internal" &&
     other.telnyx_call_control_id !== leg.telnyx_call_control_id)) return true;
+  if (b.meta.internal?.endpoints?.length && b.attemptsView().some(attempt => attempt.profile_id === leg.profile_id &&
+    attempt.leg_id !== leg.id && !isTerminalAttemptResult(attempt.result))) return true;
   const pending = b.meta.mobile_offers?.[leg.profile_id];
   return Boolean(pending && Date.parse(pending.at) + PICKUP_STALE_MS > b.ctx.now.getTime());
 }
@@ -1862,6 +1905,10 @@ function colleagueStillInvited(b: TransitionBuilder, leg: LegRow): boolean {
  * to nothing.
  */
 function onInternalPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent, at: string): ReduceResult {
+  const attempt = b.attemptForLeg(leg);
+  if (attempt && !isTerminalAttemptResult(attempt.result)) b.attempt(attempt.id, {
+    result: classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause }), ended_at: at,
+  });
   if (hasOtherAcceptedLeg(b, leg)) {
     finishIfQuiet(b, at);
     return b.note("superseded colleague leg left; accepted leg remains connected").result();

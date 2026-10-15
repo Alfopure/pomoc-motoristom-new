@@ -6,8 +6,9 @@ Toto je odlišné od Expo Go náhľadu a bežnej vizuálnej notifikácie.
 
 ## Aktuálny stav
 
-Majiteľ 11. 10. 2026 potvrdil, že spustil Expo náhľad na iPhone. Jeho Apple
-Developer členstvo čaká na schválenie. Natívny Swift SDK/CallKit/PushKit,
+Majiteľ 11. 10. 2026 potvrdil, že spustil Expo náhľad na iPhone. Dňa
+15. 10. 2026 znovu potvrdil, že Apple Developer členstvo čaká na schválenie.
+Natívny Swift SDK/CallKit/PushKit,
 JS ovládanie a JWT-auth TEST API sú pripravené v kóde. Cloudová kompilácia,
 unit testy ani verejný bundle nie sú dôkazom audia/APNs na fyzickom telefóne.
 Príjem zákazníckych hovorov vyžaduje existujúci incoming flow s application
@@ -18,6 +19,42 @@ telefónu a zapája sa do existujúcej zákazníckej fronty. Prebudenie cez push
 vždy pripraví SDK pre novú ponuku; prijatie aj ukončenie sú viazané na presný
 aktuálny mobilný endpoint. Stav SDK `ACTIVE` nepotvrdzuje odpoveď adresáta;
 systémový čas spojenia sa nastaví až po potvrdení ústredne.
+
+## Aktuálne pripravovaná etapa: spoločný hovor na webe a iPhone
+
+Jeden aplikačný hovor má samostatné webové a mobilné SIP vetvy. Pri volaní
+kolegovi sa oprávnené endpointy zmrazia pri založení hovoru a zvonia súčasne.
+Prvý prijatý endpoint vyhrá; druhý sa zruší. Zlyhanie jednej vetvy nechá
+druhú zvoniť. Zákaznícky incoming flow používa existujúce rozšírenie na
+aplikačné endpointy. Prihlásenie do mobilu samo nemení nastavený incoming flow.
+
+Prehliadač overuje vlastnú presnú vetvu cez read-only
+`GET /api/telephony/webphone/offer-status`. Potrebuje aktuálnu webovú device
+lease a presný provider control ID; server odvodí organizáciu, operátora
+a reláciu. Chýbajúci zápis alebo sieťová chyba neznamená koniec hovoru.
+Potvrdené ukončenie alebo prijatie inde zastaví iba lokálnu SDK vetvu,
+zvonenie a zachytávanie audia. Neposiela sa tým príkaz ukončiť celú reláciu.
+Kontroluje len vlastník SDK v jednej karte, bežne každé dve sekundy;
+časovače prehliadača môžu byť pri uspávaní systému oneskorené.
+
+Natívna časť viaže každú CallKit akciu na konkrétny klient, SDK Call,
+autorizovanú vetvu a akciu. Neskoré dokončenie prijatia po zrušení nesmie
+prijať ani ukončiť iný hovor. Pri SDK ATTACH sa ovládanie presunie na nový
+objekt tej istej overenej vetvy. Dočasná strata siete pri prijatom hovore
+má nepredlžovaný 30-sekundový natívny limit; obnovenie ACTIVE ho zruší,
+vypršanie ukončí presnú miestnu vetvu. Odhlásenie zruší časovače a spojenie.
+
+Použitý SDK 4.2.2 má oneskorené reconnect callbacky, ktoré pôvodne mohli
+obnoviť klienta po `disconnect()`. Pri natívnom prebuild/build sa aplikuje cielená
+CocoaPods úprava so zámkom, generačnou kontrolou a vymazaním konfigurácie
+pri odhlásení. Plugin overuje verziu aj celý pôvodný/výsledný SHA256 zdroja;
+neznámy SDK alebo zmenený hook zastaví build. Expo Go túto úpravu nenačítava.
+Pri budúcom SDK upgrade treba opravu znovu posúdiť a vykonať regresie.
+
+Lokálne JS a vykonané Swift skúšky používajú náhradné frameworky a sieť;
+nie sú fyzickým dôkazom CallKit, APNs ani audia. Čerstvá celá natívna
+kompilácia a jej zdrojový commit sa zaznamenávajú osobitne. Produkcia,
+provider konfigurácia, aktivačné prepínače a SQL sa touto etapou nemenia.
 
 ## Manuálny test natívneho spustenia
 

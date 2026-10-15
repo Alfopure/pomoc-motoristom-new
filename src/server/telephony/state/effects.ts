@@ -221,7 +221,10 @@ export async function persistTransition(
   // way, so an entry staged by one writer stays resumable by the other.
   const folded = input.phase === "critical" && sessionOwnership.getStore()?.contract === 2 &&
     (input.continuation?.databaseCursor ?? 0) === 0 &&
-    input.transition.legs.length + input.transition.attempts.length > 0;
+    input.transition.legs.length + input.transition.attempts.length > 0 &&
+    // The folded RPC only updates existing legs. An answer can precede the
+    // dial response/initiated webhook, so its identity must use the insert path.
+    !input.transition.legs.some(leg => leg.createIfMissing);
   if (input.phase === "projection") {
     // Audio/recorder acknowledgements can advance the session after the
     // critical phase. History retries must never restore its older snapshot.
@@ -374,11 +377,15 @@ async function applyLegPatch(deps: EffectsDeps, session: SessionRow, patch: LegP
 /** Links a ring attempt (natural key) to its leg row once the leg exists. */
 async function linkAttemptToLeg(deps: EffectsDeps, session: SessionRow, legId: string, clientState: Json, profileId: string | null, toNumber: string | null): Promise<void> {
   const state = clientState && typeof clientState === "object" && !Array.isArray(clientState) ? (clientState as Record<string, unknown>) : null;
-  if (!state || state.intent !== "ring" || typeof state.step !== "number") return;
+  if (!state || (state.intent !== "ring" && !(state.intent === "internal" && readMeta(session).internal?.endpoints?.length)) || typeof state.step !== "number") return;
   let query = deps.admin.from("motorist_ring_attempts").update({ leg_id: legId }).eq("session_id", session.id).eq("step_index", state.step).is("leg_id", null);
   query = state.role === "external"
     ? query.eq("member_kind", "external_number").eq("external_number", toNumber ?? "")
     : query.eq("member_kind", "operator").eq("profile_id", profileId ?? "").is("external_number", null);
+  // Separate application endpoints share a profile, never an attempt identity.
+  if (state.role !== "external") query = state.applicationDevice === "mobile"
+    ? query.eq("application_device", "mobile")
+    : query.or("application_device.is.null,application_device.eq.web");
   const result = await query;
   if (result.error) fail("attempt link failed", result.error);
 }
@@ -1677,6 +1684,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   if (retryPending) throw new EffectsError("ring fanout awaiting the original dial outcome");
 
   if (command.attempts.length > 0 && succeeded === 0) {
+    if (command.internal) throw new CommandPrerequisiteRejectedError("all colleague endpoints unavailable");
     // Nobody is ringing (every dial failed, or every member was already offered
     // in a concurrent session), so no Telnyx event will advance the step:
     // make it overdue so the next sweep or webhook moves on immediately.

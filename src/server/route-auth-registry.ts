@@ -271,6 +271,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "telephony/presence": { class: "session" },
   "telephony/presence/end-wrap-up": { class: "session" },
   "telephony/webphone/token": { class: "session", note: "Vydáva krátkodobý Telnyx WebRTC token a rotuje device_session_id." },
+  "telephony/webphone/offer-status": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only exact actor-owned WEB lease and SIP leg status, including ended offers; no provider operations." },
   "telephony/calls/[id]/link-case": { class: "session" },
   "telephony/calls/[id]/outcome": { class: "session" },
   "telephony/calls/[id]/transcript": { class: "session", note: "GET requires archive permission; PATCH also requires quality-review permission and source revision." },

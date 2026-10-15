@@ -216,6 +216,80 @@ describe("native phone lifecycle", () => {
     f.phone.setForeground(false); f.phone.setForeground(true); await tick();
     expect(f.native.connect).toHaveBeenCalledTimes(2);
   });
+  it("prepares a push arriving after native connect but before its held snapshot resolves", async () => {
+    const f = await connected();
+    let release!: (value: Awaited<ReturnType<NativePhone["snapshot"]>>) => void;
+    vi.mocked(f.native.snapshot).mockReturnValueOnce(new Promise(done => { release = done; }));
+    let prepared = false;
+    vi.mocked(f.native.connect).mockImplementation(async () => { if (vi.mocked(f.native.connect).mock.calls.length >= 3) prepared = true; });
+    vi.mocked(f.native.authorize).mockImplementation(async () => { expect(prepared).toBe(true); });
+    const connecting = f.phone.connect(); await tick();
+    f.emit({ type: "push", callId: id, providerLegId: id }); await tick();
+    expect(f.native.authorize).not.toHaveBeenCalled();
+    release({ ready: true, audioActive: false, pending: [] }); await connecting; await tick();
+    expect(prepared).toBe(true); expect(f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg");
+  });
+  it("bounds automatic foreground idle recovery without requiring an app-state transition", async () => {
+    const f = await connected(); vi.useFakeTimers();
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: false, audioActive: false, pending: [] });
+    vi.mocked(f.native.connect).mockRejectedValue(new Error("socket unavailable"));
+    f.emit({ type: "registration", state: "unregistered" });
+    await vi.advanceTimersByTimeAsync(999); expect(f.native.connect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(30_000); expect(f.native.connect).toHaveBeenCalledTimes(4);
+    expect(f.api.start).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(120_000); expect(f.native.connect).toHaveBeenCalledTimes(4);
+  });
+  it.each(["background", "call", "disconnect", "dispose"])("cancels idle reconnect when %s takes ownership", async reason => {
+    const f = await connected(); vi.useFakeTimers();
+    f.emit({ type: "registration", state: "unregistered" });
+    if (reason === "background") f.phone.setForeground(false);
+    if (reason === "call") f.emit({ type: "outgoing", callId: id, sessionId: sid });
+    if (reason === "disconnect") await f.phone.disconnect();
+    if (reason === "dispose") f.phone.dispose();
+    await vi.advanceTimersByTimeAsync(10_000); expect(f.native.connect).toHaveBeenCalledTimes(1);
+    expect(f.api.start).not.toHaveBeenCalled();
+  });
+  it("waits for native registration and cancels recovery when ready arrives", async () => {
+    const f = await connected(); vi.useFakeTimers();
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: false, audioActive: false, pending: [] });
+    await f.phone.connect(); await vi.advanceTimersByTimeAsync(9_000);
+    expect(f.native.connect).toHaveBeenCalledTimes(2);
+    f.emit({ type: "registration", state: "registered" }); await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.native.connect).toHaveBeenCalledTimes(2);
+  });
+  it("does not replace native signaling while offer authorization is pending", async () => {
+    const f = await connected(); vi.useFakeTimers();
+    vi.mocked(f.api.authorize).mockReturnValue(new Promise(() => {}));
+    f.emit({ type: "registration", state: "unregistered" });
+    f.emit({ type: "incoming", callId: id, providerLegId: id });
+    await vi.advanceTimersByTimeAsync(10_000); expect(f.native.connect).toHaveBeenCalledTimes(1);
+  });
+  it("does not prepare a push twice when the shared connection already prepared its exact ID", async () => {
+    const f = await connected();
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: false, preparedPushCallId: id.toUpperCase(), pending: [] });
+    f.emit({ type: "push", callId: id, providerLegId: id }); await tick();
+    expect(f.native.connect).toHaveBeenCalledTimes(2); expect(f.native.authorize).toHaveBeenCalledTimes(1);
+  });
+  it("stops automatic recovery when token refresh revokes the lease", async () => {
+    const f = await connected(); vi.useFakeTimers();
+    vi.mocked(f.api.token).mockRejectedValue(new MobileApiError("stale", 409, "native_lease_stale"));
+    f.emit({ type: "registration", state: "unregistered" }); await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.api.token).toHaveBeenCalledTimes(2); expect(f.native.disconnect).toHaveBeenCalledTimes(1);
+    expect(f.native.connect).toHaveBeenCalledTimes(1);
+  });
+  it.each(["background", "incoming call"])("fences an automatic recovery token that resolves after %s", async reason => {
+    const f = await connected(); vi.useFakeTimers();
+    let release!: (token: Awaited<ReturnType<VoiceApi["token"]>>) => void;
+    vi.mocked(f.api.token).mockReturnValueOnce(new Promise(done => { release = done; }));
+    f.emit({ type: "registration", state: "unregistered" }); await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.api.token).toHaveBeenCalledTimes(2);
+    if (reason === "background") f.phone.setForeground(false);
+    else { f.emit({ type: "incoming", callId: id, providerLegId: id }); await vi.advanceTimersByTimeAsync(0); }
+    release({ token: "refreshed-memory-token", deviceSessionId: lease, expiresAt: new Date(Date.now() + 86_400_000).toISOString() });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.native.connect).toHaveBeenCalledTimes(1); expect(f.native.disconnect).not.toHaveBeenCalled();
+    if (reason === "incoming call") expect(f.phone.state.call?.id).toBe(id);
+  });
   it("defers APNs token re-registration until the current call finishes", async () => {
     const f = await connected(); f.emit({ type: "outgoing", callId: id, sessionId: sid });
     f.emit({ type: "pushTokenChanged" }); await tick(); expect(f.native.connect).toHaveBeenCalledTimes(1);
