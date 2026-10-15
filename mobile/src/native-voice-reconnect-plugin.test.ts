@@ -9,6 +9,7 @@ import type { ExportedConfig, Mod } from "expo/config-plugins";
 const require = createRequire(import.meta.url);
 const plugin = require("../plugins/with-telnyx-reconnect-guard.cjs") as ((config: ExportedConfig) => ExportedConfig) & {
   patchTelnyxSource: (source: string, version: string) => string;
+  patchNetworkMonitorSource: (source: string, version: string) => string;
   patchPodfile: (source: string) => string;
   patchInstalledSdk: (podsRoot: string, version: string) => void;
 };
@@ -69,6 +70,11 @@ describe("pinned iOS voice SDK reconnect lifecycle hook", () => {
 
   it.each(["4.2.1", "4.2.3", "4.3.0"])("requires re-review of SDK version %s", version => {
     expect(() => plugin.patchTelnyxSource("", version)).toThrow(/unsupported SDK version/);
+    expect(() => plugin.patchNetworkMonitorSource("", version)).toThrow(/unsupported SDK version/);
+  });
+
+  it.each(["", "// Modified network monitor", "    private init() {"])("rejects unknown network monitor source", source => {
+    expect(() => plugin.patchNetworkMonitorSource(source, "4.2.2")).toThrow(/unexpected network monitor source/);
   });
 
   it.each(["", "// Modified SDK 4.2.2", "internal var txConfig: TxConfig?"])("rejects unknown source rather than applying a partial SDK patch", source => {

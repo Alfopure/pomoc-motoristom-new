@@ -14,6 +14,7 @@ function between(start, end) {
 const guardFields = source.includes("// LINKA lifecycle guard start")
   ? between("    // LINKA lifecycle guard start", "    // LINKA lifecycle guard end") : "";
 const methods = [
+  between("    public init() {", "    private func setupAudioRouteChangeMonitoring() {"),
   between("    public func connect(txConfig: TxConfig,", "    private func connectFromPush(txConfig: TxConfig,"),
   between("    public func disconnect() {", "    private var isCallsActive: Bool {"),
   between("    func onSocketDisconnected(reconnect: Bool, region: Region?) {", "    func onSocketError(error: Error) {"),
@@ -35,10 +36,10 @@ public struct TxServerConfiguration {
  }
 }
 struct Logger { static let log = Logger(); func i(message: String) {}; func e(message: String) {} }
-class Socket { static var connections = 0; weak var delegate: AnyObject?; func connect(signalingServer: URL) { Self.connections += 1 }; func disconnect(reconnect: Bool) {} }
+class Socket { static var connections = 0; var isConnected = false; weak var delegate: AnyObject?; func connect(signalingServer: URL) { Self.connections += 1 }; func disconnect(reconnect: Bool) {} }
 struct FileLogger { static var isCallFromPush = false }
 enum TxError: Error { case clientConfigurationFailed(reason: Reason); enum Reason { case voiceSdkIsRequired } }
-enum CallState { case NEW; var isConsideredActive: Bool { false } }
+enum CallState { case NEW; case DROPPED(reason: Reason); enum Reason { case networkLost }; var isConsideredActive: Bool { false } }
 class Call {
  var callState: CallState = .NEW
  func hangup() {}
@@ -47,6 +48,18 @@ class Call {
 class Assistant { func setSocket(_ socket: Socket?) {}; func clearAllData() {} }
 class Delegate { func onSocketDisconnected() {} }
 enum GatewayStates { case NOREG }
+class NetworkMonitor {
+ static var instances = [NetworkMonitor](); static let shared = NetworkMonitor()
+ enum NetworkState { case wifi, cellular, vpn, noConnection }
+ var onNetworkStateChange: ((NetworkState) -> Void)?; var started = false; var cancelled = false
+ init() { Self.instances.append(self) }
+ func startMonitoring() { if !cancelled { started = true } }
+ func stopMonitoring() { cancelled = true; started = false }
+ func emit(_ state: NetworkState) { if started && !cancelled { onNetworkStateChange?(state) } }
+}
+class SignalingHealthMonitor { func networkPathDidChange() {} }
+enum AVAudioSession { static let routeChangeNotification = Notification.Name("controlled-audio-route") }
+enum InternalConfig { enum NotificationNames { static let acmResetStarted = "controlled-start"; static let acmResetCompleted = "controlled-end" } }
 class TxClient {
  static let MAX_REGISTER_RETRY = 3; static let RECONNECT_BUFFER = 0.01
  var registerRetryCount = 0; var gatewayState: GatewayStates = .NOREG
@@ -56,6 +69,10 @@ class TxClient {
  var pendingCallDecline = false; var isReconnectPendingForCallKitDecline = false
  var pushMetaData = [String: Any](); var voiceSdkId: String?; var storedServerConfiguration: TxServerConfiguration?; var isCallFromPush = false
  enum PushCallState { case idle }; var pushCallState: PushCallState = .idle; var currentCallId = UUID()
+ var reconnectTimeoutTimer: DispatchSourceTimer?; var signalingHealthMonitor = SignalingHealthMonitor(); var isCallsActive = false
+ var networkReconnects = 0; var networkDrops = 0
+ func configure() {}; func setupAudioRouteChangeMonitoring() {}; func startReconnectTimeout() {}
+ func reconnectClient() { networkReconnects += 1 }; func updateActiveCallsState(callState: CallState) { networkDrops += 1 }
  func isConnected() -> Bool { false }
  func clearActiveCall() {}; func stopReconnectTimeout() {}; func stopInviteTimeout() {}
  func cleanupPendingCallKitDecline(reason: String) {}; func serverConfigurationForConnection(_ config: TxServerConfiguration) -> TxServerConfiguration { config }
@@ -108,6 +125,37 @@ do {
  try! client.processVoIPNotification(txConfig: TxConfig(token: "push"), serverConfiguration: TxServerConfiguration(), pushMetaData: ["voice_sdk_id": "exact-push"])
  client.onSocketDisconnected(reconnect: true, region: nil); let before = Socket.connections; client.disconnect(); pump()
  check("push-origin reconnect cannot survive logout", Socket.connections == before && client.storedTxConfig == nil && client.txConfig == nil)
+}
+do {
+ weak var retired: TxClient?
+ var old: TxClient? = connected(); retired = old
+ let oldMonitor = NetworkMonitor.instances.last!
+ let next = connected("replacement"); let nextMonitor = NetworkMonitor.instances.last!
+ check("replacement owns an independent network monitor", oldMonitor !== nextMonitor)
+ old = nil
+ check("old client deinitializes and cancels only its own monitor", retired == nil && oldMonitor.cancelled && nextMonitor.started && !nextMonitor.cancelled)
+ let before = next.networkReconnects; nextMonitor.emit(.wifi); pump()
+ check("new client receives network changes after old deinit", next.networkReconnects == before + 1)
+}
+do {
+ let first = connected("first"); let firstMonitor = NetworkMonitor.instances.last!
+ let second = connected("second"); let secondMonitor = NetworkMonitor.instances.last!
+ let firstBefore = first.networkReconnects; let secondBefore = second.networkReconnects
+ firstMonitor.emit(.cellular); pump()
+ check("network callback stays with its owning client", first.networkReconnects == firstBefore + 1 && second.networkReconnects == secondBefore)
+ secondMonitor.emit(.noConnection); pump()
+ check("network loss reaches only its owning client", second.networkDrops == 1 && first.networkDrops == 0)
+ first.disconnect(); try! first.connect(txConfig: TxConfig(token: "same-client"))
+ let before = first.networkReconnects; firstMonitor.emit(.wifi); pump()
+ check("same-client reconnect retains its uncanceled monitor", firstMonitor.started && !firstMonitor.cancelled && first.networkReconnects == before + 1)
+}
+do {
+ weak var retired: TxClient?
+ var prior: TxClient? = connected(); retired = prior
+ prior?.disconnect(); prior = nil
+ let fresh = connected("relogin"); let monitor = NetworkMonitor.instances.last!
+ let before = fresh.networkReconnects; monitor.emit(.wifi); pump()
+ check("logout and fresh login have a working new monitor", retired == nil && !monitor.cancelled && fresh.networkReconnects == before + 1)
 }
 let passed = checks.allSatisfy { $0["pass"] as? Bool == true }
 let result: [String: Any] = ["kind": "actual-TelnyxRTC-methods-controlled-socket", "checks": checks, "passed": passed, "providerNetworkingExecuted": false]

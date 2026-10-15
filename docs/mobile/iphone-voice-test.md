@@ -47,7 +47,9 @@ vypršanie ukončí presnú miestnu vetvu. Odhlásenie zruší časovače a spoj
 Použitý SDK 4.2.2 má oneskorené reconnect callbacky, ktoré pôvodne mohli
 obnoviť klienta po `disconnect()`. Pri natívnom prebuild/build sa aplikuje cielená
 CocoaPods úprava so zámkom, generačnou kontrolou a vymazaním konfigurácie
-pri odhlásení. Plugin overuje verziu aj celý pôvodný/výsledný SHA256 zdroja;
+pri odhlásení. Každý klient vlastní svoje sledovanie siete, takže zánik starého
+klienta nezastaví obnovu spojenia jeho náhrady. Plugin pred zápisom overuje verziu
+aj celý pôvodný/výsledný SHA256 oboch menených zdrojov;
 neznámy SDK alebo zmenený hook zastaví build. Expo Go túto úpravu nenačítava.
 Pri budúcom SDK upgrade treba opravu znovu posúdiť a vykonať regresie.
 
