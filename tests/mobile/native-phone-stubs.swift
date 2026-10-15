@@ -8,7 +8,20 @@ class Timer {
   func invalidate() { valid = false }
   static func fire(_ interval: TimeInterval) { let timers = scheduled.filter { $0.valid && $0.interval == interval }; for timer in timers { timer.valid = false; timer.callback(timer) } }
 }
-class AVAudioSession {}
+enum AVAuthorizationStatus { case authorized, denied, restricted, notDetermined }
+enum AVMediaType: Equatable { case audio, video }
+class AVCaptureDevice {
+  static var status = AVAuthorizationStatus.notDetermined
+  static var reads: [AVMediaType] = []
+  static var requests = 0
+  static func authorizationStatus(for mediaType: AVMediaType) -> AVAuthorizationStatus { reads.append(mediaType); return status }
+  static func requestAccess(for mediaType: AVMediaType, completionHandler: (Bool) -> Void) { requests += 1; completionHandler(status == .authorized) }
+}
+class AVAudioSession {
+  static var requests = 0
+  static func sharedInstance() -> AVAudioSession { AVAudioSession() }
+  func requestRecordPermission(_ response: (Bool) -> Void) { Self.requests += 1; response(false) }
+}
 protocol PKPushRegistryDelegate: AnyObject {}
 struct PKPushType: Hashable { static let voIP = PKPushType() }
 class PKPushRegistry { weak var delegate: PKPushRegistryDelegate?; var desiredPushTypes: Set<PKPushType>?; init(queue: DispatchQueue) {} }

@@ -6,7 +6,7 @@ import type { MotoristActor } from "@/server/api-auth";
 import { MutationError } from "@/server/mutation-error";
 import { getOperatorDevice } from "@/server/telephony/operator-devices";
 import { createTelephonyDeps, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
-import { telnyxSipUri } from "@/server/telephony/state/types";
+import { readMeta, telnyxSipUri, type LegRow, type SessionRow } from "@/server/telephony/state/types";
 import { nativeVoiceTestEnabled } from "@/lib/app-environment";
 
 export class NativeLeaseError extends MutationError { readonly code = "native_lease_stale"; }
@@ -32,6 +32,41 @@ export async function requireNativeLease(deps: TelephonyRuntimeDeps, actor: Moto
     throw new NativeLeaseError("Telefón bol odpojený alebo prihlásený na inom zariadení.", 409);
   }
   return device;
+}
+
+/** Blind transfer keeps the original conversation's answer metadata. Only a
+ * current, unaccepted transfer to this endpoint may outlive those closed legs. */
+async function isPendingNativeTransfer(
+  deps: TelephonyRuntimeDeps,
+  actor: MotoristActor,
+  session: SessionRow,
+  leg: LegRow,
+): Promise<boolean> {
+  const metadata = readMeta(session);
+  const transfer = metadata.transfer;
+  const state = leg.client_state && typeof leg.client_state === "object" && !Array.isArray(leg.client_state) ? leg.client_state : {};
+  if (session.direction !== "inbound" || session.state !== "ringing" || session.answered_by_profile_id
+    || session.ended_at || session.termination_requested_at || leg.ended_at || leg.answered_at
+    || transfer?.kind !== "blind" || transfer.completed_at || transfer.target?.kind !== "operator"
+    || transfer.target.profileId !== actor.profileId
+    || typeof state.intent !== "string" || !["transfer", "transfer_safe", "transfer_recorded"].includes(state.intent)) return false;
+
+  const globalWinner = metadata.answered_leg_call_control_id;
+  const acceptedWinner = metadata.accepted_device_legs?.[actor.profileId];
+  if (typeof globalWinner !== "string" || !globalWinner || globalWinner === leg.telnyx_call_control_id) return false;
+  const { data: sessionLegs, error } = await deps.admin.from("motorist_call_legs").select("*")
+    .eq("organization_id", actor.organizationId).eq("session_id", session.id);
+  if (error) throw new MutationError("Účastníka hovoru sa nepodarilo overiť.", 503);
+  if (!sessionLegs || sessionLegs.some(candidate => candidate.role !== "customer" && candidate.answered_at && !candidate.ended_at)) return false;
+  const currentLeg = sessionLegs.find(candidate => candidate.id === leg.id);
+  if (!currentLeg || currentLeg.role !== "operator" || currentLeg.profile_id !== actor.profileId
+    || currentLeg.to_number !== leg.to_number || currentLeg.telnyx_call_control_id !== leg.telnyx_call_control_id
+    || currentLeg.ended_at || currentLeg.answered_at) return false;
+  const closedWinner = (controlId: string, profileId?: string) => sessionLegs.some(candidate =>
+    candidate.telnyx_call_control_id === controlId && candidate.role === "operator"
+    && (!profileId || candidate.profile_id === profileId) && candidate.answered_at && candidate.ended_at);
+  return Boolean(closedWinner(globalWinner)
+    && (!acceptedWinner || typeof acceptedWinner === "string" && acceptedWinner !== leg.telnyx_call_control_id && closedWinner(acceptedWinner, actor.profileId)));
 }
 
 /** Resolve only a current leg addressed to this operator's mobile identity.
@@ -73,8 +108,9 @@ export async function authorizeNativeOffer(deps: TelephonyRuntimeDeps, actor: Mo
   if (attempts?.some(attempt => attempt.ended_at || !["pending", "offered", "answered"].includes(attempt.result))) throw new MutationError("Ponuka hovoru už neplatí.", 409);
   const sessionMetadata = session.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata) ? session.metadata : {};
   const accepted = sessionMetadata.accepted_device_legs && typeof sessionMetadata.accepted_device_legs === "object" && !Array.isArray(sessionMetadata.accepted_device_legs) ? sessionMetadata.accepted_device_legs : {};
-  if (accepted[actor.profileId] && accepted[actor.profileId] !== leg.telnyx_call_control_id) throw new MutationError("Hovor už prijal iný telefón.", 409);
-  if (session.answered_at && session.direction !== "internal" && sessionMetadata.answered_leg_call_control_id
+  const pendingTransfer = await isPendingNativeTransfer(deps, actor, session, leg);
+  if (!pendingTransfer && accepted[actor.profileId] && accepted[actor.profileId] !== leg.telnyx_call_control_id) throw new MutationError("Hovor už prijal iný telefón.", 409);
+  if (!pendingTransfer && session.answered_at && session.direction !== "internal" && sessionMetadata.answered_leg_call_control_id
     && sessionMetadata.answered_leg_call_control_id !== leg.telnyx_call_control_id) throw new MutationError("Hovor už prijal iný telefón.", 409);
   return { sessionId: session.id, callControlId: leg.telnyx_call_control_id, direction: session.direction,
     number: session.direction === "outbound" ? session.called_number : session.caller_number };
@@ -110,8 +146,10 @@ export async function requireNativeSession(deps: TelephonyRuntimeDeps, actor: Mo
   if (!options.readOffer && (!participant || !ownLegs.length || !data.ended_at && !openLeg && !ownsCleanup)) {
     throw new MutationError("Hovor nepatrí vášmu telefónu.", 403);
   }
+  const pendingLeg = options.readOffer && legs.find(leg => !leg.ended_at && !leg.answered_at);
+  const pendingTransfer = Boolean(pendingLeg && await isPendingNativeTransfer(deps, actor, data, pendingLeg));
   return { ...data,
     nativeConnected: Boolean(participant && openLeg?.answered_at),
-    nativeEnded: Boolean(data.ended_at || !openLeg || data.answered_at && !participant),
+    nativeEnded: !pendingTransfer && Boolean(data.ended_at || !openLeg || data.answered_at && !participant),
   };
 }

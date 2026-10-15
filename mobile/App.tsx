@@ -18,6 +18,7 @@ import { flushAccountDrafts } from "./src/drafts/vault";
 import { AuthIncarnation } from "./src/lib/auth-incarnation";
 import { supportsDurableDrafts } from "./src/drafts/storage";
 import { CallPanel } from "./src/voice/ui";
+import { PhoneReadinessCard } from "./src/voice/readiness-ui";
 import type { DispatchPhone, PhoneState } from "./src/voice/phone";
 import { SessionLogout, type LogoutState } from "./src/lib/logout";
 import { useAndroidBack } from "./src/lib/use-android-back";
@@ -246,6 +247,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
 function Console({ api, me, queryKey, active, number, onNumber, phone, phoneState }: { api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; number: string; onNumber: (value: string) => void; phone: DispatchPhone | null; phoneState: PhoneState }) {
   const [changingPresence, setChangingPresence] = useState(false);
   const query = useQuery({ queryKey: [...queryKey, "console", me.profileId], queryFn: ({ signal }) => api.console(me.profileId, signal), enabled: active, refetchInterval: active ? 30_000 : false });
+  const readiness = useQuery({ queryKey: [...queryKey, "voice-readiness", me.profileId], queryFn: ({ signal }) => api.voiceReadiness(me.profileId, signal), enabled: active, refetchInterval: active ? 30_000 : false });
+  function refreshPhone() { void Promise.allSettled([query.refetch(), readiness.refetch(), phone?.refreshDiagnostics()]); }
   async function presence(status: "available" | "paused") {
     if (!phone || changingPresence) return;
     setChangingPresence(true);
@@ -254,7 +257,7 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
   }
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}
-    refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { void query.refetch(); }} />}>
+    refreshControl={<RefreshControl refreshing={query.isRefetching || readiness.isRefetching || phoneState.checkingDiagnostics} onRefresh={refreshPhone} />}>
     <View style={s.screenHeading}><Text accessibilityRole="header" style={styles.heading}>Ústredňa</Text><Text style={styles.muted}>{me.profile.displayName}</Text></View>
     {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} /> : query.data && <>
       <Card style={s.presenceCard}><Text style={styles.label}>Váš stav v ústredni</Text><View style={styles.row}>
@@ -263,7 +266,7 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
         </View><Text style={s.presenceTitle}>{presenceLabels[query.data.presence.status]}</Text></View>
         <Text style={styles.muted}>Aktualizované {formatTime(query.data.checkedAt)}</Text>
         {phoneState.registration === "registered" && <View style={styles.row}>{(["available", "paused"] as const).map(status => <View key={status} style={{ flex: 1 }}>
-          <Button label={presenceLabels[status]} secondary disabled={changingPresence || Boolean(phoneState.call || phoneState.termination) || query.data.presence.status === status}
+          <Button label={presenceLabels[status]} secondary disabled={changingPresence || phoneState.microphonePermission === "denied" || Boolean(phoneState.call || phoneState.termination) || query.data.presence.status === status}
             onPress={() => { void presence(status); }} />
         </View>)}</View>}
       </Card>
@@ -272,20 +275,21 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
         <Text style={styles.muted}>{call.lineLabel ?? ""}</Text>
       </Card>)}</>}
     </>}
-    {phoneState.supported ? <Card><Text style={styles.subheading}>{phoneState.registration === "registered" ? "Telefón pripojený" : "Pripojte svoj telefón"}</Text>
-      <Text style={styles.muted}>Po pripojení môžete volať. Pre zákaznícke hovory nastavte stav Dostupný.</Text>
-      {phoneState.error && <ErrorNotice message={phoneState.error} />}
-      {phoneState.registration !== "registered" && <Button label={phoneState.registration === "connecting" ? "Pripájam…" : "Pripojiť telefón"}
-        disabled={phoneState.registration === "connecting"} onPress={() => { void phone?.connect(); }} />}
-      {phoneState.takeoverRequired && <Button label="Prevziať telefón na tomto iPhone" secondary onPress={() => Alert.alert("Prevziať telefón?", "Druhý mobil sa odpojí od ústredne.", [
+    <PhoneReadinessCard state={phoneState} configuration={readiness.data} configurationError={readiness.isError}
+      presence={query.isError ? undefined : query.data?.presence.status} checking={readiness.isFetching || phoneState.checkingDiagnostics}
+      onRefresh={refreshPhone} onConnect={() => { void phone?.connect(); }} onTakeover={() => Alert.alert("Prevziať telefón?", "Druhý mobil sa odpojí od ústredne.", [
         { text: "Zrušiť", style: "cancel" }, { text: "Prevziať", onPress: () => { void phone?.connect(true); } },
-      ])} />}
-    </Card> : <View style={s.notice}><Text style={[styles.label, { marginBottom: 2 }]}>Systémové hovory</Text>
-      <Text style={styles.muted}>Táto zostava podporuje prihlásenie, ústredňu, históriu a prácu s prípadmi. Systémové telefonovanie potrebuje samostatnú natívnu zostavu a overenie na telefóne.</Text></View>}
+      ])} />
+    {phoneState.retryNumber && !phoneState.dialing && <Card><Text style={styles.subheading}>Nepotvrdené volanie</Text>
+      <Text style={styles.text}>{formatNumber(phoneState.retryNumber)}</Text>
+      <Text style={styles.muted}>Zopakujeme pôvodný pokus o volanie. Tým sa nevytvorí druhý súbežný pokus.</Text>
+      <Button label="Zopakovať pôvodné volanie" disabled={!phone || phoneState.registration !== "registered" || phoneState.microphonePermission === "denied" || Boolean(phoneState.call || phoneState.termination)}
+        onPress={() => { void phone?.retryDial(); }} />
+    </Card>}
     <Card><View style={styles.row}><View style={s.smallEmblem}><PhoneCall size={20} color={colors.ink} accessible={false} /></View><Text style={styles.subheading}>Nový hovor</Text></View>
       <TextInput accessibilityLabel="Telefónne číslo" placeholder="Telefónne číslo" placeholderTextColor={colors.muted}
       selectionColor={colors.brand} keyboardType="phone-pad" maxLength={40} value={number} onChangeText={onNumber} style={[styles.input, s.phoneInput]} />
-      <Button label={phoneState.dialing ? "Vytáčam…" : "Zavolať"} disabled={!phone || phoneState.registration !== "registered" || !dialable(number) || phoneState.dialing || Boolean(phoneState.call || phoneState.termination)}
+      <Button label={phoneState.dialing ? "Vytáčam…" : "Zavolať"} disabled={!phone || phoneState.registration !== "registered" || phoneState.microphonePermission === "denied" || Boolean(phoneState.retryNumber) || !dialable(number) || phoneState.dialing || Boolean(phoneState.call || phoneState.termination)}
         onPress={() => { void phone?.dial(number.trim()); }} />
     </Card>
     </ScrollView>

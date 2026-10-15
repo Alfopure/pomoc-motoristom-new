@@ -201,3 +201,70 @@ describe("native voice boundaries", () => {
     expect(h.telnyx.calls).toHaveLength(0);
   });
 });
+
+describe("native pending transfer ownership", () => {
+  function transferred(kind: "global" | "own") {
+    const f = fixture();
+    f.h.db.update("motorist_call_legs", { client_state: { intent: "transfer_safe" } }, () => true);
+    f.h.db.seed("motorist_call_legs", [{ id: "old", session_id: sessionId, organization_id: ORG,
+      profile_id: kind === "own" ? actor.profileId : PROFILES.o2, role: "operator", telnyx_call_control_id: "old-answered-leg",
+      to_number: "sip:previous@sip.telnyx.com", answered_at: f.h.now().toISOString(), ended_at: f.h.now().toISOString(), client_state: { intent: "ring" } }]);
+    f.h.db.update("motorist_call_sessions", { answered_at: f.h.now().toISOString(), answered_by_profile_id: null,
+      metadata: { environment: "development", answered_leg_call_control_id: "old-answered-leg",
+        ...(kind === "own" ? { accepted_device_legs: { [actor.profileId]: "old-answered-leg" } } : {}),
+        transfer: { kind: "blind", at: f.h.now().toISOString(), target: { kind: "operator", profileId: actor.profileId, sipUri: "sip:native-test@sip.telnyx.com" } } } }, () => true);
+    return f;
+  }
+  it.each(["global", "own"] as const)("does not treat historical %s answered metadata as the current transfer winner", async kind => {
+    const f = transferred(kind);
+    await expect(authorizeNativeOffer(f.deps, actor, f.offer)).resolves.toMatchObject({ sessionId, callControlId: "exact-native-leg" });
+  });
+  it.each(["global", "own"] as const)("does not definitively end a pending mobile transfer due to historical %s winner", async kind => {
+    const f = transferred(kind);
+    expect(await requireNativeSession(f.deps, actor, sessionId, { readOffer: true })).toMatchObject({ nativeConnected: false, nativeEnded: false });
+  });
+  it.each(["transfer", "transfer_safe", "transfer_recorded"])("allows a current %s offer without granting session cleanup", async intent => {
+    const f = transferred("own");
+    f.h.db.update("motorist_call_legs", { client_state: { intent } }, row => row.id === legId);
+    await expect(authorizeNativeOffer(f.deps, actor, f.offer)).resolves.toMatchObject({ callControlId: "exact-native-leg" });
+    await expect(requireNativeSession(f.deps, actor, sessionId)).rejects.toMatchObject({ status: 403 });
+    expect(f.h.telnyx.calls).toHaveLength(0);
+  });
+  it.each(["live winner", "missing winner", "foreign session", "foreign organization", "wrong winner role", "foreign accepted profile", "busy caller", "wrong target", "completed transfer", "wrong intent", "outbound", "assigned", "wrong SIP", "wrong role"])("does not authorize historical metadata with %s", async reason => {
+    const f = transferred("own");
+    const old = (row: Record<string, unknown>) => row.id === "old";
+    if (reason === "live winner") f.h.db.update("motorist_call_legs", { ended_at: null }, old);
+    if (reason === "missing winner") f.h.db.update("motorist_call_legs", { telnyx_call_control_id: "different" }, old);
+    if (reason === "foreign session") f.h.db.update("motorist_call_legs", { session_id: lease }, old);
+    if (reason === "foreign organization") f.h.db.update("motorist_call_legs", { organization_id: lease }, old);
+    if (reason === "wrong winner role") f.h.db.update("motorist_call_legs", { role: "consult" }, old);
+    if (reason === "foreign accepted profile") f.h.db.update("motorist_call_legs", { profile_id: PROFILES.o2 }, old);
+    if (reason === "busy caller") f.h.db.seed("motorist_call_legs", [{ id: "busy", session_id: sessionId, organization_id: ORG, role: "operator", profile_id: PROFILES.o2, answered_at: f.h.now().toISOString(), ended_at: null }]);
+    if (reason === "wrong target" || reason === "completed transfer") {
+      const metadata = f.h.rows("motorist_call_sessions")[0].metadata as Record<string, unknown>;
+      const transfer = metadata.transfer as Record<string, unknown>;
+      f.h.db.update("motorist_call_sessions", { metadata: { ...metadata, transfer: { ...transfer,
+        ...(reason === "wrong target" ? { target: { kind: "operator", profileId: PROFILES.o2 } } : { completed_at: f.h.now().toISOString() }) } } }, () => true);
+    }
+    if (reason === "wrong intent") f.h.db.update("motorist_call_legs", { client_state: { intent: "ring" } }, row => row.id === legId);
+    if (reason === "outbound") f.h.db.update("motorist_call_sessions", { direction: "outbound" }, () => true);
+    if (reason === "assigned") f.h.db.update("motorist_call_sessions", { answered_by_profile_id: PROFILES.o2 }, () => true);
+    if (reason === "wrong SIP") f.h.db.update("motorist_call_legs", { to_number: "sip:another@sip.telnyx.com" }, row => row.id === legId);
+    if (reason === "wrong role") f.h.db.update("motorist_call_legs", { role: "consult" }, row => row.id === legId);
+    await expect(authorizeNativeOffer(f.deps, actor, f.offer)).rejects.toMatchObject({ status: 409 });
+    if (!["wrong SIP", "wrong role"].includes(reason)) {
+      expect(await requireNativeSession(f.deps, actor, sessionId, { readOffer: true })).toMatchObject({ nativeConnected: false, nativeEnded: true });
+    }
+    expect(f.h.telnyx.calls).toHaveLength(0);
+  });
+  it("retains current lease, offer reservation and attempt denials during transfer", async () => {
+    const f = transferred("own");
+    await expect(authorizeNativeOffer(f.deps, actor, { ...f.offer, deviceSessionId: sessionId })).rejects.toMatchObject({ code: "native_lease_stale" });
+    f.h.db.update("motorist_call_legs", { client_state: { intent: "transfer_safe", offerToken: "current" } }, row => row.id === legId);
+    await expect(authorizeNativeOffer(f.deps, actor, f.offer)).rejects.toMatchObject({ status: 409 });
+    f.h.db.update("motorist_call_legs", { client_state: { intent: "transfer_safe" } }, row => row.id === legId);
+    f.h.db.seed("motorist_ring_attempts", [{ organization_id: ORG, session_id: sessionId, leg_id: legId, result: "cancelled", ended_at: f.h.now().toISOString() }]);
+    await expect(authorizeNativeOffer(f.deps, actor, f.offer)).rejects.toMatchObject({ status: 409 });
+  });
+
+});
