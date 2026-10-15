@@ -40,7 +40,7 @@ describe("browser timing log authorization", () => {
     expect(await logBrowserCallObservations(h, "profile-1", [entry, ...["control-other", "control-other-org", "control-dev", "made-up"].map(callControlId => ({ ...entry, callControlId }))])).toEqual([entry.id]);
     expect(h.logger).toHaveBeenCalledTimes(1);
     expect(h.logger).toHaveBeenCalledWith({ scope: "browser_call_timing", source: "browser", observationId: entry.id, pageId: entry.pageId,
-      sessionId: "session-1", legId: "leg-1", environment: "production", phase: "ringtone_start", browserMonotonicMs: 1200, outcome: "ok", durationMs: 3 });
+      sessionId: "session-1", legId: "leg-1", environment: "production", appEnvironment: expect.any(String), serverBuild: expect.any(String), phase: "ringtone_start", browserMonotonicMs: 1200, outcome: "ok", durationMs: 3 });
     expect(JSON.stringify(h.logger.mock.calls)).not.toContain("control-1");
     expect(h.filters).toContainEqual(["motorist_call_sessions", "eq", "metadata->>environment", "production"]);
   });

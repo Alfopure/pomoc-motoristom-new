@@ -55,3 +55,16 @@ describe("call observation acknowledgement", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });
+
+it("flushes request metrics through the existing endpoint without call observations and retains failed acknowledgements", async () => {
+  const { RequestPerformanceQueue } = await import("./request-performance");
+  let now = 0;
+  const queue = new RequestPerformanceQueue(() => now);
+  const row = {id:"00000000-0000-4000-8000-000000000001",operation:"call.park" as const,ms:321,outcome:"ok" as const};
+  queue.record(row);
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ loggedIds: [] })).mockResolvedValueOnce(Response.json({ loggedIds: [], performanceIds: [row.id] }));
+  const transport = new BrowserCallTransport(new BrowserCallTelemetry(), fetcher, () => now, queue);
+  await transport.flush(); expect(queue.batch()).toHaveLength(1);
+  now = 5000; await transport.flush(); expect(queue.batch()).toHaveLength(0);
+  expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string)).toMatchObject({observations:[],requestTimings:[row]});
+});
