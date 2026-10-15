@@ -1,5 +1,8 @@
 /// <reference types="node" />
 import { createRequire } from "node:module";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExportedConfig, Mod } from "expo/config-plugins";
 
@@ -7,6 +10,7 @@ const require = createRequire(import.meta.url);
 const plugin = require("../plugins/with-telnyx-reconnect-guard.cjs") as ((config: ExportedConfig) => ExportedConfig) & {
   patchTelnyxSource: (source: string, version: string) => string;
   patchPodfile: (source: string) => string;
+  patchInstalledSdk: (podsRoot: string, version: string) => void;
 };
 const podfile = `platform :ios, '16.4'
 target 'Linka' do
@@ -36,9 +40,21 @@ describe("pinned iOS voice SDK reconnect lifecycle hook", () => {
     expect(patched).toContain("react_native_post_install(installer)");
     expect(patched.indexOf("with-telnyx-reconnect-guard.cjs")).toBeLessThan(patched.indexOf("react_native_post_install"));
     expect(patched).toContain("installer.sandbox.root.to_s");
+    expect(patched).toContain("target.root_spec.version.to_s");
     expect(patched).toContain("raise 'Telnyx lifecycle patch failed");
     expect(patched.match(/post_install do/g)).toHaveLength(1);
     expect(plugin.patchPodfile(patched)).toBe(patched);
+  });
+
+  it("uses the installer-provided version without requiring generated Local Podspecs metadata", () => {
+    const root = mkdtempSync(join(tmpdir(), "linka-voice-pods-"));
+    try {
+      const folder = join(root, "TelnyxRTC/TelnyxRTC/Telnyx");
+      mkdirSync(folder, { recursive: true });
+      writeFileSync(join(folder, "TxClient.swift"), "// deliberately unreviewed source");
+      expect(() => plugin.patchInstalledSdk(root, "4.2.2")).toThrow(/unexpected SDK source/);
+      expect(() => plugin.patchInstalledSdk(root, "4.2.3")).toThrow(/unsupported SDK version/);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it.each(["", podfile + podfile, podfile.replace("|installer|", "|another|")])("refuses unsupported CocoaPods structure", source => {

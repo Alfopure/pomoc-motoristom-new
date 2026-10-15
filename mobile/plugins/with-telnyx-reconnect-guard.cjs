@@ -11,8 +11,11 @@ const ORIGINAL_SHA256 = "06fba6adc8283a5337e88c4c74059099e856b7bdc3d7198416b1d2a
 const PATCHED_SHA256 = "3951eb7d498ec70897e2de11c1c48d65df26a6199977310a71a36059154efb73";
 const MARKER = "# Linka Telnyx lifecycle guard";
 const hook = `${MARKER}
+    telnyx_versions = installer.pod_targets.select { |target| target.root_spec.name == 'TelnyxRTC' }
+      .map { |target| target.root_spec.version.to_s }.uniq
+    raise 'Expected pinned TelnyxRTC ${VERSION} from CocoaPods installer.' unless telnyx_versions == ['${VERSION}']
     guard_script = File.expand_path('../plugins/with-telnyx-reconnect-guard.cjs', __dir__)
-    unless system('node', guard_script, installer.sandbox.root.to_s)
+    unless system('node', guard_script, installer.sandbox.root.to_s, telnyx_versions.fetch(0))
       raise 'Telnyx lifecycle patch failed; refusing an unguarded native phone build.'
     end`;
 const hash = source => createHash("sha256").update(source).digest("hex");
@@ -74,11 +77,10 @@ function patchPodfile(contents) {
   return contents.replace(postInstall, match => match + "\n    " + hook);
 }
 
-function patchInstalledSdk(podsRoot) {
-  const spec = JSON.parse(readFileSync(join(podsRoot, "Local Podspecs/TelnyxRTC.podspec.json"), "utf8"));
+function patchInstalledSdk(podsRoot, version) {
   const file = join(podsRoot, "TelnyxRTC/TelnyxRTC/Telnyx/TxClient.swift");
   const original = readFileSync(file, "utf8");
-  const patched = patchTelnyxSource(original, spec.version);
+  const patched = patchTelnyxSource(original, version);
   if (patched !== original) {
     const mode = statSync(file).mode;
     // CocoaPods may make downloaded sources read-only; restore its exact mode.
@@ -99,7 +101,7 @@ module.exports.patchTelnyxSource = patchTelnyxSource;
 module.exports.patchPodfile = patchPodfile;
 module.exports.patchInstalledSdk = patchInstalledSdk;
 if (require.main === module) {
-  if (process.argv.length !== 3) throw new Error("Expected the CocoaPods sandbox root.");
-  patchInstalledSdk(process.argv[2]);
+  if (process.argv.length !== 4) throw new Error("Expected the CocoaPods sandbox root and installer-resolved SDK version.");
+  patchInstalledSdk(process.argv[2], process.argv[3]);
   console.log(JSON.stringify({ guard: "Linka Telnyx lifecycle", sdk: VERSION, sourceSha256: PATCHED_SHA256 }));
 }
