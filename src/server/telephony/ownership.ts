@@ -40,6 +40,12 @@ export type Ownership = {
 };
 export const sessionOwnership = new AsyncLocalStorage<Ownership>();
 const ownershipRenewals = new WeakMap<Ownership, Promise<void>>();
+const databaseDeadline = new AsyncLocalStorage<number>();
+
+/** A shared deadline for recoverable bookkeeping; never changes the session fence. */
+export function withTelephonyDatabaseBudget<T>(budgetMs: number, work: () => Promise<T>): Promise<T> {
+  return databaseDeadline.run(Math.min(databaseDeadline.getStore() ?? Infinity, Date.now() + budgetMs), work);
+}
 
 function ownershipIndependentRpc(input: RequestInfo | URL): boolean {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -80,6 +86,14 @@ function abortInsteadOfTimeout(error: unknown, description: string): never {
 /** The headers belong to this async invocation, never to a shared client. */
 export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   registerDatabaseOrigin(input);
+  const deadline = databaseDeadline.getStore();
+  if (deadline !== undefined) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new DOMException("Telephony bookkeeping budget exhausted", "AbortError");
+    const budget = AbortSignal.timeout(remaining);
+    const supplied = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    init = { ...init, signal: supplied ? AbortSignal.any([supplied, budget]) : budget };
+  }
   const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
   headers.set("x-telephony-writer", "2");
   const owner = sessionOwnership.getStore();
@@ -92,7 +106,8 @@ export async function telephonyDatabaseFetch(input: RequestInfo | URL, init?: Re
     const cap = unownedReadCap(input, init);
     if (!cap) {
       const detach = observeDatabaseTimeout(init?.signal ?? (input instanceof Request ? input.signal : undefined));
-      try { return await measureRequestStep("db", () => fetch(input, { ...init, headers })); }
+      try { return await measureRequestStep("db", () => fetch(input, { ...init, headers })
+        .catch(error => abortInsteadOfTimeout(error, "Telephony database request exceeded its deadline"))); }
       finally { detach(); }
     }
     const signal = init?.signal ? AbortSignal.any([init.signal, cap]) : cap;

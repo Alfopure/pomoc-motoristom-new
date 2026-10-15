@@ -1061,6 +1061,7 @@ function planStep(b: TransitionBuilder, plan: FrozenRingPlan, index: number): Ri
   );
   const planned = planRingStep(step, {
     sessionId: b.session.id,
+    callerNumber: b.session.direction === "inbound" ? b.session.caller_number : null,
     ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
     now: b.ctx.now,
     presence: toEligibilityPresence(b.ctx.presence),
@@ -1439,6 +1440,7 @@ function offerQueuedCall(b: TransitionBuilder, customer: LegRow): boolean {
   const index = b.session.current_step;
   const choose = (members: FrozenRingMember[]) => planQueueStep(plan, index, members,
     { ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(b.session),
+      callerNumber: b.session.direction === "inbound" ? b.session.caller_number : null,
       sessionId: b.session.id, now: b.ctx.now, presence: toEligibilityPresence(b.ctx.presence), devices: toEligibilityDevices(b.ctx.devices),
       mobileDevices: toEligibilityDevices(b.ctx.mobileDevices ?? [], b.ctx.now),
       openOffers: b.ctx.openOffers, attempted: new Set(), maxConcurrentLegs: b.ctx.settings.maxConcurrentLegs, activeLegCount: b.ctx.activeLegCount });

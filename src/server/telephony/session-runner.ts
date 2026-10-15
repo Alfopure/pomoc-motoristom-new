@@ -960,6 +960,7 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
         try {
           effectsMayHaveStarted = true;
           const resumed = await resumePendingEffects(effects, snapshot.session, { databaseOnly: preemptsAudio, skipCompletedProjections: event.kind !== "app" || event.type !== "sweep",
+            projectionRecovery: event.kind === "app" && event.type === "sweep",
             deferContactChecks: snapshot.session.writer_contract === 2 && event.kind === "app" && event.type !== "sweep" });
           if (resumed?.failed && !preemptsAudio && event.kind === "app") return finish({ outcome: "applied", apply: resumed, session: resumed.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: resumed.commands });
         } catch (error) {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createTelephonyHarness, ORG } from "@/test/telephony-harness";
 import { sessionOwnership, type Ownership } from "../ownership";
+import { SessionLeaseLostError } from "../service-errors";
 import { effectsDeps } from "../session-runner";
 import { checkpointEffects, readPendingEffects, type EffectContinuation } from "./continuation";
 import { emptyTransition, toJson, type SessionRow } from "./types";
@@ -78,10 +79,13 @@ describe("fenced checkpoint latency", () => {
     expect(t.h.db.log.filter(row => row.table === "motorist_call_sessions").map(row => row.operation)).toEqual(["select", "update"]);
   });
 
-  it("does not retry or bypass a rejected fenced update", async () => {
+  it.each([
+    { code: "PT409", message: "telephony ownership lost" },
+    { code: "", message: "SessionLeaseLostError: session lease unavailable during effects" },
+  ])("keeps a rejected checkpoint retryable without retrying the expired writer ($message)", async error => {
     const t = fixture();
-    t.h.db.failNext("motorist_call_sessions", "update", { code: "PT409", message: "telephony ownership lost", details: null, hint: null });
-    await expect(t.checkpoint()).rejects.toThrow("telephony ownership lost");
+    t.h.db.failNext("motorist_call_sessions", "update", { ...error, details: null, hint: null });
+    await expect(t.checkpoint()).rejects.toBeInstanceOf(SessionLeaseLostError);
     expect(readPendingEffects(t.h.session(t.known.id) as SessionRow).entries[0].databaseCursor).toBe(0);
     expect(t.h.db.log.filter(row => row.table === "motorist_call_sessions")).toHaveLength(1);
   });

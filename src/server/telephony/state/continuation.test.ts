@@ -7,11 +7,12 @@ import { blindTransfer, createRateLimiter } from "../call-actions";
 import { setPresence } from "../presence-service";
 import { readPendingEffects } from "./continuation";
 import { readMeta, type SessionRow } from "./types";
+import { replayDeferredSessionEvents } from "../telnyx/event-processor";
 
 afterEach(() => vi.unstubAllEnvs());
-async function ringing(recording = false) {
+async function ringing(recording = false, writerContract?: 2) {
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
-  const h = createTelephonyHarness({ sweepAfterEvent: false });
+  const h = createTelephonyHarness({ sweepAfterEvent: false, writerContract });
   if (recording) {
     for (const key of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED", "TELNYX_RECORDING_CONFERENCE_VERIFIED", "TELNYX_RECORDING_TRANSFER_VERIFIED", "TELNYX_RECORDING_CHANNELS_VERIFIED"]) vi.stubEnv(key, "true");
     h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(), inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
@@ -226,6 +227,31 @@ describe("durable transition recovery", () => {
     expect(h.telnyx.of("hangup").some((command) => command.params.callControlId === operator)).toBe(false);
     h.advance(31_000);
     await runSessionEvent(h.deps, call.sessionId, { kind: "app", type: "sweep", id: "recovery", occurredAt: h.now().toISOString(), actorProfileId: null });
+    expect(pending(h, call.sessionId)).toEqual([]);
+    expect(h.telnyx.physical.connected(call.callControlId, operator)).toBe(true);
+  });
+
+  it("keeps an answer retryable after losing ownership at the accepted bridge checkpoint", async () => {
+    const { h, call, operator } = await ringing(false, 2);
+    const bridge = h.telnyx.client.bridge.bind(h.telnyx.client);
+    const spy = vi.spyOn(h.telnyx.client, "bridge").mockImplementationOnce(async input => {
+      const result = await bridge(input);
+      h.db.failNext("motorist_call_sessions", "update", { code: "", message: "SessionLeaseLostError: session lease unavailable during effects", details: null, hint: null });
+      return result;
+    });
+    const result = await h.legEvent(operator, "call.answered");
+    expect(result).toMatchObject({ status: 500, outcome: "failed" });
+    const row = h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === result.eventId)!;
+    expect(row).toMatchObject({ retry_state: "deferred", effect_failure_count: 0 });
+    expect(pending(h, call.sessionId).length).toBeGreaterThan(0);
+    expect(h.telnyx.physical.connected(call.callControlId, operator)).toBe(true);
+    expect(h.telnyx.of("hangup").some(command => command.params.callControlId === operator)).toBe(false);
+    spy.mockRestore();
+    const bridges = h.telnyx.of("bridge").length;
+    h.advance(2_000);
+    await replayDeferredSessionEvents(h.deps, call.sessionId);
+    expect(h.rows("motorist_telnyx_webhook_events").find(event => event.event_id === row.event_id)?.status).toBe("processed");
+    expect(h.telnyx.of("bridge")).toHaveLength(bridges);
     expect(pending(h, call.sessionId)).toEqual([]);
     expect(h.telnyx.physical.connected(call.callControlId, operator)).toBe(true);
   });
