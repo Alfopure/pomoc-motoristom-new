@@ -127,7 +127,7 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
     {!state.ready && visible && tab !== "account" && <View style={styles.content}><Text style={styles.text}>Pred otvorením formulárov obnovte miestne koncepty v účte.</Text><Button label="Otvoriť účet" onPress={() => props.onTab("account")} secondary /></View>}
     {state.ready && <>
       <View style={tab === "cases" ? { flex: 1 } : { display: "none" }}><Cases api={api} environment={props.config.environment} userId={props.userId} profileId={identity.profileId}
-        active={active && tab === "cases"} workStore={store} vault={vault} queryKey={caseKey} openRequest={props.caseRequest} onLeaveCases={() => props.onTab("console")} onSelectNumber={props.onSelectNumber} /></View>
+        active={active && tab === "cases"} visible={tab === "cases"} workStore={store} vault={vault} queryKey={caseKey} openRequest={props.caseRequest} onLeaveCases={() => props.onTab("console")} onSelectNumber={props.onSelectNumber} /></View>
       <View style={tab === "tasks" ? { flex: 1 } : { display: "none" }}><MyTasks store={store} queryKey={queryKey} profileId={identity.profileId}
         active={active && tab === "tasks"} onLeave={() => props.onTab("console")} onOpenCase={props.onOpenCase} openTaskRequest={props.taskRequest} /></View>
     </>}

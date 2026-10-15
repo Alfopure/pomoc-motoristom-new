@@ -19,6 +19,7 @@ import { CaseNoteDraft } from "./notes";
 import { CaseNoteForm, CaseNoteSavedNotice } from "./note-editor";
 import { CaseOwnerDraft } from "./owner";
 import { CaseOwnerForm } from "./owner-ui";
+import { CasePlacePicker } from "./case-place-picker";
 import { CaseMapFrame } from "./map-frame";
 import { CopyValue } from "./copy";
 import { directionsUrl } from "./maps";
@@ -37,8 +38,8 @@ type Page = { kind: "case.owner"; id: string; draft: CaseOwnerDraft } | { kind: 
 
 /** Kept mounted under the authenticated workspace across tab changes. Reads
  * pause when hidden; unsaved input and a confirmed created ID stay in memory. */
-export function Cases({ api, environment, userId, profileId, active, onSelectNumber, onLeaveCases, workStore, vault, queryKey, openRequest }: {
-  api: CasesApi; environment: string; userId: string; profileId: string; active: boolean; onSelectNumber: (number: string) => void; onLeaveCases?: () => void;
+export function Cases({ api, environment, userId, profileId, active, visible = active, onSelectNumber, onLeaveCases, workStore, vault, queryKey, openRequest }: {
+  api: CasesApi; environment: string; userId: string; profileId: string; active: boolean; visible?: boolean; onSelectNumber: (number: string) => void; onLeaveCases?: () => void;
   workStore?: WorkStore; vault?: DraftVault; queryKey?: string[]; openRequest?: CaseOpenRequest;
 }) {
   const queryClient = useQueryClient();
@@ -192,8 +193,8 @@ export function Cases({ api, environment, userId, profileId, active, onSelectNum
       onStatus={value => { setStatus(value); if (value && isClosedCaseStatus(value)) setCategory("all"); }} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
       onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={value => { setCategory(value); setStatus(statusForCategory(status, value)); }} onOpen={showDetail}
       onNew={showForm} draftState={state} onReviewed={requestedAt => draft.reviewList(requestedAt)} />
-      : page.kind === "new" ? <CaseForm api={api} active={active} draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} />
-        : page.kind === "edit" ? <CaseEditor api={api} edit={page.edit} active={active} onSaved={edited} onBack={() => showDetail(page.id)} />
+      : page.kind === "new" ? <CaseForm api={api} active={active} visible={visible} draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} />
+        : page.kind === "edit" ? <CaseEditor api={api} edit={page.edit} active={active} visible={visible} onSaved={edited} onBack={() => showDetail(page.id)} />
         : page.kind === "note" ? <CaseNoteForm active={active} draft={page.draft} onSaved={noteSaved} onBack={() => showDetail(page.id)} />
         : <CaseDetail onOwner={() => openOwner(page.id)} api={api} queryKey={prefix} active={active} id={page.id} created={state.created?.caseId === page.id ? state.created : null}
           onBack={showList} onHandoffs={() => openHandoffs(page.id)} onAttachments={() => setPage({ kind: "attachments", id: page.id })} onTasks={() => setPage({ kind: "tasks", id: page.id })} onSelectNumber={onSelectNumber} onEdit={normalEditor} onNote={openNote} savedNote={page.note} onNoteUpdated={noteUpdated} />}
@@ -360,7 +361,7 @@ function Navigate({ label, address }: { label: string; address: string | null })
     })();
   }} />{error && <ErrorNotice message={error} />}</View>;
 }
-function CaseForm({ api, draft, state, active, onBack, onSubmit }: { api: CasesApi; active: boolean; draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: () => void }) {
+function CaseForm({ api, draft, state, active, visible, onBack, onSubmit }: { api: CasesApi; active: boolean; visible: boolean; draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: () => void }) {
   const [mapTarget, setMapTarget] = useState<"pickup" | "destination" | null>(null);
   const saving = state.status === "saving", uncertain = state.status === "uncertain";
   const back = () => { if (draft.snapshot().status !== "saving") onBack(); };
@@ -387,7 +388,7 @@ function CaseForm({ api, draft, state, active, onBack, onSubmit }: { api: CasesA
       {state.error && <ErrorNotice message={state.error} />}
       {uncertain && <><Button label="Skontrolovať zoznam prípadov" onPress={back} secondary />
         {state.reviewedList && <Button label="Prípad som nenašiel – povoliť opakovanie" onPress={() => draft.allowRetry()} secondary />}</>}
-      {active && mapTarget && state.status === "editing" && <CaseMapFrame key={`new:pick:${mapTarget}`} api={api} caseId={null} mode="pick" target={mapTarget}
+      {mapTarget && state.status === "editing" && <CasePlacePicker key={`new:pick:${mapTarget}`} api={api} caseId={null} active={active} visible={visible} target={mapTarget}
         seed={{ selection: state.input[mapTarget] ?? null, address: state.input[mapTarget]?.address ?? state.input[mapTarget === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"] ?? "" }}
         onClose={() => setMapTarget(null)} onApply={value => draft.selectPlace(mapTarget, value)} />}
       <Button label={saving ? "Ukladám prípad…" : "Uložiť prípad"} disabled={saving || uncertain || state.status === "saved"} onPress={() => { Keyboard.dismiss(); onSubmit(); }} />

@@ -4,11 +4,11 @@ import { useAndroidBack } from "../lib/use-android-back";
 import { Button, Card, ErrorNotice, styles } from "../ui";
 import { CaseEdit, changedFields } from "./edit";
 import type { CasesApi } from "./api";
-import { CaseMapFrame } from "./map-frame";
+import { CasePlacePicker } from "./case-place-picker";
 import { describeCurrentPlace, describeSelectedPlace } from "./location";
 import { Choice, fields, jobTypes, priorities } from "./form";
 
-export function CaseEditor({ api, edit, active, onBack, onSaved }: { api: CasesApi; edit: CaseEdit; active: boolean; onBack: () => void; onSaved: () => void }) {
+export function CaseEditor({ api, edit, active, visible = active, onBack, onSaved }: { api: CasesApi; edit: CaseEdit; active: boolean; visible?: boolean; onBack: () => void; onSaved: () => void }) {
   const state = useSyncExternalStore(edit.subscribe, edit.snapshot, edit.snapshot);
   const back = () => { if (edit.snapshot().status !== "saving") onBack(); };
   useAndroidBack(active, back, state.status === "saving");
@@ -81,7 +81,7 @@ export function CaseEditor({ api, edit, active, onBack, onSaved }: { api: CasesA
           onPress={() => setAddressAcknowledged(addressAcknowledged === addressKey ? "" : addressKey)} /></Card>}
       {changes.status && ["completed_assisted", "completed_no_assistance", "cancelled", "futile_trip"].includes(changes.status)
         && <Text style={styles.muted}>Prípad zmizne z otvorených prípadov. Nájdete ho cez filter Aj uzavreté.</Text>}
-      {active && mapTarget && editing && <CaseMapFrame key={`${state.base.id}:pick:${mapTarget}`} api={api} caseId={state.base.id} mode="pick" target={mapTarget}
+      {mapTarget && editing && <CasePlacePicker key={`${state.base.id}:pick:${mapTarget}`} api={api} caseId={state.base.id} active={active} visible={visible} target={mapTarget}
         seed={{ selection: state.input[mapTarget] ?? null, address: state.input[mapTarget]?.address ?? state.input[mapTarget === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"] }}
         onClose={() => setMapTarget(null)} onApply={value => edit.selectPlace(mapTarget, value)} />}
       {state.status === "saved" ? <Button label="Zobraziť uložený detail" onPress={back} />

@@ -1,6 +1,6 @@
 # Jednoduchý mobilný dispečing: stratégia a prvé vydanie
 
-Stav vývoja: **2026-10-12**. Majiteľ oznámil nasadenie novej produkčnej verzie
+Stav vývoja: **2026-10-15**. Majiteľ oznámil nasadenie novej produkčnej verzie
 a následne vybral „Plán aj prvý základ v kóde“. Cieľ je natívna aplikácia pre
 iPhone a Android s existujúcim prihlásením, ústredňou a telefonovaním.
 
@@ -87,7 +87,10 @@ prípadmi a chránené textové koncepty. Ďalší schválený rozsah pridáva
 Nasledujúci celok pridáva [rýchly prehľad a presné filtre](case-filter-overview.md):
 počty otvorených prípadov organizácie, priame výbery a konkrétny stav/prioritu.
 Používa existujúce prípady a nevyžaduje ďalšiu SQL migráciu ani natívny modul.
-Aktuálna poloha zariadenia a bežné notifikácie zostávajú ďalším rozsahom.
+[Poloha telefónu](device-location.md) pridáva výslovné jednorazové získanie
+bodu na výber miesta v novom aj upravovanom prípade. Pred uložením ostáva
+mapové aj formulárové potvrdenie; nejde o sledovanie klienta alebo pozadia.
+Bežné notifikácie zostávajú ďalším rozsahom.
 Zakladanie je výslovná online operácia; výpadok nesmie spustiť automatické
 opakované odoslanie. Úspešný zápis sa oddelí od následného načítania detailu.
 Podrobný kontrakt a TEST skúšky sú v [mobilných prípadoch](cases.md).

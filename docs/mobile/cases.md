@@ -27,6 +27,12 @@ prípadov, prevzatie voľného otvoreného prípadu, potvrdené preradenie
 aktívnemu kolegovi aj pre bežného dispečera a výber adresy alebo bodu
 do formulára. Dostupnosť priradenia závisí od schválenej databázovej funkcie.
 
+Výber miesta v novom aj upravovanom prípade ponúkne
+[polohu tohto telefónu](device-location.md). Zistí ju až po stlačení,
+ukáže približnú presnosť a umožní zobraziť bod na mape. Pozícia telefónu
+sa nepovažuje za pozíciu zákazníka. Prípad sa nemení pred existujúcim
+potvrdením mapy a uložením formulára; ručná adresa zostáva dostupná.
+
 **Nový prípad** je krátky formulár pre meno a telefón kontaktu, EČV,
 značku/model, miesto vyzdvihnutia, cieľ, popis problému, typ zákazky,
 prioritu a poznámku. Neúplný prípad možno založiť a doplniť neskôr rovnako
