@@ -11,9 +11,9 @@ import { confirmAttribution } from "./map-links";
 import { Button, Card, ErrorNotice, Loading, styles } from "../ui";
 
 /** Mounted only while this case screen is visible. Credentials never enter the bridge seed. */
-export function CaseMapFrame({ api, caseId, mode, target, seed, controls, onClose, onApply }: {
+export function CaseMapFrame({ api, caseId, mode, target, seed, controls, title, selectionNotice, onClose, onApply }: {
   api: CasesApi; caseId: string | null; mode: MapRequest["mode"]; target: MapRequest["target"]; seed: MapSeed;
-  controls?: ReactNode; onClose: () => void; onApply?: (selection: MobileCasePlaceSelection) => void;
+  controls?: ReactNode; title?: string; selectionNotice?: string; onClose: () => void; onApply?: (selection: MobileCasePlaceSelection) => void;
 }) {
   const insets = useSafeAreaInsets();
   const initial = useRef({ mode, target, caseId, nonce: randomUUID(), seed });
@@ -51,7 +51,7 @@ export function CaseMapFrame({ api, caseId, mode, target, seed, controls, onClos
   return <Modal visible animationType="slide" onRequestClose={close}>
     <ScrollView style={{ flex: 1 }} keyboardShouldPersistTaps="handled" contentContainerStyle={[styles.content, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
       <Button label="Zatvoriť mapu" onPress={close} secondary />
-      <Text style={styles.heading}>{mode === "view" ? "Mapa prípadu" : target === "pickup" ? "Vybrať vyzdvihnutie" : "Vybrať cieľ"}</Text>
+      <Text style={styles.heading}>{title ?? (mode === "view" ? "Mapa prípadu" : target === "pickup" ? "Vybrať vyzdvihnutie" : "Vybrať cieľ")}</Text>
       {controls}
       {Platform.OS === "web" ? <ErrorNotice message="Mapa je dostupná v mobilnej aplikácii. Tu môžete adresu zadať ručne alebo použiť navigáciu." />
         : error ? <ErrorNotice message={error} /> : !frame || !WebView ? <Loading /> : <WebView ref={webview}
@@ -77,7 +77,7 @@ export function CaseMapFrame({ api, caseId, mode, target, seed, controls, onClos
       </View>}
       {candidate && !error && <Card><Text style={styles.subheading}>Potvrdiť miesto do formulára</Text>
         <Text selectable style={styles.text}>{candidate.address}</Text><Text style={styles.muted}>{candidate.lat}, {candidate.lng}</Text>
-        <Text style={styles.muted}>Prípad sa uloží až tlačidlom Uložiť vo formulári.</Text>
+        <Text style={styles.muted}>{selectionNotice ?? "Prípad sa uloží až tlačidlom Uložiť vo formulári."}</Text>
         <Button label="Použiť toto miesto" onPress={() => { if (bridge.current) { bridge.current.close(); onApply?.(candidate); onClose(); } }} />
       </Card>}
     </ScrollView>

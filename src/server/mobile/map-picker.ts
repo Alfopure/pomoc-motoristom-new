@@ -7,6 +7,7 @@ import { MutationError } from "@/server/mutation-error";
 import { mobileEnvironment } from "./auth";
 import { getMobileCase } from "./cases";
 import { runMobileMapPicker, type MapPickerConfiguration } from "./map-picker-script";
+import { parseMobileMapPreview } from "@/lib/mobile-map-preview";
 
 export async function mobileMapPicker(request: Request, actor: MotoristActor): Promise<Response> {
   const url = new URL(request.url),
@@ -48,7 +49,7 @@ export async function mobileMapPicker(request: Request, actor: MotoristActor): P
   const html = `<!doctype html><html lang="sk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>Mapa prípadu</title>
 <style nonce="${scriptNonce}">html,body{height:100%;margin:0;font:16px system-ui;color:#18181b;background:#fafafa}body{display:flex;flex-direction:column}#map{flex:1;min-height:160px}#tools{padding:12px;display:${mode === "pick" ? "grid" : "none"};gap:8px}#search>*,input,button{box-sizing:border-box;width:100%;min-height:44px;font:inherit}input{padding:8px;border:1px solid #a1a1aa;border-radius:8px}button{padding:10px;background:#18181b;color:#FCD703;border:0;border-radius:8px}button:disabled{background:#71717a;color:#fff}#status{padding:10px 12px;margin:0;font-size:14px}label{font-size:14px}.pin{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;border:2px solid #18181b;background:#FCD703;color:#18181b;font:bold 16px system-ui}</style></head>
 <body><div id="tools"><div id="search"></div><label for="address">Adresa vybraného bodu</label><input id="address" maxlength="500" autocomplete="off"><button id="confirm" disabled>Potvrdiť výber do formulára</button></div><p id="status" role="status">Pripravujem mapu…</p><div id="map" aria-label="Mapa prípadu"></div>
-<script nonce="${scriptNonce}">(${runMobileMapPicker.toString()})(${serialized});</script></body></html>`;
+<script nonce="${scriptNonce}">(${runMobileMapPicker.toString()})(${serialized}, ${parseMobileMapPreview.toString()});</script></body></html>`;
   return new Response(html, { headers: {
     "Content-Type": "text/html; charset=utf-8", "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
     Vary: "Authorization, X-PM-App-Environment, X-PM-Expected-Organization, X-PM-Map-Mode, X-PM-Map-Target, X-PM-Map-Nonce",

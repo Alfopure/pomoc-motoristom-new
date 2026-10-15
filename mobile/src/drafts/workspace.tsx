@@ -12,6 +12,8 @@ import { createCasesApi, type CasesApi } from "../cases/api";
 import { Cases, type CaseOpenRequest } from "../cases/ui";
 import { MyTasks } from "../work/my-tasks-ui";
 import { WorkStore } from "../work/store";
+import { createToolsApi } from "../tools/api";
+import { ToolsWorkspace } from "../tools/ui";
 import { Button, Card, ErrorNotice, Loading, styles } from "../ui";
 import { DraftNotSentError } from "./port";
 import { createDraftStorage } from "./storage";
@@ -20,6 +22,7 @@ import { DraftAuthority, DraftScopeSuperseded } from "./authority";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
   active: boolean; tab: string; onTab: (tab: "cases" | "tasks" | "console" | "account") => void; onSelectNumber: (number: string) => void;
+  toolsOpen: boolean; onCloseTools: () => void;
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; hasCall: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void };
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Prístup ku konceptom sa nepodarilo overiť.";
 
@@ -62,13 +65,35 @@ export function DraftWorkspace(props: Props) {
   const organizationId = verified?.organizationId ?? null;
   const current = useMemo(() => () => organizationId !== null && authority.current(organizationId), [authority, organizationId]);
   const validate = useMemo(() => () => revalidate({ organizationId: organizationId ?? "", profileId: identity.profileId }), [revalidate, organizationId, identity.profileId]);
-  const operationsVisible = ["cases", "tasks", "account"].includes(props.tab);
+  const toolsVisible = props.toolsOpen && props.tab === "console";
+  const operationsVisible = toolsVisible || ["cases", "tasks", "account"].includes(props.tab);
   if (!verified) return operationsVisible ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.tab === "account" && <Account {...props} />}
+    {toolsVisible && <Button label="Späť do ústredne" secondary onPress={props.onCloseTools} />}
     {query.isPending ? <Loading label="Overujem prístup k prípadom a konceptom…" /> : <View style={styles.content}><ErrorNotice message={errorText(authorityState.error ?? query.error)} onRetry={() => { void query.refetch(); }} /></View>}
   </ScrollView> : null;
-  return <AuthorizedDraftWorkspace key={verified.profileId + ":" + verified.organizationId} {...props} verified={verified} getToken={getToken}
-    current={current} revalidate={validate} />;
+  return <>
+    <ScopedTools key={"tools:" + verified.profileId + ":" + verified.organizationId} config={config} verified={verified} getToken={getToken} current={current}
+      active={active} visible={toolsVisible} mapBlocked={props.hasCall} onClose={props.onCloseTools} />
+    <AuthorizedDraftWorkspace key={"drafts:" + verified.profileId + ":" + verified.organizationId} {...props} verified={verified} getToken={getToken}
+      current={current} revalidate={validate} />
+  </>;
+}
+
+function ScopedTools({ config, verified, getToken, current, active, visible, mapBlocked, onClose }: {
+  config: MobileConfig; verified: MobileDraftScope; getToken: () => Promise<string | null>; current: () => boolean;
+  active: boolean; visible: boolean; mapBlocked: boolean; onClose: () => void;
+}) {
+  const token = useMemo(() => async () => {
+    if (!current()) throw new MobileApiError("Účet nástrojov sa zmenil.", 401);
+    const value = await getToken();
+    if (!current()) throw new MobileApiError("Účet nástrojov sa zmenil.", 401);
+    return value;
+  }, [getToken, current]);
+  const api = useMemo(() => createToolsApi(config, verified.profileId, verified.organizationId, token, undefined, current), [config, verified.profileId, verified.organizationId, token, current]);
+  const maps = useMemo(() => createCasesApi(config, verified.profileId, token, undefined, verified.organizationId), [config, verified.profileId, verified.organizationId, token]);
+  return <ToolsWorkspace api={api} maps={maps} scopeKey={[config.environment, verified.profileId, verified.organizationId].join(":")}
+    active={active} visible={visible} mapBlocked={mapBlocked} onClose={onClose} />;
 }
 
 function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; getToken: () => Promise<string | null>; current: () => boolean; revalidate: () => Promise<void> }) {
