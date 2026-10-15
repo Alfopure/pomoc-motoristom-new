@@ -8,7 +8,7 @@ export function logRequestPerformance(value: unknown, dropped: unknown, logger =
   const performanceIds: string[] = [];
   let performanceDropped = 0;
   try {
-    const context = { schemaVersion: 1, source: "browser", environment: resolveAppEnvironment(), serverBuild: getAppVersion(),
+    const context = { schemaVersion: 2, source: "browser", environment: resolveAppEnvironment(), serverBuild: getAppVersion(),
       timestamp: new Date().toISOString(), sampleRate: 1 };
     for (const row of readRequestPerformance(value)) {
       logger({ scope: "call-request-performance", ...context, ...row, measurement: "request_roundtrip" });

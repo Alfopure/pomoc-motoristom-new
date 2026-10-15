@@ -62,6 +62,16 @@ describe("browser call observations", () => {
     expect(all).toHaveLength(64);
     expect(queue.droppedCount()).toBe(936);
   });
+  it("retains distinct answer attempts on the same leg so human retry waiting cannot masquerade as latency", () => {
+    let now=1000; const queue=new BrowserCallTelemetry(()=>now);
+    queue.record("control","answer_requested",{answerMode:"manual"});
+    now=61000; queue.record("control","answer_requested",{answerMode:"manual"});
+    now=61500; queue.record("control","sdk_active"); queue.record("control","sdk_active");
+    expect(queue.batch().map(row=>[row.phase,row.atMs])).toEqual([
+      ["answer_requested",1000],["answer_requested",61000],["sdk_active",61500],
+    ]);
+    expect(queue.batch().every(row=>row.clientBuild)).toBe(true);
+  });
 
   it("counts observations which expired before correlation instead of silently losing them", () => {
     let now = 0;

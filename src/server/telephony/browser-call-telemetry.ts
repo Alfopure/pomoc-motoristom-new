@@ -35,6 +35,7 @@ export async function logBrowserCallObservations(
       // Browser claims are observations, never authoritative call state or server-clock timestamps.
       await Promise.resolve(deps.logger({ scope: "browser_call_timing", source: "browser", observationId: row.id, pageId: row.pageId,
         sessionId: leg.session_id, legId: leg.id, environment: deps.environment, appEnvironment: resolveAppEnvironment(), serverBuild: getAppVersion(),
+        ...(row.clientBuild ? { clientBuild: row.clientBuild } : {}),
         phase: row.phase, browserMonotonicMs: row.atMs,
         ...(row.outcome ? { outcome: row.outcome } : {}),
         ...(row.durationMs !== undefined ? { durationMs: row.durationMs } : {}),

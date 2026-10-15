@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { callPerformanceOperation } from "./performance-operation";
 import { beginRequestPerformance, readRequestPerformance, RequestPerformanceQueue, requestPerformanceQueue } from "./request-performance";
-import { telephonyFetch } from "./client-request";
+import { telephonyFetch, TelephonyRequestTimeoutError } from "./client-request";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.useRealTimers(); });
 describe("database-free request performance", () => {
   it("keeps precise fixed operation labels without URL, body or identity", () => {
     expect(callPerformanceOperation("https://app.test/api/telephony/calls/private/park?phone=secret", "POST")).toBe("call.park");
@@ -19,6 +19,39 @@ describe("database-free request performance", () => {
     const batch = queue.batch(); expect(batch).toHaveLength(16); expect(queue.droppedCount()).toBe(1);
     queue.acknowledge(batch.slice(0,1),1); expect(queue.batch()[0].id).toBe(id(3));
     now = 600_001; expect(queue.batch()).toEqual([]); expect(queue.droppedCount()).toBe(63);
+  });
+  it("retains a valid long duration and accounts for invalid clocks instead of silently losing them", () => {
+    const queue = new RequestPerformanceQueue(() => 0);
+    queue.record({id:id(1),operation:"call.park",ms:180001,outcome:"timeout"});
+    queue.record({id:id(2),operation:"call.park",ms:-1,outcome:"failed"});
+    expect(queue.batch()).toEqual([expect.objectContaining({ms:180001,outcome:"timeout"})]);
+    expect(queue.droppedCount()).toBe(1);
+  });
+  it("measures through body delivery and preserves the originating tab and responding deployment", async () => {
+    vi.stubGlobal("window", {}); vi.stubEnv("NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID", "tab_old");
+    let now=100; vi.spyOn(performance,"now").mockImplementation(()=>now);
+    const queue=requestPerformanceQueue(); queue.acknowledge(queue.batch(),queue.droppedCount());
+    let body!: ReadableStreamDefaultController<Uint8Array>;
+    const response=new Response(new ReadableStream({start(controller){body=controller;}}),
+      {headers:{"x-request-id":id(30),"x-app-version":"request_old"}});
+    const pending=telephonyFetch("/api/telephony/calls/private/park",{method:"POST",timeoutMs:1000,label:"Čakáreň"},
+      {fetch:vi.fn().mockResolvedValue(response)});
+    await Promise.resolve(); expect(queue.batch()).toEqual([]);
+    now=600; body.enqueue(new TextEncoder().encode('{}')); body.close(); await pending;
+    const batch=queue.batch(); expect(batch).toEqual([expect.objectContaining({ms:500,clientBuild:"tab_old",requestBuild:"request_old",requestId:id(30)})]);
+    expect(batch[0].startedAt).toMatch(/^\d{4}-/); expect(batch[0].completedAt).toMatch(/^\d{4}-/);
+    queue.acknowledge(batch,0);
+  });
+  it("retains response correlation when headers arrive but the response body times out", async () => {
+    vi.useFakeTimers(); vi.stubGlobal("window", {});
+    const queue=requestPerformanceQueue(); queue.acknowledge(queue.batch(),queue.droppedCount());
+    const response=new Response(new ReadableStream(),{headers:{"x-request-id":id(31),"x-app-version":"request_build"}});
+    const pending=telephonyFetch("/api/telephony/calls/private/park",{method:"POST",timeoutMs:1000,label:"Čakáreň"},
+      {fetch:vi.fn().mockResolvedValue(response)});
+    const rejected=expect(pending).rejects.toBeInstanceOf(TelephonyRequestTimeoutError);
+    await vi.advanceTimersByTimeAsync(1000); await rejected;
+    expect(queue.batch()).toEqual([expect.objectContaining({outcome:"timeout",status:200,requestId:id(31),requestBuild:"request_build"})]);
+    queue.acknowledge(queue.batch(),0);
   });
   it("collects a request once, marks 202 as acceptance, and survives a failed telemetry clock", async () => {
     vi.stubGlobal("window", {});
