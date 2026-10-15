@@ -20,7 +20,7 @@ import type { CallPerformanceOperation } from "@/lib/telephony/performance-opera
  * second away is a decision about deactivated operators. They should not be
  * decided on one number.
  */
-const CONTROL_STAGES = ["recording.admission", "recording.ack", "participants", "projection", "audit", "finalize", "staging", "state_projection"] as const;
+const CONTROL_STAGES = ["recording.admission", "recording.ack", "participants", "projection", "audit", "finalize", "staging", "state_projection", "staging_reconcile"] as const;
 export type ControlStage = typeof CONTROL_STAGES[number];
 type ControlStep = `control.${ControlStage}`;
 const controlStages = new Set<string>(CONTROL_STAGES);
