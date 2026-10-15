@@ -223,8 +223,10 @@ export async function getTelephonyHealth(deps: TelephonyHealthDeps): Promise<Tel
   const pendingConnections = connections.entries.filter((entry) => entry.outcome === "pending" && now.getTime() - Date.parse(entry.failedAt) >= 30_000);
   const unconfirmedEnded = connections.entries.filter((entry) => entry.outcome === "ended_without_confirmation");
   const unknownConnections = connections.entries.filter((entry) => entry.outcome === "unknown");
-  checks.push({ key: "connections", status: !configured ? "skipped" : pendingConnections.length ? "fail" : unconfirmedEnded.length || unknownConnections.length || connections.error || connections.truncated ? "warn" : "ok",
+  const failedSetups = connections.entries.filter((entry) => entry.outcome === "setup_failed");
+  checks.push({ key: "connections", status: !configured ? "skipped" : pendingConnections.length || failedSetups.length ? "fail" : unconfirmedEnded.length || unknownConnections.length || connections.error || connections.truncated ? "warn" : "ok",
     detail: { pending: pendingConnections.length, endedWithoutConfirmation: unconfirmedEnded.length,
+      setupFailed: failedSetups.length, setupRecovered: connections.entries.filter(entry => entry.outcome === "setup_recovered").length,
       confirmedAfterFailure: connections.entries.filter((entry) => entry.outcome === "confirmed_after_failure").length,
       commandsRecovered: connections.entries.filter((entry) => entry.outcome === "command_recovered").length, unknown: unknownConnections.length,
       entries: connections.entries, truncated: connections.truncated, error: connections.error } });

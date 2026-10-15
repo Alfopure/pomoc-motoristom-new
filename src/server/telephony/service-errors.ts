@@ -21,8 +21,9 @@ export class CallActionError extends Error {
     message: string,
     readonly status = 500,
     readonly code?: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "CallActionError";
   }
 }
@@ -80,8 +81,9 @@ export class PresenceServiceError extends Error {
   constructor(
     message: string,
     readonly status = 400,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "PresenceServiceError";
   }
 }
@@ -90,8 +92,9 @@ export class OperatorDeviceError extends Error {
   constructor(
     message: string,
     readonly status = 500,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "OperatorDeviceError";
   }
 }

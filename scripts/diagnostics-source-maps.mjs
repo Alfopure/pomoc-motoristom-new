@@ -32,7 +32,7 @@ if (mode === 'build') {
     const manifest = { release, buildSucceeded: result.status === 0, bundles: [], files: [] };
     for (const {kind,root,prefix} of bundles) {
       const maps = files(root).filter(file => file.endsWith('.map'));
-      const mapSet = new Set(maps), matched = new Set();
+      const mapSet = new Set(maps), matched = new Set(), aliases = new Set(), unmapped = [];
       for (const map of maps) {
         const target = join(artifact,kind,relative(root,map));
         mkdirSync(resolve(target,'..'),{recursive:true}); copyFileSync(map,target);
@@ -42,14 +42,30 @@ if (mode === 'build') {
         // Turbopack browser hashes differ; server entrypoints can have sibling
         // maps without a sourceMappingURL comment. Tie both to this exact JS.
         const map = reference ? sourceMapPath(reference,javascript,root) : kind === 'server' && mapSet.has(`${javascript}.map`) ? `${javascript}.map` : null;
-        if (!map) continue;
+        if (!map) {
+          unmapped.push(relative(root,javascript));
+          if (kind === 'server' && relative(root,javascript).startsWith('chunks/[root-of-the-server]')) {
+            throw new Error('Application server root chunk has no private source map.');
+          }
+          continue;
+        }
         if (!mapSet.has(map)) throw new Error('Compiled JavaScript references a missing private source map.');
         const target = join(artifact,kind,relative(root,javascript));
         mkdirSync(resolve(target,'..'),{recursive:true}); copyFileSync(javascript,target);
+        if (reference && reference !== decodeURIComponent(reference)) {
+          // CLI preserves the emitted (encoded) sourcemap header, but uploads
+          // local filenames literally. Keep a byte-identical private alias at
+          // that URL as well as the decoded filename. Never rewrite deployed JS.
+          const alias = resolve(target,'..',reference);
+          if (!alias.startsWith(join(artifact,kind) + '/')) throw new Error('Invalid private source-map alias.');
+          if (existsSync(alias) && digest(alias) !== digest(map)) throw new Error('Private source-map alias collision.');
+          mkdirSync(resolve(alias,'..'),{recursive:true}); copyFileSync(map,alias);
+          aliases.add(relative(join(artifact,kind),alias));
+        }
         matched.add(map);
       }
       if (result.status === 0 && (!maps.length || !matched.size)) throw new Error(`No mapped ${kind} JavaScript generated.`);
-      manifest.bundles.push({ kind, prefix, maps: maps.length, matched: matched.size });
+      manifest.bundles.push({ kind, prefix, maps: maps.length, matched: matched.size, encodedAliases: [...aliases], unmapped });
     }
     mkdirSync(artifact,{recursive:true});
     manifest.files = files(artifact).map(file => ({ path: relative(artifact,file), sha256: digest(file) }));

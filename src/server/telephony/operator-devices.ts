@@ -73,13 +73,13 @@ export async function getOperatorDevice(deps: DeviceDeps, input: { organizationI
     .eq("profile_id", input.profileId)
     .eq("environment", deps.environment)
     .maybeSingle();
-  if (error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo načítať: ${error.message}`, 500);
+  if (error) throw new OperatorDeviceError(`Zariadenie sa nepodarilo načítať: ${error.message}`, 500, { cause: error });
   return data;
 }
 
 export async function listOperatorDevices(deps: DeviceDeps, organizationId: string): Promise<DeviceRow[]> {
   const { data, error } = await deps.admin.from(deviceTable(deps)).select("*").eq("organization_id", organizationId).eq("environment", deps.environment);
-  if (error) throw new OperatorDeviceError(`Zariadenia sa nepodarilo načítať: ${error.message}`, 500);
+  if (error) throw new OperatorDeviceError(`Zariadenia sa nepodarilo načítať: ${error.message}`, 500, { cause: error });
   return data ?? [];
 }
 

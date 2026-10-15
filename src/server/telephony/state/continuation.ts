@@ -6,6 +6,16 @@ import { measureGuard, sessionOwnership } from "../ownership";
 import { isPausedWithoutCall } from "../routing/reservation";
 import { commandKey, readMeta, toJson, type Command, type Compensation, type ReduceResult, type SessionEvent, type SessionRow, type Transition } from "./types";
 
+export type EffectFailureAudit = {
+  /** Absent only on the original singular marker, whose event identity stays unchanged. */
+  commandKey?: string;
+  at: string;
+  stateAfter: string;
+  error: string;
+  commands: Array<{ kind: string; ok: boolean; command_id?: string | null; skipped?: boolean; error?: string }>;
+  recorded?: boolean;
+};
+
 export type EffectContinuation = {
   id: string;
   generation: number;
@@ -22,6 +32,10 @@ export type EffectContinuation = {
   attempts: number;
   lastError: string | null;
   auditComplete: boolean;
+  /** Compatibility with the original singular marker. */
+  failureAudit?: EffectFailureAudit;
+  /** At most one immutable failure obligation per original command. */
+  failureAudits?: EffectFailureAudit[];
   /** Captured provider evidence survives a failed atomic accounting stage. */
   verifiedContact?: Json;
 };
@@ -68,7 +82,15 @@ export function criticalDatabaseEffectCount(transition: Transition): number {
 }
 
 export function continuationComplete(entry: EffectContinuation): boolean {
-  return entry.auditComplete && entry.databaseCursor >= databaseEffectCount(entry.transition) && entry.commands.every((command) => entry.completedCommands.includes(commandKey(command)));
+  return entry.auditComplete && failureAuditsComplete(entry) && entry.databaseCursor >= databaseEffectCount(entry.transition) && entry.commands.every((command) => entry.completedCommands.includes(commandKey(command)));
+}
+
+export function failureAudits(entry: EffectContinuation): EffectFailureAudit[] {
+  return [...(entry.failureAudit ? [entry.failureAudit] : []), ...(entry.failureAudits ?? [])];
+}
+
+export function failureAuditsComplete(entry: EffectContinuation): boolean {
+  return failureAudits(entry).every(audit => audit.recorded === true);
 }
 
 function prepared(session: SessionRow, transition: Transition, commands: Command[], compensations: Compensation[], event: SessionEvent, branch: EffectContinuation["branch"], now: string) {

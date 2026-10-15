@@ -6,11 +6,13 @@ import type { TelephonyJsonResult } from "./client-request";
 import { EXPECTED_LEG_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_RECOVERY_TIMEOUT_MS } from "./webphone-model";
 import { isDeviceLive } from "./device-liveness";
 import * as browserTiming from "./browser-call-telemetry";
+import * as browserTransport from "./browser-call-transport";
 import { BrowserIncomingRingtone } from "./browser-ringtone";
 import { VOICE_QUALITY_WARNINGS } from "@/lib/diagnostics/voice-quality";
 
 beforeEach(() => {
   vi.spyOn(browserTiming, "browserCallTelemetry").mockReturnValue(new browserTiming.BrowserCallTelemetry());
+  vi.spyOn(browserTransport, "flushBrowserCallTelemetry").mockResolvedValue(undefined);
 });
 
 /**
@@ -368,20 +370,26 @@ describe("TelnyxWebphone", () => {
     h.phone.stop();
   });
 
-  it("keeps timings after a failed heartbeat and piggybacks them on the next ordinary pulse", async () => {
+  it("does not discard timings on heartbeat success and never waits for the diagnostic transport", async () => {
     let fail = false;
     const h = harness({ heartbeat: () => ({ ok: !fail, status: fail ? 500 : 200, body: {} }) });
     h.phone.start(); await flush(); h.client.emit("telnyx.ready"); await flush();
     h.client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall() });
     const batch = browserTiming.browserCallTelemetry().batch();
+    vi.mocked(browserTransport.flushBrowserCallTelemetry).mockClear();
+    const diagnostic = deferred<void>();
+    vi.mocked(browserTransport.flushBrowserCallTelemetry).mockReturnValue(diagnostic.promise);
     fail = true;
     h.runTimer(timer => timer.delayMs === 30_000); await flush();
-    expect(JSON.parse(h.requests.at(-1)!.body as string).callTimings).toEqual(batch);
+    expect(JSON.parse(h.requests.at(-1)!.body as string).callTimings).toBeUndefined();
     expect(browserTiming.browserCallTelemetry().batch()).toEqual(batch);
+    expect(browserTransport.flushBrowserCallTelemetry).not.toHaveBeenCalled();
     fail = false;
     h.runTimer(timer => timer.delayMs === 30_000); await flush();
-    expect(JSON.parse(h.requests.at(-1)!.body as string).callTimings).toEqual(batch);
-    expect(browserTiming.browserCallTelemetry().batch()).toEqual([]);
+    expect(browserTransport.flushBrowserCallTelemetry).toHaveBeenCalledTimes(1);
+    expect(browserTiming.browserCallTelemetry().batch()).toEqual(batch);
+    await expect(h.phone.confirmRegistration()).resolves.toBeUndefined();
+    diagnostic.resolve();
     h.phone.stop();
   });
 

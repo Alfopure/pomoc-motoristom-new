@@ -1,4 +1,7 @@
 import type { SafeException } from './sentry';
+import { EXCEPTION_DELIVERY_REASONS } from './types';
+export type ExceptionDeliveryReason = typeof EXCEPTION_DELIVERY_REASONS[number];
+export type ExceptionDeliveryCounters = Partial<Record<ExceptionDeliveryReason, number>>;
 
 export const EXCEPTION_QUEUE_LIMITS = {
     events: 8, bytes: 32 * 1024, eventBytes: 8 * 1024,
@@ -21,12 +24,6 @@ type Options = {
     now?: () => number;
 };
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
-const fingerprint = (event: SafeException) => {
-    const exception = event.exception.values[0];
-    const top = exception.stacktrace?.frames.at(-1);
-    return JSON.stringify([event.release, exception.type, exception.value, top?.filename, top?.lineno, top?.colno]);
-};
-
 /** Per-tab sanitized storage, one request at a time, and no independent retry timer. */
 export class DiagnosticExceptionQueue {
     private entries: Entry[] = [];
@@ -36,22 +33,33 @@ export class DiagnosticExceptionQueue {
     private restored = false;
     private running = false;
     private epoch = 0;
+    private counters: ExceptionDeliveryCounters = {};
+    private storageFailed = false;
     constructor(private readonly options: Options) {}
     private now() { return (this.options.now ?? Date.now)(); }
-    private state() { return { scope: this.options.scope, entries: this.entries, attempts: this.attempts, fingerprints: this.fingerprints, nextAttempt: this.nextAttempt }; }
+    private count(reason: ExceptionDeliveryReason, count = 1) { this.counters[reason] = Math.min(2_147_483_647, (this.counters[reason] ?? 0) + count); }
+    private state() { return { counters: this.counters, scope: this.options.scope, entries: this.entries, attempts: this.attempts, fingerprints: this.fingerprints, nextAttempt: this.nextAttempt }; }
     private prune() {
         const now = this.now();
-        this.entries = this.entries.filter(entry => entry.createdAt > now - EXCEPTION_QUEUE_LIMITS.ttlMs && (entry.event.timestamp ?? 0) * 1000 > now - EXCEPTION_QUEUE_LIMITS.ttlMs && entry.attempts < EXCEPTION_QUEUE_LIMITS.attemptsPerEvent);
+        this.entries = this.entries.filter(entry => {
+            if (entry.createdAt <= now - EXCEPTION_QUEUE_LIMITS.ttlMs || (entry.event.timestamp ?? 0) * 1000 <= now - EXCEPTION_QUEUE_LIMITS.ttlMs) { this.count('sentry_expired'); return false; }
+            return true;
+        });
         this.attempts = this.attempts.filter(at => at > now - 60000 && at <= now);
         this.fingerprints = this.fingerprints.filter(row => row.at > now - 60000 && row.at <= now).slice(-EXCEPTION_QUEUE_LIMITS.events);
-        while (this.entries.length > EXCEPTION_QUEUE_LIMITS.events || bytes(this.state()) > EXCEPTION_QUEUE_LIMITS.bytes) this.entries.shift();
+        while (this.entries.length && (this.entries.length > EXCEPTION_QUEUE_LIMITS.events || bytes(this.state()) > EXCEPTION_QUEUE_LIMITS.bytes)) { this.entries.shift(); this.count('sentry_overflow'); }
     }
     private persist() {
         try {
             this.prune();
-            if (this.entries.length || this.attempts.length || this.fingerprints.length || this.nextAttempt > this.now()) this.options.storage().setItem(STORAGE_KEY, JSON.stringify(this.state()));
+            if (Object.values(this.counters).some(Boolean) || this.entries.length || this.attempts.length || this.fingerprints.length || this.nextAttempt > this.now()) this.options.storage().setItem(STORAGE_KEY, JSON.stringify(this.state()));
             else this.options.storage().removeItem(STORAGE_KEY);
-        } catch { /* Restricted or full storage falls back to this page's memory. */ }
+            this.storageFailed = false;
+        } catch {
+            // Count a storage failure episode, not every retry while storage is blocked.
+            if (!this.storageFailed) this.count('sentry_storage_unavailable');
+            this.storageFailed = true;
+        }
     }
     private restore() {
         if (this.restored) return;
@@ -62,43 +70,57 @@ export class DiagnosticExceptionQueue {
             const saved = JSON.parse(raw);
             if (saved?.scope !== this.options.scope || !Array.isArray(saved.entries)) { this.persist(); return; }
             const now = this.now();
+            for (const reason of EXCEPTION_DELIVERY_REASONS) {
+                const count = saved.counters?.[reason];
+                if (Number.isInteger(count) && count > 0 && count <= 2_147_483_647) this.counters[reason] = count;
+            }
             for (const row of saved.entries.slice(-EXCEPTION_QUEUE_LIMITS.events)) {
                 const event = this.options.sanitize(row?.event);
-                if (!event || !Number.isFinite(event.timestamp) || !Number.isFinite(row.createdAt) || row.createdAt > now || row.createdAt <= now - EXCEPTION_QUEUE_LIMITS.ttlMs ||
-                    !Number.isInteger(row.attempts) || row.attempts < 0 || row.attempts >= EXCEPTION_QUEUE_LIMITS.attemptsPerEvent || !Number.isFinite(row.nextAt) || bytes(event) > EXCEPTION_QUEUE_LIMITS.eventBytes ||
-                    this.entries.some(entry => entry.event.event_id === event.event_id)) continue;
-                this.entries.push({ event, createdAt: row.createdAt, attempts: row.attempts, nextAt: Math.min(Math.max(row.createdAt, row.nextAt), row.createdAt + EXCEPTION_QUEUE_LIMITS.ttlMs) });
+                if (!event || !Number.isFinite(event.timestamp) || !Number.isFinite(row.createdAt) || row.createdAt > now ||
+                    !Number.isInteger(row.attempts) || row.attempts < 0 || row.attempts > EXCEPTION_QUEUE_LIMITS.attemptsPerEvent || !Number.isFinite(row.nextAt) || bytes(event) > EXCEPTION_QUEUE_LIMITS.eventBytes ||
+                    this.entries.some(entry => entry.event.event_id === event.event_id)) { this.count('sentry_invalid'); continue; }
+                if (row.attempts === EXCEPTION_QUEUE_LIMITS.attemptsPerEvent) { this.count('sentry_retry_exhausted'); continue; }
+                this.entries.push({ event: { ...event, tags: { ...event.tags, restored_from_storage: 'true' } }, createdAt: row.createdAt, attempts: row.attempts, nextAt: Math.min(Math.max(row.createdAt, row.nextAt), row.createdAt + EXCEPTION_QUEUE_LIMITS.ttlMs) });
             }
             this.attempts = (Array.isArray(saved.attempts) ? saved.attempts : []).filter((at: unknown) => typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now).slice(-EXCEPTION_QUEUE_LIMITS.attemptsPerMinute);
             this.nextAttempt = Number.isFinite(saved.nextAttempt) ? Math.min(Math.max(0, saved.nextAttempt), now + EXCEPTION_QUEUE_LIMITS.ttlMs) : 0;
             // ACK history retains only bounded hashes, never arbitrary strings.
             this.fingerprints = (Array.isArray(saved.fingerprints) ? saved.fingerprints : []).filter((row: Fingerprint) =>
-                row && typeof row.key === 'string' && /^[a-f0-9]{16}$/.test(row.key) && Number.isFinite(row.at) && row.at > now - 60000 && row.at <= now).slice(-EXCEPTION_QUEUE_LIMITS.events);
+                row && typeof row.key === 'string' && /^[a-f0-9]{32}$/.test(row.key) && Number.isFinite(row.at) && row.at > now - 60000 && row.at <= now).slice(-EXCEPTION_QUEUE_LIMITS.events);
         } catch { /* Malformed storage cannot affect the application. */ }
         this.persist();
     }
-    private key(event: SafeException): string {
-        // Two bounded integer hashes suffice for best-effort storm deduplication;
-        // neither this hash nor browser storage is an authorization boundary.
-        let first = 0x811c9dc5, second = 0x9e3779b9;
-        for (const character of fingerprint(event)) {
-            first = Math.imul(first ^ character.charCodeAt(0), 16777619);
-            second = Math.imul(second ^ character.charCodeAt(0), 2246822519);
-        }
-        return (first >>> 0).toString(16).padStart(8, '0') + (second >>> 0).toString(16).padStart(8, '0');
-    }
-    enqueue(value: unknown): void {
+    enqueue(value: unknown): 'enqueued' | 'deduplicated' | 'invalid' {
         try {
             this.restore(); this.prune();
             const event = this.options.sanitize(value);
-            if (!event || !Number.isFinite(event.timestamp) || bytes(event) > EXCEPTION_QUEUE_LIMITS.eventBytes) return;
-            const key = this.key(event);
-            if (this.entries.some(entry => entry.event.event_id === event.event_id || this.key(entry.event) === key) || this.fingerprints.some(row => row.key === key)) return;
+            if (!event || !Number.isFinite(event.timestamp) || bytes(event) > EXCEPTION_QUEUE_LIMITS.eventBytes) { this.count('sentry_invalid'); this.persist(); return 'invalid'; }
+            // Identity is assigned once by captureDiagnosticError with call/page scope.
+            // A second stack-based dedupe here used to orphan displayed error IDs.
+            const key = event.event_id;
+            if (this.entries.some(entry => entry.event.event_id === key) || this.fingerprints.some(row => row.key === key)) { this.count('sentry_deduplicated'); this.persist(); return 'deduplicated'; }
             const now = this.now();
-            this.entries.push({ event, createdAt: now, attempts: 0, nextAt: now });
+            this.entries.push({ event: { ...event, tags: { ...event.tags, captured_offline: this.options.online() ? 'false' : 'true' } }, createdAt: now, attempts: 0, nextAt: now });
             this.fingerprints.push({ key, at: now });
+            this.count('sentry_enqueued');
             this.persist();
-        } catch { /* no-throw */ }
+            return 'enqueued';
+        } catch { this.count('sentry_invalid'); return 'invalid'; }
+    }
+    /** Deltas are handed to the existing persisted collector, never mistaken for its dropped count. */
+    reportCounters(report: (reason: ExceptionDeliveryReason, count: number) => boolean): void {
+        try {
+            this.restore(); this.prune();
+            for (const reason of EXCEPTION_DELIVERY_REASONS) {
+                const count = Math.min(10000, this.counters[reason] ?? 0);
+                if (count && report(reason, count)) this.counters[reason] = Math.max(0, (this.counters[reason] ?? 0) - count);
+            }
+            this.persist();
+        } catch { /* Collector failures retain the counter for a later opportunity. */ }
+    }
+    snapshot(): { pending: number; counters: ExceptionDeliveryCounters } {
+        this.restore(); this.prune();
+        return { pending: this.entries.length, counters: { ...this.counters } };
     }
     async flush(): Promise<void> {
         if (this.running) return;
@@ -117,7 +139,7 @@ export class DiagnosticExceptionQueue {
                 // Save the attempt before I/O so a reload cannot reset its budget.
                 this.persist();
                 let response: DiagnosticExceptionResponse = {};
-                try { response = await this.options.send(entry.event); } catch { /* bounded retry */ }
+                try { response = await this.options.send({ ...entry.event, tags: { ...entry.event.tags, delivery_attempt: String(entry.attempts), delivery_delay_ms: String(Math.min(EXCEPTION_QUEUE_LIMITS.ttlMs, Math.max(0, Math.round(now - (entry.event.timestamp ?? now / 1000) * 1000)))) } }); } catch { /* bounded retry */ }
                 if (epoch !== this.epoch) break;
                 const status = response.statusCode;
                 const completedAt = this.now();
@@ -132,6 +154,7 @@ export class DiagnosticExceptionQueue {
                 if ((status !== undefined && status >= 200 && status < 300) ||
                     (status !== undefined && status >= 400 && status < 500 && status !== 429) || entry.attempts >= EXCEPTION_QUEUE_LIMITS.attemptsPerEvent) {
                     this.entries = this.entries.filter(row => row !== entry);
+                    this.count(status !== undefined && status >= 200 && status < 300 ? 'sentry_delivered' : status !== undefined && status >= 400 && status < 500 && status !== 429 ? 'sentry_rejected' : 'sentry_retry_exhausted');
                 } else {
                     entry.nextAt = completedAt + backoff;
                 }
@@ -143,6 +166,7 @@ export class DiagnosticExceptionQueue {
     clear(): void {
         try {
             this.restore(); this.epoch++;
+            if (this.entries.length) this.count('sentry_cleared', this.entries.length);
             this.entries = []; this.fingerprints = [];
             // Keep the minute budget across logout or a later login in this tab.
             this.persist();

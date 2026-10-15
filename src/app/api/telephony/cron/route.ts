@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-import { runTelephonyCronJobs, timedCronJob, type TelephonyCronJobResult } from "@/server/telephony/cron-jobs";
+import { runTelephonyCronJobs, isolatedCronJob, type TelephonyCronJobResult } from "@/server/telephony/cron-jobs";
 import { completeCronSummary, cronRuntimeObservation } from "@/server/telephony/cron-observation";
 import { DATABASE_REQUEST_MS } from "@/server/telephony/ownership";
 import { createTelephonyDeps } from "@/server/telephony/runtime";
@@ -62,20 +62,25 @@ export async function GET(request: Request) {
   try {
     const deps = await createTelephonyDeps({ sweepAfterEvent: false });
     heartbeatAdmin = deps.admin;
-    const summary = await runTelephonyCronJobs(deps, { cronStartedAt });
-    const reminders = await timedCronJob(() => runReminderMaterialisation(deps.organizationId));
-    const pauseWarnings = await timedCronJob(() => runPauseEndingWarningMaterialisation(deps.organizationId));
-    const { runRecordingProcessing } = await import("@/server/telephony/recording-processing");
-    const recordings = await timedCronJob(() => runRecordingProcessing({ admin: deps.admin, organizationId: deps.organizationId, cronStartedAt }));
-
-    const { runDiagnosticsMaintenance } = await import("@/server/diagnostics/service");
-    const diagnostics = await timedCronJob(() => runDiagnosticsMaintenance(deps.organizationId));
+    const onJobError = (error: unknown) => deferServerError(error, { source: "cron", route: "/api/telephony/cron" });
+    const summary = await runTelephonyCronJobs({ ...deps, onJobError }, { cronStartedAt });
+    const isolated = (job: string, run: () => Promise<TelephonyCronJobResult>) => isolatedCronJob(job, run, { onJobError });
+    const reminders = await isolated("notifications.materialize", () => runReminderMaterialisation(deps.organizationId));
+    const pauseWarnings = await isolated("notifications.pause-ending", () => runPauseEndingWarningMaterialisation(deps.organizationId));
+    const recordings = await isolated("telephony.recordings.process", async () => {
+      const { runRecordingProcessing } = await import("@/server/telephony/recording-processing");
+      return runRecordingProcessing({ admin: deps.admin, organizationId: deps.organizationId, cronStartedAt });
+    });
+    const diagnostics = await isolated("diagnostics.maintenance", async () => {
+      const { runDiagnosticsMaintenance } = await import("@/server/diagnostics/service");
+      return runDiagnosticsMaintenance(deps.organizationId);
+    });
 
     const completed = completeCronSummary(summary, [reminders, pauseWarnings, recordings, diagnostics], cronStartedAt, Date.now());
     console.info(JSON.stringify(cronRuntimeObservation(completed)));
     await Promise.all([
       finishCronMonitor(monitor, completed.executionStatus),
-      recordCronHeartbeat(deps.admin, cronStartedAt, completed.executionStatus),
+      recordCronHeartbeat(deps.admin, cronStartedAt, completed.readinessStatus),
     ]);
 
     return Response.json(
