@@ -23,6 +23,7 @@ import { applyStoredAudioOutput, REMOTE_AUDIO_ELEMENT_ID } from "@/lib/telephony
 import { expectedVoiceSilence, voiceQualityWarning, type VoiceQualityWarning, type VoiceQualityWarningCode } from "@/lib/diagnostics/voice-quality";
 import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
 import { browserCallMonotonicNow, browserCallTelemetry, prepareBrowserCallHeartbeat, type BrowserCallPhase, type BrowserCallObservation } from "@/lib/telephony/browser-call-telemetry";
+import { flushBrowserCallTelemetry } from "@/lib/telephony/browser-call-transport";
 import { beginBrowserCallStep, type CallTimingContext } from "@/lib/telephony/call-timing";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS, type TelephonyJsonResult } from "@/lib/telephony/client-request";
 import type { IClientOptions } from "@telnyx/webrtc";
@@ -688,14 +689,11 @@ export class TelnyxWebphone {
     // await that same acknowledgement instead of adding another HTTP roundtrip.
     // Leaving/unregistered reports and new socket generations remain distinct.
     if (!leaving && pending?.body === body && pending.generation === generation) return pending.promise;
-    // Attach observations only at transport: changing diagnostics must not
-    // invalidate confirmRegistration's device-state comparison or deduplication.
-    const transport = prepareBrowserCallHeartbeat(body, browserCallTelemetry);
     const promise = this.requestJson<{ error?: string; reason?: string }>(HEARTBEAT_URL, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: transport.body,
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
       keepalive: leaving, label: "heartbeat telefónu", timeoutMs: TELEPHONY_TIMEOUT_MS.read,
     }).then((result) => {
-      if (result.ok) transport.acknowledge();
+      if (result.ok && !leaving) void flushBrowserCallTelemetry();
       return result;
     });
     if (!leaving) {

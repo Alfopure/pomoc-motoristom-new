@@ -14,6 +14,7 @@ export type BrowserCallObservation = {
 export const BROWSER_CALL_BATCH_LIMIT = 16;
 const BUFFER_LIMIT = 64;
 const MEMORY_LIMIT = 256;
+const PENDING_TTL_MS = 10 * 60_000;
 const PHASES = new Set<BrowserCallPhase>(["ui_first_seen", "sdk_invite", "ringtone_start", "answer_requested", "sdk_active", "sdk_ended"]);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const CONTROL_ID = /^[a-zA-Z0-9_:+/.=-]{1,1024}$/;
@@ -42,8 +43,10 @@ export function readBrowserCallObservations(value: unknown): BrowserCallObservat
 export class BrowserCallTelemetry {
   private readonly pageId: string;
   private pending: BrowserCallObservation[] = [];
+  private queuedAt = new Map<string, number>();
   private seen = new Set<string>();
   private visibleSessions = new Map<string, number>();
+  private dropped = 0;
 
   constructor(private readonly now = () => performance.now(), private readonly uuid = () => crypto.randomUUID()) {
     this.pageId = uuid();
@@ -55,8 +58,10 @@ export class BrowserCallTelemetry {
     if (this.seen.has(key)) return;
     this.seen.add(key);
     if (this.seen.size > MEMORY_LIMIT) this.seen.delete(this.seen.values().next().value!);
-    this.pending.push({ id: this.uuid(), pageId: this.pageId, callControlId, phase, atMs, ...details });
-    if (this.pending.length > BUFFER_LIMIT) this.pending.shift();
+    const id = this.uuid();
+    this.pending.push({ id, pageId: this.pageId, callControlId, phase, atMs, ...details });
+    this.queuedAt.set(id, this.now());
+    if (this.pending.length > BUFFER_LIMIT) { this.queuedAt.delete(this.pending.shift()!.id); this.dropped++; }
   }
 
   /** A session can appear before its operator leg. Retain its first UI commit time. */
@@ -69,10 +74,28 @@ export class BrowserCallTelemetry {
     while (this.visibleSessions.size > MEMORY_LIMIT) this.visibleSessions.delete(this.visibleSessions.keys().next().value!);
   }
 
-  batch(): BrowserCallObservation[] { return this.pending.slice(0, BROWSER_CALL_BATCH_LIMIT); }
+  batch(): BrowserCallObservation[] {
+    const cutoff = this.now() - PENDING_TTL_MS;
+    const retained = this.pending.filter(entry => {
+      if ((this.queuedAt.get(entry.id) ?? 0) >= cutoff) return true;
+      this.queuedAt.delete(entry.id);
+      return false;
+    });
+    this.dropped += this.pending.length - retained.length;
+    this.pending = retained;
+    return this.pending.slice(0, BROWSER_CALL_BATCH_LIMIT);
+  }
+  droppedCount(): number { return this.dropped; }
+  acknowledgeDropped(count: number): void { this.dropped = Math.max(0, this.dropped - count); }
   acknowledge(batch: BrowserCallObservation[]): void {
     const ids = new Set(batch.map((entry) => entry.id));
     this.pending = this.pending.filter((entry) => !ids.has(entry.id));
+    for (const id of ids) this.queuedAt.delete(id);
+  }
+  defer(batch: BrowserCallObservation[]): void {
+    // Uncorrelated old legs must not block newer, valid call measurements.
+    const ids = new Set(batch.map(entry => entry.id));
+    this.pending = [...this.pending.filter(entry => !ids.has(entry.id)), ...this.pending.filter(entry => ids.has(entry.id))];
   }
 }
 
@@ -81,16 +104,16 @@ export function browserCallTelemetry(): BrowserCallTelemetry {
   return telemetry ??= new BrowserCallTelemetry();
 }
 
-export function prepareBrowserCallHeartbeat(body: string, getQueue = browserCallTelemetry): { body: string; acknowledge: () => void } {
+/** Beacon fallback only: scheduling an after-response log is not an acknowledgement. */
+export function prepareBrowserCallHeartbeat(body: string, getQueue = browserCallTelemetry): { body: string } {
   try {
     const queue = getQueue();
     const batch = queue.batch();
     return {
       body: batch.length ? JSON.stringify({ ...JSON.parse(body), callTimings: batch }) : body,
-      acknowledge: () => { try { queue.acknowledge(batch); } catch { /* Optional diagnostics. */ } },
     };
   } catch {
-    return { body, acknowledge: () => undefined };
+    return { body };
   }
 }
 

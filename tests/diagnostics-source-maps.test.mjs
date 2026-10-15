@@ -131,6 +131,10 @@ test('URI-encoded Turbopack server references copy their exact decoded local map
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(join(cwd, '.next/server/chunks/[root-of-the-server]__abc._.js.map')), false);
   assert.equal(readFileSync(join(cwd, '.context/diagnostics-source-maps/exact_release/server/chunks/[root-of-the-server]__abc._.js.map'), 'utf8'), 'server chunk map');
+  assert.equal(readFileSync(join(cwd, '.context/diagnostics-source-maps/exact_release/server/chunks/%5Broot-of-the-server%5D__abc._.js.map'), 'utf8'), 'server chunk map');
+  assert.equal(readFileSync(join(cwd, '.next/server/chunks/[root-of-the-server]__abc._.js'), 'utf8'), 'compiled server chunk\n//# sourceMappingURL=%5Broot-of-the-server%5D__abc._.js.map');
+  const manifest = JSON.parse(readFileSync(join(cwd, '.context/diagnostics-source-maps/exact_release/manifest.json'), 'utf8'));
+  assert.deepEqual(manifest.bundles.find(bundle => bundle.kind === 'server').encodedAliases, ['chunks/%5Broot-of-the-server%5D__abc._.js.map']);
 });
 for (const reference of ['%ZZ', '%2E%2E/%2E%2E/secret.map', 'https%3A//outside.test/secret.map', '%5Broot-of-the-server%5D__abc._.js.map%3Ftoken=private']) {
   test(`invalid or escaping encoded server reference fails closed: ${reference}`, t => {
