@@ -53,6 +53,230 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   private var finishedCalls = [UUID]()
   private var preparedPush: UUID?
 
+  // Server media and CallKit state are separate. SDK ACTIVE/HELD cannot prove
+  // conference media, and a historical receipt cannot override current media.
+  private struct Media {
+    var state: String
+    var version: Int
+    var canHold: Bool
+  }
+  private final class HoldCommand {
+    let actionId: UUID
+    let held: Bool
+    let version: Int
+    let session: String
+    let control: String
+    let client: TxClient
+    let call: Call
+    var action: CXSetHeldCallAction?
+    var phase = "unclaimed"
+    init(_ action: CXSetHeldCallAction, version: Int, session: String, control: String, client: TxClient, call: Call) {
+      actionId = action.uuid; held = action.isOnHold; self.version = version
+      self.session = session; self.control = control; self.client = client; self.call = call; self.action = action
+    }
+  }
+  private struct HoldMirror {
+    let action: CXSetHeldCallAction
+    let client: TxClient
+    let call: Call
+    let version: Int
+    let session: String
+    let control: String
+  }
+  private var media = [UUID: Media]()
+  private var holds = [UUID: HoldCommand]()
+  private var holdTimers = [UUID: Timer]()
+  private var mirrors = [UUID: HoldMirror]()
+  private var mirrorTimers = [UUID: Timer]()
+  private var requestedHolds = [UUID: CXSetHeldCallAction]()
+  private var systemHeld = Set<UUID>()
+  private var userMuted = Set<UUID>()
+  private var privacyHold = Set<UUID>()
+
+  private func holdEvent(_ id: UUID, _ command: HoldCommand) -> [String: Any] {
+    ["type": "heldRequested", "callId": id.uuidString, "sessionId": command.session,
+     "callControlId": command.control, "actionId": command.actionId.uuidString,
+     "held": command.held, "expectedVersion": command.version, "phase": command.phase,
+     "actionLive": command.action.map { !$0.isComplete && $0.timeoutDate > Date() } ?? false]
+  }
+  private func mirrorEvent(_ type: String, _ id: UUID, _ mirror: HoldMirror) -> [String: Any] {
+    ["type": type, "callId": id.uuidString, "sessionId": mirror.session, "callControlId": mirror.control,
+     "actionId": mirror.action.uuid.uuidString, "expectedVersion": mirror.version, "held": mirror.action.isOnHold]
+  }
+  private func failLive(_ action: CXAction) {
+    if !action.isComplete && action.timeoutDate > Date() { action.fail() }
+  }
+  private func applyMicrophone(_ id: UUID, _ call: Call) {
+    if userMuted.contains(id) || privacyHold.contains(id) { call.muteAudio() }
+    else if call.isMuted { call.unmuteAudio() }
+  }
+  private func refreshPrivacy(_ id: UUID, _ call: Call) {
+    let state = media[id]?.state
+    let blocked = holds[id] != nil || mirrors[id] != nil || systemHeld.contains(id)
+      || state == "held" || state == "pending" || (state == "unavailable" && privacyHold.contains(id))
+    let wasBlocked = privacyHold.contains(id)
+    if blocked { privacyHold.insert(id) } else { privacyHold.remove(id) }
+    if wasBlocked != blocked || (state == "active" && !blocked) { applyMicrophone(id, call) }
+  }
+  private func updateHoldCapability(_ id: UUID) {
+    let update = CXCallUpdate()
+    update.supportsHolding = ready && established.contains(id) && recoveryTimers[id] == nil
+      && media[id]?.canHold == true && ["active", "held"].contains(media[id]?.state ?? "")
+      && holds[id] == nil && mirrors[id] == nil
+      && systemHeld.contains(id) == (media[id]?.state == "held")
+    provider?.reportCall(with: id, updated: update)
+  }
+  private func exactMediaCall(_ callId: String, _ sessionId: String, _ controlId: String) throws -> (UUID, Call) {
+    guard let id = UUID(uuidString: callId), sessions[id] == sessionId, controls[id] == controlId,
+      established.contains(id), let call = currentCall(id) else { throw PhoneError() }
+    return (id, call)
+  }
+  private func acceptMedia(_ id: UUID, state: String, version: Int, canHold: Bool) throws -> Bool {
+    guard ["active", "held", "pending", "unavailable"].contains(state), version >= 0, version <= 9_007_199_254_740_991 else { throw PhoneError() }
+    if let previous = media[id] {
+      if version < previous.version { return false }
+      if version == previous.version, ["active", "held"].contains(previous.state), state != previous.state, state != "unavailable" {
+        // Effect receipts can settle pending at the same session revision; the
+        // reverse transition or opposite settled result is stale/contradictory.
+        return false
+      }
+    }
+    media[id] = Media(state: state, version: version, canHold: canHold)
+    return true
+  }
+  func requestHold(callId: String, held: Bool) throws {
+    guard ready, let id = UUID(uuidString: callId), let call = currentCall(id), established.contains(id), recoveryTimers[id] == nil,
+      media[id]?.canHold == true, media[id]?.state == (held ? "active" : "held"),
+      holds[id] == nil, mirrors[id] == nil, requestedHolds[id] == nil, systemHeld.contains(id) == !held, call.callState == .ACTIVE else { throw PhoneError() }
+    let action = CXSetHeldCallAction(call: id, onHold: held)
+    requestedHolds[id] = action
+    holdTimers[id] = Timer.scheduledTimer(withTimeInterval: min(12, max(0, action.timeoutDate.timeIntervalSinceNow)), repeats: false) { [weak self] _ in
+      guard let self, self.requestedHolds[id] === action else { return }
+      self.requestedHolds.removeValue(forKey: id); self.holdTimers.removeValue(forKey: id)?.invalidate()
+      self.failLive(action)
+      self.emit(["type": "heldCancelled", "callId": id.uuidString, "actionId": action.uuid.uuidString])
+    }
+    controller.request(CXTransaction(action: action)) { [weak self] error in
+      guard error != nil else { return }
+      DispatchQueue.main.async {
+        guard let self, self.requestedHolds[id] === action else { return }
+        self.requestedHolds.removeValue(forKey: id); self.holdTimers.removeValue(forKey: id)?.invalidate()
+        self.emit(["type": "heldCancelled", "callId": id.uuidString, "actionId": action.uuid.uuidString])
+      }
+    }
+  }
+  func claimHold(callId: String, actionId: String) -> Bool {
+    guard ready, let id = UUID(uuidString: callId), let uuid = UUID(uuidString: actionId),
+      let command = holds[id], command.actionId == uuid, command.phase == "unclaimed",
+      let action = command.action, !action.isComplete, action.timeoutDate > Date(),
+      client === command.client, sessions[id] == command.session, controls[id] == command.control,
+      currentCall(id) === command.call, holds[id] === command, recoveryTimers[id] == nil else { return false }
+    command.phase = "dispatched"
+    return true
+  }
+  func syncMedia(callId: String, sessionId: String, controlId: String, state: String, version: Int, canHold: Bool) throws {
+    let (id, call) = try exactMediaCall(callId, sessionId, controlId)
+    guard try acceptMedia(id, state: state, version: version, canHold: canHold) else { return }
+    refreshPrivacy(id, call); mirrorMedia(id, call); updateHoldCapability(id)
+  }
+  func resolveHold(callId: String, sessionId: String, controlId: String, actionId: String, outcome: String, state: String, version: Int, canHold: Bool) throws {
+    guard ["confirmed", "rejected", "uncertain"].contains(outcome), let uuid = UUID(uuidString: actionId) else { throw PhoneError() }
+    let (id, call) = try exactMediaCall(callId, sessionId, controlId)
+    guard let command = holds[id], command.actionId == uuid, command.phase != "unclaimed" else { throw PhoneError() }
+    _ = try acceptMedia(id, state: state, version: version, canHold: canHold)
+    if outcome == "uncertain" {
+      command.phase = "uncertain"; refreshPrivacy(id, call); updateHoldCapability(id); return
+    }
+    if let action = command.action {
+      if outcome == "confirmed", client === command.client, call === command.call,
+        media[id]?.state == (command.held ? "held" : "active"), media[id]!.version >= command.version,
+        !action.isComplete, action.timeoutDate > Date() {
+        action.fulfill()
+        if command.held { systemHeld.insert(id) } else { systemHeld.remove(id) }
+      } else { failLive(action) }
+    }
+    holds.removeValue(forKey: id); holdTimers.removeValue(forKey: id)?.invalidate()
+    refreshPrivacy(id, call); mirrorMedia(id, call); updateHoldCapability(id)
+  }
+  private func detachHold(_ id: UUID, timedOut: Bool = false) {
+    guard let command = holds[id] else { return }
+    if let action = command.action, !timedOut { failLive(action) }
+    command.action = nil; holdTimers.removeValue(forKey: id)?.invalidate()
+    if command.phase == "unclaimed" {
+      holds.removeValue(forKey: id)
+      emit(["type": "heldCancelled", "callId": id.uuidString, "actionId": command.actionId.uuidString])
+    } else { command.phase = "uncertain"; emit(holdEvent(id, command)) }
+    if let call = calls[id] { refreshPrivacy(id, call) }
+    updateHoldCapability(id)
+  }
+  private func failMirror(_ id: UUID, timedOut: Bool = false) {
+    guard let mirror = mirrors.removeValue(forKey: id) else { return }
+    mirrorTimers.removeValue(forKey: id)?.invalidate()
+    if !timedOut { failLive(mirror.action) }
+    // Keep the barrier until an explicit fresh sync successfully reconciles.
+    privacyHold.insert(id); if let call = calls[id] { applyMicrophone(id, call) }
+    emit(mirrorEvent("holdSyncFailed", id, mirror))
+    updateHoldCapability(id)
+  }
+  private func mirrorMedia(_ id: UUID, _ call: Call) {
+    guard holds[id] == nil, let state = media[id], ["active", "held"].contains(state.state), let client,
+      let session = sessions[id], let control = controls[id],
+      recoveryTimers[id] == nil else { return }
+    let held = state.state == "held"
+    if let mirror = mirrors[id] {
+      if mirror.version == state.version && mirror.action.isOnHold == held { emit(mirrorEvent("holdSyncPending", id, mirror)); return }
+      failMirror(id)
+    }
+    guard systemHeld.contains(id) != held else { refreshPrivacy(id, call); return }
+    let action = CXSetHeldCallAction(call: id, onHold: held)
+    mirrorActionIds[action.uuid] = id
+    let mirror = HoldMirror(action: action, client: client, call: call, version: state.version, session: session, control: control)
+    mirrors[id] = mirror
+    privacyHold.insert(id); applyMicrophone(id, call)
+    mirrorTimers[id] = Timer.scheduledTimer(withTimeInterval: min(12, max(0, action.timeoutDate.timeIntervalSinceNow)), repeats: false) { [weak self] _ in
+      guard self?.mirrors[id]?.action === action else { return }; self?.failMirror(id)
+    }
+    emit(mirrorEvent("holdSyncPending", id, mirror))
+    controller.request(CXTransaction(action: action)) { [weak self] error in
+      guard error != nil else { return }
+      DispatchQueue.main.async { if self?.mirrors[id]?.action === action { self?.failMirror(id) } }
+    }
+  }
+  func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
+    let id = action.callUUID
+    if let mirror = mirrors[id], mirror.action === action {
+      guard client === mirror.client, sessions[id] == mirror.session, controls[id] == mirror.control,
+        currentCall(id) === mirror.call, mirrors[id]?.action === action,
+        recoveryTimers[id] == nil, media[id]?.version == mirror.version,
+        media[id]?.state == (action.isOnHold ? "held" : "active"), holds[id] == nil,
+        !action.isComplete, action.timeoutDate > Date() else { failMirror(id); return }
+      mirrors.removeValue(forKey: id); mirrorTimers.removeValue(forKey: id)?.invalidate()
+      action.fulfill()
+      if action.isOnHold { systemHeld.insert(id) } else { systemHeld.remove(id) }
+      refreshPrivacy(id, mirror.call); updateHoldCapability(id)
+      emit(mirrorEvent("holdSynced", id, mirror)); return
+    }
+    // A stale mirror callback is not a new user command.
+    guard mirrorActionIds[action.uuid] == nil else { failLive(action); return }
+    guard requestedHolds[id] == nil || requestedHolds[id] === action else {
+      failLive(action); emit(["type": "heldCancelled", "callId": id.uuidString, "actionId": action.uuid.uuidString]); return
+    }
+    if requestedHolds[id] === action { requestedHolds.removeValue(forKey: id); holdTimers.removeValue(forKey: id)?.invalidate() }
+    guard ready, holds[id] == nil, mirrors[id] == nil, let client, let session = sessions[id], let control = controls[id],
+      let call = currentCall(id), established.contains(id), recoveryTimers[id] == nil,
+      call.callState == .ACTIVE, let state = media[id], state.canHold,
+      state.state == (action.isOnHold ? "active" : "held"), systemHeld.contains(id) == !action.isOnHold, !action.isComplete, action.timeoutDate > Date() else {
+      failLive(action); emit(["type": "heldCancelled", "callId": id.uuidString, "actionId": action.uuid.uuidString]); return
+    }
+    let command = HoldCommand(action, version: state.version, session: session, control: control, client: client, call: call)
+    holds[id] = command; refreshPrivacy(id, call); updateHoldCapability(id)
+    holdTimers[id] = Timer.scheduledTimer(withTimeInterval: min(12, max(0, action.timeoutDate.timeIntervalSinceNow)), repeats: false) { [weak self] _ in
+      guard self?.holds[id] === command else { return }; self?.detachHold(id)
+    }
+    emit(holdEvent(id, command))
+  }
+  private var mirrorActionIds = [UUID: UUID]()
+
   func start() {
     guard Self.enabled, provider == nil else { return }
     let settings = CXProviderConfiguration()
@@ -143,9 +367,9 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     return ["ready": ready, "audioActive": audioActive, "microphonePermission": microphonePermission(), "preparedPushCallId": preparedPush?.uuidString as Any? ?? NSNull(), "pushRegistered": pushToken != nil && pushToken == registeredPushToken && ready,
      "wasEnabled": UserDefaults.standard.bool(forKey: "linka.voice.enabled"), "calls": Array(calls.keys).compactMap { id -> [String: Any]? in
        guard let session = sessions[id], let call = currentCall(id) ?? (recoveryTimers[id] != nil ? calls[id] : nil) else { return nil }
-       return ["type": "restored", "callId": id.uuidString, "sessionId": session, "number": outgoingLabels[id] ?? call.callInfo?.callerNumber ?? "",
+       return ["type": "restored", "callId": id.uuidString, "sessionId": session, "callControlId": controls[id] ?? "", "muted": userMuted.contains(id), "privacyHold": privacyHold.contains(id), "systemHeld": systemHeld.contains(id), "media": media[id].map { ["state": $0.state, "version": $0.version, "canHold": $0.canHold] as [String: Any] } as Any? ?? NSNull(), "number": outgoingLabels[id] ?? call.callInfo?.callerNumber ?? "",
          "state": recoveryTimers[id] != nil ? "RECONNECTING" : stateName(call.callState), "outgoing": outbound.contains(id)]
-     }, "pending": pushes.map { id, metadata in
+     }, "pendingSyncs": mirrors.map { mirrorEvent("holdSyncPending", $0.key, $0.value) }, "pendingHolds": holds.map { holdEvent($0.key, $0.value) }, "pending": pushes.map { id, metadata in
       ["type": "push", "callId": id.uuidString, "providerLegId": metadata["telnyx_leg_id"] as? String ?? ""]
     }]
   }
@@ -192,7 +416,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       expected = nil; outgoingTimer?.invalidate(); outgoingTimer = nil; outbound.insert(id); reported.insert(id)
       expireUnanswered(id)
       if attempt.handleType == .generic { outgoingLabels[id] = attempt.number }
-      emit(["type": "outgoing", "callId": id.uuidString, "sessionId": attempt.sessionId, "number": attempt.number])
+      emit(["type": "outgoing", "callId": id.uuidString, "sessionId": attempt.sessionId, "callControlId": attempt.controlId, "number": attempt.number])
       let action = CXStartCallAction(call: id, handle: CXHandle(type: attempt.handleType, value: attempt.number))
       controller.request(CXTransaction(action: action)) { [weak self] error in
         guard let self else { return }
@@ -240,7 +464,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   func speaker(enabled: Bool) { if enabled { client?.setSpeaker() } else { client?.setEarpiece() } }
   func dtmf(digits: String) throws {
     guard digits.range(of: "^[0-9*#]{1,32}$", options: .regularExpression) != nil,
-      let id = reported.first, let call = currentCall(id), call.callState == .ACTIVE else { throw PhoneError() }
+      let id = reported.first, let call = currentCall(id), call.callState == .ACTIVE, !privacyHold.contains(id) else { throw PhoneError() }
     call.dtmf(dtmf: digits)
   }
 
@@ -274,6 +498,11 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     timers.removeValue(forKey: id)?.invalidate()
     recoveryTimers.removeValue(forKey: id)?.invalidate(); established.remove(id)
     failAnswer(id)
+    detachHold(id); failMirror(id)
+    holdTimers.removeValue(forKey: id)?.invalidate()
+    mirrorActionIds = mirrorActionIds.filter { $0.value != id }
+    holds.removeValue(forKey: id); media.removeValue(forKey: id); systemHeld.remove(id); userMuted.remove(id); privacyHold.remove(id)
+    if let request = requestedHolds.removeValue(forKey: id) { failLive(request); emit(["type": "heldCancelled", "callId": id.uuidString, "actionId": request.uuid.uuidString]) }
     provider?.reportCall(with: id, endedAt: Date(), reason: reason)
     reported.remove(id); pushes.removeValue(forKey: id); calls.removeValue(forKey: id); controls.removeValue(forKey: id); authorizedLegs.removeValue(forKey: id)
     if preparedPush == id { preparedPush = nil }
@@ -319,7 +548,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   private func currentCall(_ id: UUID) -> Call? {
     guard let previous = calls[id], !finishedCalls.contains(id) else { return nil }
     guard sessions[id] != nil else { return previous }
-    guard let call = client?.getCall(callId: id) else { failAnswer(id); return nil }
+    guard let call = client?.getCall(callId: id) else { failAnswer(id); detachHold(id); failMirror(id); return nil }
     guard call.callInfo?.callId == id, let leg = authorizedLegs[id], call.telnyxLegId == leg,
       call.telnyxCallControlId == nil || call.telnyxCallControlId == controls[id] else {
       // SDK ATTACH answers before notifying its delegate. Reject a mismatched
@@ -327,7 +556,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       if call.callInfo?.callId == id { call.hangup() }
       finish(id, reason: .failed); return nil
     }
-    if call !== previous { failAnswer(id); calls[id] = call }
+    if call !== previous { failAnswer(id); detachHold(id); failMirror(id); calls[id] = call; applyMicrophone(id, call) }
     return call
   }
   private func callForEnding(_ id: UUID) -> Call? {
@@ -340,6 +569,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   private func beginRecovery(_ id: UUID) {
     guard established.contains(id), let session = sessions[id], let client, recoveryTimers[id] == nil else { return }
     timers.removeValue(forKey: id)?.invalidate()
+    detachHold(id); failMirror(id)
     recoveryTimers[id] = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
       guard let self, self.client === client, self.sessions[id] == session else { return }
       self.callForEnding(id)?.hangup()
@@ -396,10 +626,20 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   }
   func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
     guard let call = currentCall(action.callUUID) else { action.fail(); return }
-    if action.isMuted { call.muteAudio() } else { call.unmuteAudio() }
+    if action.isMuted { userMuted.insert(action.callUUID) } else { userMuted.remove(action.callUUID) }
+    applyMicrophone(action.callUUID, call)
     action.fulfill(); emit(["type": "muted", "muted": action.isMuted])
   }
   func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
+    if let held = action as? CXSetHeldCallAction {
+      if mirrors[held.callUUID]?.action === held { failMirror(held.callUUID, timedOut: true) }
+      else if holds[held.callUUID]?.action === held { detachHold(held.callUUID, timedOut: true) }
+      else if requestedHolds[held.callUUID] === held {
+        requestedHolds.removeValue(forKey: held.callUUID); holdTimers.removeValue(forKey: held.callUUID)?.invalidate()
+        emit(["type": "heldCancelled", "callId": held.callUUID.uuidString, "actionId": held.uuid.uuidString])
+      }
+      return
+    }
     if let callAction = action as? CXCallAction { reject(callId: callAction.callUUID.uuidString) }
   }
   func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
@@ -413,15 +653,21 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
 
   func onClientReady() {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onClientReady() }; return }
-    ready = true; registeredPushToken = connectingPushToken; emit(["type": "registration", "state": "registered"])
+    ready = true; registeredPushToken = connectingPushToken
+    for id in reported { updateHoldCapability(id) }
+    emit(["type": "registration", "state": "registered"])
   }
   func onSocketDisconnected() {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onSocketDisconnected() }; return }
-    ready = false; emit(["type": "registration", "state": "unregistered"])
+    ready = false
+    for id in reported { detachHold(id); failMirror(id); updateHoldCapability(id) }
+    emit(["type": "registration", "state": "unregistered"])
   }
   func onClientError(error: Error) {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onClientError(error: error) }; return }
-    ready = false; emit(["type": "registration", "state": "error"])
+    ready = false
+    for id in reported { detachHold(id); failMirror(id); updateHoldCapability(id) }
+    emit(["type": "registration", "state": "error"])
   }
   func onIncomingCall(call: Call) {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onIncomingCall(call: call) }; return }
@@ -437,9 +683,10 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       guard call.telnyxLegId == authorizedLegs[id], call.telnyxCallControlId == nil || call.telnyxCallControlId == controls[id] else {
         call.hangup(); finish(id, reason: .failed); return
       }
-      if let previous = calls[id], previous !== call { failAnswer(id) }
+      if let previous = calls[id], previous !== call { failAnswer(id); detachHold(id); failMirror(id) }
     }
     calls[id] = call
+    if sessions[id] != nil { applyMicrophone(id, call) }
     expireUnanswered(id)
     if sessions[id] != nil {
       handleAuthorized(call, id: id)
@@ -476,6 +723,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       established.insert(callId)
       timers.removeValue(forKey: callId)?.invalidate()
       recoveryTimers.removeValue(forKey: callId)?.invalidate()
+      updateHoldCapability(callId)
     }
     emit(["type": "callState", "callId": callId.uuidString, "state": stateName(callState),
       "sessionId": sessions[callId] ?? ""])

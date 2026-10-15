@@ -31,6 +31,14 @@ public final class LinkaVoiceModule: Module {
       try LinkaPhone.shared.expectOutgoing(controlId: controlId, sessionId: sessionId, number: number, genericHandle: genericHandle)
     }.runOnQueue(.main)
     AsyncFunction("confirmConnected") { (callId: String) in LinkaPhone.shared.confirmConnected(callId: callId) }.runOnQueue(.main)
+    AsyncFunction("requestHold") { (callId: String, held: Bool) in try LinkaPhone.shared.requestHold(callId: callId, held: held) }.runOnQueue(.main)
+    AsyncFunction("claimHold") { (callId: String, actionId: String) in LinkaPhone.shared.claimHold(callId: callId, actionId: actionId) }.runOnQueue(.main)
+    AsyncFunction("syncMedia") { (callId: String, sessionId: String, controlId: String, state: String, version: Int, canHold: Bool) in
+      try LinkaPhone.shared.syncMedia(callId: callId, sessionId: sessionId, controlId: controlId, state: state, version: version, canHold: canHold)
+    }.runOnQueue(.main)
+    AsyncFunction("resolveHold") { (callId: String, sessionId: String, controlId: String, actionId: String, outcome: String, state: String, version: Int, canHold: Bool) in
+      try LinkaPhone.shared.resolveHold(callId: callId, sessionId: sessionId, controlId: controlId, actionId: actionId, outcome: outcome, state: state, version: version, canHold: canHold)
+    }.runOnQueue(.main)
     AsyncFunction("end") { LinkaPhone.shared.end() }.runOnQueue(.main)
     AsyncFunction("mute") { (muted: Bool) in try LinkaPhone.shared.mute(muted: muted) }.runOnQueue(.main)
     AsyncFunction("speaker") { (enabled: Bool) in LinkaPhone.shared.speaker(enabled: enabled) }.runOnQueue(.main)

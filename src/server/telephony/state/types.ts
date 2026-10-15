@@ -220,7 +220,10 @@ export type AppEventType =
 export type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 export { isSupervisorMode, SUPERVISOR_MODE_ORDER as SUPERVISOR_MODES } from "@/lib/telephony/supervisor-mode";
 
+export type NativeHoldGuard = { profileId: string; deviceSessionId: string; callControlId: string; customerControlId: string; expectedVersion: number };
+
 export type AppEvent = {
+  nativeHold?: NativeHoldGuard;
   kind: "app";
   /** Unique id of the action (fingerprint for command ids and the call event row). */
   id: string;
@@ -342,6 +345,7 @@ export type RingFanout = CommandBase & {
 };
 
 export type CommandBase = {
+  nativeHold?: NativeHoldGuard;
   /** Immutable target once a conference command is admitted. */
   conferenceId?: string;
   /** Log and continue on failure instead of running compensations (e.g. `playback_stop` on an idle leg). */
@@ -653,6 +657,8 @@ export function appendJourneyEvidence(previous: unknown, entry: JourneyEvidenceE
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
 export type SessionMeta = {
+  holdControl?: { commandId: string; held: boolean; customerControlId: string } | null;
+  holdRecovery?: { commandId: string; customerControlId: string; operatorControlId: string } | null;
   journey?: JourneyEvidence;
   /** Dialled number's routing override, frozen at inbound session creation. */
   line_inbound_mode?: LineInboundMode;

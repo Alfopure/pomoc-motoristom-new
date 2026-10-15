@@ -36,6 +36,18 @@ func fixtureExpectOutgoing(_ owner: LinkaPhone, controlId: String, sessionId: St
   try owner.expectOutgoing(controlId: controlId, sessionId: sessionId, number: number{argument})
 }}
 '''
+# Explicit missing-feature adapter: old source has no hold bridge. It does not
+# emulate the requested behavior; old existing provider timeout logic stays real.
+if 'func requestHold(' not in source:
+    adapter += """
+extension LinkaPhone {
+  func requestHold(callId: String, held: Bool) throws { throw NSError(domain: "missing-hold", code: 1) }
+  func claimHold(callId: String, actionId: String) -> Bool { false }
+  func syncMedia(callId: String, sessionId: String, controlId: String, state: String, version: Int, canHold: Bool) throws {}
+  func resolveHold(callId: String, sessionId: String, controlId: String, actionId: String, outcome: String, state: String, version: Int, canHold: Bool) throws {}
+  func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) { action.fail() }
+}
+"""
 folder = pathlib.Path(__file__).parent
 header = '// Actual LinkaPhone source SHA256: ' + hashlib.sha256(args.source.read_bytes()).hexdigest() + '\n'
 args.output.write_text(header + (folder / 'native-phone-stubs.swift').read_text() + '\n' + source + '\n' + adapter + '\n' + (folder / 'native-phone-scenarios.swift').read_text())

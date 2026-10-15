@@ -16,6 +16,9 @@ export function nativePhone(): NativePhone | null {
     expectOutgoing: (controlId, sessionId, number, genericHandle = false) => module.expectOutgoing(controlId, sessionId, number, genericHandle),
     answer: callId => module.answer(callId), confirmConnected: callId => module.confirmConnected(callId), end: () => module.end(), mute: muted => module.mute(muted),
     speaker: enabled => module.speaker(enabled), dtmf: digits => module.dtmf(digits),
+    requestHold: (callId, held) => module.requestHold(callId, held), claimHold: (callId, actionId) => module.claimHold(callId, actionId),
+    syncMedia: (callId, sessionId, controlId, state, version, canHold) => module.syncMedia(callId, sessionId, controlId, state, version, canHold),
+    resolveHold: (callId, sessionId, controlId, actionId, outcome, state, version, canHold) => module.resolveHold(callId, sessionId, controlId, actionId, outcome, state, version, canHold),
     subscribe: callback => { const subscription = module.addListener("onVoiceEvent", callback); return () => subscription.remove(); },
   };
 }

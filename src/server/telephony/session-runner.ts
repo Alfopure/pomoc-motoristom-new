@@ -978,6 +978,11 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
       if (!leaseAcquired && recordingLeaseRequired && event.kind === "app" && event.type !== "hangup") {
         throw new SessionEventDeferredError("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.");
       }
+      if (event.kind === "app" && event.nativeHold) {
+        const { assertNativeHoldAuthority } = await import("./native-hold-authority");
+        await assertNativeHoldAuthority(deps, snapshot.session, event.nativeHold, snapshot.legs);
+        if (snapshot.session.version !== event.nativeHold.expectedVersion) throw new SessionEventDeferredError("Native hold revision changed before staging", "native_hold_revision");
+      }
       const previousContact = JSON.stringify(readContactHistory(snapshot.session));
       if (!terminalReplay && (durable || readContactHistory(snapshot.session).operations.length)) {
         snapshot.session = { ...snapshot.session, metadata: toJson({ ...readMeta(snapshot.session), callback_contact: collectContactProof(snapshot, event) }) };

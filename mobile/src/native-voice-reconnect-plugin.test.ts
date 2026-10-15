@@ -10,6 +10,8 @@ const require = createRequire(import.meta.url);
 const plugin = require("../plugins/with-telnyx-reconnect-guard.cjs") as ((config: ExportedConfig) => ExportedConfig) & {
   patchTelnyxSource: (source: string, version: string) => string;
   patchNetworkMonitorSource: (source: string, version: string) => string;
+  patchCallSource: (source: string, version: string) => string;
+  patchPeerSource: (source: string, version: string) => string;
   patchPodfile: (source: string) => string;
   patchInstalledSdk: (podsRoot: string, version: string) => void;
 };
@@ -71,6 +73,8 @@ describe("pinned iOS voice SDK reconnect lifecycle hook", () => {
   it.each(["4.2.1", "4.2.3", "4.3.0"])("requires re-review of SDK version %s", version => {
     expect(() => plugin.patchTelnyxSource("", version)).toThrow(/unsupported SDK version/);
     expect(() => plugin.patchNetworkMonitorSource("", version)).toThrow(/unsupported SDK version/);
+    expect(() => plugin.patchCallSource("", version)).toThrow(/unsupported SDK version/);
+    expect(() => plugin.patchPeerSource("", version)).toThrow(/unsupported SDK version/);
   });
 
   it.each(["", "// Modified network monitor", "    private init() {"])("rejects unknown network monitor source", source => {
@@ -79,6 +83,11 @@ describe("pinned iOS voice SDK reconnect lifecycle hook", () => {
 
   it.each(["", "// Modified SDK 4.2.2", "internal var txConfig: TxConfig?"])("rejects unknown source rather than applying a partial SDK patch", source => {
     expect(() => plugin.patchTelnyxSource(source, "4.2.2")).toThrow(/unexpected SDK source/);
+  });
+
+  it.each(["", "// Unknown microphone source"])("rejects unknown Call and Peer before patching", source => {
+    expect(() => plugin.patchCallSource(source, "4.2.2")).toThrow(/unexpected Call source/);
+    expect(() => plugin.patchPeerSource(source, "4.2.2")).toThrow(/unexpected Peer source/);
   });
 
   it("config registration edits only the Podfile mod, without touching installed dependencies", async () => {

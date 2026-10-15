@@ -225,12 +225,13 @@ class TransitionBuilder {
   }
 
   cmd(command: Command): this {
-    this.commands.push(command);
+    this.commands.push(this.event.kind === "app" && this.event.nativeHold ? { ...command, nativeHold: this.event.nativeHold } : command);
     return this;
   }
 
   compensate(forCommand: string, description: string, commands: Command[], next: Transition | null = null): this {
-    this.compensations.push({ forCommand, description, commands, next });
+    this.compensations.push({ forCommand, description, commands: this.event.kind === "app" && this.event.nativeHold
+      ? commands.map(command => ({ ...command, nativeHold: this.event.kind === "app" ? this.event.nativeHold : undefined })) : commands, next });
     return this;
   }
 
@@ -1572,6 +1573,10 @@ function canDirectConnectOutbound(b: TransitionBuilder): boolean {
 function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): ReduceResult {
   if (b.session.state !== "received") return b.note("own leg answered outside received").result();
   const meta = b.meta;
+  if (b.session.direction === "internal" && intent === "internal_caller" && leg.role === "operator" && leg.profile_id &&
+      meta.internal?.by === leg.profile_id && b.session.answered_by_profile_id === leg.profile_id) {
+    rememberAcceptedDeviceLeg(b, leg);
+  }
   if (intent !== "outbound" && meta.internal?.endpoints?.length) return fanoutInternalColleague(b, leg);
   let dial: DialCommand;
   if (intent === "outbound") {
@@ -2806,8 +2811,10 @@ function promoteToConference(b: TransitionBuilder, customer: LegRow, operator: L
   b.patchMeta({ conference: { promoted_at: b.nowIso, by: actor } });
   const failed = b.fork();
   failed.patchSession({ state: b.session.state, hold_started_at: b.session.hold_started_at, conference_id: null, conference_name: null });
-  failed.patchMeta({ conference: null, consult: null });
+  failed.patchMeta({ conference: null, consult: null, holdControl: b.meta.holdControl ?? null });
   b.compensate(createId, "conference promotion failed → call stays bridged", [], failed.transition());
+  const rebridgeId = b.cmdId(customer.telnyx_call_control_id, "bridge:rejoin");
+  failed.patchMeta({ holdRecovery: { commandId: rebridgeId, customerControlId: customer.telnyx_call_control_id, operatorControlId: operator.telnyx_call_control_id } });
   // The create already moved the operator into the conference and parked the
   // customer: take the operator back out and re-bridge, otherwise the operator
   // would sit alone in a conference the customer never joined.
@@ -2816,7 +2823,7 @@ function promoteToConference(b: TransitionBuilder, customer: LegRow, operator: L
     "conference join failed → operator left the conference and re-bridged",
     [
       { kind: "conference_leave", commandId: b.cmdId(operator.telnyx_call_control_id, "conference:leave:join_failed"), leg: ref(operator), bestEffort: true },
-      { kind: "bridge", commandId: b.cmdId(customer.telnyx_call_control_id, "bridge:rejoin"), leg: ref(customer), target: ref(operator), parkAfterUnbridge: "self", bestEffort: true },
+      { kind: "bridge", commandId: rebridgeId, leg: ref(customer), target: ref(operator), parkAfterUnbridge: "self", bestEffort: true },
     ],
     failed.transition(),
   );
@@ -2832,7 +2839,13 @@ function appHold(b: TransitionBuilder, customer: LegRow): ReduceResult {
   if (b.session.state !== "talking") throw new CallActionRejected("Podržať je možné len prebiehajúci hovor.", 409);
   const operator = requireOperatorLeg(b);
   promoteToConference(b, customer, operator, (b.event as AppEvent).actorProfileId);
-  b.cmd({ kind: "conference_hold", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:hold"), legs: [ref(customer)], media: { key: "moh" } });
+  const holdCommandId = b.cmdId(customer.telnyx_call_control_id, "conference:hold");
+  const rejected = b.fork().patchSession({ state: "talking", hold_started_at: b.session.hold_started_at })
+    .patchMeta({ holdControl: b.meta.holdControl ?? null });
+  rejected.leg(customer.telnyx_call_control_id, { state: customer.state });
+  b.compensate(holdCommandId, "definite hold rejection preserves previous media", [], rejected.transition());
+  b.patchMeta({ holdControl: { commandId: holdCommandId, held: true, customerControlId: customer.telnyx_call_control_id }, holdRecovery: null });
+  b.cmd({ kind: "conference_hold", commandId: holdCommandId, legs: [ref(customer)], media: { key: "moh" } });
   b.setState("held").patchSession({ hold_started_at: b.nowIso });
   b.leg(customer.telnyx_call_control_id, { state: "held" });
   return b.note("hold").result();
@@ -2840,7 +2853,13 @@ function appHold(b: TransitionBuilder, customer: LegRow): ReduceResult {
 
 function appUnhold(b: TransitionBuilder, customer: LegRow): ReduceResult {
   if (b.session.state !== "held") throw new CallActionRejected("Hovor nie je podržaný.", 409);
-  b.cmd({ kind: "conference_unhold", commandId: b.cmdId(customer.telnyx_call_control_id, "conference:unhold"), legs: [ref(customer)] });
+  const unholdCommandId = b.cmdId(customer.telnyx_call_control_id, "conference:unhold");
+  const rejected = b.fork().patchSession({ state: "held", hold_started_at: b.session.hold_started_at })
+    .patchMeta({ holdControl: b.meta.holdControl ?? null });
+  rejected.leg(customer.telnyx_call_control_id, { state: customer.state });
+  b.compensate(unholdCommandId, "definite unhold rejection preserves previous media", [], rejected.transition());
+  b.patchMeta({ holdControl: { commandId: unholdCommandId, held: false, customerControlId: customer.telnyx_call_control_id }, holdRecovery: null });
+  b.cmd({ kind: "conference_unhold", commandId: unholdCommandId, legs: [ref(customer)] });
   b.setState("talking").patchSession({ hold_started_at: null });
   b.leg(customer.telnyx_call_control_id, { state: "bridged" });
   return b.note("unhold").result();

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DispatchPhone, type NativePhone, type VoiceEvent } from "./phone";
-import { createVoiceApi, type VoiceApi } from "./api";
+import { createVoiceApi, type VoiceApi, type VoiceHoldCommand, type VoiceHoldResult } from "./api";
 import { MobileApiError } from "../lib/api";
 
 const lease = "00000000-0000-4000-8000-000000000001", sid = "00000000-0000-4000-8000-000000000002", id = "00000000-0000-4000-8000-000000000003";
@@ -16,6 +16,7 @@ function fixture() {
     authorize: vi.fn().mockResolvedValue(undefined), reject: vi.fn().mockResolvedValue(undefined), expectOutgoing: vi.fn().mockResolvedValue(undefined),
     answer: vi.fn().mockResolvedValue(undefined), confirmConnected: vi.fn().mockResolvedValue(undefined), end: vi.fn().mockResolvedValue(undefined), mute: vi.fn().mockResolvedValue(undefined),
     speaker: vi.fn().mockResolvedValue(undefined), dtmf: vi.fn().mockResolvedValue(undefined),
+    requestHold: vi.fn().mockResolvedValue(undefined), claimHold: vi.fn().mockResolvedValue(true), syncMedia: vi.fn().mockResolvedValue(undefined), resolveHold: vi.fn().mockResolvedValue(undefined),
   };
   const api: VoiceApi = {
     token: vi.fn().mockResolvedValue({ token: "memory-only-provider-jwt", deviceSessionId: lease, expiresAt: new Date(Date.now() + 86_400_000).toISOString() }),
@@ -23,7 +24,8 @@ function fixture() {
     start: vi.fn().mockResolvedValue({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "+421900000002" }),
     startInternal: vi.fn().mockResolvedValue({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "Jana", targetProfileId: lease }),
     cancelAttempt: vi.fn().mockResolvedValue({ resolved: true, sessionId: sid, terminationPending: false }),
-    end: vi.fn().mockResolvedValue({ terminationPending: false }), status: vi.fn().mockResolvedValue({ sessionId: sid, state: "ringing", connected: false, ended: false, terminationPending: false }),
+    end: vi.fn().mockResolvedValue({ terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } }), status: vi.fn().mockResolvedValue({ sessionId: sid, state: "ringing", connected: false, ended: false, terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } }),
+    hold: vi.fn(), holdStatus: vi.fn(),
     disconnect: vi.fn().mockResolvedValue(undefined), presence: vi.fn().mockResolvedValue(undefined),
   };
   const store = { load: vi.fn().mockResolvedValue(lease), save: vi.fn().mockResolvedValue(undefined), clear: vi.fn().mockResolvedValue(undefined) };
@@ -32,6 +34,218 @@ function fixture() {
   return { phone, api, native, store, uuid, emit: (value: VoiceEvent) => event(value) };
 }
 async function connected() { const f = fixture(); await f.phone.initialise(); await f.phone.connect(); return f; }
+
+const activeMedia = { version: 8, state: "active" as const, canHold: true, callControlId: "exact-leg" };
+const holdAction = { type: "heldRequested", callId: id, sessionId: sid, callControlId: "exact-leg", actionId: lease, held: true,
+  expectedVersion: 8, phase: "unclaimed" as const, actionLive: true };
+const holdCommand: VoiceHoldCommand = { callControlId: "exact-leg", requestId: lease, held: true, expectedVersion: 8 };
+function holdResult(change: Partial<VoiceHoldResult> = {}): VoiceHoldResult {
+  return { sessionId: sid, state: "held", connected: true, ended: false, terminationPending: false,
+    media: { ...activeMedia, version: 9, state: "held" }, operation: { requestId: lease, held: true, outcome: "accepted" }, ...change };
+}
+async function activePhone() {
+  const f = await connected();
+  vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "talking", connected: true, ended: false, terminationPending: false, media: activeMedia });
+  f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
+  f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+  return f;
+}
+
+describe("mobile hold authority and recovery", () => {
+  it("requests one CallKit action instead of directly mutating the provider", async () => {
+    const f = await activePhone(); await f.phone.hold(); await f.phone.hold();
+    expect(f.native.requestHold).toHaveBeenCalledExactlyOnceWith(id, true);
+    expect(f.api.hold).not.toHaveBeenCalled(); expect(f.phone.state.holdPhase).toBe("requesting");
+  });
+  it("claims an exact native action before dispatch and confirms actual held media", async () => {
+    const f = await activePhone(); vi.mocked(f.api.hold).mockResolvedValue(holdResult());
+    f.emit(holdAction); await tick();
+    expect(f.native.claimHold).toHaveBeenCalledExactlyOnceWith(id, lease);
+    expect(f.api.hold).toHaveBeenCalledExactlyOnceWith(lease, sid, holdCommand);
+    expect(f.native.resolveHold).toHaveBeenCalledWith(id, sid, "exact-leg", lease, "confirmed", "held", 9, true);
+    expect(f.phone.state.call).toMatchObject({ connected: true, media: { state: "held" } });
+    expect(f.phone.state.holdPhase).toBe("idle");
+  });
+  it("never dispatches an expired unclaimed action", async () => {
+    const f = await activePhone(); vi.mocked(f.native.claimHold).mockResolvedValue(false);
+    f.emit(holdAction); await tick();
+    expect(f.api.hold).not.toHaveBeenCalled(); expect(f.phone.state.holdPhase).toBe("idle");
+  });
+  it.each([{ callControlId: "browser-leg" }, { sessionId: lease }, { callId: sid }, { expectedVersion: -1 }, { held: "true" }])("does not dispatch a mismatched or malformed native action %#", async change => {
+    const f = await activePhone(); f.emit({ ...holdAction, ...change } as VoiceEvent); await tick();
+    expect(f.api.hold).not.toHaveBeenCalled(); expect(f.native.claimHold).not.toHaveBeenCalled();
+    expect(f.native.end).not.toHaveBeenCalled();
+  });
+  it("retains the original identity after a lost response and resolves without another provider command", async () => {
+    const f = await activePhone(); vi.mocked(f.api.hold).mockRejectedValue(new MobileApiError("lost response", 0));
+    vi.mocked(f.api.holdStatus).mockResolvedValue(holdResult());
+    f.emit(holdAction); await tick();
+    expect(f.phone.state.holdPhase).toBe("uncertain");
+    await f.phone.hold(); expect(f.native.requestHold).not.toHaveBeenCalled();
+    await f.phone.refreshHold();
+    expect(f.api.holdStatus).toHaveBeenCalledExactlyOnceWith(lease, sid, holdCommand);
+    expect(f.api.hold).toHaveBeenCalledTimes(1); expect(f.phone.state.holdPhase).toBe("idle");
+    expect(f.native.resolveHold).toHaveBeenLastCalledWith(id, sid, "exact-leg", lease, "confirmed", "held", 9, true);
+  });
+  it("does not interpret not_found as proof that an in-flight original cannot run", async () => {
+    const f = await activePhone(); vi.mocked(f.api.hold).mockRejectedValue(new MobileApiError("lost response", 0));
+    vi.mocked(f.api.holdStatus).mockResolvedValue(holdResult({ state: "talking", media: activeMedia,
+      operation: { requestId: lease, held: true, outcome: "not_found" } }));
+    f.emit(holdAction); await tick(); await f.phone.refreshHold(); await f.phone.hold();
+    expect(f.phone.state.holdPhase).toBe("uncertain"); expect(f.native.requestHold).not.toHaveBeenCalled();
+    expect(f.native.resolveHold).toHaveBeenLastCalledWith(id, sid, "exact-leg", lease, "uncertain", "active", 8, true);
+  });
+  it("replays a claimed native snapshot through the read-only resolver after JS recreation", async () => {
+    const f = fixture(); vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: true, wasEnabled: true, pending: [],
+      calls: [{ type: "callState", callId: id, sessionId: sid, callControlId: "exact-leg", state: "ACTIVE", muted: true }],
+      pendingHolds: [{ ...holdAction, phase: "uncertain", actionLive: false }] });
+    vi.mocked(f.api.holdStatus).mockResolvedValue(holdResult()); await f.phone.initialise(); await tick();
+    expect(f.api.hold).not.toHaveBeenCalled(); expect(f.api.holdStatus).toHaveBeenCalledWith(lease, sid, holdCommand);
+    expect(f.phone.state.muted).toBe(true);
+  });
+  it("ignores a late successful hold response after the native call has ended", async () => {
+    const f = await activePhone(); let resolve!: (value: VoiceHoldResult) => void;
+    vi.mocked(f.api.hold).mockReturnValue(new Promise(done => { resolve = done; }));
+    f.emit(holdAction); await tick(); f.emit({ type: "ended", callId: id, sessionId: sid }); await tick();
+    resolve(holdResult()); await tick();
+    expect(f.phone.state.call).toBeNull(); expect(f.native.resolveHold).not.toHaveBeenCalled();
+  });
+  it("leaves hangup available while the hold outcome is unknown", async () => {
+    const f = await activePhone(); vi.mocked(f.api.hold).mockRejectedValue(new MobileApiError("lost response", 0));
+    f.emit(holdAction); await tick(); await f.phone.end();
+    expect(f.api.end).toHaveBeenCalledWith(lease, sid); expect(f.native.end).toHaveBeenCalledTimes(1);
+  });
+  it("only sends keypad tones during a confirmed active conversation", async () => {
+    const f = await activePhone(); await f.phone.dtmf("1"); expect(f.native.dtmf).toHaveBeenCalledExactlyOnceWith("1");
+    vi.mocked(f.api.hold).mockResolvedValue(holdResult()); f.emit(holdAction); await tick();
+    await f.phone.dtmf("2"); expect(f.native.dtmf).toHaveBeenCalledTimes(1);
+  });
+  it("claims a restored live unclaimed action only after authenticated connection status", async () => {
+    const f = fixture(); vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: true, wasEnabled: true, pending: [],
+      calls: [{ type: "callState", callId: id, sessionId: sid, callControlId: "exact-leg", state: "ACTIVE" }], pendingHolds: [{ ...holdAction }] });
+    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "talking", connected: true, ended: false, terminationPending: false, media: activeMedia });
+    vi.mocked(f.api.hold).mockResolvedValue(holdResult()); await f.phone.initialise();
+    expect(f.native.claimHold).toHaveBeenCalledExactlyOnceWith(id, lease);
+    expect(f.api.hold).toHaveBeenCalledExactlyOnceWith(lease, sid, holdCommand);
+  });
+  it("does not confirm a replacement outgoing call from a status paused at the native bridge", async () => {
+    const f = await activePhone(); let release!: () => void;
+    vi.mocked(f.native.syncMedia).mockReturnValueOnce(new Promise(done => { release = done; }));
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    f.emit({ type: "outgoing", callId: lease, sessionId: lease, callControlId: "new-leg" }); await tick(); release(); await tick();
+    expect(f.native.confirmConnected).not.toHaveBeenCalled();
+    expect(f.phone.state.call).toMatchObject({ id: lease, sessionId: lease, connected: false });
+  });
+  it("does not reject a replacement endpoint from an old terminal response for the same session", async () => {
+    const f = await activePhone(); let release!: (value: Awaited<ReturnType<VoiceApi["status"]>>) => void;
+    vi.mocked(f.api.status).mockReturnValueOnce(new Promise(done => { release = done; }));
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    f.emit({ type: "outgoing", callId: lease, sessionId: sid, callControlId: "new-leg" }); await tick();
+    release({ sessionId: sid, state: "ended", connected: false, ended: true, terminationPending: false,
+      media: { version: 9, state: "unavailable", canHold: false, callControlId: null } }); await tick();
+    expect(f.native.reject).not.toHaveBeenCalled(); expect(f.phone.state.call).toMatchObject({ id: lease, callControlId: "new-leg" });
+  });
+  it("allows equal-version pending media to settle and ignores its late pending observation", async () => {
+    const f = await activePhone();
+    const pending = { sessionId: sid, state: "held", connected: true, ended: false, terminationPending: false,
+      media: { ...activeMedia, version: 9, state: "pending" as const, canHold: false } };
+    vi.mocked(f.api.status).mockResolvedValue(pending); f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    expect(f.phone.state.call?.media?.state).toBe("pending");
+    vi.mocked(f.api.status).mockResolvedValue(holdResult()); f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    expect(f.phone.state.call?.media?.state).toBe("held");
+    vi.mocked(f.api.status).mockResolvedValue(pending); f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    expect(f.phone.state.call?.media?.state).toBe("held");
+  });
+  it("does not clear claimed uncertainty from an old general status response", async () => {
+    const f = await activePhone(); let releaseStatus!: (value: Awaited<ReturnType<VoiceApi["status"]>>) => void;
+    let releaseHold!: (value: VoiceHoldResult) => void;
+    vi.mocked(f.api.status).mockReturnValueOnce(new Promise(done => { releaseStatus = done; }));
+    vi.mocked(f.api.hold).mockReturnValueOnce(new Promise(done => { releaseHold = done; }));
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    f.emit(holdAction); await tick(); vi.mocked(f.native.syncMedia).mockClear();
+    releaseStatus({ sessionId: sid, state: "talking", connected: true, ended: false, terminationPending: false, media: activeMedia }); await tick();
+    expect(f.native.syncMedia).not.toHaveBeenCalled(); expect(f.phone.state.holdPhase).toBe("pending");
+    releaseHold(holdResult()); await tick(); expect(f.phone.state.call?.media?.state).toBe("held");
+  });
+  it("keeps previously held media uncertain when confirmation becomes unavailable", async () => {
+    const f = await activePhone(); vi.mocked(f.api.hold).mockResolvedValue(holdResult()); f.emit(holdAction); await tick();
+    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "held", connected: true, ended: false, terminationPending: false,
+      media: { version: 10, state: "unavailable", canHold: false, callControlId: null } });
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    expect(f.phone.state.holdPhase).toBe("uncertain"); await f.phone.dtmf("2"); expect(f.native.dtmf).not.toHaveBeenCalled();
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick(); expect(f.phone.state.holdPhase).toBe("uncertain");
+  });
+  it("does not label an accepted historical action with unavailable current media as active", async () => {
+    const f = await activePhone(); vi.mocked(f.api.hold).mockResolvedValue(holdResult({ media: { version: 10, state: "unavailable", canHold: false, callControlId: null } }));
+    f.emit(holdAction); await tick(); expect(f.phone.state.holdPhase).toBe("uncertain");
+    expect(f.native.resolveHold).toHaveBeenCalledWith(id, sid, "exact-leg", lease, "confirmed", "unavailable", 10, false);
+    await f.phone.dtmf("2"); expect(f.native.dtmf).not.toHaveBeenCalled();
+  });
+  it("waits for the exact CallKit mirror acknowledgment before another hold or keypad action", async () => {
+    const f = await activePhone();
+    const sync = { type: "holdSyncPending", callId: id, sessionId: sid, callControlId: "exact-leg", actionId: lease, expectedVersion: 8, held: false };
+    f.emit(sync); await tick(); await f.phone.hold(); await f.phone.dtmf("2");
+    expect(f.phone.state.nativeSyncPending).toBe(true); expect(f.native.requestHold).not.toHaveBeenCalled(); expect(f.native.dtmf).not.toHaveBeenCalled();
+    f.emit({ ...sync, type: "holdSynced", actionId: sid }); await tick(); expect(f.phone.state.nativeSyncPending).toBe(true);
+    f.emit({ ...sync, type: "holdSynced" }); await tick(); expect(f.phone.state.nativeSyncPending).toBe(false);
+    await f.phone.hold(); expect(f.native.requestHold).toHaveBeenCalledExactlyOnceWith(id, true);
+  });
+  it("does not clear a newer mirror from an old completion", async () => {
+    const f = await activePhone();
+    const sync = { type: "holdSyncPending", callId: id, sessionId: sid, callControlId: "exact-leg", actionId: lease, expectedVersion: 8, held: false };
+    f.emit(sync); f.emit({ ...sync, actionId: sid, expectedVersion: 9 }); await tick();
+    f.emit({ ...sync, type: "holdSynced" }); await tick(); expect(f.phone.state.nativeSyncPending).toBe(true);
+    f.emit({ ...sync, actionId: sid, expectedVersion: 9, type: "holdSynced" }); await tick(); expect(f.phone.state.nativeSyncPending).toBe(false);
+  });
+  it("recovers a lost mirror completion from the exact settled native snapshot", async () => {
+    const f = await activePhone();
+    f.emit({ type: "holdSyncPending", callId: id, sessionId: sid, callControlId: "exact-leg", actionId: lease, expectedVersion: 8, held: false }); await tick();
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: true, pending: [], pendingHolds: [], pendingSyncs: [],
+      calls: [{ type: "restored", callId: id, sessionId: sid, callControlId: "exact-leg", state: "ACTIVE", systemHeld: false, privacyHold: false, media: activeMedia }] });
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    expect(f.phone.state.nativeSyncPending).toBe(false); await f.phone.hold(); expect(f.native.requestHold).toHaveBeenCalledExactlyOnceWith(id, true);
+  });
+  it("does not infer mirror completion from absence alone or a remaining privacy barrier", async () => {
+    const f = await activePhone();
+    f.emit({ type: "holdSyncPending", callId: id, sessionId: sid, callControlId: "exact-leg", actionId: lease, expectedVersion: 8, held: false }); await tick();
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: true, pending: [], pendingHolds: [], pendingSyncs: [],
+      calls: [{ type: "restored", callId: id, sessionId: sid, callControlId: "exact-leg", state: "ACTIVE", systemHeld: false, privacyHold: true, media: activeMedia }] });
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick(); expect(f.phone.state.nativeSyncPending).toBe(true);
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: true, pending: [], pendingHolds: [], pendingSyncs: [], calls: [] });
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick(); expect(f.phone.state.nativeSyncPending).toBe(true);
+  });
+  it("recovers a lost pending mirror event from native status before another toggle", async () => {
+    const f = await activePhone();
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: true, pending: [], pendingHolds: [],
+      pendingSyncs: [{ callId: id, sessionId: sid, callControlId: "exact-leg", actionId: lease, expectedVersion: 8, held: false }] });
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    expect(f.phone.state.nativeSyncPending).toBe(true); await f.phone.hold(); expect(f.native.requestHold).not.toHaveBeenCalled();
+  });
+  it("recovers a lost live system hold event only through its still-live native claim", async () => {
+    const f = await activePhone(); vi.mocked(f.api.hold).mockResolvedValue(holdResult());
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: true, pending: [], pendingSyncs: [], pendingHolds: [{ ...holdAction }] });
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    expect(f.native.claimHold).toHaveBeenCalledExactlyOnceWith(id, lease); expect(f.api.hold).toHaveBeenCalledExactlyOnceWith(lease, sid, holdCommand);
+  });
+  it("does not clear a fresh mirror from a snapshot read that began before its native event", async () => {
+    const f = await activePhone(); let release!: (snapshot: Awaited<ReturnType<NativePhone["snapshot"]>>) => void;
+    vi.mocked(f.native.snapshot).mockReturnValueOnce(new Promise(done => { release = done; }));
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    f.emit({ type: "holdSyncPending", callId: id, sessionId: sid, callControlId: "exact-leg", actionId: lease, expectedVersion: 8, held: false }); await tick();
+    release({ ready: true, audioActive: true, pending: [], pendingHolds: [], pendingSyncs: [],
+      calls: [{ type: "restored", callId: id, sessionId: sid, callControlId: "exact-leg", state: "ACTIVE", systemHeld: false, privacyHold: false, media: activeMedia }] }); await tick();
+    expect(f.phone.state.nativeSyncPending).toBe(true);
+  });
+  it("keeps an accepted timed-out resume pending when its new mirror event was lost", async () => {
+    const f = await activePhone(); const resumed = holdResult({ state: "talking", media: { ...activeMedia, version: 10 }, operation: { requestId: lease, held: false, outcome: "accepted" } });
+    vi.mocked(f.api.holdStatus).mockResolvedValue(resumed);
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: true, pending: [], pendingHolds: [],
+      pendingSyncs: [{ callId: id, sessionId: sid, callControlId: "exact-leg", actionId: sid, expectedVersion: 10, held: false }] });
+    f.emit({ ...holdAction, held: false, phase: "uncertain", actionLive: false }); await tick();
+    expect(f.phone.state.nativeSyncPending).toBe(true); await f.phone.hold(); await f.phone.dtmf("2");
+    expect(f.native.requestHold).not.toHaveBeenCalled(); expect(f.native.dtmf).not.toHaveBeenCalled();
+  });
+});
 
 describe("native phone lifecycle", () => {
   it("buffers the originating internal invite until the exact HTTP result and uses a generic colleague handle", async () => {
@@ -324,7 +538,7 @@ describe("native phone lifecycle", () => {
     const f = await connected(); f.emit({ type: "outgoing", callId: id, sessionId: sid });
     f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick(); expect(f.phone.state.call?.connected).toBe(false);
     expect(f.native.confirmConnected).not.toHaveBeenCalled();
-    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "talking", connected: true, ended: false, terminationPending: false });
+    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "talking", connected: true, ended: false, terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } });
     f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick(); expect(f.phone.state.call?.connected).toBe(true);
     expect(f.native.confirmConnected).toHaveBeenCalledWith(id);
   });
@@ -563,7 +777,7 @@ describe("native phone lifecycle", () => {
   it("ends only the local endpoint when the server says its offer or ownership has ended", async () => {
     const f = await connected(); f.emit({ type: "outgoing", callId: id, sessionId: sid });
     vi.mocked(f.native.reject).mockImplementation(async () => { f.emit({ type: "ended", callId: id, sessionId: sid, outgoing: true }); });
-    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "talking", connected: false, ended: true, terminationPending: false });
+    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "talking", connected: false, ended: true, terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } });
     f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
     expect(f.native.reject).toHaveBeenCalledWith(id); expect(f.api.end).not.toHaveBeenCalled();
     expect(f.phone.state.call).toBeNull(); expect(f.phone.state.registration).toBe("registered");
@@ -574,9 +788,9 @@ describe("native phone lifecycle", () => {
     vi.mocked(f.api.end).mockResolvedValue({ terminationPending: true });
     await f.phone.end(); f.emit({ type: "ended", callId: id, sessionId: sid, outgoing: true }); await tick();
     vi.useFakeTimers(); f.phone.setForeground(true);
-    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "ending", connected: false, ended: true, terminationPending: true });
+    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "ending", connected: false, ended: true, terminationPending: true, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } });
     await vi.advanceTimersByTimeAsync(2_000); expect(f.phone.state.termination).toBe(sid);
-    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "completed", connected: false, ended: true, terminationPending: false });
+    vi.mocked(f.api.status).mockResolvedValue({ sessionId: sid, state: "completed", connected: false, ended: true, terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } });
     await vi.advanceTimersByTimeAsync(2_000); expect(f.phone.state.termination).toBeNull();
   });
   it("does not restore a call cancelled while native authorization was resolving", async () => {

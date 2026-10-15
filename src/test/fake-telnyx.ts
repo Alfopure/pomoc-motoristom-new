@@ -104,7 +104,17 @@ function wireRequest(method: string, params: Record<string, unknown>): { path: s
   // identity conflict where there is none.
   const rest = Object.fromEntries(Object.entries(params).filter(([key]) => key !== "commandId"));
   if (method === "dial") return { path: "/calls", body: rest };
-  if (method === "createConference") return { path: "/conferences", body: rest };
+  if (method === "createConference") return { path: "/conferences", body: Object.fromEntries(Object.entries({
+    call_control_id: params.callControlId, name: params.name, client_state: params.clientState,
+    start_conference_on_create: params.startConferenceOnCreate, beep_enabled: params.beepEnabled,
+    comfort_noise: params.comfortNoise, duration_minutes: params.durationMinutes,
+    hold_audio_url: params.holdAudioUrl, max_participants: params.maxParticipants,
+  }).filter(([, value]) => value !== undefined)) };
+  if (method === "bridge") return { path: `/calls/${encodeURIComponent(String(params.callControlId))}/actions/bridge`, body: Object.fromEntries(Object.entries({
+    call_control_id: params.targetCallControlId, client_state: params.clientState,
+    play_ringtone: params.playRingtone, ringtone: params.ringtone, park_after_unbridge: params.parkAfterUnbridge,
+    hold_after_unbridge: params.holdAfterUnbridge, prevent_double_bridge: params.preventDoubleBridge, mute_dtmf: params.muteDtmf,
+  }).filter(([, value]) => value !== undefined)) };
   const conference = /^conference:(.+)$/.exec(method);
   if (conference) {
     const { conferenceId, ...body } = rest;

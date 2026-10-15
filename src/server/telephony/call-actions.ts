@@ -743,9 +743,9 @@ async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessio
   return session;
 }
 
-export async function holdCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
+export async function holdCall(deps: CallActionDeps, actor: CallActor, sessionId: string, event?: Pick<AppEvent, "id" | "nativeHold">): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
-  return runAction(deps, session, appEvent("hold", actor, deps), "Podržanie hovoru zlyhalo. Rozšírené funkcie hovoru nie sú dostupné.");
+  return runAction(deps, session, appEvent("hold", actor, deps, event), "Podržanie hovoru zlyhalo. Rozšírené funkcie hovoru nie sú dostupné.");
 }
 
 /** An objection survives holds, transfers and retries for this logical call. */
@@ -760,9 +760,9 @@ export async function reconcileCallRecordingPolicy(deps: CallActionDeps, session
   return runSessionEvent(deps, session.id, { kind: "app", id: randomUUID(), type: "recording_policy_stop", actorProfileId: null, occurredAt: nowOf(deps).toISOString() });
 }
 
-export async function unholdCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
+export async function unholdCall(deps: CallActionDeps, actor: CallActor, sessionId: string, event?: Pick<AppEvent, "id" | "nativeHold">): Promise<CallActionResult> {
   const session = await ownedActiveSession(deps, actor, sessionId);
-  return runAction(deps, session, appEvent("unhold", actor, deps), "Obnovenie hovoru zlyhalo.");
+  return runAction(deps, session, appEvent("unhold", actor, deps, event), "Obnovenie hovoru zlyhalo.");
 }
 
 export async function parkCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {

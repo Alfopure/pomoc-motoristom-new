@@ -397,3 +397,28 @@ export type MobileHandoffRecovered = MobileScope & {
   link: Extract<MobileHandoffLink, { status: "available" }>;
 };
 export type MobileHandoffResult = MobileHandoffMutation | MobileHandoffRecovered;
+
+export type MobileVoiceMedia = {
+  version: number;
+  state: "active" | "held" | "pending" | "unavailable";
+  canHold: boolean;
+  callControlId: string | null;
+};
+export type MobileVoiceHoldInput = {
+  deviceSessionId: string;
+  callControlId: string;
+  requestId: string;
+  held: boolean;
+  expectedVersion: number;
+};
+export type MobileVoiceCallStatus = MobileScope & {
+  sessionId: string;
+  state: string;
+  connected: boolean;
+  ended: boolean;
+  terminationPending: boolean;
+  media: MobileVoiceMedia;
+};
+export type MobileVoiceHoldResult = MobileVoiceCallStatus & {
+  operation: { requestId: string; held: boolean; outcome: "accepted" | "pending" | "rejected" | "not_found" };
+};

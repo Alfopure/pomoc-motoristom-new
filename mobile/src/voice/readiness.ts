@@ -34,8 +34,9 @@ export function phoneReadiness({ state, configuration, configurationError = fals
     title = "Ukončujem hovor…"; tone = "warning"; message = "Čakáme na potvrdenie ústredne. Nový hovor bude dostupný po ukončení.";
   } else if (state.call) {
     const recovering = ["DROPPED", "RECONNECTING"].includes(state.call.state);
-    title = recovering ? "Obnovujem spojenie…" : state.call.connected ? "Prebieha hovor" : "Pripájam hovor…";
-    tone = recovering ? "warning" : "muted"; message = "Ovládanie aktuálneho hovoru je nad obsahom obrazovky.";
+    const holdPending = state.nativeSyncPending || state.holdPhase !== "idle" || state.call.media?.state === "pending";
+    title = recovering ? "Obnovujem spojenie…" : holdPending ? "Overujem stav podržania…" : state.call.media?.state === "held" ? "Hovor je podržaný" : state.call.connected ? "Prebieha hovor" : "Pripájam hovor…";
+    tone = recovering || holdPending ? "warning" : "muted"; message = "Ovládanie aktuálneho hovoru je nad obsahom obrazovky.";
   } else if (state.cancelingAttempt) {
     title = "Ukončujem pôvodný pokus…"; tone = "warning"; message = "Čakáme na overenie a ukončenie pôvodného volania.";
   } else if (state.dialing) {

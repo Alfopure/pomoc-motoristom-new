@@ -17,6 +17,7 @@ vi.mock("./voice", () => ({ nativeVoiceDeps: mocks.deps, requireNativeLease: moc
 vi.mock("@/server/telephony/operator-devices", () => ({ issueWebphoneToken: mocks.token, touchDevice: mocks.touch, disconnectDevice: mocks.disconnect }));
 vi.mock("@/server/telephony/call-actions", () => ({ startOutboundCall: mocks.dial, hangupCall: mocks.hangup, continueAcceptedHangup: mocks.continue }));
 vi.mock("next/server", () => ({ after: mocks.after }));
+vi.mock("./voice-hold", () => ({ readNativeCallStatus: async (_deps: unknown, _actor: unknown, id: string) => { const session = await mocks.session(); return {sessionId: id, state: session.state, connected: Boolean(session.nativeConnected && session.answered_at && ["talking", "held"].includes(session.state) && !session.ended_at && !session.termination_requested_at), ended: session.nativeEnded, terminationPending: Boolean(session.termination_requested_at && !session.ended_at), media: {version: 1, state: "unavailable", canHold: false, callControlId: null}}; } }));
 const actor = { userId: "user", profileId: "operator", organizationId: "organization", displayName: "Operátor", role: "dispatcher" };
 const id = "00000000-0000-4000-8000-000000000071";
 const context = { params: Promise.resolve({ id }) };

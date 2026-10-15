@@ -32,26 +32,27 @@ class CXHandle { enum HandleType: Hashable { case phoneNumber, generic }; let ty
 class CXProviderConfiguration { var supportsVideo = false; var supportedHandleTypes: Set<CXHandle.HandleType> = []; var maximumCallGroups = 1; var maximumCallsPerCallGroup = 1 }
 enum CXCallEndedReason { case failed, remoteEnded }
 class CXCallUpdate { var remoteHandle: CXHandle?; var localizedCallerName: String?; var hasVideo = false; var supportsHolding = false; var supportsGrouping = false; var supportsUngrouping = false }
-class CXAction { var isComplete = false; var fulfills = 0; var failures = 0; func fulfill() { fulfills += 1; isComplete = true }; func fail() { failures += 1; isComplete = true } }
+class CXAction { let uuid = UUID(); var timeoutDate = Date().addingTimeInterval(30); var isComplete = false; var fulfills = 0; var failures = 0; func fulfill() { fulfills += 1; isComplete = true }; func fail() { failures += 1; isComplete = true } }
 class CXCallAction: CXAction { let callUUID: UUID; init(call: UUID) { callUUID = call } }
 class CXAnswerCallAction: CXCallAction {}
 class CXEndCallAction: CXCallAction {}
 class CXStartCallAction: CXCallAction { let handle: CXHandle; init(call: UUID, handle: CXHandle) { self.handle = handle; super.init(call: call) } }
+class CXSetHeldCallAction: CXCallAction { let isOnHold: Bool; init(call: UUID, onHold: Bool) { isOnHold = onHold; super.init(call: call) } }
 class CXSetMutedCallAction: CXCallAction { let isMuted: Bool; init(call: UUID, muted: Bool) { isMuted = muted; super.init(call: call) } }
 class CXTransaction { let action: CXAction; init(action: CXAction) { self.action = action } }
-class CXCallController { static var transactions: [CXTransaction] = []; func request(_ transaction: CXTransaction, completion: @escaping (Error?) -> Void) { Self.transactions.append(transaction); completion(nil) } }
-class CXProvider { static var last: CXProvider!; let configuration: CXProviderConfiguration; init(configuration: CXProviderConfiguration) { self.configuration = configuration; Self.last = self }; func setDelegate(_ delegate: CXProviderDelegate, queue: DispatchQueue) {}; func reportNewIncomingCall(with: UUID, update: CXCallUpdate, completion: @escaping (Error?) -> Void) { completion(nil) }; func reportCall(with: UUID, endedAt: Date, reason: CXCallEndedReason) {}; func reportOutgoingCall(with: UUID, startedConnectingAt: Date) {}; func reportOutgoingCall(with: UUID, connectedAt: Date) {} }
+class CXCallController { static var transactions: [CXTransaction] = []; static var requestError: Error?; func request(_ transaction: CXTransaction, completion: @escaping (Error?) -> Void) { Self.transactions.append(transaction); completion(Self.requestError) } }
+class CXProvider { var updates: [UUID: CXCallUpdate] = [:]; func reportCall(with id: UUID, updated: CXCallUpdate) { updates[id] = updated }; static var last: CXProvider!; let configuration: CXProviderConfiguration; init(configuration: CXProviderConfiguration) { self.configuration = configuration; Self.last = self }; func setDelegate(_ delegate: CXProviderDelegate, queue: DispatchQueue) {}; func reportNewIncomingCall(with: UUID, update: CXCallUpdate, completion: @escaping (Error?) -> Void) { completion(nil) }; func reportCall(with: UUID, endedAt: Date, reason: CXCallEndedReason) {}; func reportOutgoingCall(with: UUID, startedConnectingAt: Date) {}; func reportOutgoingCall(with: UUID, connectedAt: Date) {} }
 struct CallTerminationReason: Equatable {}
 enum CallState: Equatable { case NEW, CONNECTING, RINGING, ACTIVE, HELD; case DONE(reason: CallTerminationReason? = nil), RECONNECTING(reason: Reason), DROPPED(reason: Reason); enum Reason { case networkSwitch, networkLost } }
 struct CallInfo { let callId: UUID; var callerNumber: String? = "fixture"; var callerName: String? = "fixture" }
 class Call {
   var callInfo: CallInfo?; var telnyxLegId: UUID?; var telnyxCallControlId: String?; var callState = CallState.RINGING
-  var answerCount = 0, hangs = 0, mutes = 0, tones = 0; var answerCompletion: ((Bool) -> Void)?
+  var isMuted = false; var answerCount = 0, hangs = 0, mutes = 0, tones = 0; var answerCompletion: ((Bool) -> Void)?
   init(_ id: UUID, leg: UUID) { callInfo = CallInfo(callId: id); telnyxLegId = leg }
   func answer(completion: @escaping (Bool) -> Void) { answerCount += 1; answerCompletion = completion }
   func completeAnswer(_ success: Bool) { if success { callState = .ACTIVE }; answerCompletion?(success) }
   func hangup() { hangs += 1; callState = .DONE() }
-  func muteAudio() { mutes += 1 }; func unmuteAudio() { mutes -= 1 }; func dtmf(dtmf: String) { tones += 1 }
+  func muteAudio() { mutes += 1; isMuted = true }; func unmuteAudio() { mutes -= 1; isMuted = false }; func dtmf(dtmf: String) { tones += 1 }
 }
 struct TxConfig { enum PushEnvironment { case production }; enum LogLevel { case none }; let reconnectClient: Bool; init(token: String, pushDeviceToken: String?, pushEnvironment: PushEnvironment, logLevel: LogLevel, reconnectClient: Bool, debug: Bool, enableCallReports: Bool) { self.reconnectClient = reconnectClient } }
 struct TxServerConfiguration {}
