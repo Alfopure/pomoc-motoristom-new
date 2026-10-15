@@ -1,0 +1,11 @@
+import { describe, expect, it, vi } from "vitest";
+import { PhoneOverlaySelection } from "./phone-overlays";
+vi.mock("react-native",()=>({AppState:{currentState:"active",addEventListener:()=>({remove(){}})}}));
+
+describe("phone priority over covering UI",()=>{
+ it("call cycle closes selection and rejects old opens/apply",()=>{const selection=new PhoneOverlaySelection<string>();selection.context(true,true);const old=selection.snapshot().epoch;expect(selection.show("map",old)).toBe(true);const apply=selection.snapshot().epoch;selection.context(false,false);expect(selection.snapshot().value).toBeNull();selection.context(true,true);expect(selection.show("old",old)).toBe(false);expect(selection.current(apply)).toBe(false);expect(selection.snapshot().value).toBeNull();expect(selection.show("new",selection.snapshot().epoch)).toBe(true);});
+ it("own permission inactive retains selection but cannot open/apply until active",()=>{const selection=new PhoneOverlaySelection<string>();selection.context(true,true);selection.show("map",selection.snapshot().epoch);const epoch=selection.snapshot().epoch;selection.context(true,false);expect(selection.snapshot().value).toBe("map");expect(selection.current(epoch)).toBe(false);selection.context(true,true);expect(selection.current(epoch)).toBe(true);});
+ it("tab hiding invalidates work even if shown again before completion",()=>{const selection=new PhoneOverlaySelection<string>();selection.context(true,true);const pending=selection.begin();selection.context(false,false);selection.context(true,true);expect(selection.show("late chooser",pending!)).toBe(false);});
+ it("new selection and closing fence retained callbacks",()=>{const selection=new PhoneOverlaySelection<string>();selection.context(true,true);selection.show("pickup",selection.snapshot().epoch);const first=selection.snapshot().epoch;selection.show("destination",first);expect(selection.current(first)).toBe(false);const next=selection.snapshot().epoch;selection.close();expect(selection.current(next)).toBe(false);});
+ it("unmounted selection rejects async completion",()=>{const selection=new PhoneOverlaySelection<string>();selection.context(true,true);const pending=selection.begin();selection.context(false,false);expect(selection.show("late",pending!)).toBe(false);});
+});

@@ -4,6 +4,7 @@ import type { CasesApi } from "./api";
 import { DraftNotSentError, draftKeys, draftObject, type DraftPort, type DraftWrite } from "../drafts/port";
 import { freezeCommand, placeSelection } from "./location";
 import { caseCreatedDraft, caseDraftInput, copyCaseDraft } from "./draft-codecs";
+import { customerCallNumber } from "../call-context/number";
 
 export type DraftState = { input: MobileCaseCreateInput; status: "editing" | "saving" | "uncertain" | "saved";
   error: string | null; created: MobileCaseCreated | null; reviewAfter: number; reviewedList: boolean };
@@ -47,6 +48,15 @@ export class CaseDraft {
     if ("manualPickupAddress" in change) delete input.pickup;
     if ("manualDestinationAddress" in change) delete input.destination;
     this.update({ input });
+  }
+  canApplyCallPhone() {
+    return !this.disposed && !this.rejected && this.state.status === "editing" && (!this.port || this.port.current() && this.port.settled());
+  }
+  applyCallPhone(value: string, expectedPhone: string) {
+    const phone = customerCallNumber("inbound", value);
+    if (!phone || !this.canApplyCallPhone() || (this.state.input.contactPhone ?? "") !== expectedPhone) return false;
+    this.edit({ contactPhone: phone });
+    return true;
   }
   selectPlace(target: "pickup" | "destination", value: unknown) {
     if (this.rejected || this.disposed || this.state.status !== "editing") return;

@@ -1,3 +1,4 @@
+import { usePhoneOverlay } from "../ui/phone-overlays";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, View } from "react-native";
 import { useAndroidBack } from "../lib/use-android-back";
@@ -16,7 +17,8 @@ export function CaseEditor({ api, edit, active, visible = active, onBack, onSave
   useEffect(() => {
     if (active && (state.error || ["uncertain", "conflict", "blocked", "committed", "saved"].includes(state.status))) scroll.current?.scrollTo({ y: 0, animated: false });
   }, [active, state.status, state.error]);
-  const [mapTarget, setMapTarget] = useState<"pickup" | "destination" | null>(null);
+  const mapOverlay = usePhoneOverlay<"pickup" | "destination">(visible, active);
+  const mapTarget = mapOverlay.value;
   const [addressAcknowledged, setAddressAcknowledged] = useState("");
   useEffect(() => { edit.setActive(active); return () => edit.setActive(false); }, [edit, active]);
   useEffect(() => {
@@ -63,8 +65,8 @@ export function CaseEditor({ api, edit, active, visible = active, onBack, onSave
           maxLength={field.max} multiline={field.multiline} keyboardType={field.key === "contactPhone" ? "phone-pad" : "default"}
           autoCapitalize={field.key === "licensePlate" ? "characters" : "sentences"} autoCorrect={field.key !== "licensePlate" && field.key !== "contactPhone"}
           style={[styles.input, field.multiline && { minHeight: 90, textAlignVertical: "top" }]} />
-        {(field.key === "manualPickupAddress" || field.key === "manualDestinationAddress") && <Button label="Vybrať miesto na mape" secondary disabled={!editing}
-          onPress={() => setMapTarget(field.key === "manualPickupAddress" ? "pickup" : "destination")} />}
+        {(field.key === "manualPickupAddress" || field.key === "manualDestinationAddress") && <Button label="Vybrať miesto na mape" secondary disabled={!editing || !mapOverlay.canOpen}
+          onPress={() => mapOverlay.open(field.key === "manualPickupAddress" ? "pickup" : "destination")} />}
       </View>)}
       <Text style={styles.label}>Služba</Text><View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>{jobTypes.map(item => <Choice key={item.value} label={item.label}
         selected={state.input.jobTypes.includes(item.value)} disabled={!editing} onPress={() => edit.edit({ jobTypes: state.input.jobTypes.includes(item.value)
@@ -83,7 +85,7 @@ export function CaseEditor({ api, edit, active, visible = active, onBack, onSave
         && <Text style={styles.muted}>Prípad zmizne z otvorených prípadov. Nájdete ho cez filter Aj uzavreté.</Text>}
       {mapTarget && editing && <CasePlacePicker key={`${state.base.id}:pick:${mapTarget}`} api={api} caseId={state.base.id} active={active} visible={visible} target={mapTarget}
         seed={{ selection: state.input[mapTarget] ?? null, address: state.input[mapTarget]?.address ?? state.input[mapTarget === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"] }}
-        onClose={() => setMapTarget(null)} onApply={value => edit.selectPlace(mapTarget, value)} />}
+        onClose={mapOverlay.close} onApply={mapOverlay.guard(value => edit.selectPlace(mapTarget, value))} />}
       {state.status === "saved" ? <Button label="Zobraziť uložený detail" onPress={back} />
         : <Button label={state.status === "saving" ? "Ukladám zmeny…" : "Uložiť zmeny"} disabled={!editing || keys.length === 0 || addressChange && addressAcknowledged !== addressKey}
           onPress={() => { Keyboard.dismiss(); void edit.save(); }} />}
