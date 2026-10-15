@@ -12,6 +12,8 @@ import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 import type { TelephonyPresenceSnapshot } from "@/lib/telephony/presence";
 import { AUDIO_CONNECTION_WARNING_MS, type AudioConnectionView } from "@/lib/telephony/audio-connection";
+import type { CallControlProgress } from "@/lib/telephony/active-calls-model";
+import { pendingCallControl } from "./state/control-progress";
 
 import { deviceIsLive } from "./operator-devices";
 import { effectivePresenceStatus, effectivePresenceSince } from "./presence-service";
@@ -61,6 +63,7 @@ function legMetaOf(leg: LegRow): Record<string, unknown> {
 }
 
 export type ActiveCallView = {
+  controlPending?: CallControlProgress | null;
   sessionId: string;
   /** `motorist_calls.id` of the log row, once one exists (link-case / outcome). */
   callId: string | null;
@@ -424,13 +427,16 @@ function buildActiveCalls(
 
   const calls = sessions.map((session) => {
     const meta = readMeta(session);
+    const pending = pendingCallControl(session);
+    const operatorProfileId = pending?.operatorProfileId ?? session.answered_by_profile_id;
     const line = session.line_id ? lines.get(session.line_id) : undefined;
     const offeredProfileIds = offersBySession.get(session.id) ?? [];
     const sessionLegs = legsBySession.get(session.id) ?? [];
     return {
       sessionId: session.id,
       callId: callIdBySession.get(session.id) ?? null,
-      state: session.state,
+      state: pending?.state ?? session.state,
+      controlPending: pending?.progress ?? null,
       direction: session.direction,
       contactName: session.direction === "internal" ? null : rows.contactNames?.get(normalizeDialNumberForComparison(session.direction === "outbound" ? session.called_number : session.caller_number)) ?? null,
       callerNumber: session.caller_number,
@@ -444,8 +450,8 @@ function buildActiveCalls(
       match: null,
       startedAt: session.started_at,
       answeredAt: session.answered_at,
-      answeredByProfileId: session.answered_by_profile_id,
-      audioConnection: audioConnectionView(session, legs.filter((leg) => leg.session_id === session.id), now),
+      answeredByProfileId: operatorProfileId,
+      audioConnection: pending ? null : audioConnectionView(session, legs.filter((leg) => leg.session_id === session.id), now),
       holdStartedAt: session.hold_started_at,
       parkedAt: session.parked_at,
       parkedByProfileId: meta.park?.by ?? null,
@@ -459,7 +465,7 @@ function buildActiveCalls(
       offeredProfileIds,
       legs: sessionLegs,
       mine:
-        session.answered_by_profile_id === actor.profileId ||
+        operatorProfileId === actor.profileId ||
         offeredProfileIds.includes(actor.profileId) ||
         sessionLegs.some((leg) => leg.profileId === actor.profileId),
     } satisfies ActiveCallView;

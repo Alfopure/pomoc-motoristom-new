@@ -30,6 +30,7 @@ import {
   TERMINAL_STATES,
   WAITING_STATES,
   emptyTransition,
+  commandKey,
   announcementKeyForMedia,
   ignoredResult,
   isOpenLeg,
@@ -2880,7 +2881,14 @@ function appPark(b: TransitionBuilder, customer: LegRow, event: AppEvent): Reduc
   b.patchMeta({ park: { by: event.actorProfileId, at: b.nowIso }, previous_operator: operator.profile_id ?? null, conference: null });
   enterWaiting(b, customer, "parked", "parked");
   b.leg(customer.telnyx_call_control_id, { state: "answered" });
-  if (operator.profile_id) b.presenceChange({ profileId: operator.profile_id, status: "after_call_work", sessionId: null, startWrapUp: true, onlyIfSession: b.session.id, reason: "parked" });
+  // Finish disconnecting the operator and starting waiting audio before reading
+  // wrap-up settings or releasing presence. Those database reads used to delay
+  // the first provider command while the staged session already said "parked".
+  // The existing after-command obligation is durable: a failed command keeps
+  // the operator reserved, and a failed presence write is retried with the same
+  // journalled command rather than losing the release.
+  if (operator.profile_id) b.presenceChange({ profileId: operator.profile_id, status: "after_call_work", sessionId: null,
+    startWrapUp: true, onlyIfSession: b.session.id, reason: "parked", afterCommandId: commandKey(b.commands[b.commands.length - 1]) });
   return b.result();
 }
 

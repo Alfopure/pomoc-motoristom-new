@@ -265,6 +265,8 @@ export async function persistTransition(
   // no provider HTTP — the commands run only after this returns. Anything that
   // is not idempotent (the callback INSERT) keeps its own checkpoint, and the
   // batch is retired first so a replay cannot repeat it after the INSERT.
+  // Eligible media controls run their state-only leg projection after commands;
+  // those commands already have durable outcomes in the provider journal.
   let batchPending = false;
   const flushBatch = async () => {
     if (!input.continuation || !batchPending) return;
@@ -332,7 +334,8 @@ export async function persistTransition(
   // checkpoint. Its cursor still advances in memory; a crash replays the same
   // projection and fingerprint-unique audit. Other effects keep their cursor.
   await effect(() => upsertCallRow(deps, session, callOverrides), false, false, Boolean(deferCallCheckpoint));
-  // The critical batch must be durable before any provider command runs.
+  // Retire the batch before continuing (before commands on the prerequisite
+  // path, after their journalled completion on the media-control path).
   await flushBatch();
   return session;
 }
@@ -1806,9 +1809,25 @@ async function executeReduceResult(
   // Commit ownership, recorder intent and privacy barriers before commands.
   // History and fairness are recoverable projections for recorded calls too.
   // START separately ensures the call identity needed for recording admission.
-  const deferProjections = Boolean(input.continuation && !input.databaseOnly && readMeta(input.session).recording);
+  const recording = readMeta(input.session).recording;
+  const deferProjections = Boolean(input.continuation && !input.databaseOnly && recording);
+  const owner = sessionOwnership.getStore();
+  // These controls already durably staged the session intent under ownership.
+  // Their remaining leg patches merely project held/bridged/answered state;
+  // they do not authorize a provider operation. Apply them after media, keeping
+  // the original durable cursor and the provider journal on every command.
+  // Recorder/privacy, reservations, new legs, callbacks and legacy writers
+  // retain their existing prerequisite-first path.
+  const mediaBeforeLegProjection = Boolean(input.continuation && !input.databaseOnly &&
+    input.session.writer_contract === 2 && input.continuation.generation === effectGeneration(input.session) &&
+    input.event.kind === "app" && ["hold", "unhold", "park"].includes(input.event.type) &&
+    owner?.contract === 2 && owner.admin === deps.admin && owner.sessionId === input.session.id && owner.organizationId === deps.organizationId &&
+    recording?.policy.enabled === false && !recording.recorders.length && !recording.barrier && !recording.pendingAudio &&
+    !readMeta(input.session).announcement_sequence && !Object.keys(transition.session).length &&
+    transition.legs.every(leg => !leg.createIfMissing && Object.keys(leg.values).every(key => key === "state")) &&
+    !transition.attempts.length && !transition.callbacks.length && transition.presence.every(change => Boolean(change.afterCommandId)));
   let projectionError: string | null = null;
-  let session = await persistTransition(deps, { session: input.session, transition, expectedVersion: input.continuation ? null : input.expectedVersion,
+  let session = mediaBeforeLegProjection ? input.session : await persistTransition(deps, { session: input.session, transition, expectedVersion: input.continuation ? null : input.expectedVersion,
     event: input.event, continuation: input.continuation, ...(deferProjections ? { phase: "critical" as const } : {}) });
   if (input.event.kind === "app" && ["recording_stop", "recording_retry_stop"].includes(input.event.type) && readMeta(session).recording?.suppressionReason === "objection") {
     const restricted = await deps.admin.rpc("motorist_recording_restrict_session", { p_organization_id: deps.organizationId, p_session_id: session.id });
@@ -2269,6 +2288,13 @@ async function executeReduceResult(
   }
   // Anything still banked belongs to a run that ended with the list.
   await writeCheckpoint();
+
+  if (mediaBeforeLegProjection && !failure) {
+    session = await measureControlStage("state_projection", () => persistTransition(deps, {
+      session: ctx.session, transition, expectedVersion: null, event: input.event, continuation: input.continuation, phase: "critical",
+    }));
+    ctx.session = session;
+  }
 
   // Provider results and the critical cursor are durable now. History/audit
   // must not hold the next HOLD/PARK behind a series of 4 s database waits.
