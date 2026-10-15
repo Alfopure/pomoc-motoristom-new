@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { telnyxSignedMessage } from "@/server/telephony/telnyx/signature";
 
+const reporting = vi.hoisted(() => ({ after: vi.fn(), capture: vi.fn() }));
+vi.mock("next/server", () => ({ after: reporting.after }));
+vi.mock("@/server/diagnostics/server-errors", () => ({ captureServerError: reporting.capture }));
 const processTelnyxEvent = vi.fn();
 
 vi.mock("@/server/telephony/telnyx/event-processor", () => ({
@@ -46,12 +49,14 @@ describe("POST /api/telephony/telnyx/webhook", () => {
   beforeEach(() => {
     process.env.TELNYX_API_KEY = "KEYtest";
     process.env.TELNYX_PUBLIC_KEY = keys.portalKey;
-    processTelnyxEvent.mockReset();
+    processTelnyxEvent.mockReset(); reporting.after.mockReset(); reporting.capture.mockReset();
+    vi.stubEnv("DIAGNOSTICS_SERVER_ERRORS_ENABLED", "true");
   });
 
   afterEach(() => {
     delete process.env.TELNYX_API_KEY;
     delete process.env.TELNYX_PUBLIC_KEY;
+    vi.unstubAllEnvs();
   });
 
   it("returns 503 with the Slovak notice when telephony is not configured", async () => {
@@ -127,4 +132,28 @@ describe("POST /api/telephony/telnyx/webhook", () => {
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toEqual({ error: "processing_failed" });
   });
+  it("reports first technical failure after the response with safe correlation", async () => {
+    processTelnyxEvent.mockResolvedValue(processorResult({ status: 500, outcome: "failed", error: "PRIVATE", claim: { attempts: 1 } }));
+    expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(500);
+    expect(reporting.capture).not.toHaveBeenCalled(); expect(reporting.after).toHaveBeenCalledOnce();
+    await reporting.after.mock.calls[0][0]();
+    expect(reporting.capture).toHaveBeenCalledWith(expect.objectContaining({ code: "webhook_processing_failed" }), expect.objectContaining({ route: "call.webhook", retryable: true, attempt: 1 }));
+    expect(String(reporting.capture.mock.calls[0][0])).not.toContain("PRIVATE");
+  });
+
+  it("leaves ordinary busy, correlation waits and later failed redelivery to the ledger without paging each retry", async () => {
+    for (const outcome of ["busy", "awaiting_correlation", "failed"]) {
+      processTelnyxEvent.mockResolvedValue(processorResult({ status: 500, outcome, claim: { attempts: 2 } }));
+      expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(500);
+    }
+    expect(reporting.after).not.toHaveBeenCalled();
+  });
+
+  it("reports terminal unresolved even when the provider acknowledgement is 200", async () => {
+    processTelnyxEvent.mockResolvedValue(processorResult({ status: 200, outcome: "unresolved", claim: { attempts: 5 } }));
+    expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(200);
+    await reporting.after.mock.calls[0][0]();
+    expect(reporting.capture).toHaveBeenCalledWith(expect.objectContaining({ code: "webhook_unresolved" }), expect.objectContaining({ retryable: false, attempt: 5 }));
+  });
+
 });

@@ -1,3 +1,5 @@
+import { recordDiagnostic } from './client';
+import { diagnosticAuthTags, sanitizeAuthTags, type DiagnosticAuthTags } from './auth-error';
 import { reserveDiagnosticAttempt } from './traffic';
 import { diagnosticErrorText } from './error-value';
 import { DiagnosticExceptionQueue } from './exception-queue';
@@ -26,7 +28,7 @@ export type SafeException = {
             };
         }[];
     };
-    tags: {
+    tags: DiagnosticAuthTags & {
         diagnostic_error_id: string;
         diagnostic_page_id?: string;
         react_error_code?: string;
@@ -34,6 +36,10 @@ export type SafeException = {
         browser_version?: string;
         call_session_id?: string;
         device_session_id?: string;
+        delivery_attempt?: string;
+        delivery_delay_ms?: string;
+        captured_offline?: 'true' | 'false';
+        restored_from_storage?: 'true';
     };
     contexts?: { dispatch_ui: DiagnosticUiContext };
     breadcrumbs?: DiagnosticBreadcrumb[];
@@ -111,7 +117,7 @@ export function sanitizeDiagnosticException(error: unknown, id: string, release:
         return sanitizeOutboundDiagnosticException({ event_id: id, level: 'error', platform: 'javascript', release, timestamp: Date.now() / 1000,
             environment: process.env.NEXT_PUBLIC_DIAGNOSTICS_ENVIRONMENT,
             exception: { values: [{ type, value: code ? `React error #${code}` : type, ...(frames.length ? { stacktrace: { frames: frames.reverse() } } : {}) }] },
-            tags: { diagnostic_error_id: id, diagnostic_page_id: context.pageId, react_error_code: code, ...browserTags(), call_session_id: context.callSessionId, device_session_id: context.deviceSessionId },
+            tags: { diagnostic_error_id: id, diagnostic_page_id: context.pageId, react_error_code: code, ...diagnosticAuthTags(error), ...browserTags(), call_session_id: context.callSessionId, device_session_id: context.deviceSessionId },
             contexts: { dispatch_ui: context.ui ?? getDiagnosticUiContext() }, breadcrumbs: context.breadcrumbs ?? getDiagnosticBreadcrumbs(),
         }, origin);
     }
@@ -134,8 +140,12 @@ export function sanitizeOutboundDiagnosticException(value: unknown, origin: stri
             return safe ? [safe] : [];
         });
         const code = typeof exception.value === 'string' ? exception.value.match(/^React error #([1-9]\d{0,3})$/)?.[1] : undefined;
-        const tags: SafeException['tags'] = { diagnostic_error_id: input.event_id };
+        const tags: SafeException['tags'] = { diagnostic_error_id: input.event_id, ...sanitizeAuthTags(input.tags) };
         if (code) tags.react_error_code = code;
+        if (/^[1-3]$/.test(input.tags?.delivery_attempt ?? '')) tags.delivery_attempt = input.tags.delivery_attempt;
+        if (/^(?:0|[1-9][0-9]{0,7})$/.test(input.tags?.delivery_delay_ms ?? '') && Number(input.tags.delivery_delay_ms) <= 86_400_000) tags.delivery_delay_ms = input.tags.delivery_delay_ms;
+        if (input.tags?.captured_offline === 'true' || input.tags?.captured_offline === 'false') tags.captured_offline = input.tags.captured_offline;
+        if (input.tags?.restored_from_storage === 'true') tags.restored_from_storage = 'true';
         if (isDiagnosticUuid(input.tags?.diagnostic_page_id)) tags.diagnostic_page_id = input.tags.diagnostic_page_id;
         if (isDiagnosticUuid(input.tags?.call_session_id)) tags.call_session_id = input.tags.call_session_id;
         if (isDiagnosticUuid(input.tags?.device_session_id)) tags.device_session_id = input.tags.device_session_id;
@@ -175,16 +185,25 @@ function exceptionQueue(): DiagnosticExceptionQueue | undefined {
 export function sendDiagnosticException(error: unknown, id: string, context?: DiagnosticExceptionContext): void {
     try {
         const pending = exceptionQueue();
-        if (!pending) return;
+        if (!pending) { recordDiagnostic({ type: 'exception_delivery', module: 'app', reason: 'sentry_disabled', outcome: 'unknown', count: 1 }); return; }
         const event = sanitizeDiagnosticException(error, id, process.env.NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID || 'local', location.origin, context);
         if (event) pending.enqueue(event);
-        void pending.flush();
+        void pending.flush().then(() => reportExceptionCounters(pending));
     }
     catch { /* Diagnostics must never recurse into the global error handler. */ }
 }
 export async function flushDiagnosticExceptions(): Promise<void> {
-    try { await exceptionQueue()?.flush(); } catch { /* no-throw */ }
+    try { const pending = exceptionQueue(); await pending?.flush(); if (pending) reportExceptionCounters(pending); } catch { /* no-throw */ }
 }
 export function clearDiagnosticExceptions(): void {
     try { exceptionQueue()?.clear(); } catch { /* no-throw */ }
+}
+
+function reportExceptionCounters(pending: DiagnosticExceptionQueue): void {
+    pending.reportCounters((reason, count) => Boolean(recordDiagnostic({ type: 'exception_delivery', module: 'app', reason, count,
+        outcome: reason === 'sentry_delivered' || reason === 'sentry_enqueued' || reason === 'sentry_deduplicated' ? 'ok' : 'unknown' })));
+}
+/** Local observed deltas, not a claim of end-to-end or process-kill coverage. */
+export function diagnosticExceptionDeliverySnapshot() {
+    try { return exceptionQueue()?.snapshot() ?? null; } catch { return null; }
 }

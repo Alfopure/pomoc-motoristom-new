@@ -197,11 +197,12 @@ export function telephonyErrorResponse(error: unknown, fallback: string): Respon
     // Register while Next owns the request, then load the reporter after the
     // response. Keep diagnostic modules out of the cold webhook import graph.
     try {
-      const requestId = requestTimingContext()?.request_id;
+      const timing = requestTimingContext();
+      const requestId = timing?.request_id;
       after(async () => {
         try {
           const { captureServerError } = await import("@/server/diagnostics/server-errors");
-          await captureServerError(error, { source: "telephony", route: "telephony.operation", status: knownStatus, requestId });
+          await captureServerError(error, { source: "telephony", route: timing?.route ?? "telephony.operation", status: knownStatus, requestId, databaseTimeouts: timing?.database_timeouts });
         } catch { /* Reporting cannot change call control. */ }
       });
     } catch { /* No retained request lifecycle: skip reporting. */ }
