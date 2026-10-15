@@ -143,6 +143,10 @@ export function phoneBarCapabilities(input: {
     };
   }
 
+  if (call.controlPending) {
+    return { ...NO_CAPABILITIES, hangup: true, mute: input.browserCallActive, dtmf: input.browserCallActive, newCase: true, linkCase: true };
+  }
+
   if (call.kind === "waiting") {
     return { ...NO_CAPABILITIES, pickup: true, newCase: true, linkCase: true };
   }
@@ -226,6 +230,12 @@ export function callElapsedSeconds(call: Pick<PhoneBarCall, "timerSince">, now: 
 export type PhoneBarStateLabel = { label: string; tone: "live" | "hold" | "ring" | "wait" };
 
 export function phoneBarStateLabel(call: PhoneBarCall): PhoneBarStateLabel {
+  if (call.controlPending) {
+    const labels = call.controlPending.failed
+      ? { hold: "Podržanie nepotvrdené", unhold: "Obnovenie hovoru nepotvrdené", park: "Presun do čakárne nepotvrdený" }
+      : { hold: "Podržiavam…", unhold: "Obnovujem hovor…", park: "Presúvam do čakárne…" };
+    return { label: labels[call.controlPending.action], tone: "wait" };
+  }
   if (call.direction === "outbound" && call.state === "received") return { label: "Pripájam telefón…", tone: "wait" };
   if (call.direction === "outbound" && call.state === "ringing") return { label: "Vytáčam", tone: "ring" };
   if (call.kind === "offer") return { label: "Zvoní", tone: "ring" };
