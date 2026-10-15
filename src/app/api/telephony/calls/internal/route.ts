@@ -32,5 +32,5 @@ export async function POST(request: Request) {
     } catch (error) {
       return telephonyErrorResponse(error, "Interný hovor sa nepodarilo vytočiť.");
     }
-  });
+  }, { operation: "call.internal" });
 }

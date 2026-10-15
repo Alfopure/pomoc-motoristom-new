@@ -1,3 +1,4 @@
+import { beginRequestPerformance } from "./request-performance";
 import { isMobileApp } from "./phone-platform";
 import { beginBrowserCallStep } from "./call-timing";
 import { beginDiagnosticOperation } from "@/lib/diagnostics/client";
@@ -88,6 +89,7 @@ export async function telephonyFetch(
 
   if (callerSignal?.aborted) throw abortError();
 
+  const finishPerformance = beginRequestPerformance(input, rest.method);
   const finishTiming = beginBrowserCallStep("request", { operationId });
   const controller = new AbortController();
   let timedOut = false;
@@ -113,9 +115,11 @@ export async function telephonyFetch(
     // through the body: fetch() alone resolves as soon as headers arrive.
     const body = response.body ? await readBoundedBody(response.body, controller.signal) : null;
     if (controller.signal.aborted) throw abortError();
+    finishPerformance({ outcome: response.status === 202 ? "accepted" : response.ok ? "ok" : "failed", status: response.status, requestId: response.headers.get("x-request-id") ?? undefined });
     finishTiming({ outcome: response.ok ? "ok" : "failed", requestId: response.headers.get("x-request-id") });
     return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   } catch (error) {
+    finishPerformance({ outcome: callerSignal?.aborted ? "cancelled" : timedOut ? "timeout" : "failed" });
     finishTiming({ outcome: callerSignal?.aborted ? "cancelled" : "failed" });
     // Keep caller cancellation distinguishable if it races the timer.
     if (callerSignal?.aborted) throw abortError();

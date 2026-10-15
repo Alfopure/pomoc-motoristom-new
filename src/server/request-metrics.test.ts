@@ -260,3 +260,19 @@ describe("request metrics", () => {
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private|provider ID/);
   });
 });
+
+it("retains operation and TEST identity on failures and accepted work without mixing background duration", async () => {
+  vi.stubEnv("MOTORIST_APP_ENV", "test"); vi.stubEnv("VERCEL_ENV", "production");
+  try {
+    const logger=vi.fn(); let background!:()=>Promise<void>; let time=0;
+    await withRequestMetrics("call.action",async()=>{
+      background=withBackgroundRequestMetrics(async()=>{time=100;});
+      time=10; return Response.json({}, {status:202});
+    },{logger,now:()=>time,operation:"call.hangup"});
+    await background();
+    expect(logger.mock.calls[0][0]).toMatchObject({environment:"test",operation:"call.hangup",outcome:"accepted",phase:"response",ms:10,sampleRate:1});
+    expect(logger.mock.calls[1][0]).toMatchObject({operation:"call.hangup",phase:"after",ms:90});
+    await withRequestMetrics("call.action",async()=>{time=0;return Response.json({});},{logger,now:()=>time});
+    expect(logger.mock.calls[2][0].ms).toBeNull();
+  } finally { vi.unstubAllEnvs(); }
+});
