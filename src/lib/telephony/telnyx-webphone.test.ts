@@ -105,9 +105,9 @@ function fakeCall(overrides: Partial<WebphoneSdkCall> = {}): WebphoneSdkCall & {
   return call as WebphoneSdkCall & { answered: boolean; hungUp: boolean; digits: string[] };
 }
 
-type Request = { url: string; body: unknown };
+type Request = { url: string; body: unknown; init: Parameters<NonNullable<TelnyxWebphoneOptions["requestJson"]>>[1] };
 
-function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: boolean; token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"] } = {}) {
+function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: boolean; deviceKind?: TelnyxWebphoneOptions["deviceKind"]; token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; offerStatus?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"] } = {}) {
   const requests: Request[] = [];
   const timers: Array<{ id: number; handler: () => void; delayMs: number }> = [];
   let nextTimer = 1;
@@ -115,6 +115,7 @@ function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: b
 
   const phone = new TelnyxWebphone({
     silent: options.silent ?? true,
+    deviceKind: options.deviceKind,
     logger: options.logger,
     now: options.now ?? (() => Date.parse("2026-09-03T08:00:00.000Z")),
     createClient: options.createClient ?? (options.loadSdk ? undefined : credentials => { client.options.login_token = credentials.token; return client; }),
@@ -129,7 +130,8 @@ function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: b
       if (index >= 0) timers.splice(index, 1);
     },
     requestJson: async (url, init) => {
-      requests.push({ url, body: init.body });
+      requests.push({ url, body: init.body, init });
+      if (url.includes("/webphone/offer-status")) return (options.offerStatus?.() ?? { ok: true, status: 200, body: { status: "pending" } }) as never;
       if (url.includes("/webphone/token")) {
         return (options.token ?? {
           ok: true,
@@ -162,6 +164,160 @@ function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: b
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+describe("authoritative browser leg settlement", () => {
+  const sessionId = "00000000-0000-4000-8000-000000000001";
+  const result = (status: string, callControlId = "cc-1") => ({
+    ok: true, status: 200, body: { status, callControlId, sessionId },
+  });
+  async function ringing(options: Parameters<typeof harness>[0] = {}) {
+    const h = harness(options);
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    return { ...h, call };
+  }
+
+  it("silences a losing incoming web leg without waiting for BYE or ending the shared call", async () => {
+    const h = await ringing({ offerStatus: () => result("superseded"), silent: false });
+    const stopRingtone = vi.spyOn(BrowserIncomingRingtone.prototype, "stop");
+    const bye = deferred<void>();
+    const hangup = vi.fn(() => bye.promise);
+    h.call.hangup = hangup;
+    expect(h.phone.getSnapshot().call).toMatchObject({ ringing: true, sessionId: null });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: null });
+    expect(stopRingtone).toHaveBeenCalled();
+    expect(hangup).toHaveBeenCalledOnce();
+    const request = h.requests.find(request => request.url.includes("offer-status"))!;
+    expect(new URL(request.url, "https://test.example").searchParams.get("callControlId")).toBe("cc-1");
+    expect(new URL(request.url, "https://test.example").searchParams.get("deviceSessionId")).toBe("device-1");
+    expect(request.init).toMatchObject({ method: "GET", cache: "no-store", timeoutMs: 8_000 });
+    expect(h.requests.filter(request => request.init.method !== "GET").every(request => /token|heartbeat/.test(request.url))).toBe(true);
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: h.call });
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    bye.resolve(); h.phone.stop();
+  });
+
+  it.each(["pending", "ringing", "connected", "unknown"])("keeps the current call on %s", async status => {
+    const h = await ringing({ offerStatus: () => result(status) });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(h.call.id);
+    expect(h.call.hungUp).toBe(false);
+    expect(h.timers.filter(timer => timer.delayMs === 2_000)).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("ignores mismatched control IDs, missing session identity and a different known session", async () => {
+    const offerStatus = vi.fn()
+      .mockResolvedValueOnce(result("ended", "different-leg"))
+      .mockResolvedValueOnce({ ok: true, status: 200, body: { status: "ended", callControlId: "cc-1", sessionId: null } })
+      .mockResolvedValueOnce({ ...result("ended"), body: { ...result("ended").body, sessionId: "other-session" } });
+    const h = await ringing({ offerStatus });
+    for (let index = 0; index < 2; index++) { h.runTimer(timer => timer.delayMs === 2_000); await flush(); }
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(h.call.id);
+    expect(h.call.hungUp).toBe(false);
+    h.phone.stop();
+  });
+
+  it("releases ended active media and only hangs up its exact local SDK leg", async () => {
+    const h = await ringing({ offerStatus: () => result("ended") });
+    const stop = vi.fn();
+    h.call.state = "active";
+    h.call.localStream = { getTracks: () => [{ stop }] } as unknown as MediaStream;
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: h.call });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(h.client.disconnected).toBe(false);
+    h.phone.stop();
+  });
+
+  it("never overlaps requests and aborts an obsolete response before another call", async () => {
+    const old = deferred<TelephonyJsonResult<unknown>>();
+    const h = await ringing({ offerStatus: () => old.promise });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    const request = h.requests.find(request => request.url.includes("offer-status"))!;
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: true });
+    expect(h.requests.filter(request => request.url.includes("offer-status"))).toHaveLength(1);
+    h.call.state = "hangup";
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: h.call });
+    expect(request.init.signal?.aborted).toBe(true);
+    const next = fakeCall({ id: "next", telnyxIDs: { ...h.call.telnyxIDs, telnyxCallControlId: "cc-next" } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: next });
+    old.resolve(result("ended")); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(next.id);
+    expect(next.hungUp).toBe(false);
+    expect(h.timers.filter(timer => timer.delayMs === 2_000)).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("backs off errors without treating network or lease rejection as an ended call", async () => {
+    const offerStatus = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ ok: false, status: 409, body: { status: "ended", callControlId: "cc-1", sessionId } })
+      .mockResolvedValue(result("ringing"));
+    const h = await ringing({ offerStatus });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.timers.some(timer => timer.delayMs === 4_000)).toBe(true);
+    h.runTimer(timer => timer.delayMs === 4_000); await flush();
+    expect(h.timers.some(timer => timer.delayMs === 8_000)).toBe(true);
+    expect(h.call.hungUp).toBe(false);
+    h.runTimer(timer => timer.delayMs === 8_000); await flush();
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(true);
+    h.phone.stop();
+  });
+
+  it("aborts on ownership shutdown and fences late terminal reads after restart", async () => {
+    const old = deferred<TelephonyJsonResult<unknown>>();
+    const h = await ringing({ offerStatus: () => old.promise });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    const request = h.requests.find(request => request.url.includes("offer-status"))!;
+    h.phone.stop("ownership_release");
+    expect(request.init.signal?.aborted).toBe(true);
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    const next = fakeCall({ id: "new-account-call" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: next });
+    old.resolve(result("superseded")); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(next.id);
+    expect(next.hungUp).toBe(false);
+    h.phone.stop();
+  });
+
+  it("ignores a terminal response from the previous lease after a token renewal", async () => {
+    const credentials = { token: "jwt", expiresAt: "2026-09-03T09:00:00.000Z", deviceSessionId: "device-1", sipUsername: "gencred1" };
+    const token: TelephonyJsonResult<unknown> = { ok: true, status: 200, body: credentials };
+    const old = deferred<TelephonyJsonResult<unknown>>();
+    const h = await ringing({ token, offerStatus: () => old.promise });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    const request = h.requests.find(request => request.url.includes("offer-status"))!;
+    token.body = { ...credentials, token: "renewed", deviceSessionId: "device-2" };
+    h.runTimer(timer => timer.delayMs === 1_800_000); await flush();
+    expect(h.phone.getSnapshot().deviceSessionId).toBe("device-2");
+    expect(request.init.signal?.aborted).toBe(true);
+    old.resolve(result("ended")); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(h.call.id);
+    expect(h.call.hungUp).toBe(false);
+    expect(h.timers.filter(timer => timer.delayMs === 2_000)).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("does not query idle phones, calls without a control ID or legacy mobile browser leases", async () => {
+    const h = harness(); h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    const call = fakeCall({ telnyxIDs: { telnyxCallControlId: "", telnyxSessionId: "ts", telnyxLegId: "leg" } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    h.phone.stop();
+    const mobile = await ringing({ deviceKind: "mobile" });
+    expect(mobile.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    mobile.phone.stop();
+  });
+});
 
 describe("bounded SDK voice-quality observations", () => {
   const session = "00000000-0000-4000-8000-000000000001";
@@ -510,7 +666,7 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot().status).toBe("registered");
     expect(h.phone.getSnapshot().registration.label).toBe("Registrované");
     expect(h.phone.getSnapshot().sipUsername).toBe("gencred1");
-    expect(h.requests.at(-1)).toEqual({ url: "/api/telephony/devices/heartbeat", body: JSON.stringify({ deviceSessionId: "device-1", registrationState: "registered" }) });
+    expect(h.requests.at(-1)).toMatchObject({ url: "/api/telephony/devices/heartbeat", body: JSON.stringify({ deviceSessionId: "device-1", registrationState: "registered" }) });
   });
 
   it("stays in the not-configured mode when the token route answers 503", async () => {
@@ -551,7 +707,7 @@ describe("TelnyxWebphone", () => {
     await expect(h.phone.confirmRegistration()).resolves.toBeUndefined();
 
     Object.assign(token, { ok: true, status: 200, body: { ...credentials, token: "renewed-jwt", deviceSessionId: "device-2" } });
-    h.runTimer(timer => timer.delayMs < 30_000);
+    h.runTimer(timer => timer.delayMs > 2_000 && timer.delayMs < 30_000);
     await flush();
     expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", deviceSessionId: "device-2", message: null, call: { active: true } });
     expect(connect).toHaveBeenCalledTimes(1);

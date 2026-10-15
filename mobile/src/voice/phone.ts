@@ -2,7 +2,7 @@ import { MobileApiError } from "../lib/api";
 import type { VoiceApi, VoiceOutgoing, VoiceToken } from "./api";
 
 export type VoiceEvent = { type: string; callId?: string; callControlId?: string; providerLegId?: string; sessionId?: string; number?: string; state?: string; active?: boolean; muted?: boolean; outgoing?: boolean };
-export type PhoneSnapshot = { ready: boolean; audioActive: boolean; pushRegistered?: boolean; wasEnabled?: boolean; calls?: VoiceEvent[]; pending: VoiceEvent[] };
+export type PhoneSnapshot = { ready: boolean; audioActive: boolean; pushRegistered?: boolean; preparedPushCallId?: string | null; wasEnabled?: boolean; calls?: VoiceEvent[]; pending: VoiceEvent[] };
 export type NativePhone = {
   snapshot(): Promise<PhoneSnapshot>; requestMicrophone(): Promise<boolean>; connect(token: string): Promise<void>; disconnect(): Promise<void>;
   authorize(callId: string, sessionId: string, controlId: string): Promise<void>; reject(callId: string): Promise<void>;
@@ -33,6 +33,8 @@ export class DispatchPhone {
   private heartbeatBusy = false;
   private monitorBusy = false;
   private connecting: Promise<void> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
   private pendingDial: { requestId: string; to: string } | null = null;
   private outgoingIntent: VoiceOutgoing | null = null;
   private refreshPushRegistration = false;
@@ -65,24 +67,32 @@ export class DispatchPhone {
     if (snapshot.pending.length || snapshot.wasEnabled) await this.connect();
   }
   connect(takeover = false): Promise<void> {
+    this.reconnectAttempts = 0;
+    return this.connectAttempt(takeover);
+  }
+  private connectAttempt(takeover = false, automatic = false): Promise<void> {
     if (!this.native || this.stopped) return Promise.resolve();
     if (this.connecting) return this.connecting;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
     const generation = this.generation;
     this.update({ registration: "connecting", takeoverRequired: false, error: null });
     this.connecting = (async () => {
       try {
         if (!await this.native!.requestMicrophone()) throw new MobileApiError("Povoľte mikrofón v nastaveniach iPhone.", 403);
+        if (!this.current(generation) || (automatic && !this.idleForRecovery())) return;
         this.leaseId ??= await this.leases?.load() ?? null;
-        if (!this.current(generation)) return;
+        if (!this.current(generation) || (automatic && !this.idleForRecovery())) return;
         const token = await this.api.token(this.leaseId ?? undefined, takeover);
         if (!this.current(generation)) { await this.api.disconnect(token.deviceSessionId).catch(() => {}); return; }
         this.leaseId = token.deviceSessionId;
         await this.leases?.save(token.deviceSessionId);
         if (!this.current(generation)) return;
         this.token = token;
+        if (automatic && !this.idleForRecovery()) return;
         await this.native!.connect(token.token);
         if (!this.current(generation)) return;
         const pending = await this.native!.snapshot();
+        if (!this.current(generation)) return;
         if (pending.ready) await this.event({ type: "registration", state: "registered" });
         for (const event of pending.pending) void this.event(event);
       } catch (error) {
@@ -91,11 +101,15 @@ export class DispatchPhone {
           this.fail(error);
         }
       } finally {
+        if (automatic && this.current(generation) && !this.idleForRecovery() && this.state.registration === "connecting") {
+          this.update({ registration: "unregistered" });
+        }
         this.connecting = null;
         if (this.current(generation) && this.refreshPushRegistration && this.token && this.state.registration !== "error"
           && !this.state.call && !this.pendingDial && !this.outgoingIntent) {
           this.refreshPushRegistration = false; void this.connect();
         }
+        this.scheduleRecovery();
       }
     })();
     return this.connecting;
@@ -107,7 +121,29 @@ export class DispatchPhone {
       else void this.touch();
     }
   }
+  private idleForRecovery() {
+    return !this.stopped && this.foreground && this.token && !this.state.call
+      && !this.state.termination && !this.pendingDial && !this.outgoingIntent && !this.state.dialing
+      && this.authorizing.size === 0 && this.state.registration !== "registered" && !this.state.takeoverRequired;
+  }
+  private canRecover() { return !this.connecting && this.idleForRecovery(); }
+  private scheduleRecovery() {
+    if (!this.canRecover()) {
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null; return;
+    }
+    if (this.reconnectTimer || this.reconnectAttempts >= 3) return;
+    // connect() starts native login; allow its asynchronous registration to
+    // finish before replacing an otherwise healthy, still-connecting socket.
+    const delay = this.state.registration === "connecting" ? 10_000 : [1_000, 2_000, 5_000][this.reconnectAttempts];
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.canRecover()) return;
+      this.reconnectAttempts += 1; void this.connectAttempt(false, true);
+    }, delay);
+  }
   private schedule() {
+    this.scheduleRecovery();
     if (this.heartbeat) clearInterval(this.heartbeat); this.heartbeat = null;
     if (this.monitor) clearInterval(this.monitor); this.monitor = null;
     if (this.stopped || (!this.token && !(this.leaseId && this.state.termination))) return;
@@ -190,6 +226,7 @@ export class DispatchPhone {
       if (event.type === "registration") {
         if (!this.token) return;
         const registration = event.state === "registered" ? "registered" : event.state === "error" ? "error" : "unregistered";
+        if (registration === "registered") this.reconnectAttempts = 0;
         this.update({ registration }); this.schedule();
         if (registration === "registered") await this.touch();
       } else if (event.type === "pushTokenChanged") {
@@ -215,6 +252,17 @@ export class DispatchPhone {
           if (!this.token || event.type === "push") await this.connect();
           if (!this.current(generation) || this.finished.has(id)) return;
           if (!this.token || this.state.registration === "error") { await this.native.reject(id); return; }
+          if (event.type === "push") {
+            // A push may arrive after a shared connect has already crossed the
+            // native bridge. Its completion alone does not prove this push was prepared.
+            const snapshot = await this.native.snapshot();
+            if (!this.current(generation) || this.finished.has(id)) return;
+            if (snapshot.preparedPushCallId?.toLowerCase() !== id.toLowerCase()
+              && !snapshot.calls?.some(call => call.callId?.toLowerCase() === id.toLowerCase())) {
+              await this.native.connect(this.token.token);
+              if (!this.current(generation) || this.finished.has(id)) return;
+            }
+          }
           const identity = event.callControlId ? { callControlId: event.callControlId } : { providerLegId: event.providerLegId };
           const offer = await this.authorizeOffer(this.token.deviceSessionId, identity, id, generation);
           if (!offer || !this.current(generation) || this.finished.has(id)) return;
@@ -232,7 +280,7 @@ export class DispatchPhone {
             state: intent ? "CONNECTING" : "RINGING", outgoing: Boolean(intent), connected: false } });
           this.schedule();
           await this.native.authorize(id, offer.sessionId, offer.callControlId);
-        } finally { this.authorizing.delete(id); }
+        } finally { this.authorizing.delete(id); this.scheduleRecovery(); }
       } else if (event.type === "outgoing" && event.callId && event.sessionId) {
         if (this.finished.has(event.callId)) return;
         this.update({ call: { id: event.callId, sessionId: event.sessionId, number: event.number ?? null, state: "CONNECTING", outgoing: true, connected: false } }); this.schedule();
@@ -342,6 +390,7 @@ export class DispatchPhone {
   }
   dispose() {
     this.stopped = true; this.generation += 1; this.off?.(); this.off = null;
-    if (this.heartbeat) clearInterval(this.heartbeat); if (this.monitor) clearInterval(this.monitor); this.listeners.clear();
+    if (this.heartbeat) clearInterval(this.heartbeat); if (this.monitor) clearInterval(this.monitor);
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.listeners.clear();
   }
 }

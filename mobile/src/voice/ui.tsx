@@ -10,11 +10,12 @@ export function CallPanel({ phone, state }: { phone: DispatchPhone | null; state
   if (!phone || (!state.call && !state.termination)) return null;
   const call = state.call;
   const ringing = call?.state === "RINGING" && !call.outgoing;
+  const recovering = call?.state === "DROPPED" || call?.state === "RECONNECTING";
   return <View style={{ paddingHorizontal: 20, paddingTop: 12 }}><Card>
-    <Text style={styles.label}>{state.termination ? "Ukončujem hovor…" : ringing ? "Prichádzajúci hovor" : call?.connected ? "Prebieha hovor" : "Spájam hovor…"}</Text>
+    <Text style={styles.label}>{state.termination ? "Ukončujem hovor…" : recovering ? "Obnovujem spojenie…" : ringing ? "Prichádzajúci hovor" : call?.connected ? "Prebieha hovor" : "Spájam hovor…"}</Text>
     {call && <Text style={styles.subheading}>{formatNumber(call.number)}</Text>}
     {ringing && !state.termination && <Button label="Prijať" onPress={() => { void phone.answer(); }} />}
-    {call?.connected && !state.termination && <>
+    {call?.connected && !recovering && !state.termination && <>
       <View style={styles.row}>
         <View style={{ flex: 1 }}><Button label={state.muted ? "Zapnúť mikrofón" : "Stíšiť"} secondary onPress={() => { void phone.mute(); }} /></View>
         <View style={{ flex: 1 }}><Button label={state.speaker ? "Slúchadlo" : "Reproduktor"} secondary onPress={() => { void phone.speaker(); }} /></View>

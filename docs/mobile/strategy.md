@@ -4,6 +4,15 @@ Stav vývoja: **2026-10-15**. Majiteľ oznámil nasadenie novej produkčnej verz
 a následne vybral „Plán aj prvý základ v kóde“. Cieľ je natívna aplikácia pre
 iPhone a Android s existujúcim prihlásením, ústredňou a telefonovaním.
 
+**Priorita majiteľa z 15. 10. 2026: systémové telefonovanie na iPhone.** Ďalšie
+rozširovanie prípadov a úloh teraz ustupuje prijímaniu a vytáčaniu hovorov,
+CallKit/PushKit a spoločnému riadeniu webového a mobilného telefónu. Prijatie
+na jednom zariadení musí zastaviť druhé zvonenie bez ukončenia prijatého
+hovoru. Nasledujúce kroky a fyzické akceptačné podmienky sú v
+[iPhone TEST postupe](iphone-voice-test.md). Majiteľ potvrdil, že ešte čaká
+na schválenie Apple Developer členstva; podpis a fyzické APNs testy zostávajú
+závislosťou tejto priority.
+
 ## Počiatočné overené východisko z 11. októbra
 
 | Oblasť | Overenie pred implementáciou |

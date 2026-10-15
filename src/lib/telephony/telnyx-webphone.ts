@@ -25,7 +25,7 @@ import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
 import { browserCallMonotonicNow, browserCallTelemetry, prepareBrowserCallHeartbeat, type BrowserCallPhase, type BrowserCallObservation } from "@/lib/telephony/browser-call-telemetry";
 import { flushBrowserCallTelemetry } from "@/lib/telephony/browser-call-transport";
 import { beginBrowserCallStep, type CallTimingContext } from "@/lib/telephony/call-timing";
-import { telephonyJson, TELEPHONY_TIMEOUT_MS, type TelephonyJsonResult } from "@/lib/telephony/client-request";
+import { nextBackoffDelayMs, telephonyJson, TELEPHONY_TIMEOUT_MS, type TelephonyJsonResult } from "@/lib/telephony/client-request";
 import type { IClientOptions } from "@telnyx/webrtc";
 import {
   EXPECTED_LEG_TTL_MS,
@@ -153,7 +153,7 @@ export type TelnyxWebphoneOptions = {
   createClient?: (credentials: WebphoneCredentials) => Promise<WebphoneSdkClient> | WebphoneSdkClient;
   /** Test seam: download the SDK independently of credentials/socket setup. */
   loadSdk?: () => Promise<WebphoneSdkModule>;
-  /** Test seam for the two HTTP calls this module makes. */
+  /** Test seam for bounded credential, heartbeat and own-leg status requests. */
   requestJson?: typeof telephonyJson;
   setTimeout?: (handler: () => void, timeoutMs: number) => number;
   clearTimeout?: (handle: number) => void;
@@ -164,6 +164,8 @@ export type TelnyxWebphoneOptions = {
 
 const TOKEN_URL = "/api/telephony/webphone/token";
 const HEARTBEAT_URL = "/api/telephony/devices/heartbeat";
+const OFFER_STATUS_URL = "/api/telephony/webphone/offer-status";
+const OFFER_STATUS_INTERVAL_MS = 2_000;
 // SDK attach recovery answers its own replacement peer. It is never a new offer.
 const RINGING_STATES = new Set(["ringing"]);
 const ACTIVE_STATES = new Set(["active", "held", "early", "answering"]);
@@ -176,6 +178,21 @@ type SdkLoginRequest = {
   connectionEpoch: number;
   credentials: WebphoneCredentials;
   timedOut: boolean;
+};
+
+type OfferObservation = {
+  call: WebphoneSdkCall;
+  callControlId: string;
+  deviceSessionId: string;
+  clientGeneration: number;
+  abort: AbortController;
+  failures: number;
+};
+
+type OfferStatus = {
+  callControlId: string;
+  sessionId: string | null;
+  status: "pending" | "ringing" | "connected" | "superseded" | "ended";
 };
 
 export class TelnyxWebphone {
@@ -205,6 +222,8 @@ export class TelnyxWebphone {
   private heartbeatTimer: number | null = null;
   private heartbeatWorker: Worker | null = null;
   private expectedLegTimer: number | null = null;
+  private offerStatusTimer: number | null = null;
+  private offerObservation: OfferObservation | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
   private ringtone: BrowserIncomingRingtone | null = null;
   private ringing = false;
@@ -533,7 +552,7 @@ export class TelnyxWebphone {
     return timer(handler, delayMs);
   }
 
-  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer" | "expectedLegTimer" | "recoveryTimer" | "loginTimer"): void {
+  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer" | "expectedLegTimer" | "recoveryTimer" | "loginTimer" | "offerStatusTimer"): void {
     const handle = this[key];
     if (handle === null) return;
     this[key] = null;
@@ -559,6 +578,67 @@ export class TelnyxWebphone {
 
   private get requestJson(): typeof telephonyJson {
     return this.options.requestJson ?? telephonyJson;
+  }
+
+  /** Only the SDK owner observes its exact leg; shared tabs receive its snapshot. */
+  private syncOfferObservation(): void {
+    const call = this.call;
+    const callControlId = call?.telnyxIDs?.telnyxCallControlId;
+    const deviceSessionId = this.state.credentials?.deviceSessionId;
+    const current = this.offerObservation;
+    if (this.started && this.options.deviceKind !== "mobile" && call && callControlId && deviceSessionId) {
+      if (current?.call === call && current.callControlId === callControlId &&
+        current.deviceSessionId === deviceSessionId && current.clientGeneration === this.clientGeneration) return;
+      this.clearOfferObservation();
+      const observation: OfferObservation = {
+        call, callControlId, deviceSessionId, clientGeneration: this.clientGeneration,
+        abort: new AbortController(), failures: 0,
+      };
+      this.offerObservation = observation;
+      this.scheduleOfferObservation(observation);
+    } else this.clearOfferObservation();
+  }
+
+  private clearOfferObservation(): void {
+    const observation = this.offerObservation;
+    this.offerObservation = null;
+    this.clearTimer("offerStatusTimer");
+    observation?.abort.abort();
+  }
+
+  private scheduleOfferObservation(observation: OfferObservation): void {
+    if (this.offerObservation !== observation) return;
+    this.offerStatusTimer = this.schedule(() => {
+      if (this.offerObservation !== observation) return;
+      this.offerStatusTimer = null;
+      void this.observeOffer(observation);
+    }, nextBackoffDelayMs({ baseMs: OFFER_STATUS_INTERVAL_MS, consecutiveFailures: observation.failures, maxMs: 15_000, jitter: 0 }));
+  }
+
+  private async observeOffer(observation: OfferObservation): Promise<void> {
+    if (this.offerObservation !== observation) return;
+    try {
+      const query = new URLSearchParams({ deviceSessionId: observation.deviceSessionId, callControlId: observation.callControlId });
+      const result = await this.requestJson<OfferStatus>(`${OFFER_STATUS_URL}?${query}`, {
+        method: "GET", cache: "no-store", signal: observation.abort.signal,
+        label: "stav vlastného hovoru", timeoutMs: TELEPHONY_TIMEOUT_MS.read,
+      });
+      if (this.offerObservation !== observation || observation.abort.signal.aborted) return;
+      observation.failures = result.ok ? 0 : observation.failures + 1;
+      const body = result.body;
+      if (result.ok && body?.callControlId === observation.callControlId &&
+        typeof body.sessionId === "string" && body.sessionId.length > 0 &&
+        (!this.callSessionId || body.sessionId === this.callSessionId) &&
+        (body.status === "superseded" || body.status === "ended")) {
+        // This ends this SDK leg only. A full-session hangup could kill the
+        // winner on the iPhone while the provider's loser BYE is delayed.
+        this.confirmCallEnded(observation.call.id);
+      }
+    } catch {
+      if (this.offerObservation === observation) observation.failures++;
+    } finally {
+      this.scheduleOfferObservation(observation);
+    }
   }
 
   private async mintToken(): Promise<void> {
@@ -1383,6 +1463,7 @@ export class TelnyxWebphone {
   }
 
   private clearCurrentCall(): void {
+    this.clearOfferObservation();
     // SDK 2.27 sets Hangup before awaiting BYE (up to 5 seconds), and only
     // closes its peer afterwards. Release this terminal call's actual tracks
     // now; signaling and the authoritative server command still finish normally.
@@ -1461,6 +1542,7 @@ export class TelnyxWebphone {
     // SDK methods and errors can change the mutable Call without a final
     // notification. Never leave a terminated call holding the mobile busy lock.
     if (this.call && DEAD_STATES.has(String(this.call.state).toLowerCase())) this.clearCurrentCall();
+    this.syncOfferObservation();
     this.snapshot = this.buildSnapshot();
     for (const listener of this.listeners) listener(this.snapshot);
   }

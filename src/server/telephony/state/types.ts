@@ -325,6 +325,8 @@ export type AttemptPlan = {
 
 export type RingFanout = CommandBase & {
   kind: "ring_fanout";
+  /** Internal fanout terminates the caller only after every endpoint definitively fails. */
+  internal?: true;
   step: number;
   /**
    * When set, `motorist_advance_ring_step(session, expectedStep)` must succeed
@@ -692,7 +694,7 @@ export type SessionMeta = {
    * caller's name already reduced to SIP display characters (older sessions
    * lack all three).
    */
-  internal?: { target_profile_id: string; target_sip: string; by: string; caller_name?: string | null; target_name?: string | null; caller_display?: string | null } | null;
+  internal?: { target_profile_id: string; target_sip: string; endpoints?: Array<{ device: "web" | "mobile"; sipUri: string }>; by: string; caller_name?: string | null; target_name?: string | null; caller_display?: string | null } | null;
   transfer?: { kind: "blind" | "attended"; target: TransferTarget; by: string | null; at: string; completed_at?: string | null } | null;
   consult?: { target: TransferTarget; by: string | null; at: string; leg_call_control_id?: string | null; answered_at?: string | null } | null;
   callback?: { requested_at?: string | null; source?: CallbackSource | null; confirmed?: boolean; declined_at?: string | null; digit?: string; context?: string; event_id?: string; deadline_at?: string; confirmation_retry?: boolean; closing_at?: string; input_retry?: boolean } | null;

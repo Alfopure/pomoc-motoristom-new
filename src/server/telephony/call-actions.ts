@@ -450,7 +450,7 @@ function colleagueCallError(block: ColleagueCallBlock, status = 409): CallAction
  * The daily cap and the organisation's concurrent-leg ceiling in one read
  * round. A colleague call never takes the capacity a customer would need.
  */
-async function assertInternalCallBudget(deps: CallActionDeps): Promise<void> {
+async function assertInternalCallBudget(deps: CallActionDeps): Promise<number> {
   const now = nowOf(deps);
   const [usage, settings, legs] = await Promise.all([
     loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now }),
@@ -461,14 +461,16 @@ async function assertInternalCallBudget(deps: CallActionDeps): Promise<void> {
   ]);
   assertLoadedLegBudget(deps, usage, settings);
   if (legs.error) throw new CallActionError("Voľnú kapacitu liniek sa nepodarilo overiť.", 503, "capacity_unknown");
-  if ((legs.count ?? 0) + INTERNAL_CALL_LEGS + INTERNAL_CALL_CUSTOMER_RESERVE > settings.maxConcurrentLegs) throw colleagueCallError("capacity");
+  const available = settings.maxConcurrentLegs - (legs.count ?? 0) - INTERNAL_CALL_CUSTOMER_RESERVE;
+  if (available < INTERNAL_CALL_LEGS) throw colleagueCallError("capacity");
+  return available;
 }
 
 /**
  * The colleague's own phone in the application — never a company line or a
  * private number. Rings an available colleague and one on pause.
  */
-async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): Promise<{ profileId: string; sipUri: string; label: string }> {
+async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): Promise<{ profileId: string; sipUri: string; label: string; endpoints: Array<{ device: "web" | "mobile"; sipUri: string }> }> {
   if (!isUuid(profileId)) throw new CallActionError("Kolega sa nenašiel.", 404, "target_not_found");
   const [profile, presence, settings, webDevice, mobileDevice] = await Promise.all([
     humansOnly(deps.admin.from("motorist_profiles").select("id, display_name, active, access_status")
@@ -489,13 +491,14 @@ async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): 
   if (block) throw colleagueCallError(block);
   // Their calls go to a personal mobile: no application phone to ring.
   if ((settings.data as { delivery_mode?: string } | null)?.delivery_mode === "personal_mobile") throw colleagueCallError("personal_mobile");
-  // An explicitly connected TEST native phone takes colleague calls. The
-  // production/browser route retains its established selection unchanged.
   const mobileReachable = mobileDevice && (deviceIsLive(mobileDevice, nowOf(deps)) || nativeMobilePushReachable(mobileDevice, nowOf(deps)));
-  const device = mobileReachable ? mobileDevice : webDevice;
-  const sipUri = device ? deviceSipUri(device) : null;
-  if (!device || !sipUri || (!mobileReachable && !deviceIsLive(device, nowOf(deps)))) throw colleagueCallError("no_phone");
-  return { profileId, sipUri, label: profile.data.display_name };
+  const endpoints: Array<{ device: "web" | "mobile"; sipUri: string }> = [];
+  const webSip = webDevice && deviceIsLive(webDevice, nowOf(deps)) ? deviceSipUri(webDevice) : null;
+  const mobileSip = mobileReachable ? deviceSipUri(mobileDevice) : null;
+  if (webSip) endpoints.push({ device: "web", sipUri: webSip });
+  if (mobileSip && mobileSip !== webSip) endpoints.push({ device: "mobile", sipUri: mobileSip });
+  if (!endpoints.length) throw colleagueCallError("no_phone");
+  return { profileId, sipUri: mobileSip ?? webSip!, label: profile.data.display_name, endpoints };
 }
 
 async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string }): Promise<StartOutboundResult> {
@@ -512,7 +515,8 @@ async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: {
       .eq("organization_id", deps.organizationId).eq("id", actor.profileId).maybeSingle().then((result) => result.data?.display_name ?? null),
   ]);
   for (const outcome of [budget, target, device, fromLine]) if (outcome.status === "rejected") throw outcome.reason;
-  if (target.status !== "fulfilled" || device.status !== "fulfilled" || fromLine.status !== "fulfilled") throw new CallActionError("Interný hovor sa nepodarilo pripraviť.", 500);
+  if (budget.status !== "fulfilled" || target.status !== "fulfilled" || device.status !== "fulfilled" || fromLine.status !== "fulfilled") throw new CallActionError("Interný hovor sa nepodarilo pripraviť.", 500);
+  if (budget.value < 1 + target.value.endpoints.length) throw colleagueCallError("capacity");
   const { line, from } = fromLine.value;
   const callerName = caller.status === "fulfilled" ? caller.value?.trim() || null : null;
   const plan = { to: target.value.sipUri, from, sipUri: device.value.sipUri, fromDisplayName: sipDisplayText(callerName) };
@@ -526,6 +530,7 @@ async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: {
     answeredBy: actor.profileId,
     metadata: { ...(input.requestId ? { initial_operation: { ...initialOperationIdentity(actor, "internal", input)!, request: input, ...plan } } : {}),
       internal: { target_profile_id: target.value.profileId, target_sip: target.value.sipUri, by: actor.profileId,
+        ...(target.value.endpoints.length > 1 ? { endpoints: target.value.endpoints } : {}),
         caller_name: callerName, target_name: target.value.label, caller_display: plan.fromDisplayName ?? null },
       line_label: line?.label ?? null },
   });

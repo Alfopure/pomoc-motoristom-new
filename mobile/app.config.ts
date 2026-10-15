@@ -34,7 +34,7 @@ const config: ExpoConfig = {
   },
   android: { package: "sk.linkapomoci.dispecing" + suffix, blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
     "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.FOREGROUND_SERVICE_LOCATION", "android.permission.ACTIVITY_RECOGNITION", "com.google.android.gms.permission.ACTIVITY_RECOGNITION"] },
-  plugins: ["expo-secure-store", "./plugins/with-draft-secure-store.cjs", ["expo-image-picker", {
+  plugins: ["expo-secure-store", "./plugins/with-draft-secure-store.cjs", ...(voiceProof ? ["./plugins/with-telnyx-reconnect-guard.cjs"] : []), ["expo-image-picker", {
     photosPermission: "Linka pomoci potrebuje prístup k vybranej fotografii na priloženie k prípadu.",
     cameraPermission: "Linka pomoci potrebuje fotoaparát na odfotografovanie prílohy prípadu.",
     microphonePermission: voiceProof ? "Linka pomoci potrebuje mikrofón na telefonovanie." : false,
