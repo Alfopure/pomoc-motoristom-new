@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { measureControlStage, requestStepCount, requestTimingContext } from "@/server/request-metrics";
-import { assertOwnership, firstProviderDispatchAt, guardTiming, measureGuard, ownershipRpc, sessionOwnership, type Ownership } from "../ownership";
+import { assertOwnership, firstProviderDispatchAt, guardTiming, measureGuard, ownershipRpc, sessionOwnership, withTelephonyDatabaseBudget, type Ownership } from "../ownership";
 import { payloadFingerprint } from "../provider-journal";
 import { isDeepStrictEqual } from "node:util";
 
@@ -1719,7 +1719,7 @@ function compensationWouldReopenCall(next: Transition | null | undefined, curren
 
 async function executeReduceResult(
   deps: EffectsDeps,
-  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean; urgentStamps?: UrgentDispatchStamps },
+  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean; urgentStamps?: UrgentDispatchStamps; projectionRecovery?: boolean },
 ): Promise<ApplyResult> {
   const { result } = input;
   let branch: "main" | "rejected" = "main";
@@ -2256,10 +2256,19 @@ async function executeReduceResult(
   // Anything still banked belongs to a run that ended with the list.
   await writeCheckpoint();
 
+  // Provider results and the critical cursor are durable now. History/audit
+  // must not hold the next HOLD/PARK behind a series of 4 s database waits.
+  // An interrupted projection keeps its existing durable recovery obligation.
+  // Recovery gets more room so a healthy-but-slower history write does not
+  // starve forever behind the interactive limit. Its owned deadline still applies.
+  const projectionDeadline = Date.now() + (input.projectionRecovery ? 4_000 : 1_000);
+  const project = <T>(work: () => Promise<T>): Promise<T> => deferProjections
+    ? withTelephonyDatabaseBudget(Math.max(0, projectionDeadline - Date.now()), work) : work();
+
   if (deferProjections && !failure) {
     try {
-      session = await measureControlStage("projection", () => persistTransition(deps, { session: ctx.session, transition, expectedVersion: null, event: input.event,
-        continuation: input.continuation, phase: "projection", deferCallProjectionCheckpoint: true }));
+      session = await project(() => measureControlStage("projection", () => persistTransition(deps, { session: ctx.session, transition, expectedVersion: null, event: input.event,
+        continuation: input.continuation, phase: "projection", deferCallProjectionCheckpoint: true })));
       ctx.session = session;
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
@@ -2291,8 +2300,8 @@ async function executeReduceResult(
     if (!failure && !projectionError && !input.continuation.auditComplete && input.continuation.commands.every((command) => input.continuation!.completedCommands.includes(commandKey(command)))) {
       try {
         const continuation = input.continuation;
-        await measureControlStage("audit", () => recordCallEvent(deps, { session, event: continuation.event, handledStatus: "processed", stateBefore: continuation.stateBefore, stateAfter: session.state,
-          notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) }));
+        await project(() => measureControlStage("audit", () => recordCallEvent(deps, { session, event: continuation.event, handledStatus: "processed", stateBefore: continuation.stateBefore, stateAfter: session.state,
+          notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) })));
         input.continuation.auditComplete = true;
       } catch (error) {
         if (!deferProjections || error instanceof SessionLeaseLostError) throw error;
@@ -2314,7 +2323,7 @@ async function executeReduceResult(
       if (fresh.data) session = fresh.data;
     }
     // Clean transition: close the open command incident (throttled per instance).
-    await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, deps.now());
+    await withTelephonyDatabaseBudget(250, () => recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, deps.now()));
   }
 
   return { session, branch, commands: outcomes, compensations: compensated, failed: failure !== null, failure,
@@ -2385,7 +2394,7 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
   return stamps;
 }
 
-export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps; deferContactChecks?: boolean; contactChecksOnly?: boolean } = {}): Promise<ApplyResult | null> {
+export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps; deferContactChecks?: boolean; contactChecksOnly?: boolean; projectionRecovery?: boolean } = {}): Promise<ApplyResult | null> {
   let latest: ApplyResult | null = null;
   let requested: ApplyResult | null = null;
   const stamps: UrgentDispatchStamps = new Map(options.urgentStamps ?? []);
@@ -2453,7 +2462,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
           // The provider fact is now committed with its accounting obligation;
           // a failure below cannot lose it when the call subsequently ends.
           await executeReduceResult(deps, { session: saved, expectedVersion: saved.version, event: proofEvent,
-            result: { next: proofEntry.transition, commands: [], compensations: [], guard: null, ignored: null }, continuation: proofEntry });
+            result: { next: proofEntry.transition, commands: [], compensations: [], guard: null, ignored: null }, continuation: proofEntry, projectionRecovery: options.projectionRecovery });
         } else if (!verified.retry) await checkpointEffects(deps, session.id, null, current.id, fresh.data);
         else {
           current.attempts += 1;
@@ -2476,8 +2485,11 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     try {
       latest = await executeReduceResult(deps, { session: fresh.data, expectedVersion: fresh.data.version, event: current.event,
         result: { next: current.transition, commands: current.commands, compensations: current.compensations, guard: null, ignored: null },
-        continuation: current, databaseOnly: options.databaseOnly, urgentStamps: stamps });
+        continuation: current, databaseOnly: options.databaseOnly, urgentStamps: stamps, projectionRecovery: options.projectionRecovery });
     } catch (error) {
+      // The durable entry and provider journal already own recovery. Another
+      // checkpoint with an expired owner only hides the original refusal.
+      if (error instanceof SessionLeaseLostError) throw error;
       current.attempts += 1;
       current.lastError = describeError(error);
       await checkpointEffects(deps, session.id, current, current.id, fresh.data);
@@ -2511,6 +2523,7 @@ export async function applyReduceResult(deps: EffectsDeps, input: { session: Ses
       event: current.event, continuation: current, phase: "critical" });
   }
   const result = await resumePendingEffects(deps, staged, { priorityEntryId: input.event.id, teardownPrepared: prepareFacts, urgentStamps,
+    projectionRecovery: input.event.kind === "app" && input.event.type === "sweep",
     deferContactChecks: input.session.writer_contract === 2 && input.event.kind === "app" && input.event.type !== "sweep" });
   if (!result) throw new EffectsError("staged transition missing its continuation");
   return result;

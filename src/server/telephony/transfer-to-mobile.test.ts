@@ -7,7 +7,7 @@ import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness }
 import { blindTransfer, CallActionError, createRateLimiter, listTransferTargets, type CallActionDeps, type CallActor } from "./call-actions";
 
 const o1: CallActor = { profileId: PROFILES.o1, role: "dispatcher", displayName: "Jana" };
-const MOBILE = "+421905123456";
+const MOBILE = "+421905123457"; // Distinct from the inbound caller.
 
 afterEach(() => { vi.unstubAllEnvs(); });
 

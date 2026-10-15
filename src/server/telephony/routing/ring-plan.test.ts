@@ -140,6 +140,17 @@ describe("applyPausedOperatorRouting", () => {
 });
 
 describe("planRingStep", () => {
+  it.each([NUMBERS.customer, "0905 123 456"])("does not ring an inbound caller back through personal or external routing (%s)", callerNumber => {
+    const personal = { kind: "external_number" as const, profileId: PROFILES.o1, ownerProfileId: PROFILES.o1,
+      externalNumber: NUMBERS.customer, position: 0, ringSecs: 20, memberId: "personal" };
+    const external = { ...personal, profileId: null, ownerProfileId: null, memberId: "external" };
+    const step = { ...stepAll, members: [personal, external, ...stepAll.members] };
+    const planned = planRingStep(step, input({ callerNumber, ownedPstnEnabled: true }));
+    expect(planned.attempts.map(attempt => attempt.profileId)).toEqual([PROFILES.o1, PROFILES.o2, PROFILES.o5]);
+    expect(planned.skipped.filter(skip => skip.reason === "caller_loop").map(skip => skip.member.memberId)).toEqual(["personal", "external"]);
+    expect(planRingStep(step, input({ callerNumber: null, ownedPstnEnabled: true })).attempts.some(attempt => attempt.externalNumber === NUMBERS.customer)).toBe(true);
+  });
+
   it("dials every eligible member of an 'all' step and skips offline/paused ones", () => {
     const planned = planRingStep(stepAll, input());
     expect(planned.attempts.map((attempt) => attempt.profileId)).toEqual([PROFILES.o1, PROFILES.o2, PROFILES.o5]);

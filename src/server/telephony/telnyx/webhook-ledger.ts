@@ -5,6 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
 import { recordTelephonyIncident, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { describeServiceError } from "../service-errors";
+import { DATABASE_REQUEST_MS, withTelephonyDatabaseBudget } from "../ownership";
 
 /**
  * Webhook claim ledger (`motorist_telnyx_webhook_events`).
@@ -109,6 +110,7 @@ export async function claimWebhookEvent(client: AdminClient, input: ClaimWebhook
       p_delivery: !input.replay,
       p_correlation: input.replay === "correlation",
     })
+    .abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS))
     .single();
 
   if (error) {
@@ -135,7 +137,7 @@ export function resetClaimLostIncidentThrottle(): void { lastClaimLostIncidentAt
 async function reportClaimLost(client: AdminClient, eventId: string, result: string, now: Date): Promise<void> {
   if (now.getTime() - lastClaimLostIncidentAt < CLAIM_LOST_INCIDENT_INTERVAL_MS) return;
   lastClaimLostIncidentAt = now.getTime();
-  await recordTelephonyIncident(client, { job: TELEPHONY_INCIDENT_JOBS.webhook, error: new Error("webhook_claim_lost"), context: { eventId, result }, now });
+  await withTelephonyDatabaseBudget(250, () => recordTelephonyIncident(client, { job: TELEPHONY_INCIDENT_JOBS.webhook, error: new Error("webhook_claim_lost"), context: { eventId, result }, now }));
 }
 
 async function finish(client: AdminClient, eventId: string, result: "processed" | "deferred" | "awaiting_correlation" | "failed", failure: unknown, options: FinishOptions): Promise<boolean> {
@@ -144,7 +146,7 @@ async function finish(client: AdminClient, eventId: string, result: "processed" 
   const message = failure == null ? null : describeServiceError(failure);
   const { data, error } = await client.rpc("motorist_telnyx_finish_webhook_event_v2", {
     p_event_id: eventId, p_claimed_at: options.claimedAt, p_result: result, p_error: message?.slice(0, 2000) ?? null,
-  });
+  }).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS));
   if (error) throw new WebhookLedgerError(`Could not finish event: ${error.message}`, eventId, error);
   const owned = data === true;
   if (!owned) {
