@@ -1,3 +1,5 @@
+import { browserPerformanceBuild, performanceBuild } from "./performance-metadata";
+
 /** Small, tab-local observations. All clocks are monotonic within pageId only. */
 export type BrowserCallPhase = "ui_first_seen" | "sdk_invite" | "ringtone_start" | "answer_requested" | "sdk_active" | "sdk_ended";
 export type BrowserCallObservation = {
@@ -9,6 +11,7 @@ export type BrowserCallObservation = {
   outcome?: "ok" | "failed" | "cancelled" | "suppressed";
   durationMs?: number;
   answerMode?: "manual" | "automatic";
+  clientBuild?: string;
 };
 
 export const BROWSER_CALL_BATCH_LIMIT = 16;
@@ -34,8 +37,9 @@ export function readBrowserCallObservations(value: unknown): BrowserCallObservat
     ids.add(row.id);
     return [{ id: row.id, pageId: row.pageId, callControlId: row.callControlId, phase: row.phase as BrowserCallPhase, atMs: Math.round(row.atMs),
       ...(["ok", "failed", "cancelled", "suppressed"].includes(String(row.outcome)) ? { outcome: row.outcome as BrowserCallObservation["outcome"] } : {}),
-      ...(typeof row.durationMs === "number" && Number.isFinite(row.durationMs) && row.durationMs >= 0 && row.durationMs <= 120_000 ? { durationMs: Math.round(row.durationMs) } : {}),
+      ...(typeof row.durationMs === "number" && Number.isFinite(row.durationMs) && row.durationMs >= 0 && row.durationMs <= Number.MAX_SAFE_INTEGER ? { durationMs: Math.round(row.durationMs) } : {}),
       ...(row.answerMode === "manual" || row.answerMode === "automatic" ? { answerMode: row.answerMode } : {}),
+      ...(performanceBuild(row.clientBuild) ? { clientBuild: row.clientBuild as string } : {}),
     }];
   });
 }
@@ -55,11 +59,14 @@ export class BrowserCallTelemetry {
   record(callControlId: string | undefined, phase: BrowserCallPhase, details: Pick<BrowserCallObservation, "outcome" | "durationMs" | "answerMode"> = {}, atMs = this.now()): void {
     if (!callControlId || !CONTROL_ID.test(callControlId)) return;
     const key = `${callControlId}:${phase}:${details.outcome ?? ""}:${details.answerMode ?? ""}`;
-    if (this.seen.has(key)) return;
-    this.seen.add(key);
+    // A failed SDK answer can be retried by the user on this same leg. Dropping
+    // the second request would turn the human retry delay into "answer latency".
+    // SDK notification repeats still deduplicate; each actual answer attempt survives.
+    if (phase !== "answer_requested" && this.seen.has(key)) return;
+    if (phase !== "answer_requested") this.seen.add(key);
     if (this.seen.size > MEMORY_LIMIT) this.seen.delete(this.seen.values().next().value!);
     const id = this.uuid();
-    this.pending.push({ id, pageId: this.pageId, callControlId, phase, atMs, ...details });
+    this.pending.push({ id, pageId: this.pageId, callControlId, phase, atMs, ...details, clientBuild: browserPerformanceBuild() });
     this.queuedAt.set(id, this.now());
     if (this.pending.length > BUFFER_LIMIT) { this.queuedAt.delete(this.pending.shift()!.id); this.dropped++; }
   }

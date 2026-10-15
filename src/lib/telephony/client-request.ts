@@ -93,6 +93,7 @@ export async function telephonyFetch(
   const finishTiming = beginBrowserCallStep("request", { operationId });
   const controller = new AbortController();
   let timedOut = false;
+  let responseContext: { status?: number; requestId?: string; requestBuild?: string } = {};
   const onCallerAbort = () => controller.abort();
   callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
   const timer = schedule(() => {
@@ -111,15 +112,17 @@ export async function telephonyFetch(
       headers: isMobileApp() && input.startsWith("/api/telephony/") ? { ...Object.fromEntries(new Headers(rest.headers)), "x-pm-phone-kind": "mobile" } : rest.headers,
       signal: controller.signal,
     });
+    responseContext = { status: response.status, requestId: response.headers.get("x-request-id") ?? undefined,
+      requestBuild: response.headers.get("x-app-version") ?? undefined };
     // Every caller consumes a finite API response. Keep the deadline alive
     // through the body: fetch() alone resolves as soon as headers arrive.
     const body = response.body ? await readBoundedBody(response.body, controller.signal) : null;
     if (controller.signal.aborted) throw abortError();
-    finishPerformance({ outcome: response.status === 202 ? "accepted" : response.ok ? "ok" : "failed", status: response.status, requestId: response.headers.get("x-request-id") ?? undefined });
+    finishPerformance({ ...responseContext, outcome: response.status === 202 ? "accepted" : response.ok ? "ok" : "failed" });
     finishTiming({ outcome: response.ok ? "ok" : "failed", requestId: response.headers.get("x-request-id") });
     return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   } catch (error) {
-    finishPerformance({ outcome: callerSignal?.aborted ? "cancelled" : timedOut ? "timeout" : "failed" });
+    finishPerformance({ ...responseContext, outcome: callerSignal?.aborted ? "cancelled" : timedOut ? "timeout" : "failed" });
     finishTiming({ outcome: callerSignal?.aborted ? "cancelled" : "failed" });
     // Keep caller cancellation distinguishable if it races the timer.
     if (callerSignal?.aborted) throw abortError();
