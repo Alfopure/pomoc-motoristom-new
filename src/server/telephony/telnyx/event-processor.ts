@@ -420,6 +420,19 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     return done({ ...identity, status: 200, outcome: "unverified_connection" });
   }
 
+  // Speaker changes have no reducer, recording or call-accounting effects.
+  // During one PARK they generated repeated claim/correlation/audit/finish DB
+  // work competing with the actual control. Keep a bounded runtime observation
+  // after signature (route) and exact connection verification, without a DB
+  // journal or sweep. Existing ledger rows still follow their completion path.
+  if (event.type === "conference.floor.changed" && !deps.ledgerReplay && event.connectionId && allowed.has(event.connectionId)) {
+    try { deps.logger?.({ scope: "voice-activity", code: "conference_floor_changed", eventId: event.id,
+      occurredAt: event.occurredAt, conferenceId: event.conferenceId, callControlId: event.callControlId,
+      sessionHint: event.clientState?.sid ?? null, sessionVerified: false }); }
+    catch { /* Optional observation must not cause provider retries. */ }
+    return done({ ...identity, status: 200, outcome: "ignored", notes: ["voice activity observed without database writes"] });
+  }
+
   const claim = await claimWebhookEvent(deps.admin, {
     eventId: event.id,
     eventType: event.type,
