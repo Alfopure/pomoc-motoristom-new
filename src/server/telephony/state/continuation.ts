@@ -1,8 +1,8 @@
-import { measureRequestStep } from "@/server/request-metrics";
+import { measureControlStage, measureRequestStep } from "@/server/request-metrics";
 import type { Json } from "@/lib/supabase/database.types";
 import type { EffectsDeps } from "./effects";
 import { isSessionLeaseLost, SessionConflictError, SessionEventDeferredError, SessionLeaseLostError } from "../service-errors";
-import { measureGuard, sessionOwnership } from "../ownership";
+import { measureGuard, sessionOwnership, withTelephonyDatabaseBudget } from "../ownership";
 import { isPausedWithoutCall } from "../routing/reservation";
 import { commandKey, readMeta, toJson, type Command, type Compensation, type ReduceResult, type SessionEvent, type SessionRow, type Transition } from "./types";
 
@@ -142,9 +142,37 @@ export async function stageEffects(deps: EffectsDeps, input: { session: SessionR
   });
   // Reservation and staging are atomic in this RPC; report the combined time.
   let result: Awaited<ReturnType<typeof stage>>;
-  try { result = await (guard ? measureGuard("guard_stage_ms", () => measureRequestStep("guard.stage", stage)) : stage()); }
-  catch (error) { throw stagingFailure(error); }
-  if (result.error) throw stagingFailure(result.error);
+  try {
+    result = await (guard ? measureGuard("guard_stage_ms", () => measureRequestStep("guard.stage", stage)) : stage());
+    if (result.error) throw result.error;
+  } catch (error) {
+    const failure = stagingFailure(error);
+    const owner = sessionOwnership.getStore();
+    // An interactive action has no provider inbox to redeliver it. A timed-out
+    // response can leave its committed intent waiting until the next hangup.
+    // Read back once, under the SAME owner, without repeating the mutation or
+    // extending the normal deadline. Dispatch only the exact durable entry.
+    if (failure instanceof SessionEventDeferredError && !isSessionLeaseLost(error) &&
+      input.event.kind === "app" && ["hold", "unhold", "park"].includes(input.event.type) &&
+      owner?.contract === 2 && owner.admin === deps.admin && owner.sessionId === input.session.id && owner.organizationId === deps.organizationId) {
+      try {
+        const fresh = await withTelephonyDatabaseBudget(1_000, () => measureControlStage("staging_reconcile", async () =>
+          await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", input.session.id).single()));
+        const row = fresh.data;
+        const entry = row && readPendingEffects(row).entries.find(item => item.id === input.event.id);
+        if (!fresh.error && row?.writer_contract === 2 && row.lease_token === owner.token && row.ownership_generation === owner.generation &&
+          row.lease_until && Date.parse(row.lease_until) > deps.now().getTime() && Date.now() < owner.deadline &&
+          !row.ended_at && !row.termination_requested_at && entry?.branch === "main" && entry.generation === main.entry.generation &&
+          effectGeneration(row) === entry.generation && entry.event.kind === "app" && entry.event.type === input.event.type &&
+          entry.event.actorProfileId === input.event.actorProfileId) {
+          try { deps.logger?.({ scope: "effects", code: "staging_response_recovered", sessionId: row.id, eventId: input.event.id }); }
+          catch { /* Optional diagnostics cannot undo proven recovery. */ }
+          return row;
+        }
+      } catch { /* An unavailable/mismatched read is not proof that staging succeeded. */ }
+    }
+    throw failure;
+  }
   const response = result.data as { applied?: boolean; session?: SessionRow } | null;
   if (response?.applied === false) throw new SessionConflictError(input.session.id, input.expectedVersion);
   if (!response?.session) throw new Error("Transition staging returned no session");
