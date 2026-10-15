@@ -16,7 +16,7 @@ export const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: 10 },
   card: { backgroundColor: colors.white, padding: 20, borderRadius: 24, borderWidth: 1, borderColor: colors.border, gap: 10 },
   button: { backgroundColor: colors.ink, borderRadius: 17, padding: 16, minHeight: 52, alignItems: "center", justifyContent: "center" },
-  buttonText: { color: colors.white, fontSize: 16, fontWeight: "600" },
+  buttonText: { color: colors.white, fontSize: 16, fontWeight: "600", maxWidth: "100%", textAlign: "center" },
   secondary: { backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
   secondaryText: { color: colors.ink },
   disabled: { backgroundColor: "#D4D4D8" },

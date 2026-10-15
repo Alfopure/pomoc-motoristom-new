@@ -6,6 +6,30 @@ const config = { environment: "test" as const, apiOrigin: "https://test.dispecin
 const scope = { ok: true, apiVersion: 1, environment: "test", profileId: "profile", checkedAt: "2026-10-11T12:00:00Z" };
 const me = { ...scope, profile: { id: "profile", displayName: "Test", email: null, role: "dispatcher" }, capabilities: { voice: false, presenceWrite: false } };
 describe("native API transport", () => {
+  it("searches the scoped colleague directory by GET without registering a device", async () => {
+    const row = { profileId: "00000000-0000-4000-8000-000000000001", displayName: "Jana", status: "paused", canCall: true, reason: null };
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, colleagues: [row], hasMore: false }));
+    const value = await createMobileApi(config, async () => "token", transport).voiceColleagues("profile", " Jana ");
+    expect(value.colleagues).toEqual([row]);
+    expect(transport).toHaveBeenCalledWith(config.apiOrigin + "/api/mobile/v1/voice/colleagues?q=Jana", expect.objectContaining({ method: "GET", credentials: "omit" }));
+  });
+  it.each([
+    { profileId: "invalid" }, { displayName: "" }, { displayName: "x".repeat(121) }, { displayName: "Jana\nNew" },
+    { status: "unknown" }, { canCall: "true" }, { canCall: true, reason: "busy" }, { status: "offline", canCall: true },
+    { canCall: false, reason: null }, { reason: "unknown" },
+    { status: ["available"] }, { canCall: false, reason: ["offline"] },
+  ])("rejects an unsafe colleague row %#", async changes => {
+    const row = { profileId: "00000000-0000-4000-8000-000000000001", displayName: "Jana", status: "available", canCall: true, reason: null, ...changes };
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, colleagues: [row], hasMore: false }));
+    await expect(createMobileApi(config, async () => "token", transport).voiceColleagues("profile", "")).rejects.toMatchObject({ status: 502 });
+  });
+  it("refuses duplicate directory identities and malformed pagination or scope", async () => {
+    const row = { profileId: "00000000-0000-4000-8000-000000000001", displayName: "Jana", status: "available", canCall: true, reason: null };
+    for (const change of [{ colleagues: [row, row] }, { colleagues: Array.from({ length: 51 }, () => row) }, { hasMore: "false" }, { environment: "production" }, { profileId: "other" }]) {
+      const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, colleagues: [row], hasMore: false, ...change }));
+      await expect(createMobileApi(config, async () => "token", transport).voiceColleagues("profile", "")).rejects.toMatchObject({ status: 502 });
+    }
+  });
   it("reads phone configuration without registering a phone or sending cookies", async () => {
     const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, nativeCallingEnabled: false, backgroundIncomingEnabled: false }));
     const result = await createMobileApi(config, async () => "current-token", transport).voiceReadiness("profile");
@@ -38,6 +62,22 @@ describe("native API transport", () => {
   it("cannot enable a missing native phone engine through a backend flag", async () => {
     const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...me, capabilities: { voice: true, presenceWrite: true } }));
     await expect(createMobileApi(config, async () => "token", transport).me()).rejects.toMatchObject({ status: 502 });
+  });
+  it("rejects array-valued profile and presence enums", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValueOnce(Response.json({ ...me, profile: { ...me.profile, role: ["dispatcher"] } }))
+      .mockResolvedValueOnce(Response.json({ ...scope, presence: { status: ["available"], since: null }, activeCalls: [], capabilities: me.capabilities }));
+    const api = createMobileApi(config, async () => "token", transport);
+    await expect(api.me()).rejects.toMatchObject({ status: 502 });
+    await expect(api.console("profile")).rejects.toMatchObject({ status: 502 });
+  });
+  it("rejects array-valued call directions before exposing history or active calls", async () => {
+    const call = { id: "call", direction: ["internal"], number: "+421900000001", name: "Kolega", startedAt: scope.checkedAt,
+      status: "completed", state: "bridged", lineLabel: "Dispečing", operatorName: null, answeredAt: null, endedAt: null, durationSeconds: null };
+    const transport = vi.fn<MobileTransport>().mockResolvedValueOnce(Response.json({ ...scope, calls: [call], nextCursor: null }))
+      .mockResolvedValueOnce(Response.json({ ...scope, presence: { status: "available", since: null }, activeCalls: [call], capabilities: me.capabilities }));
+    const api = createMobileApi(config, async () => "token", transport);
+    await expect(api.history("profile", { category: "all", q: "" })).rejects.toMatchObject({ status: 502 });
+    await expect(api.console("profile")).rejects.toMatchObject({ status: 502 });
   });
   it("preserves the exact next-page cursor and applies filters on the server", async () => {
     const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, calls: [], nextCursor: null }));

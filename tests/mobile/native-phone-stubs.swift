@@ -28,7 +28,7 @@ class PKPushRegistry { weak var delegate: PKPushRegistryDelegate?; var desiredPu
 class PKPushCredentials { var token = Data() }
 class PKPushPayload { var dictionaryPayload: [String: Any]; init(_ data: [String: Any]) { dictionaryPayload = data } }
 protocol CXProviderDelegate: AnyObject {}
-class CXHandle { enum HandleType: Hashable { case phoneNumber, generic }; init(type: HandleType, value: String) {} }
+class CXHandle { enum HandleType: Hashable { case phoneNumber, generic }; let type: HandleType; let value: String; init(type: HandleType, value: String) { self.type = type; self.value = value } }
 class CXProviderConfiguration { var supportsVideo = false; var supportedHandleTypes: Set<CXHandle.HandleType> = []; var maximumCallGroups = 1; var maximumCallsPerCallGroup = 1 }
 enum CXCallEndedReason { case failed, remoteEnded }
 class CXCallUpdate { var remoteHandle: CXHandle?; var localizedCallerName: String?; var hasVideo = false; var supportsHolding = false; var supportsGrouping = false; var supportsUngrouping = false }
@@ -36,11 +36,11 @@ class CXAction { var isComplete = false; var fulfills = 0; var failures = 0; fun
 class CXCallAction: CXAction { let callUUID: UUID; init(call: UUID) { callUUID = call } }
 class CXAnswerCallAction: CXCallAction {}
 class CXEndCallAction: CXCallAction {}
-class CXStartCallAction: CXCallAction { init(call: UUID, handle: CXHandle) { super.init(call: call) } }
+class CXStartCallAction: CXCallAction { let handle: CXHandle; init(call: UUID, handle: CXHandle) { self.handle = handle; super.init(call: call) } }
 class CXSetMutedCallAction: CXCallAction { let isMuted: Bool; init(call: UUID, muted: Bool) { isMuted = muted; super.init(call: call) } }
 class CXTransaction { let action: CXAction; init(action: CXAction) { self.action = action } }
-class CXCallController { func request(_ transaction: CXTransaction, completion: @escaping (Error?) -> Void) { completion(nil) } }
-class CXProvider { static var last: CXProvider!; init(configuration: CXProviderConfiguration) { Self.last = self }; func setDelegate(_ delegate: CXProviderDelegate, queue: DispatchQueue) {}; func reportNewIncomingCall(with: UUID, update: CXCallUpdate, completion: @escaping (Error?) -> Void) { completion(nil) }; func reportCall(with: UUID, endedAt: Date, reason: CXCallEndedReason) {}; func reportOutgoingCall(with: UUID, startedConnectingAt: Date) {}; func reportOutgoingCall(with: UUID, connectedAt: Date) {} }
+class CXCallController { static var transactions: [CXTransaction] = []; func request(_ transaction: CXTransaction, completion: @escaping (Error?) -> Void) { Self.transactions.append(transaction); completion(nil) } }
+class CXProvider { static var last: CXProvider!; let configuration: CXProviderConfiguration; init(configuration: CXProviderConfiguration) { self.configuration = configuration; Self.last = self }; func setDelegate(_ delegate: CXProviderDelegate, queue: DispatchQueue) {}; func reportNewIncomingCall(with: UUID, update: CXCallUpdate, completion: @escaping (Error?) -> Void) { completion(nil) }; func reportCall(with: UUID, endedAt: Date, reason: CXCallEndedReason) {}; func reportOutgoingCall(with: UUID, startedConnectingAt: Date) {}; func reportOutgoingCall(with: UUID, connectedAt: Date) {} }
 struct CallTerminationReason: Equatable {}
 enum CallState: Equatable { case NEW, CONNECTING, RINGING, ACTIVE, HELD; case DONE(reason: CallTerminationReason? = nil), RECONNECTING(reason: Reason), DROPPED(reason: Reason); enum Reason { case networkSwitch, networkLost } }
 struct CallInfo { let callId: UUID; var callerNumber: String? = "fixture"; var callerName: String? = "fixture" }

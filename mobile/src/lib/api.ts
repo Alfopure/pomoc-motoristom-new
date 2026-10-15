@@ -1,4 +1,4 @@
-import type { MobileConsole, MobileDraftScope, MobileHistory, MobileMe, MobileScope, MobileVoiceReadiness } from "../../../src/lib/mobile-api";
+import type { MobileConsole, MobileDraftScope, MobileHistory, MobileMe, MobileScope, MobileVoiceReadiness, MobileVoiceColleagues } from "../../../src/lib/mobile-api";
 import type { MobileConfig } from "./config";
 import { draftDate } from "../drafts/port";
 
@@ -39,7 +39,7 @@ function capabilities(value: unknown) {
 }
 function callFields(value: unknown) {
   const call = object(value);
-  if (!text(call.id) || !["inbound", "outbound", "internal"].includes(String(call.direction))
+  if (!text(call.id) || !text(call.direction) || !["inbound", "outbound", "internal"].includes(call.direction)
     || !nullableText(call.number) || !nullableText(call.name) || !text(call.startedAt)) throw contractError();
   return call;
 }
@@ -71,6 +71,26 @@ export function createMobileApi(config: MobileConfig, getToken: TokenGetter, tra
     } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
   }
   return {
+    voiceColleagues: async (profileId: string, query: string, signal?: AbortSignal): Promise<MobileVoiceColleagues> => {
+      const q = query.trim();
+      if (q.length > 80) throw new MobileApiError("Vyhľadávanie môže mať najviac 80 znakov.", 400);
+      const body = object(await read("voice/colleagues?" + new URLSearchParams({ q }), signal));
+      scope(body, config, profileId);
+      if (!Array.isArray(body.colleagues) || body.colleagues.length > 50 || typeof body.hasMore !== "boolean") throw contractError();
+      const seen = new Set<string>();
+      for (const value of body.colleagues) {
+        const row = object(value);
+        if (!text(row.profileId) || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(row.profileId)
+          || row.profileId === profileId || seen.has(row.profileId) || !text(row.displayName) || !row.displayName.trim()
+          || row.displayName.length > 120 || row.displayName.trim() !== row.displayName || /[\u0000-\u001f\u007f]/.test(row.displayName)
+          || !text(row.status) || !["available", "paused", "busy", "offline"].includes(row.status) || typeof row.canCall !== "boolean"
+          || !(row.reason === null || text(row.reason) && ["busy", "wrap_up", "offline", "no_phone", "personal_mobile"].includes(row.reason))
+          || row.canCall && (row.reason !== null || !["available", "paused"].includes(row.status))
+          || !row.canCall && row.reason === null) throw contractError();
+        seen.add(row.profileId);
+      }
+      return body as MobileVoiceColleagues;
+    },
     voiceReadiness: async (profileId: string, signal?: AbortSignal): Promise<MobileVoiceReadiness> => {
       const body = object(await read("voice/readiness", signal));
       scope(body, config, profileId);
@@ -90,7 +110,7 @@ export function createMobileApi(config: MobileConfig, getToken: TokenGetter, tra
       scope(body, config);
       const profile = object(body.profile);
       if (profile.id !== body.profileId || !text(profile.displayName) || !nullableText(profile.email)
-        || !["dispatcher", "senior_dispatcher", "manager", "admin"].includes(String(profile.role))) throw contractError();
+        || !text(profile.role) || !["dispatcher", "senior_dispatcher", "manager", "admin"].includes(profile.role)) throw contractError();
       capabilities(body.capabilities);
       return body as MobileMe;
     },
@@ -98,7 +118,7 @@ export function createMobileApi(config: MobileConfig, getToken: TokenGetter, tra
       const body = object(await read("console", signal));
       scope(body, config, profileId);
       const presence = object(body.presence);
-      if (!["available", "paused", "offline", "ringing", "on_call", "after_call_work"].includes(String(presence.status)) || !nullableText(presence.since)
+      if (!text(presence.status) || !["available", "paused", "offline", "ringing", "on_call", "after_call_work"].includes(presence.status) || !nullableText(presence.since)
         || !Array.isArray(body.activeCalls) || body.activeCalls.length > 100) throw contractError();
       for (const value of body.activeCalls) {
         const call = callFields(value);

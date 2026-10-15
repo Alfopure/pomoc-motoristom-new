@@ -45,7 +45,8 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   private var established = Set<UUID>()
   private var pendingAnswers = [UUID: CXAnswerCallAction]()
   private var answering = [UUID: CXCallAction]()
-  private var expected: (controlId: String, sessionId: String, number: String)?
+  private var expected: (controlId: String, sessionId: String, number: String, handleType: CXHandle.HandleType)?
+  private var outgoingLabels = [UUID: String]()
   private var outbound = Set<UUID>()
   private var connectedOutbound = Set<UUID>()
   private var outgoingTimer: Timer?
@@ -142,7 +143,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     return ["ready": ready, "audioActive": audioActive, "microphonePermission": microphonePermission(), "preparedPushCallId": preparedPush?.uuidString as Any? ?? NSNull(), "pushRegistered": pushToken != nil && pushToken == registeredPushToken && ready,
      "wasEnabled": UserDefaults.standard.bool(forKey: "linka.voice.enabled"), "calls": Array(calls.keys).compactMap { id -> [String: Any]? in
        guard let session = sessions[id], let call = currentCall(id) ?? (recoveryTimers[id] != nil ? calls[id] : nil) else { return nil }
-       return ["type": "restored", "callId": id.uuidString, "sessionId": session, "number": call.callInfo?.callerNumber ?? "",
+       return ["type": "restored", "callId": id.uuidString, "sessionId": session, "number": outgoingLabels[id] ?? call.callInfo?.callerNumber ?? "",
          "state": recoveryTimers[id] != nil ? "RECONNECTING" : stateName(call.callState), "outgoing": outbound.contains(id)]
      }, "pending": pushes.map { id, metadata in
       ["type": "push", "callId": id.uuidString, "providerLegId": metadata["telnyx_leg_id"] as? String ?? ""]
@@ -169,9 +170,9 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     if let call = currentCall(id) { handleAuthorized(call, id: id) }
   }
 
-  func expectOutgoing(controlId: String, sessionId: String, number: String) throws {
+  func expectOutgoing(controlId: String, sessionId: String, number: String, genericHandle: Bool = false) throws {
     guard Self.enabled, ready, expected == nil, UUID(uuidString: sessionId) != nil else { throw PhoneError() }
-    expected = (controlId, sessionId, number)
+    expected = (controlId, sessionId, genericHandle ? String(number.prefix(120)) : number, genericHandle ? .generic : .phoneNumber)
     outgoingTimer?.invalidate()
     outgoingTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
       guard let self, self.expected?.controlId == controlId else { return }
@@ -190,8 +191,9 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       guard !reported.contains(id) else { return }
       expected = nil; outgoingTimer?.invalidate(); outgoingTimer = nil; outbound.insert(id); reported.insert(id)
       expireUnanswered(id)
+      if attempt.handleType == .generic { outgoingLabels[id] = attempt.number }
       emit(["type": "outgoing", "callId": id.uuidString, "sessionId": attempt.sessionId, "number": attempt.number])
-      let action = CXStartCallAction(call: id, handle: CXHandle(type: .phoneNumber, value: attempt.number))
+      let action = CXStartCallAction(call: id, handle: CXHandle(type: attempt.handleType, value: attempt.number))
       controller.request(CXTransaction(action: action)) { [weak self] error in
         guard let self else { return }
         if error != nil { DispatchQueue.main.async { self.reject(callId: id.uuidString) } }
@@ -278,7 +280,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     finishedCalls.append(id); if finishedCalls.count > 50 { finishedCalls.removeFirst() }
     let session = sessions.removeValue(forKey: id)
     let wasOutgoing = outbound.remove(id) != nil
-    connectedOutbound.remove(id)
+    connectedOutbound.remove(id); outgoingLabels.removeValue(forKey: id)
     emit(["type": "ended", "callId": id.uuidString, "sessionId": session ?? "", "outgoing": wasOutgoing])
   }
 

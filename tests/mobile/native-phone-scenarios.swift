@@ -171,6 +171,45 @@ for mismatch in ["leg", "control"] {
   check("definitive ATTACH \(mismatch) mismatch cannot masquerade as temporary absence", (owner.snapshot()["calls"] as? [[String: Any]])?.isEmpty == true)
   owner.disconnect()
 }
+// Exercise actual outgoing-handle construction, never an emulated handle factory.
+for generic in [false, true] {
+  let owner = phone(), id = UUID()
+  var outgoingEvents: [[String: Any]] = []
+  owner.listen(owner: UUID()) { event in if event["type"] as? String == "outgoing" { outgoingEvents.append(event) } }
+  CXCallController.transactions = []
+  let label = generic ? "Kolega Žaneta " + String(repeating: "á", count: 140) : "+421900000123"
+  let expectedLabel = generic ? String(label.prefix(120)) : label
+  try! fixtureExpectOutgoing(owner, controlId: "fixture-control", sessionId: session, number: label, genericHandle: generic)
+  check("outgoing expectation does not create SDK call or CallKit start \(generic)", TxClient.last.registry.isEmpty && CXCallController.transactions.isEmpty)
+  let call = incoming(owner, id)
+  let starts = CXCallController.transactions.compactMap { $0.action as? CXStartCallAction }
+  check("actual outgoing handle kind \(generic)", starts.count == 1 && starts.first?.handle.type == (generic ? .generic : .phoneNumber))
+  check("actual outgoing handle bounded display label \(generic)", starts.first?.handle.value == expectedLabel)
+  check("outgoing event preserves display label \(generic)", outgoingEvents.first?["number"] as? String == expectedLabel)
+  if generic {
+    check("generic outgoing snapshot preserves peer label", (owner.snapshot()["calls"] as? [[String: Any]])?.first?["number"] as? String == expectedLabel)
+  }
+  check("outgoing handle does not answer before CallKit action \(generic)", call.answerCount == 0)
+  check("provider supports both explicit handle kinds \(generic)", CXProvider.last.configuration.supportedHandleTypes == [.generic, .phoneNumber])
+  owner.disconnect()
+  check("outgoing label removed with call on disconnect \(generic)", (owner.snapshot()["calls"] as? [[String: Any]])?.isEmpty == true)
+}
+do {
+  let owner = phone(); CXCallController.transactions = []
+  try! owner.expectOutgoing(controlId: "fixture-control", sessionId: session, number: "+421900000123")
+  _ = incoming(owner)
+  check("omitted generic flag retains external phoneNumber handle", (CXCallController.transactions.first?.action as? CXStartCallAction)?.handle.type == .phoneNumber)
+  owner.disconnect()
+}
+for mismatch in ["control", "session"] {
+  let owner = phone(), id = UUID(); CXCallController.transactions = []
+  try! fixtureExpectOutgoing(owner, controlId: "fixture-control", sessionId: session, number: "Kolega", genericHandle: true)
+  let call = Call(id, leg: UUID()); TxClient.last.registry[id] = call; owner.onIncomingCall(call: call)
+  try! owner.authorize(callId: id.uuidString, sessionId: mismatch == "session" ? UUID().uuidString : session,
+    controlId: mismatch == "control" ? "other-control" : "fixture-control")
+  check("mismatched \(mismatch) cannot start colleague handle", !CXCallController.transactions.contains { $0.action is CXStartCallAction } && call.answerCount == 0)
+  owner.disconnect()
+}
 let passed = checks.allSatisfy { $0["pass"] as? Bool == true }
 let report: [String: Any] = ["kind": "actual-LinkaPhone-methods-controlled-frameworks", "passed": passed, "checks": checks, "physicalDevice": false, "sdkNetworkingExecuted": false]
 print(String(data: try! JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), encoding: .utf8)!)

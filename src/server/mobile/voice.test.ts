@@ -268,3 +268,51 @@ describe("native pending transfer ownership", () => {
   });
 
 });
+
+
+describe("native internal offer party contract", () => {
+  it.each(["caller", "callee"] as const)("derives the exact internal %s and safe peer display", async role => {
+    const f = fixture();
+    f.h.db.update("motorist_call_sessions", { direction: "internal", metadata: { environment: "development", internal: {
+      by: role === "caller" ? actor.profileId : PROFILES.o2, target_profile_id: role === "callee" ? actor.profileId : PROFILES.o2,
+      caller_name: "Caller", target_name: "Colleague" } } }, () => true);
+    f.h.db.update("motorist_call_legs", { client_state: { intent: role === "caller" ? "internal_caller" : "internal" } }, () => true);
+    expect(await authorizeNativeOffer(f.deps, actor, f.offer)).toMatchObject({ role, displayName: role === "caller" ? "Colleague" : "Caller", number: null });
+  });
+  it.each(["internal_caller", "internal"])("rejects mismatched internal party identity for %s", async intent => {
+    const f = fixture();
+    f.h.db.update("motorist_call_sessions", { direction: "internal", metadata: { environment: "development", internal: { by: PROFILES.o2, target_profile_id: PROFILES.o3 } } }, () => true);
+    f.h.db.update("motorist_call_legs", { client_state: { intent } }, () => true);
+    await expect(authorizeNativeOffer(f.deps, actor, f.offer)).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+
+describe("native offer role fail-closed boundaries", () => {
+  it.each(["internal", "ring", "transfer", null])("never grants caller role to a different intent %s", async intent => {
+    const f = fixture();
+    f.h.db.update("motorist_call_sessions", { direction: "internal", metadata: { environment: "development", internal: { by: actor.profileId, target_profile_id: PROFILES.o2 } } }, () => true);
+    f.h.db.update("motorist_call_legs", { client_state: { intent } }, () => true);
+    await expect(authorizeNativeOffer(f.deps, actor, f.offer)).rejects.toMatchObject({ status: 409 });
+  });
+  it.each([undefined, "not-a-profile", actor.profileId])("rejects an incomplete or self-referential peer %s", async peer => {
+    const f = fixture();
+    f.h.db.update("motorist_call_sessions", { direction: "internal", metadata: { environment: "development", internal: { by: actor.profileId, target_profile_id: peer } } }, () => true);
+    f.h.db.update("motorist_call_legs", { client_state: { intent: "internal_caller" } }, () => true);
+    await expect(authorizeNativeOffer(f.deps, actor, f.offer)).rejects.toMatchObject({ status: 409 });
+  });
+  it.each([["outbound", "caller"], ["inbound", "callee"]])("retains the external %s number and explicit %s role", async (direction, role) => {
+    const f = fixture(); f.h.db.update("motorist_call_sessions", { direction, called_number: "+421905555555" }, () => true);
+    expect(await authorizeNativeOffer(f.deps, actor, f.offer)).toMatchObject({ role, displayName: null, number: direction === "outbound" ? "+421905555555" : "+421900000001" });
+  });
+});
+
+
+describe("internal offer safe peer label", () => {
+  it.each([[undefined, "Kolega"], ["  Ja\nna  ", "Jana"], ["x".repeat(130), "x".repeat(120)]])("uses safe presentation independently of authority: %j", async (name, expected) => {
+    const f = fixture();
+    f.h.db.update("motorist_call_sessions", { direction: "internal", metadata: { environment: "development", internal: { by: PROFILES.o2, target_profile_id: actor.profileId, caller_name: name } } }, () => true);
+    f.h.db.update("motorist_call_legs", { client_state: { intent: "internal" } }, () => true);
+    expect(await authorizeNativeOffer(f.deps, actor, f.offer)).toMatchObject({ role: "callee", displayName: expected, number: null });
+  });
+});

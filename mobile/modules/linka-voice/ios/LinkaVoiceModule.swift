@@ -27,8 +27,8 @@ public final class LinkaVoiceModule: Module {
     AsyncFunction("authorize") { (callId: String, sessionId: String, controlId: String) in try LinkaPhone.shared.authorize(callId: callId, sessionId: sessionId, controlId: controlId) }.runOnQueue(.main)
     AsyncFunction("reject") { (callId: String) in LinkaPhone.shared.reject(callId: callId) }.runOnQueue(.main)
     AsyncFunction("answer") { (callId: String) in try LinkaPhone.shared.answer(callId: callId) }.runOnQueue(.main)
-    AsyncFunction("expectOutgoing") { (controlId: String, sessionId: String, number: String) in
-      try LinkaPhone.shared.expectOutgoing(controlId: controlId, sessionId: sessionId, number: number)
+    AsyncFunction("expectOutgoing") { (controlId: String, sessionId: String, number: String, genericHandle: Bool) in
+      try LinkaPhone.shared.expectOutgoing(controlId: controlId, sessionId: sessionId, number: number, genericHandle: genericHandle)
     }.runOnQueue(.main)
     AsyncFunction("confirmConnected") { (callId: String) in LinkaPhone.shared.confirmConnected(callId: callId) }.runOnQueue(.main)
     AsyncFunction("end") { LinkaPhone.shared.end() }.runOnQueue(.main)

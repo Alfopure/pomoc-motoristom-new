@@ -5,9 +5,9 @@ import type { MobileVoiceReadiness } from "../../../src/lib/mobile-api";
 
 const now = Date.parse("2026-10-15T13:00:00Z");
 const configuration: MobileVoiceReadiness = { ok: true, apiVersion: 1, environment: "test", profileId: "operator", checkedAt: new Date(now).toISOString(), nativeCallingEnabled: true, backgroundIncomingEnabled: true };
-const state: PhoneState = { supported: true, registration: "registered", takeoverRequired: false, call: null, termination: null, dialing: false,
+const state: PhoneState = { supported: true, registration: "registered", takeoverRequired: false, call: null, termination: null, dialing: false, cancelingAttempt: false,
   audioActive: false, muted: false, speaker: false, error: null, microphonePermission: "granted", pushRegistered: true,
-  lastHeartbeatAt: new Date(now).toISOString(), heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryNumber: null };
+  lastHeartbeatAt: new Date(now).toISOString(), heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null };
 const inspect = (changes: Partial<PhoneState> = {}, options: Partial<Parameters<typeof phoneReadiness>[0]> = {}) => phoneReadiness({ state: { ...state, ...changes }, configuration, presence: "available", now, ...options });
 
 describe("operator phone readiness", () => {
@@ -43,7 +43,7 @@ describe("operator phone readiness", () => {
     }
   });
   it("offers ordinary reconnect for an uncertain request, while keeping takeover blocked", () => {
-    const result = inspect({ registration: "error", retryNumber: "+421900000002", takeoverRequired: true });
+    const result = inspect({ registration: "error", retryTarget: { kind: "external", number: "+421900000002" }, takeoverRequired: true });
     expect(result.canConnect).toBe(true); expect(result.canTakeover).toBe(false);
     expect(result.message).toContain("druhom zariadení");
   });
