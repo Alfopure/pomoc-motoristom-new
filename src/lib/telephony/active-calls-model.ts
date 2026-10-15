@@ -55,7 +55,10 @@ export type ActiveCallLegPayload = {
   supervisorMode: string | null;
 };
 
+export type CallControlProgress = { action: "hold" | "unhold" | "park"; startedAt: string; failed: boolean };
+
 export type ActiveCallPayload = {
+  controlPending?: CallControlProgress | null;
   audioConnection?: AudioConnectionView | null;
   sessionId: string;
   /** `motorist_calls.id` of the log row (link-case / outcome), null until it exists. */
@@ -232,6 +235,7 @@ export function callCenterCallFromActive(
 export type PhoneBarCallKind = "active" | "offer" | "waiting";
 
 export type PhoneBarCall = {
+  controlPending?: CallControlProgress | null;
   /** Frozen waiting-room policy and queue progress for this session. */
   waitingSince?: string | null;
   waitingMaxMinutes?: number | null;
@@ -420,6 +424,7 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     parkedByProfileId: call.parkedByProfileId,
     startedAt: call.startedAt,
     audioConnection: call.audioConnection ?? null,
+    controlPending: call.controlPending ?? null,
     sessionId: call.sessionId,
     callId: call.callId,
     browserCallControlIds: [...new Set(call.legs.flatMap((leg) =>
