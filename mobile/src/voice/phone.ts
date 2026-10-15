@@ -236,54 +236,54 @@ export class DispatchPhone {
     finally { this.monitorBusy = false; }
   }
   private async applyCallStatus(status: VoiceStatus, generation: number, holdResult = false, requestedCall = this.state.call) {
-      const sessionId = status.sessionId;
-      const sameCall = () => this.current(generation) && this.state.call?.id === requestedCall?.id
-        && this.state.call?.sessionId === requestedCall?.sessionId && this.state.call?.callControlId === requestedCall?.callControlId;
-      if (!this.current(generation) || this.state.call && !sameCall()) return;
-      if (this.state.call?.media && status.media.version < this.state.call.media.version) return;
-      if (status.ended) {
-        if (this.state.call?.sessionId === sessionId) {
-          const id = this.state.call.id;
-          // Server-directed loss/transfer ends only this mobile endpoint. Fence
-          // its native ended callback before rejecting so it cannot hang up the
-          // other endpoint's session or turn a valid lease into an auth error.
-          this.rememberFinished(id);
-          if (this.outgoingIntent?.sessionId === sessionId) this.outgoingIntent = null;
-          this.pendingHold = null; this.nativeMediaSync = null;
-          this.update({ call: null, holdPhase: "idle", nativeSyncPending: false, audioActive: false, muted: false, speaker: false });
-          await this.native?.reject(id);
-          if (!this.current(generation) || this.state.call) return;
-        }
-        if (this.state.termination === sessionId) this.update({ termination: status.terminationPending ? sessionId : null });
-      } else if (this.state.call?.sessionId === sessionId) {
-        const call = this.state.call, media = status.media;
-        if (media.callControlId && call.callControlId && media.callControlId !== call.callControlId) {
-          throw new MobileApiError("Odpoveď telefónu patrí inému spojeniu.", 502);
-        }
-        const currentMedia = call.media;
-        const older = currentMedia && (media.version < currentMedia.version
-          || media.version === currentMedia.version && ["active", "held"].includes(currentMedia.state) && media.state === "pending");
-        // A status read started before a claimed action cannot resolve that
-        // action. Only its immutable operation receipt may release the barrier.
-        const applyMedia = !older && (!this.pendingHold || holdResult);
-        this.update({ call: { ...call, connected: status.connected, ...(applyMedia ? { media, callControlId: media.callControlId ?? call.callControlId } : {}) } });
-        if (applyMedia && call.callControlId && !holdResult) {
-          await this.native?.syncMedia(call.id, sessionId, call.callControlId, media.state, media.version, media.canHold);
-          if (!sameCall()) return;
-          await this.reconcileNativeSync(generation);
-          if (!sameCall()) return;
-          if (!this.pendingHold && this.state.holdPhase !== "requesting") {
-            const privacyUnresolved = media.state === "unavailable" && (currentMedia?.state === "held" || currentMedia?.state === "pending" || this.state.holdPhase === "uncertain");
-            this.update({ holdPhase: privacyUnresolved ? "uncertain" : media.state === "pending" ? "pending" : "idle" });
-          }
-        }
-        if (status.connected && call.outgoing && sameCall()) {
-          await this.native?.confirmConnected(call.id);
-          if (!sameCall()) return;
+    const sessionId = status.sessionId;
+    const sameCall = () => this.current(generation) && this.state.call?.id === requestedCall?.id
+      && this.state.call?.sessionId === requestedCall?.sessionId && this.state.call?.callControlId === requestedCall?.callControlId;
+    if (!this.current(generation) || this.state.call && !sameCall()) return;
+    if (this.state.call?.media && status.media.version < this.state.call.media.version) return;
+    if (status.ended) {
+      if (this.state.call?.sessionId === sessionId) {
+        const id = this.state.call.id;
+        // Server-directed loss/transfer ends only this mobile endpoint. Fence
+        // its native ended callback before rejecting so it cannot hang up the
+        // other endpoint's session or turn a valid lease into an auth error.
+        this.rememberFinished(id);
+        if (this.outgoingIntent?.sessionId === sessionId) this.outgoingIntent = null;
+        this.pendingHold = null; this.nativeMediaSync = null;
+        this.update({ call: null, holdPhase: "idle", nativeSyncPending: false, audioActive: false, muted: false, speaker: false });
+        await this.native?.reject(id);
+        if (!this.current(generation) || this.state.call) return;
+      }
+      if (this.state.termination === sessionId) this.update({ termination: status.terminationPending ? sessionId : null });
+    } else if (this.state.call?.sessionId === sessionId) {
+      const call = this.state.call, media = status.media;
+      if (media.callControlId && call.callControlId && media.callControlId !== call.callControlId) {
+        throw new MobileApiError("Odpoveď telefónu patrí inému spojeniu.", 502);
+      }
+      const currentMedia = call.media;
+      const older = currentMedia && (media.version < currentMedia.version
+        || media.version === currentMedia.version && ["active", "held"].includes(currentMedia.state) && media.state === "pending");
+      // A status read started before a claimed action cannot resolve that
+      // action. Only its immutable operation receipt may release the barrier.
+      const applyMedia = !older && (!this.pendingHold || holdResult);
+      this.update({ call: { ...call, connected: status.connected, ...(applyMedia ? { media, callControlId: media.callControlId ?? call.callControlId } : {}) } });
+      if (applyMedia && call.callControlId && !holdResult) {
+        await this.native?.syncMedia(call.id, sessionId, call.callControlId, media.state, media.version, media.canHold);
+        if (!sameCall()) return;
+        await this.reconcileNativeSync(generation);
+        if (!sameCall()) return;
+        if (!this.pendingHold && this.state.holdPhase !== "requesting") {
+          const privacyUnresolved = media.state === "unavailable" && (currentMedia?.state === "held" || currentMedia?.state === "pending" || this.state.holdPhase === "uncertain");
+          this.update({ holdPhase: privacyUnresolved ? "uncertain" : media.state === "pending" ? "pending" : "idle" });
         }
       }
-      if (!status.ended && status.terminationPending) this.update({ termination: sessionId });
-      this.schedule();
+      if (status.connected && call.outgoing && sameCall()) {
+        await this.native?.confirmConnected(call.id);
+        if (!sameCall()) return;
+      }
+    }
+    if (!status.ended && status.terminationPending) this.update({ termination: sessionId });
+    this.schedule();
   }
   async hold() {
     const call = this.state.call;
@@ -315,7 +315,10 @@ export class DispatchPhone {
       || !Number.isSafeInteger(event.expectedVersion) || event.expectedVersion! < (call.media?.version ?? 0)) return;
     if (event.type === "holdSyncPending") {
       if (this.nativeMediaSync && this.nativeMediaSync.expectedVersion > event.expectedVersion!) return;
-      this.nativeSyncRevision += 1; this.nativeMediaSync = event as NativeMediaSync; this.update({ nativeSyncPending: true });
+      this.nativeSyncRevision += 1;
+      this.nativeMediaSync = { callId: call.id, sessionId: call.sessionId, callControlId: event.callControlId!,
+        actionId: event.actionId, held: event.held, expectedVersion: event.expectedVersion! };
+      this.update({ nativeSyncPending: true });
     } else if (this.nativeMediaSync?.actionId === event.actionId && this.nativeMediaSync.expectedVersion === event.expectedVersion
       && this.nativeMediaSync.held === event.held && (event.type === "holdSyncFailed" || call.media?.state === (event.held ? "held" : "active"))) {
       this.nativeSyncRevision += 1; this.nativeMediaSync = null;

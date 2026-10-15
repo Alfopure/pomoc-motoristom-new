@@ -60,9 +60,9 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
       || typeof command.held !== "boolean" || !Number.isSafeInteger(command.expectedVersion) || command.expectedVersion < 0) throw invalid();
     const requestId = command.requestId.toLowerCase();
     const body = await request("calls/" + encodeURIComponent(sessionId) + "/" + path, { deviceSessionId, ...command, requestId });
-    status(body, sessionId);
-    if ((body.media as VoiceMedia).callControlId !== null && (body.media as VoiceMedia).callControlId !== command.callControlId
-      || (body.media as VoiceMedia).version < command.expectedVersion) throw invalid();
+    const media = status(body, sessionId).media;
+    if (media.callControlId !== null && media.callControlId !== command.callControlId
+      || media.version < command.expectedVersion) throw invalid();
     const operation = body.operation;
     if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw invalid();
     const value = operation as Record<string, unknown>;
