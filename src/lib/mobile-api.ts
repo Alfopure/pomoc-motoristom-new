@@ -18,6 +18,20 @@ export type MobileVoiceReadiness = MobileScope & {
   nativeCallingEnabled: boolean;
   backgroundIncomingEnabled: boolean;
 };
+export type MobileVoiceColleague = {
+  profileId: string;
+  displayName: string;
+  status: "available" | "paused" | "busy" | "offline";
+  canCall: boolean;
+  reason: "busy" | "wrap_up" | "offline" | "no_phone" | "personal_mobile" | null;
+};
+export type MobileVoiceColleagues = MobileScope & { colleagues: MobileVoiceColleague[]; hasMore: boolean };
+export type MobileVoiceInternalStarted = MobileScope & {
+  sessionId: string; operatorLegCallControlId: string; to: string; targetProfileId: string;
+};
+export type MobileVoiceAttemptEnded = MobileScope & {
+  resolved: boolean; sessionId: string | null; terminationPending: boolean;
+};
 export type MobileMe = MobileScope & {
   profile: { id: string; displayName: string; email: string | null; role: MobileRole };
   capabilities: { voice: false; presenceWrite: false };

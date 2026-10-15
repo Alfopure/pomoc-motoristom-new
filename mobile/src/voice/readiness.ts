@@ -22,7 +22,7 @@ export function phoneReadiness({ state, configuration, configurationError = fals
     { key: "connection", label: "Spojenie s ústredňou", value: !registered ? state.registration === "connecting" ? "Pripájam…" : "Nepripojené" : heartbeat ? "Potvrdené" : "Čaká na overenie", tone: registered && heartbeat ? "success" : "warning" },
     { key: "background", label: "Príjem pri zamknutí", value: !configured ? "Nastavenie neoverené" : !configuration?.backgroundIncomingEnabled ? "Zatiaľ neaktivované" : background ? "Registrácia potvrdená" : "Čaká na registráciu", tone: background ? "success" : "warning" },
   ];
-  const busy = Boolean(state.call || state.termination || state.dialing);
+  const busy = Boolean(state.call || state.termination || state.dialing || state.cancelingAttempt);
   const canConnect = state.supported && configured && configuration?.nativeCallingEnabled === true && !busy
     && state.registration !== "connecting" && state.registration !== "registered" && state.microphonePermission !== "denied";
   let title = "Telefón je pripojený", tone: Tone = "success";
@@ -36,12 +36,14 @@ export function phoneReadiness({ state, configuration, configurationError = fals
     const recovering = ["DROPPED", "RECONNECTING"].includes(state.call.state);
     title = recovering ? "Obnovujem spojenie…" : state.call.connected ? "Prebieha hovor" : "Pripájam hovor…";
     tone = recovering ? "warning" : "muted"; message = "Ovládanie aktuálneho hovoru je nad obsahom obrazovky.";
+  } else if (state.cancelingAttempt) {
+    title = "Ukončujem pôvodný pokus…"; tone = "warning"; message = "Čakáme na overenie a ukončenie pôvodného volania.";
   } else if (state.dialing) {
     title = "Vytáčam…"; tone = "muted"; message = "Ústredňa pripravuje hovor.";
-  } else if (state.retryNumber) {
+  } else if (state.retryTarget) {
     title = "Posledné volanie nebolo potvrdené"; tone = "warning";
     message = state.takeoverRequired ? "Najprv overte posledný hovor na druhom zariadení. Potom skúste znova pripojiť telefón."
-      : "Zopakujte pôvodný pokus o volanie. Nové číslo bude dostupné po jeho vyriešení.";
+      : "Zopakujte pôvodný pokus o volanie. Nový hovor bude dostupný po jeho vyriešení.";
   } else if (!configured) {
     title = "Nastavenie volania nie je overené"; tone = "warning"; message = "Obnovte stav. Existujúci hovor sa tým nepreruší.";
   } else if (!configuration?.nativeCallingEnabled) {
@@ -60,5 +62,5 @@ export function phoneReadiness({ state, configuration, configurationError = fals
   } else if (presence !== "available") {
     title = "Telefón pripojený, príjem je pozastavený"; tone = "warning"; message = "Pre zákaznícke hovory nastavte stav Dostupný. Vytáčanie zostáva dostupné.";
   }
-  return { title, tone, message, checks, canConnect, canTakeover: canConnect && state.takeoverRequired && !state.retryNumber };
+  return { title, tone, message, checks, canConnect, canTakeover: canConnect && state.takeoverRequired && !state.retryTarget };
 }

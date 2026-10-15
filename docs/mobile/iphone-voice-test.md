@@ -83,6 +83,29 @@ aktuálnu mobilnú SIP vetvu a dôkaz o uzavretí historických vetiev; živý v
 alebo cudzia identita naďalej blokujú prevzatie. Samotná ponuka nedáva právo
 ukončiť celú reláciu.
 
+## Volanie kolegovi z mobilu
+
+Ústredňa má vyhľadávanie kolegov v organizácii. Výber sám nezačne volať;
+volanie spustí až tlačidlo „Zavolať kolegovi“. Pauza môže povoľovať interný
+hovor, aj keď operátor neprijíma zákazníkov. Zoznam je iba aktuálny prehľad;
+server pri volaní znovu overí cieľ, dostupnosť, kapacitu a vlastný mobilný
+telefón. Osobné mobilné číslo ani firemná linka nenahrádzajú interný cieľ.
+
+Interné vytáčanie používa existujúci príkaz ústredne s rovnakým request UUID,
+rezerváciou a vetvami web/mobil. Autorizovaná ponuka odlišuje volajúceho
+od adresáta. Vlastnú volajúcu vetvu mobil prijme iba pre presnú očakávanú
+reláciu a provider vetvu; ponuku kolegu zobrazí ako prichádzajúcu. CallKit
+pre meno kolegu používa generický handle, externé číslo ostáva telefónnym.
+Pri obnove natívnej obrazovky sa zachová rovnaké meno.
+
+Po neistom výsledku sa zachová pôvodný typ hovoru, cieľ a request UUID aj
+pri následnej zmene oprávnení alebo nedostupnosti kolegu. Výslovné
+„Ukončiť pôvodný pokus“ vyhľadá iba tento pokus a ukončí jeho vlastnú
+mobilnú reláciu. Chýbajúci záznam nepotvrdzuje, že hovor nevznikol.
+Nepotvrdené ukončenie ostáva blokujúce až do overenia ústredňou.
+História interných hovorov neponúka výber firemného čísla na spätné volanie;
+na nový interný hovor slúži overený zoznam kolegov.
+
 ## Manuálny test natívneho spustenia
 
 Z adresára `mobile` spustiť:
@@ -151,6 +174,7 @@ call/session identitou a výsledkom; neukladať JWT, push payload ani telefónne
 | Scenár | Očakávaný výsledok |
 | --- | --- |
 | Web → pripojený TEST kolega | Systémový CallKit hovor, správny volajúci, jedno audio spojenie |
+| Mobil → kolega s webom alebo iPhone | Generický handle s menom, presná vlastná volajúca vetva a jeden prijatý cieľ |
 | Zamknutý iPhone po > 2 minútach | Reálne zvonenie aj bez JS heartbeat, Prijať/Odmietnuť funguje |
 | Cold launch / app ukončená systémom | Report pred JS, obnova Auth/device lease, overenie ponuky, audio |
 | Odpoveď pred dokončením JS/auth | CallKit answer čaká na presnú autorizáciu; timeout končí bezpečne |
@@ -158,6 +182,7 @@ call/session identitou a výsledkom; neukladať JWT, push payload ani telefónne
 | Web aj mobil odpovedia naraz | Jeden víťaz serverovej rezervácie, druhý leg ukončený |
 | Volajúci ukončí / oneskorený alebo duplicitný push | Žiadny obnovený/zaseknutý hovor, ponuka sa neprijme |
 | Vytáčanie, sieťový timeout, opakovanie | Jeden serverový pokus s rovnakým request UUID a presným operator leg |
+| Neistý pokus, kolega sa stane nedostupný, ukončenie pokusu | Pôvodný pokus sa nestratí; ukončí sa iba jeho oprávnená mobilná relácia, bez ďalšieho vytáčania |
 | SDK operator leg ACTIVE, adresát stále zvoní | UI ešte neoznačí rozhovor za spojený |
 | Mikrofón/reproduktor/DTMF/ukončenie | Obojstranné audio; serverové 202 ostáva pending do potvrdenia |
 | Odhlásenie, odobratý prístup, prevzatie na inom mobile | Starý mobil sa neprihlási, credential je revokovaný; web ostáva oddelený |

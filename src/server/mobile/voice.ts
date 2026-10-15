@@ -3,6 +3,9 @@ import "server-only";
 import { canOperateTelephony, resolveAppEnvironment } from "@/lib/app-environment";
 import { isUuid } from "@/lib/telephony/uuid";
 import type { MotoristActor } from "@/server/api-auth";
+import { findInitialCall, initialOperationIdentity } from "@/server/telephony/initial-call-operation";
+import { callColleague } from "@/server/telephony/call-actions";
+import { mobileColleagueName, requireMobileColleague } from "./voice-colleagues";
 import { MutationError } from "@/server/mutation-error";
 import { getOperatorDevice } from "@/server/telephony/operator-devices";
 import { createTelephonyDeps, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
@@ -32,6 +35,45 @@ export async function requireNativeLease(deps: TelephonyRuntimeDeps, actor: Moto
     throw new NativeLeaseError("Telefón bol odpojený alebo prihlásený na inom zariadení.", 409);
   }
   return device;
+}
+
+/** The command remains immutable in callColleague's existing initial-operation journal. */
+export async function startNativeInternalCall(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new MutationError("Neplatný pokus o volanie.", 400);
+  const body = value as Record<string, unknown>;
+  await requireNativeLease(deps, actor, body.deviceSessionId);
+  if (Object.keys(body).some(key => !["deviceSessionId", "requestId", "targetProfileId"].includes(key))
+    || typeof body.requestId !== "string" || !isUuid(body.requestId)
+    || typeof body.targetProfileId !== "string" || !isUuid(body.targetProfileId)) {
+    throw new MutationError("Chýba identita pokusu alebo kolegu.", 400);
+  }
+  const target = await requireMobileColleague(deps.admin, actor, body.targetProfileId);
+  const result = await callColleague(deps, actor, { requestId: body.requestId, targetProfileId: body.targetProfileId });
+  return { sessionId: result.sessionId, operatorLegCallControlId: result.operatorLegCallControlId,
+    targetProfileId: target.id, to: mobileColleagueName(target.display_name) };
+}
+
+/** Resolve the immutable original attempt, never a new destination or an absence proof. */
+export async function resolveNativeAttempt(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new MutationError("Neplatný pokus o volanie.", 400);
+  const body = value as Record<string, unknown>;
+  await requireNativeLease(deps, actor, body.deviceSessionId, { cleanup: true });
+  const targetKey = body.kind === "external" ? "to" : "targetProfileId";
+  if ((body.kind !== "external" && body.kind !== "internal")
+    || Object.keys(body).some(key => !["deviceSessionId", "requestId", "kind", targetKey].includes(key))
+    || typeof body.requestId !== "string" || !isUuid(body.requestId)
+    || body.kind === "external" && (typeof body.to !== "string" || !body.to || body.to.length > 200)
+    || body.kind === "internal" && (typeof body.targetProfileId !== "string" || !isUuid(body.targetProfileId))) {
+    throw new MutationError("Chýba pôvodná identita pokusu o volanie.", 400);
+  }
+  const input = body.kind === "external"
+    ? { requestId: body.requestId, to: body.to as string }
+    : { requestId: body.requestId, targetProfileId: body.targetProfileId as string };
+  const identity = initialOperationIdentity(actor, body.kind === "external" ? "outbound" : "internal", input);
+  const session = await findInitialCall(deps, identity);
+  if (!session) return null;
+  if (readMeta(session).environment !== deps.environment) throw new MutationError("Hovor nepatrí vášmu telefónu.", 403);
+  return requireNativeSession(deps, actor, session.id);
 }
 
 /** Blind transfer keeps the original conversation's answer metadata. Only a
@@ -112,8 +154,20 @@ export async function authorizeNativeOffer(deps: TelephonyRuntimeDeps, actor: Mo
   if (!pendingTransfer && accepted[actor.profileId] && accepted[actor.profileId] !== leg.telnyx_call_control_id) throw new MutationError("Hovor už prijal iný telefón.", 409);
   if (!pendingTransfer && session.answered_at && session.direction !== "internal" && sessionMetadata.answered_leg_call_control_id
     && sessionMetadata.answered_leg_call_control_id !== leg.telnyx_call_control_id) throw new MutationError("Hovor už prijal iný telefón.", 409);
-  return { sessionId: session.id, callControlId: leg.telnyx_call_control_id, direction: session.direction,
-    number: session.direction === "outbound" ? session.called_number : session.caller_number };
+  let role: "caller" | "callee" = session.direction === "outbound" ? "caller" : "callee";
+  let displayName: string | null = null;
+  if (session.direction === "internal") {
+    const internal = readMeta(session).internal;
+    if (clientState.intent === "internal_caller" && internal?.by === actor.profileId && isUuid(internal.target_profile_id) && internal.target_profile_id !== actor.profileId) {
+      role = "caller";
+      displayName = mobileColleagueName(internal.target_name);
+    } else if (clientState.intent === "internal" && internal?.target_profile_id === actor.profileId && typeof internal.by === "string" && isUuid(internal.by) && internal.by !== actor.profileId) {
+      role = "callee";
+      displayName = mobileColleagueName(internal.caller_name);
+    } else throw new MutationError("Táto ponuka hovoru nepatrí vášmu telefónu.", 409);
+  }
+  return { sessionId: session.id, callControlId: leg.telnyx_call_control_id, direction: session.direction, role, displayName,
+    number: session.direction === "internal" ? null : session.direction === "outbound" ? session.called_number : session.caller_number };
 }
 
 /** Native hangup controls only the operator's own connected/started session. */

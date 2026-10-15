@@ -1,5 +1,5 @@
 import { MobileApiError } from "../lib/api";
-import type { VoiceApi, VoiceOutgoing, VoiceToken } from "./api";
+import type { VoiceApi, VoiceCallTarget, VoiceOutgoing, VoiceToken } from "./api";
 
 export type VoiceEvent = { type: string; callId?: string; callControlId?: string; providerLegId?: string; sessionId?: string; number?: string; state?: string; active?: boolean; muted?: boolean; outgoing?: boolean };
 export type MicrophonePermission = "granted" | "denied" | "undetermined" | "unknown";
@@ -7,18 +7,19 @@ export type PhoneSnapshot = { ready: boolean; audioActive: boolean; microphonePe
 export type NativePhone = {
   snapshot(): Promise<PhoneSnapshot>; requestMicrophone(): Promise<boolean>; connect(token: string): Promise<void>; disconnect(): Promise<void>;
   authorize(callId: string, sessionId: string, controlId: string): Promise<void>; reject(callId: string): Promise<void>;
-  expectOutgoing(controlId: string, sessionId: string, number: string): Promise<void>;
+  expectOutgoing(controlId: string, sessionId: string, number: string, genericHandle?: boolean): Promise<void>;
   answer(callId: string): Promise<void>; confirmConnected(callId: string): Promise<void>; end(): Promise<void>; mute(muted: boolean): Promise<void>; speaker(enabled: boolean): Promise<void>; dtmf(digits: string): Promise<void>;
   subscribe(callback: (event: VoiceEvent) => void): () => void;
 };
 export type PhoneLeaseStore = { load(): Promise<string | null>; save(id: string): Promise<void>; clear(): Promise<void> };
+export type PhoneDialTarget = VoiceCallTarget;
 export type PhoneState = {
   supported: boolean; registration: "unregistered" | "connecting" | "registered" | "error"; takeoverRequired: boolean;
-  call: { id: string; sessionId: string; number: string | null; state: string; outgoing: boolean; connected: boolean } | null;
-  termination: string | null; dialing: boolean; audioActive: boolean; muted: boolean; speaker: boolean; error: string | null;
+  call: { id: string; sessionId: string; number: string | null; displayName?: string | null; state: string; outgoing: boolean; connected: boolean } | null;
+  termination: string | null; dialing: boolean; cancelingAttempt: boolean; audioActive: boolean; muted: boolean; speaker: boolean; error: string | null;
   microphonePermission: MicrophonePermission; pushRegistered: boolean | null; lastHeartbeatAt: string | null;
   heartbeatError: string | null; diagnosticsError: string | null; checkingDiagnostics: boolean;
-  retryNumber: string | null;
+  retryTarget: PhoneDialTarget | null;
 };
 
 /** CallKit owns audio/signaling. JS owns the authenticated mobile lease and
@@ -39,8 +40,8 @@ export class DispatchPhone {
   private connecting: Promise<void> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
-  private pendingDial: { requestId: string; to: string } | null = null;
-  private outgoingIntent: VoiceOutgoing | null = null;
+  private pendingDial: { requestId: string; target: PhoneDialTarget; uncertain: boolean } | null = null;
+  private outgoingIntent: (VoiceOutgoing & { kind: PhoneDialTarget["kind"] }) | null = null;
   private refreshPushRegistration = false;
   private pendingInvites = new Map<string, VoiceEvent>();
   private authorizing = new Set<string>();
@@ -49,8 +50,8 @@ export class DispatchPhone {
   private listeners = new Set<() => void>();
   constructor(private api: VoiceApi, private native: NativePhone | null, private uuid: () => string, private leases?: PhoneLeaseStore) {
     this.state = { supported: Boolean(native), registration: "unregistered", takeoverRequired: false, call: null, termination: null,
-      dialing: false, audioActive: false, muted: false, speaker: false, error: null,
-      microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryNumber: null };
+      dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false, error: null,
+      microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null };
   }
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   snapshot = () => this.state;
@@ -91,6 +92,7 @@ export class DispatchPhone {
     } finally { if (this.current(generation)) this.update({ checkingDiagnostics: false }); }
   }
   connect(takeover = false): Promise<void> {
+    if (this.state.cancelingAttempt) return Promise.resolve();
     if (takeover && (this.state.call || this.state.termination || this.state.dialing || this.pendingDial || this.outgoingIntent || this.authorizing.size)) return Promise.resolve();
     this.reconnectAttempts = 0;
     return this.connectAttempt(takeover);
@@ -228,20 +230,36 @@ export class DispatchPhone {
     } catch (error) { if (this.current(generation)) this.fail(error); }
     finally { this.monitorBusy = false; }
   }
-  async dial(to: string) {
+  async dial(to: string) { await this.startCall({ kind: "external", number: to }); }
+  async dialColleague(profileId: string, name: string) { await this.startCall({ kind: "internal", profileId, name }); }
+  private retainsOutgoingCommand(requestId: string, sessionId: string) {
+    return !this.stopped && (this.pendingDial?.requestId === requestId
+      || this.outgoingIntent?.sessionId === sessionId || this.state.call?.sessionId === sessionId);
+  }
+  private async startCall(target: PhoneDialTarget) {
     if (!this.native || !this.token || this.state.registration !== "registered" || this.state.microphonePermission === "denied"
-      || this.state.call || this.state.termination || this.state.dialing || this.outgoingIntent) return;
-    if (this.pendingDial && this.pendingDial.to !== to) { this.update({ error: "Najprv zopakujte pôvodný pokus o volanie." }); return; }
-    this.pendingDial ??= { requestId: this.uuid(), to };
+      || this.state.call || this.state.termination || this.state.dialing || this.state.cancelingAttempt || this.outgoingIntent) return;
+    const original = this.pendingDial?.target;
+    if (original && !(original.kind === "external" && target.kind === "external" && original.number === target.number
+      || original.kind === "internal" && target.kind === "internal" && original.profileId === target.profileId)) {
+      this.update({ error: "Najprv zopakujte pôvodný pokus o volanie." }); return;
+    }
+    this.pendingDial ??= { requestId: this.uuid(), target, uncertain: false };
     const generation = this.generation, leaseId = this.token.deviceSessionId;
     let createdSession: string | null = null;
-    this.update({ dialing: true, error: null, retryNumber: null });
+    this.update({ dialing: true, error: null, retryTarget: null });
     try {
-      const outgoing = await this.api.start(leaseId, this.pendingDial.requestId, to);
+      const command = this.pendingDial;
+      const outgoing = command.target.kind === "internal"
+        ? await this.api.startInternal(leaseId, command.requestId, command.target.profileId)
+        : await this.api.start(leaseId, command.requestId, command.target.number);
       createdSession = outgoing.sessionId;
-      if (!this.current(generation)) { await this.api.end(leaseId, outgoing.sessionId).catch(() => {}); return; }
-      this.outgoingIntent = outgoing;
-      await this.native.expectOutgoing(outgoing.operatorLegCallControlId, outgoing.sessionId, outgoing.to);
+      if (!this.current(generation)) {
+        if (!this.retainsOutgoingCommand(command.requestId, outgoing.sessionId)) await this.api.end(leaseId, outgoing.sessionId).catch(() => {});
+        return;
+      }
+      this.outgoingIntent = { ...outgoing, kind: command.target.kind };
+      await this.native.expectOutgoing(outgoing.operatorLegCallControlId, outgoing.sessionId, outgoing.to, command.target.kind === "internal");
       if (!this.current(generation)) return;
       this.pendingDial = null;
       const invites = [...this.pendingInvites.values()]; this.pendingInvites.clear();
@@ -249,16 +267,34 @@ export class DispatchPhone {
       this.schedule();
     } catch (error) { if (this.current(generation)) {
       if (createdSession) { this.pendingDial = null; this.outgoingIntent = null; await this.endSession(createdSession); }
-      if (error instanceof MobileApiError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) {
+      const denied = error instanceof MobileApiError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
+      if (!createdSession && this.pendingDial && !denied) this.pendingDial.uncertain = true;
+      if (denied && !this.pendingDial?.uncertain) {
         this.pendingDial = null;
         for (const id of this.pendingInvites.keys()) await this.native.reject(id);
         this.pendingInvites.clear();
       }
-      this.update({ retryNumber: this.pendingDial?.to ?? null });
+      this.update({ retryTarget: this.pendingDial?.target ?? null });
       this.fail(error, !createdSession && error instanceof MobileApiError && error.status === 502);
     } } finally { if (this.current(generation)) this.update({ dialing: false }); }
   }
-  async retryDial() { if (this.pendingDial) await this.dial(this.pendingDial.to); }
+  async retryDial() { if (this.pendingDial) await this.startCall(this.pendingDial.target); }
+  async cancelAttempt() {
+    const command = this.pendingDial, token = this.token;
+    if (!command || !token || this.stopped || this.state.dialing || this.state.cancelingAttempt || this.state.call || this.state.termination || this.outgoingIntent) return;
+    const generation = this.generation;
+    this.update({ cancelingAttempt: true, error: null });
+    try {
+      const result = await this.api.cancelAttempt(token.deviceSessionId, command.requestId, command.target);
+      if (!this.current(generation)) return;
+      if (!result.resolved) { this.update({ error: "Ústredňa ešte overuje pôvodný pokus. Skúste jeho ukončenie znova." }); return; }
+      this.pendingDial = null;
+      this.update({ retryTarget: null, termination: result.terminationPending ? result.sessionId : null }); this.schedule();
+      const invites = [...this.pendingInvites.values()]; this.pendingInvites.clear();
+      for (const event of invites) await this.event(event);
+    } catch (error) { if (this.current(generation)) this.fail(error, true); }
+    finally { if (this.current(generation)) this.update({ cancelingAttempt: false }); }
+  }
   private async event(event: VoiceEvent) {
     if (this.stopped || !this.native) return;
     const generation = this.generation;
@@ -284,7 +320,7 @@ export class DispatchPhone {
         if (this.state.call || this.state.termination) { await this.native.reject(id); return; }
         // A real SDK INVITE has a leg UUID, but no control ID until ANSWER.
         // Hold it until the HTTP result establishes the exact outgoing intent.
-        if (event.type === "incoming" && this.pendingDial) { this.pendingInvites.set(id, event); return; }
+        if (this.pendingDial) { this.pendingInvites.set(id, event); return; }
         this.authorizing.add(id);
         try {
           // A push wake may follow hours of suspension. Refresh the provider
@@ -307,8 +343,9 @@ export class DispatchPhone {
           const offer = await this.authorizeOffer(this.token.deviceSessionId, identity, id, generation);
           if (!offer || !this.current(generation) || this.finished.has(id)) return;
           const intent = this.outgoingIntent;
-          if (offer.direction === "outbound" && !intent) { await this.native.reject(id); return; }
-          if (intent && (offer.callControlId !== intent.operatorLegCallControlId || offer.sessionId !== intent.sessionId)) {
+          if (offer.role === "caller" && !intent) { await this.native.reject(id); return; }
+          if (intent && (offer.role !== "caller" || offer.direction !== (intent.kind === "internal" ? "internal" : "outbound")
+            || offer.callControlId !== intent.operatorLegCallControlId || offer.sessionId !== intent.sessionId)) {
             await this.native.reject(id); return;
           }
           // Recheck after HTTP: another simultaneous offer may already own UI.
@@ -316,7 +353,7 @@ export class DispatchPhone {
           if (activeCall && activeCall.id !== id) { await this.native.reject(id); return; }
           // Reserve the single call before crossing the async bridge. Native
           // may synchronously emit ACTIVE/ended while authorize is resolving.
-          this.update({ call: { id, sessionId: offer.sessionId, number: offer.number,
+          this.update({ call: { id, sessionId: offer.sessionId, number: offer.number, displayName: offer.displayName,
             state: intent ? "CONNECTING" : "RINGING", outgoing: Boolean(intent), connected: false } });
           this.schedule();
           await this.native.authorize(id, offer.sessionId, offer.callControlId);
@@ -386,14 +423,15 @@ export class DispatchPhone {
       ? "Telefonovanie v tejto TEST aplikácii ešte nie je aktivované." : error.message : "Telefonovanie sa nepodarilo pripraviť.";
     this.update({ error: message });
     if (error instanceof MobileApiError && ([401, 403, 502].includes(error.status) || ["native_lease_stale", "native_voice_disabled"].includes(error.code ?? ""))) {
+      if (this.pendingDial && this.state.dialing) this.pendingDial.uncertain = true;
       const ownedSession = this.state.call && (this.state.call.outgoing || this.state.call.connected) ? this.state.call.sessionId : this.outgoingIntent?.sessionId;
       this.generation += 1;
       this.update({ termination: this.state.termination ?? ownedSession ?? null });
       // An untrusted start reply may follow a committed call. Disconnect its
       // credentials, but keep that one command for an explicit same-ID retry.
-      this.token = null; if (!preserveOutgoingRequest) this.pendingDial = null;
-      this.outgoingIntent = null; this.pendingInvites.clear(); this.update({ registration: "error", call: null, dialing: false, audioActive: false, muted: false, speaker: false,
-        pushRegistered: null, lastHeartbeatAt: null, checkingDiagnostics: false, retryNumber: this.pendingDial?.to ?? null }); this.schedule();
+      this.token = null; if (!preserveOutgoingRequest && !this.pendingDial?.uncertain) this.pendingDial = null;
+      this.outgoingIntent = null; this.pendingInvites.clear(); this.update({ registration: "error", call: null, dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false,
+        pushRegistered: null, lastHeartbeatAt: null, checkingDiagnostics: false, retryTarget: this.pendingDial?.target ?? null }); this.schedule();
       void this.native?.disconnect().catch(() => {});
     }
   }
@@ -435,8 +473,8 @@ export class DispatchPhone {
       if (!(error instanceof MobileApiError && error.status === 409)) throw error;
     }
     await this.leases?.clear(); this.leaseId = null;
-    this.update({ registration: "unregistered", call: null, termination: null, dialing: false, audioActive: false, muted: false, speaker: false,
-      pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryNumber: null });
+    this.update({ registration: "unregistered", call: null, termination: null, dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false,
+      pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null });
   }
   dispose() {
     this.stopped = true; this.generation += 1; this.off?.(); this.off = null;

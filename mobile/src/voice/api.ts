@@ -2,8 +2,11 @@ import type { MobileConfig } from "../lib/config";
 import { MobileApiError, type MobileTransport } from "../lib/api";
 
 export type VoiceToken = { token: string; expiresAt: string; deviceSessionId: string };
-export type VoiceOffer = { sessionId: string; callControlId: string; direction: "inbound" | "outbound" | "internal"; number: string | null };
+export type VoiceOffer = { sessionId: string; callControlId: string; direction: "inbound" | "outbound" | "internal"; number: string | null; role: "caller" | "callee"; displayName: string | null };
 export type VoiceOutgoing = { sessionId: string; operatorLegCallControlId: string; to: string };
+export type VoiceInternalOutgoing = VoiceOutgoing & { targetProfileId: string };
+export type VoiceCallTarget = { kind: "external"; number: string } | { kind: "internal"; profileId: string; name: string };
+export type VoiceAttemptEnd = { resolved: false; sessionId: null; terminationPending: false } | { resolved: true; sessionId: string; terminationPending: boolean };
 export type VoiceStatus = { sessionId: string; state: string; connected: boolean; ended: boolean; terminationPending: boolean };
 
 export function createVoiceApi(config: MobileConfig, profileId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch) {
@@ -32,6 +35,7 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
   }
   const invalid = () => new MobileApiError("Odpoveď telefónu sa nepodarilo overiť.", 502);
   const nonempty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+  const name = (value: unknown): value is string => nonempty(value) && value.length <= 120 && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
   const uuid = (value: unknown): value is string => typeof value === "string" && /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(value);
   return {
     token: async (deviceSessionId?: string, takeover = false): Promise<VoiceToken> => {
@@ -45,13 +49,33 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
     },
     authorize: async (deviceSessionId: string, identity: { callControlId?: string; providerLegId?: string }): Promise<VoiceOffer> => {
       const body = await request("offers", { deviceSessionId, ...identity });
-      if (!uuid(body.sessionId) || !nonempty(body.callControlId) || !["inbound", "outbound", "internal"].includes(String(body.direction)) || !(body.number === null || typeof body.number === "string")) throw invalid();
+      if (!uuid(body.sessionId) || !nonempty(body.callControlId) || typeof body.direction !== "string" || !["inbound", "outbound", "internal"].includes(body.direction) || !(body.number === null || typeof body.number === "string")
+        || typeof body.role !== "string" || !["caller", "callee"].includes(body.role) || !(body.displayName === null || name(body.displayName))
+        || body.direction === "internal" && (!name(body.displayName) || body.number !== null)
+        || body.direction !== "internal" && body.displayName !== null
+        || body.direction === "outbound" && body.role !== "caller" || body.direction === "inbound" && body.role !== "callee") throw invalid();
       return body as unknown as VoiceOffer;
     },
     start: async (deviceSessionId: string, requestId: string, to: string): Promise<VoiceOutgoing> => {
       const body = await request("calls", { deviceSessionId, requestId, to });
       if (!uuid(body.sessionId) || !nonempty(body.operatorLegCallControlId) || !nonempty(body.to)) throw invalid();
       return body as unknown as VoiceOutgoing;
+    },
+    startInternal: async (deviceSessionId: string, requestId: string, targetProfileId: string): Promise<VoiceInternalOutgoing> => {
+      const body = await request("calls/internal", { deviceSessionId, requestId, targetProfileId });
+      if (!uuid(body.sessionId) || !nonempty(body.operatorLegCallControlId) || !uuid(body.targetProfileId)
+        || body.targetProfileId !== targetProfileId || !name(body.to)) throw invalid();
+      return body as unknown as VoiceInternalOutgoing;
+    },
+    cancelAttempt: async (deviceSessionId: string, requestId: string, target: VoiceCallTarget): Promise<VoiceAttemptEnd> => {
+      const body = await request("calls/attempt/end", { deviceSessionId, requestId, kind: target.kind,
+        ...(target.kind === "internal" ? { targetProfileId: target.profileId } : { to: target.number }) });
+      if (body.resolved === false) {
+        if (body.sessionId !== null || body.terminationPending !== false) throw invalid();
+        return { resolved: false, sessionId: null, terminationPending: false };
+      }
+      if (body.resolved !== true || !uuid(body.sessionId) || typeof body.terminationPending !== "boolean") throw invalid();
+      return { resolved: true, sessionId: body.sessionId, terminationPending: body.terminationPending };
     },
     end: async (deviceSessionId: string, sessionId: string): Promise<{ terminationPending: boolean }> => {
       const body = await request("calls/" + encodeURIComponent(sessionId) + "/end", { deviceSessionId });

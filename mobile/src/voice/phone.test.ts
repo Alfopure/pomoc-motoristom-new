@@ -19,8 +19,10 @@ function fixture() {
   };
   const api: VoiceApi = {
     token: vi.fn().mockResolvedValue({ token: "memory-only-provider-jwt", deviceSessionId: lease, expiresAt: new Date(Date.now() + 86_400_000).toISOString() }),
-    heartbeat: vi.fn().mockResolvedValue(undefined), authorize: vi.fn().mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "inbound", number: "+421900000001" }),
+    heartbeat: vi.fn().mockResolvedValue(undefined), authorize: vi.fn().mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "inbound", role: "callee", displayName: null, number: "+421900000001" }),
     start: vi.fn().mockResolvedValue({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "+421900000002" }),
+    startInternal: vi.fn().mockResolvedValue({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "Jana", targetProfileId: lease }),
+    cancelAttempt: vi.fn().mockResolvedValue({ resolved: true, sessionId: sid, terminationPending: false }),
     end: vi.fn().mockResolvedValue({ terminationPending: false }), status: vi.fn().mockResolvedValue({ sessionId: sid, state: "ringing", connected: false, ended: false, terminationPending: false }),
     disconnect: vi.fn().mockResolvedValue(undefined), presence: vi.fn().mockResolvedValue(undefined),
   };
@@ -32,6 +34,178 @@ function fixture() {
 async function connected() { const f = fixture(); await f.phone.initialise(); await f.phone.connect(); return f; }
 
 describe("native phone lifecycle", () => {
+  it("buffers the originating internal invite until the exact HTTP result and uses a generic colleague handle", async () => {
+    const f = await connected(); let resolve!: (value: Awaited<ReturnType<VoiceApi["startInternal"]>>) => void;
+    vi.mocked(f.api.startInternal).mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "internal", role: "caller", displayName: "Jana", number: "+421900000000" });
+    const work = f.phone.dialColleague(lease, "Jana");
+    f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
+    expect(f.native.authorize).not.toHaveBeenCalled();
+    resolve({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "Jana", targetProfileId: lease }); await work;
+    expect(f.api.startInternal).toHaveBeenCalledWith(lease, id, lease); expect(f.api.start).not.toHaveBeenCalled();
+    expect(f.native.expectOutgoing).toHaveBeenCalledWith("exact-leg", sid, "Jana", true);
+    expect(f.phone.state.call).toMatchObject({ outgoing: true, displayName: "Jana", sessionId: sid });
+  });
+  it("rejects a caller's internal leg without this phone's exact outgoing intent", async () => {
+    const f = await connected();
+    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "internal", role: "caller", displayName: "Jana", number: null });
+    f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
+    expect(f.native.reject).toHaveBeenCalledWith(id); expect(f.native.authorize).not.toHaveBeenCalled(); expect(f.phone.state.call).toBeNull();
+  });
+  it("keeps a genuine internal recipient incoming and displays the caller's name", async () => {
+    const f = await connected();
+    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "internal", role: "callee", displayName: "Peter", number: "+421900000000" });
+    f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
+    expect(f.phone.state.call).toMatchObject({ outgoing: false, state: "RINGING", displayName: "Peter" });
+    expect(f.native.expectOutgoing).not.toHaveBeenCalled(); expect(f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg");
+  });
+  it("retries the original colleague and UUID without switching kind or target", async () => {
+    const f = await connected(); vi.mocked(f.api.startInternal).mockRejectedValueOnce(new MobileApiError("network", 0));
+    await f.phone.dialColleague(lease, "Jana");
+    expect(f.phone.state.retryTarget).toEqual({ kind: "internal", profileId: lease, name: "Jana" });
+    await f.phone.dial("+421900000002"); await f.phone.dialColleague(sid, "Peter");
+    expect(f.api.start).not.toHaveBeenCalled(); expect(f.api.startInternal).toHaveBeenCalledTimes(1);
+    await f.phone.retryDial();
+    expect(f.api.startInternal).toHaveBeenNthCalledWith(2, lease, id, lease); expect(f.uuid).toHaveBeenCalledTimes(1);
+    expect(f.phone.state.retryTarget).toBeNull();
+  });
+  it("preserves the exact internal target after a malformed successful reply and ordinary reconnect", async () => {
+    const f = await connected();
+    const envelope = { ok: true, apiVersion: 1, environment: "test", profileId: "operator", sessionId: sid, operatorLegCallControlId: "exact-leg", to: "Jana" };
+    const transport = vi.fn().mockResolvedValueOnce(Response.json({ ...envelope, targetProfileId: sid }))
+      .mockResolvedValueOnce(Response.json({ ...envelope, targetProfileId: lease }));
+    f.api.startInternal = vi.fn(createVoiceApi({ environment: "test", apiOrigin: "https://test.dispecing.linkapomoci.sk", supabaseUrl: "https://nzpnqdstvkfncflgqlny.supabase.co", publishableKey: "fixture" }, "operator", async () => "token", transport).startInternal);
+    await f.phone.dialColleague(lease, "Jana");
+    expect(f.phone.state.registration).toBe("error"); expect(f.phone.state.retryTarget).toEqual({ kind: "internal", profileId: lease, name: "Jana" });
+    expect(f.native.expectOutgoing).not.toHaveBeenCalled();
+    await f.phone.connect(); await f.phone.retryDial();
+    expect(transport.mock.calls.map(call => JSON.parse(String(call[1].body)))).toEqual([
+      { deviceSessionId: lease, requestId: id, targetProfileId: lease }, { deviceSessionId: lease, requestId: id, targetProfileId: lease },
+    ]);
+    expect(f.uuid).toHaveBeenCalledTimes(1); expect(f.native.expectOutgoing).toHaveBeenCalledWith("exact-leg", sid, "Jana", true);
+  });
+  it("buffers an originating internal push before HTTP establishes its exact intent", async () => {
+    const f = await connected(); let resolve!: (value: Awaited<ReturnType<VoiceApi["startInternal"]>>) => void;
+    vi.mocked(f.api.startInternal).mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "internal", role: "caller", displayName: "Jana", number: null });
+    const work = f.phone.dialColleague(lease, "Jana"); f.emit({ type: "push", callId: id, providerLegId: id }); await tick();
+    expect(f.api.authorize).not.toHaveBeenCalled(); expect(f.native.reject).not.toHaveBeenCalled();
+    resolve({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "Jana", targetProfileId: lease }); await work;
+    expect(f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg"); expect(f.phone.state.call?.outgoing).toBe(true);
+  });
+  it.each([
+    { internal: false, direction: "internal", role: "caller" },
+    { internal: true, direction: "internal", role: "callee" },
+    { internal: true, direction: "outbound", role: "caller" },
+  ] as const)("rejects an exact-ID invite with contradictory call kind or role %#", async ({ internal, direction, role }) => {
+    const f = await connected();
+    if (internal) await f.phone.dialColleague(lease, "Jana"); else await f.phone.dial("+421900000002");
+    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction, role, displayName: "Jana", number: null });
+    f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
+    expect(f.native.reject).toHaveBeenCalledWith(id); expect(f.native.authorize).not.toHaveBeenCalled(); expect(f.phone.state.call).toBeNull();
+  });
+  it("cleans up a late internal start after account disposal without starting CallKit", async () => {
+    const f = await connected(); let resolve!: (value: Awaited<ReturnType<VoiceApi["startInternal"]>>) => void;
+    vi.mocked(f.api.startInternal).mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    const work = f.phone.dialColleague(lease, "Jana"); f.phone.dispose();
+    resolve({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "Jana", targetProfileId: lease }); await work;
+    expect(f.api.end).toHaveBeenCalledWith(lease, sid); expect(f.native.expectOutgoing).not.toHaveBeenCalled();
+  });
+  it.each([401, 403, 404, 409])("keeps an uncertain original command after a later %s denial", async status => {
+    const f = await connected();
+    vi.mocked(f.api.startInternal).mockRejectedValueOnce(new MobileApiError("unknown provider outcome", 0))
+      .mockRejectedValueOnce(new MobileApiError("target or authority changed", status));
+    await f.phone.dialColleague(lease, "Jana"); await f.phone.retryDial();
+    expect(f.phone.state.retryTarget).toEqual({ kind: "internal", profileId: lease, name: "Jana" });
+    await f.phone.dial("+421900000002"); expect(f.api.start).not.toHaveBeenCalled(); expect(f.uuid).toHaveBeenCalledTimes(1);
+  });
+  it("does not retain an initial definitive target denial as an uncertain call", async () => {
+    const f = await connected(); vi.mocked(f.api.startInternal).mockRejectedValueOnce(new MobileApiError("target missing", 404));
+    await f.phone.dialColleague(lease, "Jana"); expect(f.phone.state.retryTarget).toBeNull();
+    await f.phone.dial("+421900000002"); expect(f.api.start).toHaveBeenCalledTimes(1);
+  });
+  it("explicitly cancels the exact uncertain original without another dial UUID", async () => {
+    const f = await connected(); vi.mocked(f.api.startInternal).mockRejectedValueOnce(new MobileApiError("network", 0));
+    await f.phone.dialColleague(lease, "Jana"); await f.phone.cancelAttempt();
+    expect(f.api.cancelAttempt).toHaveBeenCalledWith(lease, id, { kind: "internal", profileId: lease, name: "Jana" });
+    expect(f.phone.state.retryTarget).toBeNull(); expect(f.phone.state.cancelingAttempt).toBe(false);
+    expect(f.api.startInternal).toHaveBeenCalledTimes(1); expect(f.uuid).toHaveBeenCalledTimes(1);
+  });
+  it("keeps the original when cancellation cannot yet find the in-flight request", async () => {
+    const f = await connected(); vi.mocked(f.api.startInternal).mockRejectedValueOnce(new MobileApiError("network", 0));
+    vi.mocked(f.api.cancelAttempt).mockResolvedValueOnce({ resolved: false, sessionId: null, terminationPending: false });
+    await f.phone.dialColleague(lease, "Jana"); await f.phone.cancelAttempt();
+    expect(f.phone.state.retryTarget).toMatchObject({ kind: "internal", profileId: lease });
+    await f.phone.dial("+421900000002"); expect(f.api.start).not.toHaveBeenCalled();
+  });
+  it("blocks new calls while the acknowledged original cancellation remains pending", async () => {
+    const f = await connected(); vi.mocked(f.api.startInternal).mockRejectedValueOnce(new MobileApiError("network", 0));
+    vi.mocked(f.api.cancelAttempt).mockResolvedValueOnce({ resolved: true, sessionId: sid, terminationPending: true });
+    await f.phone.dialColleague(lease, "Jana"); await f.phone.cancelAttempt();
+    expect(f.phone.state.retryTarget).toBeNull(); expect(f.phone.state.termination).toBe(sid);
+    await f.phone.dial("+421900000002"); expect(f.api.start).not.toHaveBeenCalled();
+  });
+  it("serializes explicit cancellation against retry, a new target and a second cancellation", async () => {
+    const f = await connected(); let resolve!: (value: Awaited<ReturnType<VoiceApi["cancelAttempt"]>>) => void;
+    vi.mocked(f.api.startInternal).mockRejectedValueOnce(new MobileApiError("network", 0));
+    vi.mocked(f.api.cancelAttempt).mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    await f.phone.dialColleague(lease, "Jana"); const work = f.phone.cancelAttempt();
+    await f.phone.retryDial(); await f.phone.dialColleague(sid, "Peter"); await f.phone.cancelAttempt();
+    expect(f.phone.state.cancelingAttempt).toBe(true); expect(f.api.cancelAttempt).toHaveBeenCalledTimes(1);
+    expect(f.api.startInternal).toHaveBeenCalledTimes(1); expect(f.uuid).toHaveBeenCalledTimes(1);
+    resolve({ resolved: true, sessionId: sid, terminationPending: false }); await work;
+  });
+  it.each([0, 502])("keeps original identity when cancellation has an uncertain %s result", async status => {
+    const f = await connected(); vi.mocked(f.api.startInternal).mockRejectedValueOnce(new MobileApiError("network", 0));
+    vi.mocked(f.api.cancelAttempt).mockRejectedValueOnce(new MobileApiError("cancellation outcome unknown", status));
+    await f.phone.dialColleague(lease, "Jana"); await f.phone.cancelAttempt();
+    expect(f.phone.state.retryTarget).toMatchObject({ kind: "internal", profileId: lease }); expect(f.phone.state.cancelingAttempt).toBe(false);
+    await f.phone.dial("+421900000002"); expect(f.api.start).not.toHaveBeenCalled();
+  });
+  it("does not apply a cancellation response after account disposal", async () => {
+    const f = await connected(); let resolve!: (value: Awaited<ReturnType<VoiceApi["cancelAttempt"]>>) => void;
+    vi.mocked(f.api.startInternal).mockRejectedValueOnce(new MobileApiError("network", 0));
+    vi.mocked(f.api.cancelAttempt).mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    await f.phone.dialColleague(lease, "Jana"); const work = f.phone.cancelAttempt(); f.phone.dispose(); const before = f.phone.state;
+    resolve({ resolved: true, sessionId: sid, terminationPending: false }); await work;
+    expect(f.phone.state).toBe(before);
+  });
+  it("creates only one internal command under simultaneous explicit dial actions", async () => {
+    const f = await connected();
+    await Promise.all([f.phone.dialColleague(lease, "Jana"), f.phone.dialColleague(sid, "Peter")]);
+    expect(f.api.startInternal).toHaveBeenCalledTimes(1); expect(f.uuid).toHaveBeenCalledTimes(1);
+  });
+  it("retains a possibly committed command if heartbeat authentication fails during its first HTTP request", async () => {
+    const f = await connected(); let reject!: (error: Error) => void;
+    vi.mocked(f.api.startInternal).mockReturnValueOnce(new Promise((_done, fail) => { reject = fail; }))
+      .mockRejectedValueOnce(new MobileApiError("target removed", 404));
+    const work = f.phone.dialColleague(lease, "Jana");
+    vi.mocked(f.api.heartbeat).mockRejectedValueOnce(new MobileApiError("auth revoked", 401));
+    f.emit({ type: "registration", state: "registered" }); await tick();
+    reject(new MobileApiError("outcome unknown", 0)); await work;
+    expect(f.phone.state.retryTarget).toMatchObject({ kind: "internal", profileId: lease });
+    await f.phone.connect(); await f.phone.retryDial();
+    expect(f.phone.state.retryTarget).toMatchObject({ kind: "internal", profileId: lease });
+    expect(f.uuid).toHaveBeenCalledTimes(1);
+  });
+  it("cannot terminate a recovered same-command call when its old HTTP response arrives late", async () => {
+    const f = await connected(); let resolve!: (value: Awaited<ReturnType<VoiceApi["startInternal"]>>) => void;
+    vi.mocked(f.api.startInternal).mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    const old = f.phone.dialColleague(lease, "Jana");
+    vi.mocked(f.api.heartbeat).mockRejectedValueOnce(new MobileApiError("auth expired", 401));
+    f.emit({ type: "registration", state: "registered" }); await tick(); await f.phone.connect(); await f.phone.retryDial();
+    f.emit({ type: "outgoing", callId: id, sessionId: sid, number: "Jana" });
+    resolve({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "Jana", targetProfileId: lease }); await old;
+    expect(f.api.end).not.toHaveBeenCalled(); expect(f.phone.state.call?.sessionId).toBe(sid);
+  });
+  it("never originates an internal call with revoked microphone or while another call owns the phone", async () => {
+    const f = await connected();
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: false, pending: [], microphonePermission: "denied" }); await f.phone.refreshDiagnostics();
+    await f.phone.dialColleague(lease, "Jana"); expect(f.api.startInternal).not.toHaveBeenCalled();
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: false, pending: [], microphonePermission: "granted" }); await f.phone.refreshDiagnostics();
+    f.emit({ type: "outgoing", callId: id, sessionId: sid }); await f.phone.dialColleague(lease, "Jana");
+    expect(f.api.startInternal).not.toHaveBeenCalled();
+  });
   it("withdraws receiving availability after microphone permission is revoked", async () => {
     const f = await connected();
     vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: false, pending: [], pushRegistered: true, microphonePermission: "denied" });
@@ -46,11 +220,11 @@ describe("native phone lifecycle", () => {
   });
   it("offers an explicit retry of the original uncertain outbound request", async () => {
     const f = await connected(); vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("timeout", 0));
-    await f.phone.dial("+421900000002"); expect(f.phone.state.retryNumber).toBe("+421900000002");
+    await f.phone.dial("+421900000002"); expect(f.phone.state.retryTarget).toEqual({ kind: "external", number: "+421900000002" });
     await f.phone.retryDial();
     expect(f.api.start).toHaveBeenNthCalledWith(1, lease, id, "+421900000002");
     expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002");
-    expect(f.phone.state.retryNumber).toBeNull();
+    expect(f.phone.state.retryTarget).toBeNull();
   });
   it("preserves the original uncertain command across an untrusted start response and safe reconnect", async () => {
     const f = await connected();
@@ -59,7 +233,7 @@ describe("native phone lifecycle", () => {
       .mockResolvedValueOnce(Response.json({ ...envelope, operatorLegCallControlId: "exact-leg" }));
     f.api.start = vi.fn(createVoiceApi({ environment: "test", apiOrigin: "https://test.dispecing.linkapomoci.sk", supabaseUrl: "https://nzpnqdstvkfncflgqlny.supabase.co", publishableKey: "fixture" }, "operator", async () => "user-token", transport).start);
     await f.phone.dial("+421900000002");
-    expect(f.phone.state.retryNumber).toBe("+421900000002"); expect(f.phone.state.registration).toBe("error");
+    expect(f.phone.state.retryTarget).toEqual({ kind: "external", number: "+421900000002" }); expect(f.phone.state.registration).toBe("error");
     expect(f.native.disconnect).toHaveBeenCalled();
     await f.phone.connect(); await f.phone.retryDial();
     expect(f.uuid).toHaveBeenCalledTimes(1);
@@ -69,7 +243,7 @@ describe("native phone lifecycle", () => {
   it("does not discard an uncertain outgoing command when another device owns reconnect", async () => {
     const f = await connected(); vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("Malformed reply", 502));
     await f.phone.dial("+421900000002"); vi.mocked(f.api.token).mockRejectedValueOnce(new MobileApiError("Owned on other phone", 409));
-    await f.phone.connect(); expect(f.phone.state.takeoverRequired).toBe(true); expect(f.phone.state.retryNumber).toBe("+421900000002");
+    await f.phone.connect(); expect(f.phone.state.takeoverRequired).toBe(true); expect(f.phone.state.retryTarget).toEqual({ kind: "external", number: "+421900000002" });
     await f.phone.connect(true); expect(f.api.token).toHaveBeenCalledTimes(2);
   });
   it("refreshes microphone diagnostics without prompting, registering or interrupting a call", async () => {
@@ -118,12 +292,13 @@ describe("native phone lifecycle", () => {
   it("buffers SIP before HTTP and auto-answers only the exact returned operator leg", async () => {
     const f = await connected(); let resolve!: (value: Awaited<ReturnType<VoiceApi["start"]>>) => void;
     vi.mocked(f.api.start).mockReturnValue(new Promise(done => { resolve = done; }));
+    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "outbound", role: "caller", displayName: null, number: "+421900000002" });
     const dial = f.phone.dial("+421900000002");
     f.emit({ type: "incoming", callId: id, providerLegId: id });
     f.emit({ type: "incoming", callId: "another-call", providerLegId: lease }); await tick();
     expect(f.native.authorize).not.toHaveBeenCalled();
     resolve({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "+421900000002" }); await dial;
-    expect(f.native.expectOutgoing).toHaveBeenCalledWith("exact-leg", sid, "+421900000002");
+    expect(f.native.expectOutgoing).toHaveBeenCalledWith("exact-leg", sid, "+421900000002", false);
     expect(f.api.authorize).toHaveBeenCalledWith(lease, { providerLegId: id });
     expect(f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg"); expect(f.native.reject).toHaveBeenCalledWith("another-call");
     expect(f.phone.state.call?.outgoing).toBe(true);
@@ -142,7 +317,7 @@ describe("native phone lifecycle", () => {
     const f = await connected(); let resolve!: (value: Awaited<ReturnType<VoiceApi["authorize"]>>) => void;
     vi.mocked(f.api.authorize).mockReturnValue(new Promise(done => { resolve = done; }));
     f.emit({ type: "push", callId: id, providerLegId: id }); await tick(); f.emit({ type: "ended", callId: id });
-    resolve({ sessionId: sid, callControlId: "exact-leg", direction: "inbound", number: null }); await tick();
+    resolve({ sessionId: sid, callControlId: "exact-leg", direction: "inbound", role: "callee", displayName: null, number: null }); await tick();
     expect(f.native.authorize).not.toHaveBeenCalled(); expect(f.phone.state.call).toBeNull();
   });
   it("requires backend bridge confirmation before displaying a connected call", async () => {
@@ -187,7 +362,7 @@ describe("native phone lifecycle", () => {
   });
   it("matches an outbound INVITE after HTTP through the authenticated leg resolution", async () => {
     const f = await connected(); await f.phone.dial("+421900000002");
-    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "outbound", number: "+421900000002" });
+    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "outbound", role: "caller", displayName: null, number: "+421900000002" });
     f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
     expect(f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg");
     expect(f.phone.state.call?.outgoing).toBe(true);
@@ -197,7 +372,7 @@ describe("native phone lifecycle", () => {
     { sessionId: lease, callControlId: "exact-leg" },
   ])("rejects a resolved offer outside the exact outgoing session/control pair: %j", async mismatch => {
     const f = await connected(); await f.phone.dial("+421900000002");
-    vi.mocked(f.api.authorize).mockResolvedValue({ ...mismatch, direction: "outbound", number: null });
+    vi.mocked(f.api.authorize).mockResolvedValue({ ...mismatch, direction: "outbound", role: "caller", displayName: null, number: null });
     f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
     expect(f.native.authorize).not.toHaveBeenCalled(); expect(f.native.reject).toHaveBeenCalledWith(id);
     expect(f.phone.state.call).toBeNull();
@@ -208,7 +383,7 @@ describe("native phone lifecycle", () => {
     vi.mocked(f.api.authorize).mockReturnValue(new Promise(done => { resolve = done; }));
     f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
     f.emit({ type: "outgoingFailed", sessionId: sid }); await tick();
-    resolve({ sessionId: sid, callControlId: "exact-leg", direction: "outbound", number: null }); await tick();
+    resolve({ sessionId: sid, callControlId: "exact-leg", direction: "outbound", role: "caller", displayName: null, number: null }); await tick();
     expect(f.native.authorize).not.toHaveBeenCalled(); expect(f.native.reject).toHaveBeenCalledWith(id);
   });
   it("refreshes a suspended phone's JWT and prepares native before authorizing a push", async () => {
@@ -275,7 +450,7 @@ describe("native phone lifecycle", () => {
     f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
     vi.mocked(f.api.heartbeat).mockRejectedValue(new MobileApiError("disabled", 503, "native_voice_disabled"));
     f.phone.setForeground(true); await tick();
-    resolve({ sessionId: sid, callControlId: "exact-leg", direction: "inbound", number: null }); await tick();
+    resolve({ sessionId: sid, callControlId: "exact-leg", direction: "inbound", role: "callee", displayName: null, number: null }); await tick();
     expect(f.native.disconnect).toHaveBeenCalled(); expect(f.native.authorize).not.toHaveBeenCalled();
     expect(f.phone.state.registration).toBe("error");
   });

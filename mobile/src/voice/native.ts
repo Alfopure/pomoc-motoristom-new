@@ -13,7 +13,7 @@ export function nativePhone(): NativePhone | null {
     snapshot: () => module.snapshot(), requestMicrophone: () => module.requestMicrophone(),
     connect: token => module.connect(token), disconnect: () => module.disconnect(),
     authorize: (callId, sessionId, controlId) => module.authorize(callId, sessionId, controlId), reject: callId => module.reject(callId),
-    expectOutgoing: (controlId, sessionId, number) => module.expectOutgoing(controlId, sessionId, number),
+    expectOutgoing: (controlId, sessionId, number, genericHandle = false) => module.expectOutgoing(controlId, sessionId, number, genericHandle),
     answer: callId => module.answer(callId), confirmConnected: callId => module.confirmConnected(callId), end: () => module.end(), mute: muted => module.mute(muted),
     speaker: enabled => module.speaker(enabled), dtmf: digits => module.dtmf(digits),
     subscribe: callback => { const subscription = module.addListener("onVoiceEvent", callback); return () => subscription.remove(); },
