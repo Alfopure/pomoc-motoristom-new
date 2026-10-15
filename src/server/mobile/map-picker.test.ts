@@ -110,13 +110,16 @@ function browser(html: string) {
   let timerId = 0;
   Object.assign(window, { ReactNativeWebView: { postMessage: (data: string) => messages.push(JSON.parse(data)) }, setTimeout: (callback: () => void) => { const id = ++timerId; timers.set(id, callback); return id; }, clearTimeout: (id: number) => timers.delete(id) });
   const geocode = vi.fn();
-  const importLibrary = vi.fn().mockResolvedValue({});
+  const path = [{ lat: 0, lng: 0 }, { lat: 0, lng: 0 }];
+  const importLibrary = vi.fn().mockImplementation(async (name: string) => name === "geometry" ? { encoding: { decodePath: () => path } } : {});
+  const polylines: Record<string, unknown>[] = [];
   class BrowserMap extends Element {
     constructor(_element: unknown, readonly options: Record<string, unknown>) { super(); maps.push(this); if (!options.mapId) throw new Error("Map ID required"); }
     addListener(name: string, handler: Handler) { this.addEventListener(name, handler); }
     panTo = vi.fn(); setZoom = vi.fn(); setCenter = vi.fn(); fitBounds = vi.fn();
   }
   const google = { maps: { importLibrary, Map: BrowserMap,
+    Polyline: class { constructor(options: Record<string, unknown>) { polylines.push(options); } },
     marker: { AdvancedMarkerElement: class {
       constructor(private options: Record<string, unknown>) { if (!importLibrary.mock.calls.some(([library]) => library === "marker")) throw new Error("Marker library required"); markers.push(options); }
       set position(value: unknown) { this.options.position = value; }
@@ -132,12 +135,41 @@ function browser(html: string) {
   const scope = { ...messages[0] }; delete scope.type;
   const seed = (override: Record<string, unknown> = {}) => document.dispatch("message", { data: JSON.stringify({ ...scope, type: "seed", selection: null, address: "Draft address", ...override }) });
   const ready = () => (window.__pmMapReady as () => Promise<void>)();
-  return { elements, document, window, global, messages, maps, markers, geocode, importLibrary, timers, seed, ready,
+  return { elements, document, window, global, messages, maps, markers, polylines, geocode, importLibrary, timers, seed, ready,
     click: (lat: number, lng: number) => maps[0].dispatch("click", { latLng: { lat: () => lat, lng: () => lng } }) };
 }
 
 describe("actual serialized Google browser program with controlled adapters", () => {
   async function setup(mode = "pick") { fixture(); return browser(await (await mobileMapPicker(request("", { "X-PM-Map-Mode": mode }), actor)).text()); }
+  it("renders an explicitly seeded fleet point with its label, including valid zero coordinates", async () => {
+    const h = await setup("view");
+    await h.seed({ preview: { points: [{ lat: 0, lng: 0, label: "BA123AA · posledná známa poloha" }] } }); await h.ready();
+    expect(h.markers).toHaveLength(1);
+    expect(h.markers[0]).toMatchObject({ position: { lat: 0, lng: 0 }, title: "BA123AA · posledná známa poloha" });
+    expect(h.elements.status.textContent).not.toContain("Prípad");
+  });
+  it("draws the validated provider road polyline without inventing a line between stops", async () => {
+    const h = await setup("view");
+    await h.seed({ preview: { points: [{ lat: 0, lng: 0, label: "Štart" }, { lat: 0, lng: 0, label: "Cieľ" }], encodedPolyline: "????" } }); await h.ready();
+    expect(h.polylines).toHaveLength(1); expect(h.importLibrary).toHaveBeenCalledWith("geometry");
+    expect(h.polylines[0]).toMatchObject({ path: [{ lat: 0, lng: 0 }, { lat: 0, lng: 0 }] });
+    expect(h.elements.status.textContent).toContain("Vypočítaná cestná trasa");
+  });
+  it("accepts the largest valid escaped route seed within its explicit wire limit", async () => {
+    const h = await setup("view"), encodedPolyline = ("_\\_\\" + "`\\`\\").repeat(25000);
+    expect(encodedPolyline).toHaveLength(200000);
+    expect(JSON.stringify({ encodedPolyline }).length).toBeGreaterThan(300000);
+    await h.seed({ preview: { points: [{ lat: 0, lng: 0, label: "Trasa" }], encodedPolyline } }); await h.ready();
+    expect(h.polylines).toHaveLength(1);
+  });
+  it("rejects preview smuggling into a picking frame and invalid coordinates before loading Google", async () => {
+    const pick = await setup(); await pick.seed({ preview: { points: [{ lat: 0, lng: 0, label: "Fleet" }] } });
+    expect(pick.document.head.children).toHaveLength(0);
+    const view = await setup("view");
+    await view.seed({ preview: { points: [{ lat: 95, lng: 0, label: "Bad" }] } });
+    await view.seed({ preview: { points: [{ lat: 0, lng: 0, label: "Fleet" }], encodedPolyline: "?" } });
+    expect(view.document.head.children).toHaveLength(0);
+  });
   it("keeps manual taps independent of reverse geocoding and uses the current marker library", async () => {
     const h = await setup(); await h.seed(); await h.ready(); await h.click(48, 17); await h.elements.confirm.dispatch("click");
     expect(h.geocode).not.toHaveBeenCalled();
@@ -162,6 +194,15 @@ describe("actual serialized Google browser program with controlled adapters", ()
     const h = browser(`<script nonce="x">(${exports.runMobileMapPicker!.toString()})(${JSON.stringify(configuration)});</script>`);
     await h.seed(); await h.ready(); await h.click(48, 17); await h.elements.confirm.dispatch("click");
     expect(h.messages.at(-1)).toMatchObject({ type: "candidate", selection: { lat: 48, lng: 17 } });
+    const parserOutput = await swc.transform(readFileSync("src/lib/mobile-map-preview.ts", "utf8"), {
+      filename: "mobile-map-preview.ts", jsc: { parser: { syntax: "typescript" }, target: "es2017", minify: { compress: true, mangle: true } }, module: { type: "commonjs" }, minify: true,
+    });
+    const parserExports: { parseMobileMapPreview?: () => void } = {};
+    runInNewContext(parserOutput.code, { exports: parserExports });
+    const view = browser(`<script nonce="x">(${exports.runMobileMapPicker!.toString()})(${JSON.stringify({ ...configuration, mode: "view" })},${parserExports.parseMobileMapPreview!.toString()});</script>`);
+    await view.seed({ preview: { points: [{ lat: 0, lng: 0, label: "Štart" }], encodedPolyline: "????" } }); await view.ready();
+    expect(view.markers[0]).toMatchObject({ title: "Štart", position: { lat: 0, lng: 0 } });
+    expect(view.polylines).toHaveLength(1);
   });
   it("emits exact nonsecret ready and waits for one matching scoped seed before loading any resource", async () => {
     const h = await setup();

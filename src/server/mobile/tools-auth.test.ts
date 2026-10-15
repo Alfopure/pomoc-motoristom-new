@@ -1,0 +1,43 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createFakeSupabase } from "@/test/fake-supabase";
+const mocks=vi.hoisted(()=>({claims:vi.fn(),admin:vi.fn(),organization:vi.fn(),lookup:vi.fn(),fleet:vi.fn(),route:vi.fn()}));
+vi.mock("@supabase/supabase-js",()=>({createClient:()=>({auth:{getClaims:mocks.claims}})}));
+vi.mock("@/lib/supabase/admin",()=>({createSupabaseAdminClient:mocks.admin}));
+vi.mock("@/server/default-organization",()=>({resolveDefaultOrganizationId:mocks.organization}));
+vi.mock("@/server/vehicle-lookup/service",async original=>({...await original<typeof import("@/server/vehicle-lookup/service")>(),lookupVehicle:mocks.lookup}));
+vi.mock("@/data/dispatch-repository",()=>({loadFleetData:mocks.fleet}));
+vi.mock("@/server/driving-route",()=>({computeDrivingRoute:mocks.route}));
+import * as lookup from "@/app/api/mobile/v1/tools/vehicle-lookup/route";
+import * as route from "@/app/api/mobile/v1/tools/route/route";
+import * as fleet from "@/app/api/mobile/v1/tools/fleet/route";
+import { VehicleLookupError } from "@/server/vehicle-lookup/service";
+const userId="11111111-1111-4111-8111-111111111111", profileId="22222222-2222-4222-8222-222222222222",organizationId="33333333-3333-4333-8333-333333333333";
+const issuer="https://nzpnqdstvkfncflgqlny.supabase.co/auth/v1";
+const claims=()=>({sub:userId,iss:issuer,aud:"authenticated",role:"authenticated",exp:Math.floor(Date.now()/1000)+3600});
+const token=Buffer.from(JSON.stringify({alg:"ES256"})).toString("base64url")+"."+Buffer.from(JSON.stringify(claims())).toString("base64url")+".signature";
+const point={lat:48,lng:17};
+const routes=[{path:"vehicle-lookup",method:"POST",invoke:lookup.POST,body:{kind:"plate",value:"BA123AB",country:"SK"}}, {path:"route",method:"POST",invoke:route.POST,body:{origin:point,destination:point}}, {path:"fleet",method:"GET",invoke:fleet.GET,body:undefined}] as const;
+let db:ReturnType<typeof createFakeSupabase>;
+function request(item:typeof routes[number],headers:Record<string,string>={},body:unknown=item.body,query="") {return new Request(`https://test.dispecing.linkapomoci.sk/api/mobile/v1/tools/${item.path}${query}`,{method:item.method,headers:{Authorization:"Bearer "+token,"X-PM-App-Environment":"test","X-PM-Expected-Organization":organizationId,"Content-Type":"application/json",...headers},...(item.method==="POST"?{body:typeof body==="string"?body:JSON.stringify(body)}:{})});}
+function privateResponse(r:Response){expect(r.headers.get("Cache-Control")).toBe("private, no-store");expect(r.headers.get("Vary")).toBe("Authorization, X-PM-App-Environment");expect(r.headers.get("Set-Cookie")).toBeNull();}
+function noTools(){expect(mocks.lookup).not.toHaveBeenCalled();expect(mocks.route).not.toHaveBeenCalled();expect(mocks.fleet).not.toHaveBeenCalled();}
+beforeEach(()=>{vi.resetAllMocks();for(const[k,v]of Object.entries({MOTORIST_APP_ENV:"test",MOTORIST_TEST_LIVE_INTEGRATIONS:"true",VERCEL_ENV:"production",VERCEL_GIT_COMMIT_REF:"dev",VERCEL_PROJECT_ID:"prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",APP_BASE_URL:"https://test.dispecing.linkapomoci.sk",SUPABASE_URL:issuer.replace("/auth/v1",""),SUPABASE_PUBLISHABLE_KEY:"fixture"}))vi.stubEnv(k,v);vi.stubGlobal("fetch",vi.fn(()=>{throw new Error("Unexpected network");}));mocks.claims.mockResolvedValue({data:{claims:claims()},error:null});mocks.organization.mockResolvedValue(organizationId);db=createFakeSupabase();db.db.seed("motorist_profiles",[{id:profileId,user_id:userId,organization_id:organizationId,display_name:"Dispatcher",role:"dispatcher",active:true,access_status:"active",kind:"human"}]);mocks.admin.mockReturnValue(db.client);mocks.fleet.mockResolvedValue({fleetAssets:[]});mocks.route.mockResolvedValue({distanceMeters:0,durationSeconds:0,encodedPolyline:"??",legs:[{distanceMeters:0,durationSeconds:0,encodedPolyline:"??"}],provider:"google-routes",calculatedAt:new Date().toISOString()});mocks.lookup.mockImplementation(async query=>({snapshot:{proof:"private",result:{version:1,id:userId,query,fetchedAt:new Date().toISOString(),sources:[]}},cached:false}));});
+afterEach(()=>{expect(fetch).not.toHaveBeenCalled();vi.unstubAllEnvs();vi.unstubAllGlobals();});
+for(const endpoint of routes)describe(endpoint.path+" bearer tools boundary",()=>{
+ it.each(["","Bearer invalid"])("auth before invalid input/cookies %s",async authorization=>{const r=await endpoint.invoke(request(endpoint,{authorization,Cookie:"session=pretend"},"invalid","?bad=1"));expect(r.status).toBe(401);privateResponse(r);expect(r.headers.get("WWW-Authenticate")).toBe("Bearer");expect(mocks.admin).not.toHaveBeenCalled();noTools();});
+ it.each<Record<string,string>>([{"X-PM-App-Environment":"production"},{"X-PM-Expected-Organization":userId}])("rejects scope switch %j",async headers=>{const r=await endpoint.invoke(request(endpoint,headers));expect(r.status).toBe(409);privateResponse(r);noTools();});
+ it.each([{active:false},{kind:"ai"},{role:"driver"},{organization_id:userId}])("rejects unauthorized actor %j",async patch=>{db.db.update("motorist_profiles",patch,r=>r.id===profileId);const response=await endpoint.invoke(request(endpoint));expect(response.status).toBe(403);privateResponse(response);noTools();});
+ it("requires explicit expected organization before any tool operation",async()=>{const req=request(endpoint);req.headers.delete("X-PM-Expected-Organization");const response=await endpoint.invoke(req);expect(response.status).toBe(409);noTools();});
+ it("rejects unverified signature",async()=>{mocks.claims.mockResolvedValue({data:null,error:new Error("untrusted")});expect((await endpoint.invoke(request(endpoint))).status).toBe(401);noTools();});
+ it.each(["dispatcher","senior_dispatcher","manager","admin"])("allows existing web role %s with verified scoped envelope",async role=>{db.db.update("motorist_profiles",{role},r=>r.id===profileId);const response=await endpoint.invoke(request(endpoint));expect(response.status).toBe(200);privateResponse(response);expect(await response.json()).toMatchObject({ok:true,apiVersion:1,environment:"test",profileId,organizationId,checkedAt:expect.any(String)});if(endpoint.path==="fleet")expect(mocks.fleet).toHaveBeenCalledWith(organizationId,expect.any(AbortSignal),{maxRows:1000});if(endpoint.path==="vehicle-lookup")expect(mocks.lookup.mock.calls[0][1]).toMatchObject({organizationId,profileId});});
+ it("sanitizes backend failure",async()=>{for(const mock of [mocks.lookup,mocks.route,mocks.fleet])mock.mockRejectedValue(new Error("private-integration-key"));const r=await endpoint.invoke(request(endpoint));expect(r.status).toBe(503);privateResponse(r);expect(await r.text()).not.toContain("private-integration-key");});
+});
+it("strict body errors after authentication never call lookup",async()=>{expect((await lookup.POST(request(routes[0],{}, {kind:["plate"],value:"BA123AB",country:"SK"}))).status).toBe(400);noTools();});
+it("strict duplicate fleet filters reject before DB snapshot",async()=>{expect((await fleet.GET(request(routes[2],{},undefined,"?kind=all&kind=tow_truck"))).status).toBe(400);noTools();});
+it("preserves service rate limit and Retry-After",async()=>{mocks.lookup.mockRejectedValue(new VehicleLookupError("Limit",429,60));const response=await lookup.POST(request(routes[0]));expect(response.status).toBe(429);expect(response.headers.get("Retry-After")).toBe("60");privateResponse(response);});
+it("rejects actual streamed oversized body before lookup",async()=>{const response=await lookup.POST(request(routes[0],{},"x".repeat(64001)));expect(response.status).toBe(400);noTools();});
+
+it("rejects a cached result for another normalized query",async()=>{mocks.lookup.mockImplementation(async query=>({snapshot:{proof:"private",result:{version:1,id:userId,query:{...query,value:"BB999ZZ"},fetchedAt:new Date().toISOString(),sources:[]}},cached:true}));const response=await lookup.POST(request(routes[0]));expect(response.status).toBe(503);expect(await response.text()).not.toContain("BB999ZZ");expect(mocks.lookup).toHaveBeenCalledOnce();});
+
+it.each([{VERCEL_ENV:"preview"},{VERCEL_PROJECT_ID:"wrong-project"},{MOTORIST_TEST_LIVE_INTEGRATIONS:"false"}])("lookup denies disabled provider deployment %j before claim",async overrides=>{for(const[key,value]of Object.entries(overrides))vi.stubEnv(key,value);const response=await lookup.POST(request(routes[0]));expect(response.status).toBe(503);privateResponse(response);expect(mocks.lookup).not.toHaveBeenCalled();});
+it("stored fleet remains readable in Preview without live integrations",async()=>{vi.stubEnv("VERCEL_ENV","preview");vi.stubEnv("MOTORIST_TEST_LIVE_INTEGRATIONS","false");expect((await fleet.GET(request(routes[2]))).status).toBe(200);expect(mocks.fleet).toHaveBeenCalledOnce();});

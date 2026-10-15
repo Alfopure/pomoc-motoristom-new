@@ -5,6 +5,14 @@ const source: MapSource = { uri: "https://test.dispecing.linkapomoci.sk/api/mobi
 const selected = { label: "Bod", address: "Adresa", lat: 0, lng: 0, provider: "manual" as const };
 const envelope = (type: string, fields = {}) => JSON.stringify({ ...source.identity, type, ...fields });
 describe("native map bridge", () => {
+  it("serializes a bounded tools preview only into a standalone view and clones it", () => {
+    const viewSource = { ...source, identity: { ...source.identity, mode: "view" as const } };
+    const preview = { points: [{ lat: 0, lng: 0, label: "Fleet" }], encodedPolyline: "????" };
+    const view = new MapBridge(viewSource, { selection: null, address: "", preview }); preview.points[0].lat = 50;
+    expect(view.receive(source.uri, envelope("ready", { mode: "view" }))?.seed).toContain('"lat":0');
+    expect(() => new MapBridge(source, { selection: null, address: "", preview })).toThrow();
+    expect(() => new MapBridge({ ...viewSource, identity: { ...viewSource.identity, caseId: "case" } }, { selection: null, address: "", preview })).toThrow();
+  });
   it("sends local seed once only after scoped ready and never serializes request authorization", () => {
     const bridge = new MapBridge(source, { selection: selected, address: "Adresa" });
     expect(bridge.receive(source.uri, envelope("candidate", { selection: selected }))).toBeNull();

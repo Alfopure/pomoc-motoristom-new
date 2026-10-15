@@ -1,4 +1,5 @@
 import type { MobileCaseMap, MobileCasePlaceSelection, MobileEnvironment } from "@/lib/mobile-api";
+import type { MobileMapPreview, parseMobileMapPreview } from "@/lib/mobile-map-preview";
 
 export type MapPickerConfiguration = {
   version: 1;
@@ -15,7 +16,7 @@ export type MapPickerConfiguration = {
 };
 
 /** Serialized into the protected HTML. Keep this function free of module closures. */
-export function runMobileMapPicker(configuration: MapPickerConfiguration) {
+export function runMobileMapPicker(configuration: MapPickerConfiguration, previewParser?: typeof parseMobileMapPreview) {
   const host = window as Window & { ReactNativeWebView?: { postMessage: (message: string) => void }; __pmMapReady?: () => void; gm_authFailure?: () => void };
   // Object rest/spread can introduce module-level compiler helpers outside the
   // serialized function. Keep every operation here executable on its own.
@@ -85,7 +86,7 @@ export function runMobileMapPicker(configuration: MapPickerConfiguration) {
     notice(edited ? "Skontrolujte adresu a bod. Výber sa zatiaľ neuloží do prípadu." : "Vyberte bod a vyplňte adresu.");
   });
 
-  function load(seed: { selection: MobileCasePlaceSelection | null; address: string }) {
+  function load(seed: { selection: MobileCasePlaceSelection | null; address: string; preview?: MobileMapPreview }) {
     const timer = window.setTimeout(() => fatal("Mapu sa nepodarilo načítať. Zavrite ju a skúste znova. Ručná adresa zostáva dostupná."), 20_000);
     host.gm_authFailure = () => { window.clearTimeout(timer); fatal("Mapová služba nie je dostupná. Ručná adresa zostáva dostupná."); };
     host.__pmMapReady = async () => {
@@ -94,10 +95,31 @@ export function runMobileMapPicker(configuration: MapPickerConfiguration) {
         await Promise.all([google.maps.importLibrary("maps"), google.maps.importLibrary("marker")]);
         if (!alive) return;
         const initial = initialMap[configuration.target]?.point;
-        const center = seed.selection ?? initial ?? { lat: 48.669, lng: 19.699 };
+        const center = seed.preview?.points[0] ?? seed.selection ?? initial ?? { lat: 48.669, lng: 19.699 };
         map = new google.maps.Map(document.getElementById("map")!, { center, mapId: configuration.mapId, zoom: seed.selection || initial ? 15 : 7,
           mapTypeControl: false, streetViewControl: false, fullscreenControl: false, clickableIcons: false });
         if (configuration.mode === "view") {
+          if (seed.preview) {
+            const bounds = new google.maps.LatLngBounds();
+            for (let index = 0; index < seed.preview.points.length; index++) {
+              const location = seed.preview.points[index];
+              const glyph = document.createElement("span"); glyph.className = "pin"; glyph.textContent = String(index + 1);
+              new google.maps.marker.AdvancedMarkerElement({ map, position: { lat: location.lat, lng: location.lng }, title: location.label, content: glyph });
+              bounds.extend(location);
+            }
+            if (seed.preview.encodedPolyline) {
+              const geometry = await google.maps.importLibrary("geometry") as google.maps.GeometryLibrary;
+              if (!alive) return;
+              const path = geometry.encoding.decodePath(seed.preview.encodedPolyline);
+              new google.maps.Polyline({ map, path, strokeColor: "#171719", strokeOpacity: 0.85, strokeWeight: 5 });
+              for (const location of path) bounds.extend(location);
+            }
+            if (seed.preview.points.length > 1 || seed.preview.encodedPolyline) map.fitBounds(bounds, 40);
+            else { map.setCenter(seed.preview.points[0]); map.setZoom(15); }
+            window.clearTimeout(timer);
+            notice(seed.preview.encodedPolyline ? "Vypočítaná cestná trasa. Číslované body sú zadané zastávky." : "Uložené polohy vozidiel. Čas a presnosť GPS skontrolujte v prehľade flotily.");
+            return;
+          }
           window.clearTimeout(timer);
           const bounds = new google.maps.LatLngBounds();
           let count = 0;
@@ -182,17 +204,22 @@ export function runMobileMapPicker(configuration: MapPickerConfiguration) {
     document.head.appendChild(script);
   }
   function receive(event: MessageEvent) {
-    if (!alive || seeded || typeof event.data !== "string" || event.data.length > 5000) return;
+    if (!alive || seeded || typeof event.data !== "string" || event.data.length > 500000) return;
     try {
       const value = JSON.parse(event.data);
       if (!value || typeof value !== "object" || Array.isArray(value)
-        || Object.keys(value).some(key => ![...Object.keys(scope), "type", "selection", "address"].includes(key))
+        || Object.keys(value).some(key => ![...Object.keys(scope), "type", "selection", "address", "preview"].includes(key))
         || Object.entries(scope).some(([key, item]) => value[key] !== item) || value.type !== "seed"
         || !Object.hasOwn(value, "selection") || !safeText(value.address, 500, true)) return;
       const selected = value.selection === null ? null : selection(value.selection);
       if (value.selection !== null && !selected) return;
+      let preview: MobileMapPreview | undefined;
+      if (Object.hasOwn(value, "preview")) {
+        if (configuration.mode !== "view" || configuration.caseId !== null || !previewParser) return;
+        preview = previewParser(value.preview);
+      }
       seeded = true;
-      load({ selection: selected, address: value.address });
+      load({ selection: selected, address: value.address, preview });
     } catch { /* A malformed message cannot initialize the map or alter a selection. */ }
   }
   // Android dispatches native postMessage on document; iOS dispatches on window.

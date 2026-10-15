@@ -1,10 +1,11 @@
 import type { MobileCasePlaceSelection } from "../../../src/lib/mobile-api";
 import { draftId, draftKeys, draftObject } from "../drafts/port";
 import { locationText, placeSelection } from "./location";
+import { parseMobileMapPreview, type MobileMapPreview } from "../../../src/lib/mobile-map-preview";
 export type MapIdentity = { version: 1; nonce: string; mode: "view" | "pick"; target: "pickup" | "destination"; environment: "test" | "production"; profileId: string; organizationId: string; caseId: string | null };
 export type MapRequest = Pick<MapIdentity, "mode" | "target" | "nonce" | "caseId">;
 export type MapSource = { uri: string; headers: Record<string, string>; identity: MapIdentity };
-export type MapSeed = { selection: MobileCasePlaceSelection | null; address: string };
+export type MapSeed = { selection: MobileCasePlaceSelection | null; address: string; preview?: MobileMapPreview };
 export const mapOriginWhitelist = ["*"]; // WebView otherwise launches rejected whitelist URLs through Linking before our guard.
 export function allowsMapNavigation(url: string, expected: string) { return url === expected; }
 export class MapBridge {
@@ -12,7 +13,9 @@ export class MapBridge {
   private closed = false;
   constructor(readonly source: MapSource, private seed: MapSeed) {
     if (!draftId(source.identity.nonce) || !locationText(seed.address, 500, true)) throw new Error("Neplatné miesto mapy.");
-    this.seed = { address: seed.address, selection: seed.selection === null ? null : placeSelection(seed.selection) };
+    if (seed.preview && (source.identity.mode !== "view" || source.identity.caseId !== null)) throw new Error("Náhľad nepatrí do tejto mapy.");
+    this.seed = { address: seed.address, selection: seed.selection === null ? null : placeSelection(seed.selection),
+      ...(seed.preview === undefined ? {} : { preview: parseMobileMapPreview(seed.preview) }) };
   }
   receive(url: string, data: string): { seed?: string; selection?: MobileCasePlaceSelection; error?: string } | null {
     if (this.closed || !allowsMapNavigation(url, this.source.uri) || data.length > 12000) return null;

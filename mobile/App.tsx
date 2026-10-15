@@ -190,6 +190,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   const [number, setNumber] = useState("");
   const [category, setCategory] = useState<Category>("all");
   const [search, setSearch] = useState("");
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null), [logoutBusy, setLogoutBusy] = useState(false);
   const preparingLogout = useRef(false);
   const { fontScale } = useWindowDimensions();
@@ -234,18 +235,19 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   return <View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
     <CallPanel phone={phone} state={phoneState} />
     {me.isError && <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />}
-    {tab === "console" ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} />
+    {tab === "console" && !toolsOpen ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} onTools={() => setToolsOpen(true)} />
       : tab === "history" ? <History api={api} me={identity} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
         onSelect={value => { setNumber(value); setTab("console"); }} />
       : null}
     <DraftWorkspace key={identity.profileId} config={config} client={client} identity={identity} userId={userId} liveUser={liveUser} active={active} tab={tab} onTab={setTab}
+      toolsOpen={toolsOpen} onCloseTools={() => setToolsOpen(false)}
       onSelectNumber={value => { setNumber(value); setTab("console"); }} logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} />
     <GlassTabBar selected={tab} onSelect={setTab} />
   </View>;
 }
 
-function Console({ api, me, queryKey, active, number, onNumber, phone, phoneState }: { api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; number: string; onNumber: (value: string) => void; phone: DispatchPhone | null; phoneState: PhoneState }) {
+function Console({ api, me, queryKey, active, number, onNumber, phone, phoneState, onTools }: { api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; number: string; onNumber: (value: string) => void; phone: DispatchPhone | null; phoneState: PhoneState; onTools: () => void }) {
   const cache = useQueryClient();
   const [changingPresence, setChangingPresence] = useState(false);
   const query = useQuery({ queryKey: [...queryKey, "console", me.profileId], queryFn: ({ signal }) => api.console(me.profileId, signal), enabled: active, refetchInterval: active ? 30_000 : false });
@@ -260,7 +262,10 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching || readiness.isRefetching || phoneState.checkingDiagnostics} onRefresh={refreshPhone} />}>
-    <View style={s.screenHeading}><Text accessibilityRole="header" style={styles.heading}>Ústredňa</Text><Text style={styles.muted}>{me.profile.displayName}</Text></View>
+    <View style={[styles.row, { flexWrap: "wrap", justifyContent: "space-between" }]}>
+      <View style={[s.screenHeading, { flex: 1, minWidth: 130 }]}><Text accessibilityRole="header" style={styles.heading}>Ústredňa</Text><Text style={styles.muted}>{me.profile.displayName}</Text></View>
+      <Button label="Nástroje" secondary onPress={onTools} />
+    </View>
     {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} /> : query.data && <>
       <Card style={s.presenceCard}><Text style={styles.label}>Váš stav v ústredni</Text><View style={styles.row}>
         <View style={[s.presenceIndicator, { backgroundColor: query.data.presence.status === "available" ? "#E1F5EC" : colors.surfaceMuted }]}>

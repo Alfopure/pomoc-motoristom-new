@@ -11,8 +11,9 @@ import { Button, styles } from "../ui";
 
 /** This owner survives its own iOS permission sheet; only the guarded inner
  * map is remounted after a deliberate new phone-position seed. */
-export function CasePlacePicker({ api, caseId, target, seed, active, visible, onClose, onApply }: {
+export function CasePlacePicker({ api, caseId, target, seed, active, visible, title, selectionNotice, deviceLocationNotice, onClose, onApply }: {
   api: CasesApi; caseId: string | null; target: MapRequest["target"]; seed: MapSeed; active: boolean; visible: boolean;
+  title?: string; selectionNotice?: string; deviceLocationNotice?: string;
   onClose: () => void; onApply: (selection: MobileCasePlaceSelection) => void;
 }) {
   const [activity, setActivity] = useState<string>(AppState.currentState ?? "active");
@@ -38,7 +39,7 @@ export function CasePlacePicker({ api, caseId, target, seed, active, visible, on
   if (!visible || !active && !ownPermissionSheet) return null;
   const busy = state.phase === "permission" || state.phase === "locating";
   const controls = <View style={{ gap: 8 }}>
-    <Text style={styles.muted}>Poloha tohto telefónu, nie zákazníka. Použite ju iba vtedy, keď ste na mieste zásahu.</Text>
+    <Text style={styles.muted}>{deviceLocationNotice ?? "Poloha tohto telefónu, nie zákazníka. Použite ju iba vtedy, keď ste na mieste zásahu."}</Text>
     <Button label={busy ? "Zisťujem polohu telefónu…" : "Použiť polohu telefónu"} secondary disabled={busy || !active} onPress={() => {
       if (context.current.active && context.current.visible) void location.request();
     }} />
@@ -53,7 +54,7 @@ export function CasePlacePicker({ api, caseId, target, seed, active, visible, on
       }} />
     </>}
   </View>;
-  return <CaseMapFrame key={map.generation} api={api} caseId={caseId} mode="pick" target={target} seed={map.seed} controls={controls}
+  return <CaseMapFrame key={map.generation} api={api} caseId={caseId} mode="pick" target={target} seed={map.seed} controls={controls} title={title} selectionNotice={selectionNotice}
     onClose={() => { location.cancel(); onClose(); }} onApply={selection => {
       if (context.current.active && context.current.visible && context.current.activity === "active") onApply(selection);
     }} />;
