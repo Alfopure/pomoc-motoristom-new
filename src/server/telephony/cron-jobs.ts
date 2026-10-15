@@ -406,7 +406,10 @@ export async function replayStalledWebhookEvents(deps: TelephonyCronDeps, option
       .limit(REPLAY_BATCH_SIZE * 2),
   ]);
   const error = stalled.error ?? dueDeferred.error;
-  if (error) return { job: LEDGER_REPLAY_JOB, status: "failed", detail: {}, error: error.message };
+  if (error) {
+    reportJobError(deps.onJobError, error, LEDGER_REPLAY_JOB);
+    return { job: LEDGER_REPLAY_JOB, status: "failed", detail: { reason: "terminal_replay_unavailable" }, error: error.message };
+  }
 
   const rows = [...new Map([...(stalled.data ?? []), ...(dueDeferred.data ?? [])].map((row) => [row.event_id, row])).values()];
   const receivedAt = (row: { received_at: string | null }) => row.received_at ?? "";
@@ -780,15 +783,16 @@ export async function runTelephonyCronJobs(deps: TelephonyCronDeps, options: { c
   const started = nowOf(deps).getTime();
   const timed = (job: string, run: () => Promise<TelephonyCronJobResult>) => isolatedCronJob(job, run, { clock, onJobError: deps.onJobError });
   // Sequential: terminal facts precede any recovery that could dial or close a
-  // leg. An unexpected replay abort blocks dependent mutations, but monitoring
-  // and retention still run. Other failures do not discard independent jobs.
+  // leg. An unavailable replay scan or unexpected abort blocks dependent
+  // mutations, but monitoring and retention still run. Per-event failures do
+  // not discard independent recovery jobs after a successful ledger scan.
   const replay = await timed(LEDGER_REPLAY_JOB, () => replayStalledWebhookEvents(deps, { deadline: cronStartedAt + REPLAY_DEADLINE_MS }));
-  const replayAborted = replay.detail.reason === "unexpected_job_failure";
-  const recover = (job: string, run: () => Promise<TelephonyCronJobResult>) => timed(job, () => replayAborted
+  const replayUnavailable = replay.detail.reason === "unexpected_job_failure" || replay.detail.reason === "terminal_replay_unavailable";
+  const recover = (job: string, run: () => Promise<TelephonyCronJobResult>) => timed(job, () => replayUnavailable
     ? Promise.resolve({ job, status: "failed", detail: { reason: "terminal_replay_unavailable" } }) : run());
   const reconciliationRead = createHealthReadRetry();
   let candidates: ReconciliationCandidates | undefined;
-  if (deps.telnyx && !replayAborted) {
+  if (deps.telnyx && !replayUnavailable) {
     try { candidates = await reconciliationCandidates(deps, reconciliationRead); } catch (error) {
       reportJobError(deps.onJobError, error, RECONCILE_JOB);
       candidates = { sessions: [], remaining: 0, cutoff: nowOf(deps).toISOString(), error: "Reconciliation candidate read failed" };

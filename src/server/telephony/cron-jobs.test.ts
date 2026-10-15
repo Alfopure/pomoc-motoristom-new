@@ -165,6 +165,49 @@ describe("telephony cron jobs", () => {
     read.mockRestore();
   });
 
+
+  it.each(["stalled", "deferred"] as const)("blocks dependent mutations when the %s ledger scan returns a database error", async scan => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    await h.inbound({ to: "+421232408718" });
+    h.advance(60_000); // A real ring sweep is due, not just an empty scheduler.
+    const original = h.db.takeInjectedError.bind(h.db);
+    let ledgerReads = 0;
+    const failure = { code: "57014", message: "ledger scan timeout", details: null, hint: null };
+    const read = vi.spyOn(h.db, "takeInjectedError").mockImplementation((table, operation) => {
+      if (table === "motorist_telnyx_webhook_events" && operation === "select" && ++ledgerReads === (scan === "stalled" ? 1 : 2)) return failure;
+      return original(table, operation);
+    });
+    const runSession = vi.fn();
+    const onJobError = vi.fn();
+    const report = await runTelephonyCronJobs({ ...h.deps, runSession, onJobError });
+    expect(report.status).toBe("degraded");
+    expect(report.jobs.find(job => job.job === LEDGER_REPLAY_JOB)).toMatchObject({ status: "failed", detail: { reason: "terminal_replay_unavailable" } });
+    for (const name of [RING_SWEEP_JOB, EFFECTS_RECOVERY_JOB, RECONCILE_JOB, STUCK_SESSION_JOB, AI_DEMO_CLEANUP_JOB]) {
+      expect(report.jobs.find(job => job.job === name)).toMatchObject({ status: "failed", detail: { reason: "terminal_replay_unavailable" } });
+    }
+    expect(runSession).not.toHaveBeenCalled();
+    expect(onJobError).toHaveBeenCalledWith(failure, LEDGER_REPLAY_JOB);
+    expect(report.jobs.find(job => job.job === ALERT_JOB)?.status).toBe("ok");
+    expect(report.jobs.find(job => job.job === LEDGER_PRUNE_JOB)?.status).toBe("ok");
+    read.mockRestore();
+  });
+
+  it("keeps independent recovery enabled after a scanned event fails replay", async () => {
+    const h = createTelephonyHarness({ ivrOnNeutralLine: false });
+    const { sessionId } = await h.inbound({ to: "+421232408718" });
+    h.advance(60_000);
+    const old = new Date(h.now().getTime() - 120_000).toISOString();
+    h.db.seed("motorist_telnyx_webhook_events", [{ organization_id: ORG, event_id: "isolated-event-failure", event_type: "call.answered",
+      status: "failed", attempts: 1, received_at: old, occurred_at: old, payload: {} }]);
+    const runSession = vi.fn(async () => ({ outcome: "ignored" }));
+    const replayEvent = vi.fn(async () => ({ outcome: "failed", error: "individual event rejected" }));
+    const report = await runTelephonyCronJobs({ ...h.deps, runSession, replayEvent });
+    expect(report.jobs.find(job => job.job === LEDGER_REPLAY_JOB)).toMatchObject({ status: "failed", detail: { attempted: 1, failed: 1 } });
+    expect(report.jobs.find(job => job.job === RING_SWEEP_JOB)).toMatchObject({ status: "ok", detail: { swept: 1 } });
+    expect(runSession).toHaveBeenCalledWith(sessionId, expect.objectContaining({ type: "sweep" }), expect.anything());
+    expect(report.jobs.some(job => job.detail.reason === "terminal_replay_unavailable")).toBe(false);
+  });
+
   it("contains a thrown job and a broken observer without claiming recovery succeeded", async () => {
     const error = new Error("critical job read failed");
     const onJobError = vi.fn(() => { throw new Error("observer unavailable"); });
