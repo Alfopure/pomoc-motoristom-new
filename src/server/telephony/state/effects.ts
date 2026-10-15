@@ -664,6 +664,7 @@ export async function recordCallEvent(
     commands: Array<{ kind: string; ok: boolean; command_id?: string | null; skipped?: boolean; started_at?: string; effect_ms?: number; phase?: string }>;
     error?: string | null;
     timing?: EventTiming;
+    failureAt?: string;
   },
 ): Promise<void> {
   const { admin } = deps;
@@ -699,6 +700,7 @@ export async function recordCallEvent(
       ...(input.routing?.length ? { routing: input.routing } : {}),
       commands: input.commands,
       error: input.error ?? null,
+      ...(input.failureAt ? { failure_at: input.failureAt } : {}),
       ...(measuredTiming || event.kind === "telnyx" ? { timing: {
         ...requestTimingContext(), ...guardTiming(), first_command_at: firstProviderDispatchAt(),
         lease_acquired_at: sessionOwnership.getStore() ? new Date(sessionOwnership.getStore()!.acquiredAt).toISOString() : null,
@@ -713,6 +715,23 @@ export async function recordCallEvent(
     received_at: deps.now().toISOString(),
   });
   if (inserted.error && !isDuplicate(inserted.error)) fail("call event insert failed", inserted.error);
+}
+
+/** The original event can finish later; its first failure has a separate immutable identity. */
+async function flushFailureAudit(deps: EffectsDeps, session: SessionRow, entry: EffectContinuation): Promise<void> {
+  const failure = entry.failureAudit;
+  if (!failure || failure.recorded) return;
+  try {
+    await recordCallEvent(deps, { session, event: { ...entry.event, id: `${entry.id}:failure` }, handledStatus: "failed",
+      stateBefore: entry.stateBefore, stateAfter: failure.stateAfter, notes: ["durable command failure"],
+      commands: failure.commands, error: failure.error, failureAt: failure.at });
+    failure.recorded = true;
+  } catch (error) {
+    if (error instanceof SessionLeaseLostError) throw error;
+    // Audio and urgent teardown may proceed, but the continuation cannot be
+    // retired until this already-checkpointed obligation has been written.
+    deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "failure_audit_pending" });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2227,6 +2246,7 @@ async function executeReduceResult(
   }
 
   if (input.continuation && !input.databaseOnly) {
+    await flushFailureAudit(deps, session, input.continuation);
     if (!failure && !projectionError) {
       const history = readContactHistory(session);
       for (const operation of history.operations) {
@@ -2253,9 +2273,17 @@ async function executeReduceResult(
       }
     }
     input.continuation.attempts += 1;
+    if (failure && !input.continuation.failureAudit) {
+      const failedKey = failure.command;
+      const failedCommand = commands.find(command => commandKey(command) === failedKey);
+      input.continuation.failureAudit = { at: deps.now().toISOString(), stateAfter: session.state, error: failure.error,
+        commands: outcomes.some(command => !command.ok) ? auditCommandOutcomes(outcomes)
+          : failedCommand ? [{ kind: failedCommand.kind, ok: false, command_id: "commandId" in failedCommand ? failedCommand.commandId : null, error: failure.error }] : [] };
+    }
     input.continuation.lastError = projectionError ?? failure?.error ?? (continuationComplete(input.continuation) ? null : "mandatory effects pending");
     const continuation = input.continuation;
     session = await measureControlStage("finalize", () => checkpointEffects(deps, session.id, continuationComplete(continuation) ? null : continuation, continuation.id, session));
+    if (failure) await flushFailureAudit(deps, session, continuation);
     if (!continuationComplete(input.continuation) && !failure && !projectionError) failure = { command: "continuation", error: "mandatory effects pending", callGone: false };
   }
 
@@ -2376,6 +2404,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     const current = readPendingEffects(fresh.data).entries.find((item) => item.id === entry.id);
     if (!current) continue;
     if ((options.skipCompletedProjections || options.priorityEntryId && current.id !== options.priorityEntryId) &&
+      (!current.failureAudit || current.failureAudit.recorded) &&
       !current.transition.contactChecks?.length &&
       current.databaseCursor >= criticalDatabaseEffectCount(current.transition) &&
       current.commands.every((command) => current.completedCommands.includes(commandKey(command)))) continue;

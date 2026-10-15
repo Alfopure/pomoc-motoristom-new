@@ -50,6 +50,7 @@ describe("terminal call hangup recovery", () => {
     const order = first === "customer" ? [call.callControlId, operator] : [operator, call.callControlId];
     for (const cc of order) await h.legEvent(cc, "call.hangup", { hangup_cause: "normal_clearing" });
     expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: h.now().toISOString() });
+    expect(h.call(call.sessionId)).toMatchObject({ status: "ended", end_reason: "caller_hangup" });
     const commands = h.telnyx.calls.length;
     const presence = { ...h.presence(PROFILES.o1) };
     h.advance(5_000);

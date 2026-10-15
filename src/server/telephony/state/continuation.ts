@@ -22,6 +22,14 @@ export type EffectContinuation = {
   attempts: number;
   lastError: string | null;
   auditComplete: boolean;
+  /** First mandatory failure remains an obligation even if the command later succeeds or is superseded. */
+  failureAudit?: {
+    at: string;
+    stateAfter: string;
+    error: string;
+    commands: Array<{ kind: string; ok: boolean; command_id?: string | null; skipped?: boolean; error?: string }>;
+    recorded?: boolean;
+  };
   /** Captured provider evidence survives a failed atomic accounting stage. */
   verifiedContact?: Json;
 };
@@ -68,7 +76,7 @@ export function criticalDatabaseEffectCount(transition: Transition): number {
 }
 
 export function continuationComplete(entry: EffectContinuation): boolean {
-  return entry.auditComplete && entry.databaseCursor >= databaseEffectCount(entry.transition) && entry.commands.every((command) => entry.completedCommands.includes(commandKey(command)));
+  return entry.auditComplete && (!entry.failureAudit || entry.failureAudit.recorded === true) && entry.databaseCursor >= databaseEffectCount(entry.transition) && entry.commands.every((command) => entry.completedCommands.includes(commandKey(command)));
 }
 
 function prepared(session: SessionRow, transition: Transition, commands: Command[], compensations: Compensation[], event: SessionEvent, branch: EffectContinuation["branch"], now: string) {
