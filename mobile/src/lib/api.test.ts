@@ -6,6 +6,22 @@ const config = { environment: "test" as const, apiOrigin: "https://test.dispecin
 const scope = { ok: true, apiVersion: 1, environment: "test", profileId: "profile", checkedAt: "2026-10-11T12:00:00Z" };
 const me = { ...scope, profile: { id: "profile", displayName: "Test", email: null, role: "dispatcher" }, capabilities: { voice: false, presenceWrite: false } };
 describe("native API transport", () => {
+  it("reads phone configuration without registering a phone or sending cookies", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, nativeCallingEnabled: false, backgroundIncomingEnabled: false }));
+    const result = await createMobileApi(config, async () => "current-token", transport).voiceReadiness("profile");
+    expect(result.nativeCallingEnabled).toBe(false);
+    expect(transport).toHaveBeenCalledWith(config.apiOrigin + "/api/mobile/v1/voice/readiness", expect.objectContaining({ method: "GET", credentials: "omit" }));
+  });
+  it.each([
+    { nativeCallingEnabled: "true", backgroundIncomingEnabled: false },
+    { nativeCallingEnabled: true, backgroundIncomingEnabled: null },
+    { nativeCallingEnabled: false, backgroundIncomingEnabled: true },
+    { nativeCallingEnabled: true, backgroundIncomingEnabled: true, environment: "production" },
+    { nativeCallingEnabled: true, backgroundIncomingEnabled: true, profileId: "someone-else" },
+  ])("refuses unsafe phone configuration %#", async changes => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, ...changes }));
+    await expect(createMobileApi(config, async () => "token", transport).voiceReadiness("profile")).rejects.toMatchObject({ status: 502 });
+  });
   it("uses the fresh user token, explicit environment and no cookies", async () => {
     const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json(me));
     await createMobileApi(config, async () => "current-token", transport).me();

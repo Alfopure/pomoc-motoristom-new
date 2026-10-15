@@ -9,6 +9,19 @@ func incoming(_ owner: LinkaPhone, _ id: UUID = UUID(), leg: UUID = UUID()) -> C
   return call
 }
 do {
+  let owner = LinkaPhone(), previousClient = TxClient.last
+  let permissions: [(AVAuthorizationStatus, String)] = [(.notDetermined, "undetermined"), (.denied, "denied"), (.restricted, "denied"), (.authorized, "granted")]
+  for (permission, expected) in permissions {
+    AVCaptureDevice.status = permission
+    check("snapshot microphone permission \(permission)", owner.snapshot()["microphonePermission"] as? String == expected)
+  }
+  AVCaptureDevice.status = .denied
+  check("snapshot reflects Settings revocation on same native owner", owner.snapshot()["microphonePermission"] as? String == "denied")
+  check("permission snapshot only queries audio authorization", AVCaptureDevice.reads == Array(repeating: .audio, count: 5))
+  check("permission snapshot never prompts or connects SDK", AVCaptureDevice.requests == 0 && AVAudioSession.requests == 0 && TxClient.last === previousClient)
+  check("permission result does not imply push registration", owner.snapshot()["pushRegistered"] as? Bool == false)
+}
+do {
   let owner = phone(), id = UUID(); let call = incoming(owner, id)
   let action = CXAnswerCallAction(call: id); owner.provider(CXProvider.last, perform: action)
   owner.reject(callId: id.uuidString)

@@ -1,4 +1,4 @@
-import type { MobileConsole, MobileDraftScope, MobileHistory, MobileMe, MobileScope } from "../../../src/lib/mobile-api";
+import type { MobileConsole, MobileDraftScope, MobileHistory, MobileMe, MobileScope, MobileVoiceReadiness } from "../../../src/lib/mobile-api";
 import type { MobileConfig } from "./config";
 import { draftDate } from "../drafts/port";
 
@@ -71,6 +71,13 @@ export function createMobileApi(config: MobileConfig, getToken: TokenGetter, tra
     } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
   }
   return {
+    voiceReadiness: async (profileId: string, signal?: AbortSignal): Promise<MobileVoiceReadiness> => {
+      const body = object(await read("voice/readiness", signal));
+      scope(body, config, profileId);
+      if (typeof body.nativeCallingEnabled !== "boolean" || typeof body.backgroundIncomingEnabled !== "boolean"
+        || body.backgroundIncomingEnabled && !body.nativeCallingEnabled) throw contractError();
+      return body as MobileVoiceReadiness;
+    },
     draftScope: async (profileId: string, signal?: AbortSignal): Promise<MobileDraftScope> => {
       const body = object(await read("drafts/scope", signal));
       scope(body, config, profileId);

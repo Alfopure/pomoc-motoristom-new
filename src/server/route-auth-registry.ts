@@ -61,6 +61,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/cases/dispatchers": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Bounded organization-scoped human dispatcher choices, including inactive historical owners." },
   "mobile/v1/console": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only own-call DTO; no provider or presence operations." },
   "mobile/v1/calls/history": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Uses existing actor-authorized search; excludes archive and provider fields." },
+  "mobile/v1/voice/readiness": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only native TEST configuration opt-ins; no provider, device or audio readiness claim." },
   "mobile/v1/voice/token": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },
   "mobile/v1/voice/heartbeat": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },
   "mobile/v1/voice/offers": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },

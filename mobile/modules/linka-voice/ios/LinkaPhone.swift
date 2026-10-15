@@ -139,7 +139,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   }
 
   func snapshot() -> [String: Any] {
-    return ["ready": ready, "audioActive": audioActive, "preparedPushCallId": preparedPush?.uuidString as Any? ?? NSNull(), "pushRegistered": pushToken != nil && pushToken == registeredPushToken && ready,
+    return ["ready": ready, "audioActive": audioActive, "microphonePermission": microphonePermission(), "preparedPushCallId": preparedPush?.uuidString as Any? ?? NSNull(), "pushRegistered": pushToken != nil && pushToken == registeredPushToken && ready,
      "wasEnabled": UserDefaults.standard.bool(forKey: "linka.voice.enabled"), "calls": Array(calls.keys).compactMap { id -> [String: Any]? in
        guard let session = sessions[id], let call = currentCall(id) ?? (recoveryTimers[id] != nil ? calls[id] : nil) else { return nil }
        return ["type": "restored", "callId": id.uuidString, "sessionId": session, "number": call.callInfo?.callerNumber ?? "",
@@ -147,6 +147,16 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
      }, "pending": pushes.map { id, metadata in
       ["type": "push", "callId": id.uuidString, "providerLegId": metadata["telnyx_leg_id"] as? String ?? ""]
     }]
+  }
+
+  private func microphonePermission() -> String {
+    // Read current OS permission without prompting or activating audio.
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .authorized: return "granted"
+    case .denied, .restricted: return "denied"
+    case .notDetermined: return "undetermined"
+    @unknown default: return "unknown"
+    }
   }
 
   func authorize(callId: String, sessionId: String, controlId: String) throws {

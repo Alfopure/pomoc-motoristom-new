@@ -13,6 +13,11 @@ export type MobileScope = {
   checkedAt: string;
 };
 export type MobileDraftScope = MobileScope & { organizationId: string };
+/** Configuration opt-ins only; not provider, device, push-delivery or audio acceptance. */
+export type MobileVoiceReadiness = MobileScope & {
+  nativeCallingEnabled: boolean;
+  backgroundIncomingEnabled: boolean;
+};
 export type MobileMe = MobileScope & {
   profile: { id: string; displayName: string; email: string | null; role: MobileRole };
   capabilities: { voice: false; presenceWrite: false };

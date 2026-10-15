@@ -6,6 +6,15 @@ const config = { environment: "test" as const, apiOrigin: "https://test.dispecin
 const scope = { ok: true, apiVersion: 1, environment: "test", profileId: "operator" };
 const token = { ...scope, token: "provider-token", deviceSessionId: id, expiresAt: new Date(Date.now() + 86_400_000).toISOString() };
 describe("native voice transport", () => {
+  it.each([undefined, "unregistered", "invalid"])("rejects a heartbeat that does not acknowledge the reported registration: %s", registrationState => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, registrationState }));
+    return expect(createVoiceApi(config, "operator", async () => "token", transport).heartbeat(id, "registered", true)).rejects.toMatchObject({ status: 502 });
+  });
+  it("accepts the exact acknowledged heartbeat including microphone withdrawal", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, registrationState: "unregistered" }));
+    await createVoiceApi(config, "operator", async () => "token", transport).heartbeat(id, "unregistered", false);
+    expect(JSON.parse(String(transport.mock.calls[0][1].body))).toEqual({ deviceSessionId: id, registrationState: "unregistered", nativeVoipRegistered: false });
+  });
   it("uses the user JWT and mobile lease on POST, without cookies", async () => {
     const fetch = vi.fn<MobileTransport>().mockResolvedValue(Response.json(token));
     await createVoiceApi(config, "operator", async () => "user-token", fetch).token(id);

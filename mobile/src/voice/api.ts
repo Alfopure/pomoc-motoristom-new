@@ -39,7 +39,10 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
       if (!nonempty(body.token) || !uuid(body.deviceSessionId) || !nonempty(body.expiresAt) || Date.parse(body.expiresAt) <= Date.now() + 60_000 || !Number.isFinite(Date.parse(body.expiresAt))) throw invalid();
       return body as unknown as VoiceToken;
     },
-    heartbeat: async (deviceSessionId: string, registrationState: string, nativeVoipRegistered = false) => { await request("heartbeat", { deviceSessionId, registrationState, nativeVoipRegistered }); },
+    heartbeat: async (deviceSessionId: string, registrationState: string, nativeVoipRegistered = false) => {
+      const body = await request("heartbeat", { deviceSessionId, registrationState, nativeVoipRegistered });
+      if (body.registrationState !== registrationState) throw invalid();
+    },
     authorize: async (deviceSessionId: string, identity: { callControlId?: string; providerLegId?: string }): Promise<VoiceOffer> => {
       const body = await request("offers", { deviceSessionId, ...identity });
       if (!uuid(body.sessionId) || !nonempty(body.callControlId) || !["inbound", "outbound", "internal"].includes(String(body.direction)) || !(body.number === null || typeof body.number === "string")) throw invalid();

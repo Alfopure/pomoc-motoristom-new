@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DispatchPhone, type NativePhone, type VoiceEvent } from "./phone";
-import type { VoiceApi } from "./api";
+import { createVoiceApi, type VoiceApi } from "./api";
 import { MobileApiError } from "../lib/api";
 
 const lease = "00000000-0000-4000-8000-000000000001", sid = "00000000-0000-4000-8000-000000000002", id = "00000000-0000-4000-8000-000000000003";
@@ -32,6 +32,79 @@ function fixture() {
 async function connected() { const f = fixture(); await f.phone.initialise(); await f.phone.connect(); return f; }
 
 describe("native phone lifecycle", () => {
+  it("withdraws receiving availability after microphone permission is revoked", async () => {
+    const f = await connected();
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: false, pending: [], pushRegistered: true, microphonePermission: "denied" });
+    await f.phone.refreshDiagnostics();
+    expect(f.api.heartbeat).toHaveBeenLastCalledWith(lease, "unregistered", false);
+    await f.phone.dial("+421900000002"); expect(f.api.start).not.toHaveBeenCalled();
+  });
+  it("does not take over another device while this phone has a call", async () => {
+    const f = await connected(); f.emit({ type: "outgoing", callId: id, sessionId: sid });
+    vi.mocked(f.api.token).mockClear(); await f.phone.connect(true);
+    expect(f.api.token).not.toHaveBeenCalled(); expect(f.phone.state.call?.id).toBe(id);
+  });
+  it("offers an explicit retry of the original uncertain outbound request", async () => {
+    const f = await connected(); vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("timeout", 0));
+    await f.phone.dial("+421900000002"); expect(f.phone.state.retryNumber).toBe("+421900000002");
+    await f.phone.retryDial();
+    expect(f.api.start).toHaveBeenNthCalledWith(1, lease, id, "+421900000002");
+    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002");
+    expect(f.phone.state.retryNumber).toBeNull();
+  });
+  it("preserves the original uncertain command across an untrusted start response and safe reconnect", async () => {
+    const f = await connected();
+    const envelope = { ok: true, apiVersion: 1, environment: "test", profileId: "operator", sessionId: sid, to: "+421900000002" };
+    const transport = vi.fn().mockResolvedValueOnce(Response.json(envelope))
+      .mockResolvedValueOnce(Response.json({ ...envelope, operatorLegCallControlId: "exact-leg" }));
+    f.api.start = vi.fn(createVoiceApi({ environment: "test", apiOrigin: "https://test.dispecing.linkapomoci.sk", supabaseUrl: "https://nzpnqdstvkfncflgqlny.supabase.co", publishableKey: "fixture" }, "operator", async () => "user-token", transport).start);
+    await f.phone.dial("+421900000002");
+    expect(f.phone.state.retryNumber).toBe("+421900000002"); expect(f.phone.state.registration).toBe("error");
+    expect(f.native.disconnect).toHaveBeenCalled();
+    await f.phone.connect(); await f.phone.retryDial();
+    expect(f.uuid).toHaveBeenCalledTimes(1);
+    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002");
+    expect(transport.mock.calls.map(call => JSON.parse(String(call[1].body)).requestId)).toEqual([id, id]);
+  });
+  it("does not discard an uncertain outgoing command when another device owns reconnect", async () => {
+    const f = await connected(); vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("Malformed reply", 502));
+    await f.phone.dial("+421900000002"); vi.mocked(f.api.token).mockRejectedValueOnce(new MobileApiError("Owned on other phone", 409));
+    await f.phone.connect(); expect(f.phone.state.takeoverRequired).toBe(true); expect(f.phone.state.retryNumber).toBe("+421900000002");
+    await f.phone.connect(true); expect(f.api.token).toHaveBeenCalledTimes(2);
+  });
+  it("refreshes microphone diagnostics without prompting, registering or interrupting a call", async () => {
+    const f = await connected(); f.emit({ type: "outgoing", callId: id, sessionId: sid });
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: true, audioActive: true, pending: [], pushRegistered: true, microphonePermission: "denied" });
+    vi.mocked(f.native.requestMicrophone).mockClear(); vi.mocked(f.api.token).mockClear(); vi.mocked(f.native.disconnect).mockClear();
+    await f.phone.refreshDiagnostics();
+    expect(f.phone.state.microphonePermission).toBe("denied"); expect(f.phone.state.call?.id).toBe(id);
+    expect(f.native.requestMicrophone).not.toHaveBeenCalled(); expect(f.api.token).not.toHaveBeenCalled(); expect(f.native.disconnect).not.toHaveBeenCalled();
+  });
+  it("never marks a failed heartbeat as confirmed and recovers on a later success", async () => {
+    const f = await connected(); expect(f.phone.state.lastHeartbeatAt).not.toBeNull();
+    vi.mocked(f.api.heartbeat).mockRejectedValueOnce(new MobileApiError("network unavailable", 0));
+    f.emit({ type: "registration", state: "registered" }); await tick();
+    expect(f.phone.state.heartbeatError).toBe("network unavailable");
+    expect(f.phone.state.registration).toBe("registered"); expect(f.native.disconnect).not.toHaveBeenCalled();
+    f.emit({ type: "registration", state: "registered" }); await tick();
+    expect(f.phone.state.heartbeatError).toBeNull(); expect(f.phone.state.error).toBeNull();
+  });
+  it("treats an old native snapshot without microphone information as unknown", async () => {
+    const f = await connected(); await f.phone.refreshDiagnostics();
+    expect(f.phone.state.microphonePermission).toBe("unknown");
+  });
+  it("does not apply diagnostics that arrive after account disposal", async () => {
+    const f = await connected(); let release!: (snapshot: Awaited<ReturnType<NativePhone["snapshot"]>>) => void;
+    vi.mocked(f.native.snapshot).mockReturnValueOnce(new Promise(done => { release = done; }));
+    const work = f.phone.refreshDiagnostics(); const before = f.phone.state;
+    f.phone.dispose(); release({ ready: true, audioActive: false, pending: [], microphonePermission: "granted", pushRegistered: true }); await work;
+    expect(f.phone.state).toBe(before);
+  });
+  it("does not terminate the current call on an unrelated old outgoing timeout", async () => {
+    const f = await connected(); f.emit({ type: "outgoing", callId: id, sessionId: sid });
+    f.emit({ type: "outgoingFailed", sessionId: lease }); await tick();
+    expect(f.api.end).not.toHaveBeenCalled(); expect(f.phone.state.call?.sessionId).toBe(sid);
+  });
   it("restores only the lease; provider JWT goes to native memory, never storage", async () => {
     const f = await connected(); expect(f.api.token).toHaveBeenCalledWith(lease, false);
     expect(f.store.save).toHaveBeenCalledWith(lease); expect(f.store.save).not.toHaveBeenCalledWith("memory-only-provider-jwt");

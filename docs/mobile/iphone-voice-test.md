@@ -58,6 +58,31 @@ nie sú fyzickým dôkazom CallKit, APNs ani audia. Čerstvá celá natívna
 kompilácia a jej zdrojový commit sa zaznamenávajú osobitne. Produkcia,
 provider konfigurácia, aktivačné prepínače a SQL sa touto etapou nemenia.
 
+## Stav telefónu a zotavenie v ústredni
+
+Ústredňa rozlišuje natívnu podporu, aktuálne povolenie mikrofónu, SIP
+pripojenie, posledné potvrdenie ústredne a registráciu príjmu pri zamknutí.
+Neaktuálne nastavenie ani neúspešné obnovenie nesmú zobrazovať pripravenosť.
+Čítanie stavu mikrofónu neotvára dialóg ani nepripája telefón; po návrate
+z Nastavení sa číta znovu. Výslovne odobraté povolenie pri ďalšom potvrdení
+odoberie mobilnú dostupnosť bez zmeny dostupnosti webového telefónu.
+
+`GET /api/mobile/v1/voice/readiness` vracia iba overený mobilný scope a dva
+príznaky konfigurácie. Nevolá provider API ani nevytvára telefón. Zhodný TEST
+projekt, databáza, live guard a oba opt-in prepínače zostávajú podmienkou.
+Konfigurácia a registrácia nepotvrdzujú doručenie APNs ani obojstranné audio.
+
+Nejasný výsledok vytáčania ponúkne opakovanie pôvodného čísla s rovnakým
+request ID. Zmena čísla nezaloží druhý pokus, kým prvý nie je vyriešený.
+Starý timeout smie ukončiť iba svoju odchádzajúcu reláciu; prevzatie telefónu
+nie je dostupné počas hovoru alebo rozpracovaného vytáčania.
+
+Pri novom platnom inbound blind transfere sa historický uzavretý víťaz
+nesmie zameniť za aktuálne prijatie. Výnimka vyžaduje presný cieľ transferu,
+aktuálnu mobilnú SIP vetvu a dôkaz o uzavretí historických vetiev; živý víťaz
+alebo cudzia identita naďalej blokujú prevzatie. Samotná ponuka nedáva právo
+ukončiť celú reláciu.
+
 ## Manuálny test natívneho spustenia
 
 Z adresára `mobile` spustiť:
