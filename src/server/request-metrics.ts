@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import { channel } from "node:diagnostics_channel";
 import { performance } from "node:perf_hooks";
 import { getAppVersion } from "./app-version";
+import { resolveAppEnvironment } from "@/lib/app-environment";
+import type { CallPerformanceOperation } from "@/lib/telephony/performance-operation";
 
 /**
  * `auth` is the whole gate; `auth.token` and `auth.profile` are the two halves
@@ -31,6 +33,7 @@ type Metric = { count: number; ms: number; dbCount?: number; dbMs?: number };
 type RequestMetrics = {
   id: string;
   route: MeasuredRoute;
+  operation?: CallPerformanceOperation;
   started: number;
   now: () => number;
   steps: Partial<Record<RequestStep, Metric>>;
@@ -92,7 +95,7 @@ export function requestTimingContext(): { request_id: string; ingress_at: string
 }
 
 function newScope(route: MeasuredRoute, now: () => number, logger: RequestMetrics["logger"], parent?: RequestMetrics): RequestMetrics {
-  return { id: parent?.id ?? randomUUID(), ingressAt: parent?.ingressAt ?? new Date().toISOString(), route,
+  return { id: parent?.id ?? randomUUID(), ingressAt: parent?.ingressAt ?? new Date().toISOString(), route, operation: parent?.operation,
     started: now(), now, logger, steps: {}, finished: false, dbIssued: 0, dbFirstMs: null, dbMaxMs: null, dbAborts: 0,
     connectsAtStart: databaseConnects, eluAtStart: performance.eventLoopUtilization() };
 }
@@ -105,8 +108,10 @@ function finish(scope: RequestMetrics, detail: Record<string, unknown>): void {
     ...(metric.dbCount === undefined ? {} : { dbCount: metric.dbCount, dbMs: round(metric.dbMs ?? 0) }),
   }]));
   try {
-    scope.logger({ scope: "request-performance", requestId: scope.id, route: scope.route, serverBuild: getAppVersion(),
-      ms: Math.max(0, round(scope.now() - scope.started)), steps,
+    const duration = scope.now() - scope.started;
+    scope.logger({ scope: "request-performance", schemaVersion: 2, source: "server", environment: resolveAppEnvironment(),
+      operation: scope.operation ?? scope.route, timestamp: new Date().toISOString(), ingressAt: scope.ingressAt, sampleRate: 1, requestId: scope.id, route: scope.route, serverBuild: getAppVersion(),
+      ms: Number.isFinite(duration) && duration >= 0 ? round(duration) : null, steps,
       dbFirstMs: scope.dbFirstMs === null ? null : round(scope.dbFirstMs),
       dbMaxMs: scope.dbMaxMs === null ? null : round(scope.dbMaxMs), dbAborts: scope.dbAborts,
       dbConnects: databaseConnects - scope.connectsAtStart, dbConnectsScope: "instance-window",
@@ -206,10 +211,11 @@ export async function measureRequestStep<T>(name: RequestStep, work: () => Promi
 export async function withRequestMetrics(
   route: MeasuredRoute,
   handler: () => Promise<Response>,
-  options: { logger?: (entry: Record<string, unknown>) => void; now?: () => number } = {},
+  options: { logger?: (entry: Record<string, unknown>) => void; now?: () => number; operation?: CallPerformanceOperation } = {},
 ): Promise<Response> {
   const now = options.now ?? (() => performance.now());
   const scope = newScope(route, now, options.logger ?? ((entry) => console.info(JSON.stringify(entry))));
+  scope.operation = options.operation;
   return requests.run(scope, async () => {
     let status = 500;
     let responseBytes: number | null = null;
@@ -229,7 +235,7 @@ export async function withRequestMetrics(
       } catch { /* Redirects may have immutable headers; preserve the original response. */ }
       return response;
     } finally {
-      finish(scope, { phase: "response", status, responseBytes, timingHeaders });
+      finish(scope, { phase: "response", measurement: "handler_response", outcome: status === 202 ? "accepted" : status < 400 ? "ok" : "failed", status, responseBytes, timingHeaders });
     }
   });
 }

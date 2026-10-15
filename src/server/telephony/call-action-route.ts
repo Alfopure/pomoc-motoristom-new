@@ -1,4 +1,5 @@
 import "server-only";
+import { callPerformanceOperation } from "@/lib/telephony/performance-operation";
 import { after } from "next/server";
 
 import { measureRequestStep, withRequestMetrics, withBackgroundRequestMetrics } from "@/server/request-metrics";
@@ -105,7 +106,7 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
     } catch (error) {
       return telephonyErrorResponse(error, options.fallback);
     }
-  });
+  }, { operation: callPerformanceOperation(request.url, request.method) });
 }
 
 /** `{ profileId, number }` transfer/consult target from a request body. */

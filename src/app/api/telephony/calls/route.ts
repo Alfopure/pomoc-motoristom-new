@@ -43,5 +43,5 @@ export async function POST(request: Request) {
     } catch (error) {
       return telephonyErrorResponse(error, "Hovor sa nepodarilo vytočiť.");
     }
-  });
+  }, { operation: "call.outbound" });
 }

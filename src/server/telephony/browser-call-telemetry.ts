@@ -1,3 +1,5 @@
+import { resolveAppEnvironment } from "@/lib/app-environment";
+import { getAppVersion } from "@/server/app-version";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import type { BrowserCallObservation } from "@/lib/telephony/browser-call-telemetry";
@@ -32,7 +34,7 @@ export async function logBrowserCallObservations(
       // ID supports offline deduplication across retries/beacons and instances.
       // Browser claims are observations, never authoritative call state or server-clock timestamps.
       await Promise.resolve(deps.logger({ scope: "browser_call_timing", source: "browser", observationId: row.id, pageId: row.pageId,
-        sessionId: leg.session_id, legId: leg.id, environment: deps.environment,
+        sessionId: leg.session_id, legId: leg.id, environment: deps.environment, appEnvironment: resolveAppEnvironment(), serverBuild: getAppVersion(),
         phase: row.phase, browserMonotonicMs: row.atMs,
         ...(row.outcome ? { outcome: row.outcome } : {}),
         ...(row.durationMs !== undefined ? { durationMs: row.durationMs } : {}),
