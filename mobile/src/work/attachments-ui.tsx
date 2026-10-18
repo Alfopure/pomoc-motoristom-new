@@ -77,7 +77,7 @@ export function Attachments({ store, caseId, queryKey, active, visible: pageVisi
         {editing && state.coldMissingFile && <Text style={styles.muted}>Súbor sa do konceptu neukladá. Vyberte ho znova; poznámka zostala zachovaná.</Text>}
         <View style={s.group}>
           {state.selected ? <View style={s.selected}><View style={s.fileIcon}><Paperclip size={15} strokeWidth={2.3} color={palette.label} accessible={false} /></View>
-            <View style={{ flex: 1, minWidth: 0 }}><Text style={s.caption}>Vybraný súbor</Text><Text numberOfLines={2} style={s.fileName}>{state.selected.fileName}</Text>
+            <View style={{ flex: 1, minWidth: 0 }}><Text style={s.caption}>{state.coldMissingFile ? "Pôvodný súbor – treba ho vybrať znova" : "Vybraný súbor"}</Text><Text style={s.fileName}>{state.selected.fileName}</Text>
               <Text style={s.caption}>{state.selected.mimeType} · {sizeLabel(state.selected.sizeBytes)}</Text></View></View>
             : <View style={s.selected}><Text style={s.caption}>Zatiaľ nie je vybraný súbor.</Text></View>}
           <View style={s.separator} />
@@ -108,17 +108,19 @@ export function Attachments({ store, caseId, queryKey, active, visible: pageVisi
 function AttachmentRow({ item, first, disabled, onOpen }: { item: MobileCaseAttachment; first: boolean; disabled: boolean; onOpen: () => void }) {
   const Icon = item.category === "photo" ? ImageIcon : item.category === "video" ? Film : FileText;
   const meta = [item.category === "photo" ? "Fotografia" : item.category === "video" ? "Video" : "Dokument", item.sizeBytes !== null ? sizeLabel(item.sizeBytes) : null, item.createdAt ? formatTime(item.createdAt) : null].filter(Boolean).join(" · ");
-  return <Pressable accessibilityRole="button" accessibilityLabel={"Otvoriť " + item.fileName} accessibilityState={{ disabled }} disabled={disabled} onPress={onOpen}
+  // The label replaces the row's texts for screen readers, so it carries all of them.
+  const label = ["Otvoriť " + item.fileName, meta, item.note, item.downloadable ? null : "Tento súbor nie je dostupný na otvorenie."].filter(Boolean).join(", ");
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onOpen}
     style={({ pressed }) => [s.row, pressed && !disabled && { backgroundColor: "#ECECF0" }]}>
     {!first && <View style={s.rowSeparator} />}
     <View style={s.fileIcon}><Icon size={15} strokeWidth={2.3} color={palette.label} accessible={false} /></View>
     <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
-      <Text numberOfLines={2} style={s.fileName}>{item.fileName}</Text>
+      <Text style={s.fileName}>{item.fileName}</Text>
       <Text style={s.caption}>{meta}</Text>
       {item.note ? <Text style={s.note}>{item.note}</Text> : null}
       {!item.downloadable ? <Text style={s.caption}>Tento súbor nie je dostupný na otvorenie.</Text> : null}
     </View>
-    {item.downloadable ? <Text style={[s.open, disabled && { color: palette.tertiaryLabel }]}>Otvoriť ›</Text> : null}
+    {item.downloadable ? <Text maxFontSizeMultiplier={1.3} style={[s.open, disabled && { color: palette.tertiaryLabel }]}>Otvoriť ›</Text> : null}
   </Pressable>;
 }
 const s = StyleSheet.create({
