@@ -17,7 +17,7 @@ Konfigurácia od 2026-09-21 oddeľuje nové Preview nasadenia vrátane vetvy `de
 | Prostredie | Supabase | Organizácia | Aplikácia |
 | --- | --- | --- | --- |
 | Production, vetva `main` | `ifpaeegaesdmljfkdvcn` | AlfoPure, `reqzkjhaquxbbhhalcmm` | `https://dispecing.linkapomoci.sk` |
-| Preview, vetva `dev` a pracovné vetvy | `nzpnqdstvkfncflgqlny` | AlfoPure, `reqzkjhaquxbbhhalcmm`, Pro — trvalý projekt, compute Small | [Testovacie prostredie (`dev`)](https://test.dispecing.linkapomoci.sk), [záložný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) a nové Preview URL pracovných vetiev |
+| Preview, vetva `dev` a pracovné vetvy | `nzpnqdstvkfncflgqlny` | AlfoPure, `reqzkjhaquxbbhhalcmm`, Pro — trvalý projekt, compute Micro | [Testovacie prostredie (`dev`)](https://test.dispecing.linkapomoci.sk), [záložný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) a nové Preview URL pracovných vetiev |
 
 Obe databázy sú vo Frankfurte (`eu-central-1`). Vercel projekt je `pomoc-motoristom-dispatching` (`prj_DN3smSO1EbGowAmw3nHLQUYoSVJG`, tím `team_56GjBnBw6zGSG83LJAnQCB8T`, región `fra1`).
 
@@ -41,15 +41,17 @@ Po každej budúcej zmene doménového mapovania over DNS, platný HTTPS certifi
 
 ## Trvalý TEST projekt
 
+Projekty sa v Supabase volajú `Pomoc motoristom dispečing – PRODUKCIA` (`ifpaeegaesdmljfkdvcn`) a `Pomoc motoristom dispečing – TEST` (`nzpnqdstvkfncflgqlny`). Rozhoduje vždy ref, nie názov.
+
 Od 2026-10-18 je TEST projekt presunutý z Free organizácie AlfoSystems (`rwhghkvusmdnaexjvrum`) do Pro organizácie AlfoPure (`reqzkjhaquxbbhhalcmm`). Ref, URL, kľúče, Auth používatelia, Storage aj dáta zostali rovnaké, preto sa nemenili Vercel premenné, mobilná konfigurácia ani kontroly povoleného ref. Projekty v Pro organizácii sa automaticky nepozastavujú a majú denné zálohy. [Project Transfers](https://supabase.com/docs/guides/platform/project-transfer), [Supabase Project Pausing](https://supabase.com/docs/guides/platform/free-project-pausing).
 
 Spoločná organizácia neznamená spoločnú databázu: TEST je samostatná inštancia s vlastnými kľúčmi a výkonom. Členovia organizácie však vidia oba projekty a Supabase konektor dosiahne oba. Pred každým SQL, migráciou alebo zmenou nastavení uveď presný ref a over ho cez `GET /v1/projects/<ref>`; produkčné kľúče do TESTu nikdy nekopíruj.
 
-Compute TESTu je **Small (2 GB)**, približne 15 USD mesačne navyše k organizácii. Produkcia beží na Medium (4 GB), preto časy z TESTu nie sú výkonovo rovnocenné produkcii. Zmena compute je rozhodnutie majiteľa o nákladoch a spôsobí krátky reštart databázy; vykonáva sa mimo testovacích hovorov a po nej sa overí `GET /api/health/ready`. [Compute and Disk](https://supabase.com/docs/guides/platform/compute-and-disk).
+Compute TESTu je **Micro (1 GB)**, približne 10 USD mesačne navyše k organizácii; schválil ho majiteľ 2026-10-18. Produkcia beží na Medium (4 GB), preto časy z TESTu nie sú výkonovo rovnocenné produkcii. Zmena compute je rozhodnutie majiteľa o nákladoch a spôsobí krátky reštart databázy; vykonáva sa mimo testovacích hovorov a po nej sa overí `GET /api/health/ready`. [Compute and Disk](https://supabase.com/docs/guides/platform/compute-and-disk).
 
 Ak je TEST nedostupný:
 
-1. Otvor [Dashboard testovacieho projektu](https://supabase.com/dashboard/project/nzpnqdstvkfncflgqlny) a over názov `Pomoc motoristom dispatching TEST`, ref a organizáciu AlfoPure.
+1. Otvor [Dashboard testovacieho projektu](https://supabase.com/dashboard/project/nzpnqdstvkfncflgqlny) a over názov `Pomoc motoristom dispečing – TEST`, ref a organizáciu AlfoPure.
 2. Skontroluj stav projektu a služieb (`GET /v1/projects/nzpnqdstvkfncflgqlny/health`). Nevytváraj náhradný projekt ani branch, kým nie je jasná príčina.
 3. Over `https://test.dispecing.linkapomoci.sk/api/health/ready`. Produkciu kontroluj iba čítaním `https://dispecing.linkapomoci.sk/api/health/ready`.
 4. Ak sa nezmenili URL ani kľúče, obnova databázy nevyžaduje nový build aplikácie.
