@@ -1,6 +1,6 @@
 import { usePhoneOverlay } from "../ui/phone-overlays";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, View } from "react-native";
+import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, View } from "react-native";
 import { useAndroidBack } from "../lib/use-android-back";
 import { useShellBack } from "../shell/back";
 import { Button, Card, ErrorNotice, styles } from "../ui";
@@ -9,6 +9,8 @@ import type { CasesApi } from "./api";
 import { CasePlacePicker } from "./case-place-picker";
 import { describeCurrentPlace, describeSelectedPlace } from "./location";
 import { Choice, fields, jobTypes, priorities } from "./form";
+import { CaseFieldSections, CaseServiceSection } from "./fields-ui";
+import { ChoiceField, formLayout } from "../design/form";
 
 export function CaseEditor({ api, edit, active, visible = active, onBack, onSaved }: { api: CasesApi; edit: CaseEdit; active: boolean; visible?: boolean; onBack: () => void; onSaved: () => void }) {
   const state = useSyncExternalStore(edit.subscribe, edit.snapshot, edit.snapshot);
@@ -33,10 +35,14 @@ export function CaseEditor({ api, edit, active, visible = active, onBack, onSave
   const editing = state.status === "editing";
   const addressChange = "manualPickupAddress" in changes || "manualDestinationAddress" in changes || "pickup" in changes || "destination" in changes;
   const addressKey = JSON.stringify([state.base.updatedAt, state.input.manualPickupAddress, state.input.manualDestinationAddress, state.input.pickup, state.input.destination]);
+  const notices = Boolean(state.receipt || state.error || state.status === "uncertain" || state.status === "conflict" || state.status === "blocked" && state.canRecover);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-    <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-      <Text accessibilityRole="header" style={styles.heading}>Upraviť {state.base.caseNumber}</Text>
-      <Text style={styles.muted}>Zmeny zostanú rozpracované, kým ich neuložíte. Poznámka tu upravuje hlavný text prípadu.</Text>
+    <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={formLayout.content}>
+      <View style={formLayout.head}>
+        <Text accessibilityRole="header" style={styles.heading}>Upraviť prípad</Text>
+        <Text style={styles.muted}>{state.base.caseNumber} · Zmeny zostanú rozpracované, kým ich neuložíte.</Text>
+      </View>
+      {notices && <View style={formLayout.notices}>
       {state.receipt && <Card><Text accessibilityRole="alert" style={styles.subheading}>Zmeny sú uložené.</Text>
         {state.receipt.warnings.map((item, i) => <Text key={item.code + i} style={styles.text}>{item.message}</Text>)}
         {state.status === "committed" && <Text style={styles.muted}>Aktuálny detail ešte načítavame. Uloženie sa nebude opakovať.</Text>}</Card>}
@@ -62,35 +68,30 @@ export function CaseEditor({ api, edit, active, visible = active, onBack, onSave
           <Button label="Zahodiť moje zmeny a načítať aktuálne" secondary disabled={state.refreshing} onPress={() => edit.reload()} />
         </>}
       </Card>}
-      {fields.map(field => <View key={field.key}><Text style={styles.label}>{field.label}</Text>
-        <TextInput accessibilityLabel={field.label} value={field.key === "manualPickupAddress" ? state.input.pickup?.address ?? state.input.manualPickupAddress : field.key === "manualDestinationAddress" ? state.input.destination?.address ?? state.input.manualDestinationAddress : state.input[field.key]} onChangeText={value => edit.edit({ [field.key]: value })} editable={editing}
-          maxLength={field.max} multiline={field.multiline} keyboardType={field.key === "contactPhone" ? "phone-pad" : "default"}
-          autoCapitalize={field.key === "licensePlate" ? "characters" : "sentences"} autoCorrect={field.key !== "licensePlate" && field.key !== "contactPhone"}
-          style={[styles.input, field.multiline && { minHeight: 90, textAlignVertical: "top" }]} />
-        {(field.key === "manualPickupAddress" || field.key === "manualDestinationAddress") && <Button label="Vybrať miesto na mape" secondary disabled={!editing || !mapOverlay.canOpen}
-          onPress={() => mapOverlay.open(field.key === "manualPickupAddress" ? "pickup" : "destination")} />}
-      </View>)}
-      <Text style={styles.label}>Služba</Text><View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>{jobTypes.map(item => <Choice key={item.value} label={item.label}
-        selected={state.input.jobTypes.includes(item.value)} disabled={!editing} onPress={() => edit.edit({ jobTypes: state.input.jobTypes.includes(item.value)
-          ? state.input.jobTypes.filter(value => value !== item.value) : [...state.input.jobTypes, item.value] })} />)}</View>
-      <Text style={styles.label}>Priorita</Text><View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>{priorities.map(item => <Choice key={item.value} label={item.label}
-        selected={state.input.priority === item.value} disabled={!editing} onPress={() => edit.edit({ priority: item.value })} />)}</View>
-      <Text style={styles.label}>Stav prípadu</Text><Text style={styles.muted}>Aktuálne: {state.base.statusLabel}</Text>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        <Choice label="Ponechať aktuálny" selected={state.input.status === state.base.editable.status} disabled={!editing} onPress={() => edit.edit({ status: state.base.editable.status })} />
-        {state.base.statusOptions.map(item => <Choice key={item.value} label={item.label}
-        selected={state.input.status === item.value && state.input.status !== state.base.editable.status} disabled={!editing} onPress={() => edit.edit({ status: item.value })} />)}</View>
+      </View>}
+      <CaseFieldSections editable={editing} onChange={(key, value) => edit.edit({ [key]: value })} footers={{ Problém: "Poznámka tu upravuje hlavný text prípadu." }}
+        value={key => key === "manualPickupAddress" ? state.input.pickup?.address ?? state.input.manualPickupAddress : key === "manualDestinationAddress" ? state.input.destination?.address ?? state.input.manualDestinationAddress : state.input[key]}
+        mapDisabled={!editing || !mapOverlay.canOpen} onMap={target => mapOverlay.open(target)} />
+      <CaseServiceSection selectedJobs={state.input.jobTypes} priority={state.input.priority} disabled={!editing}
+        onJobs={jobTypes => edit.edit({ jobTypes })} onPriority={priority => edit.edit({ priority })}
+        footer={changes.status && ["completed_assisted", "completed_no_assistance", "cancelled", "futile_trip"].includes(changes.status) ? "Prípad zmizne z otvorených prípadov. Nájdete ho cez filter Aj uzavreté." : null}>
+        <ChoiceField label="Stav prípadu" detail={"Aktuálne: " + state.base.statusLabel}>
+          <Choice label="Ponechať aktuálny" selected={state.input.status === state.base.editable.status} disabled={!editing} onPress={() => edit.edit({ status: state.base.editable.status })} />
+          {state.base.statusOptions.map(item => <Choice key={item.value} label={item.label}
+            selected={state.input.status === item.value && state.input.status !== state.base.editable.status} disabled={!editing} onPress={() => edit.edit({ status: item.value })} />)}
+        </ChoiceField>
+      </CaseServiceSection>
+      <View style={formLayout.actions}>
       {addressChange && <Card><Text style={styles.text}>Zmena adresy nahradí pôvodné miesto aj jeho uloženú polohu na mape. Prázdna adresa miesto odstráni.</Text>
         <Choice label="Potvrdzujem nahradenie miesta" selected={addressAcknowledged === addressKey} disabled={!editing}
           onPress={() => setAddressAcknowledged(addressAcknowledged === addressKey ? "" : addressKey)} /></Card>}
-      {changes.status && ["completed_assisted", "completed_no_assistance", "cancelled", "futile_trip"].includes(changes.status)
-        && <Text style={styles.muted}>Prípad zmizne z otvorených prípadov. Nájdete ho cez filter Aj uzavreté.</Text>}
+      {state.status === "saved" ? <Button label="Zobraziť uložený detail" onPress={back} />
+        : <Button primary label={state.status === "saving" ? "Ukladám zmeny…" : "Uložiť zmeny"} disabled={!editing || keys.length === 0 || addressChange && addressAcknowledged !== addressKey}
+          onPress={() => { Keyboard.dismiss(); void edit.save(); }} />}
+      </View>
       {mapTarget && editing && <CasePlacePicker key={`${state.base.id}:pick:${mapTarget}`} api={api} caseId={state.base.id} active={active} visible={visible} target={mapTarget}
         seed={{ selection: state.input[mapTarget] ?? null, address: state.input[mapTarget]?.address ?? state.input[mapTarget === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"] }}
         onClose={mapOverlay.close} onApply={mapOverlay.guard(value => edit.selectPlace(mapTarget, value))} />}
-      {state.status === "saved" ? <Button label="Zobraziť uložený detail" onPress={back} />
-        : <Button label={state.status === "saving" ? "Ukladám zmeny…" : "Uložiť zmeny"} disabled={!editing || keys.length === 0 || addressChange && addressAcknowledged !== addressKey}
-          onPress={() => { Keyboard.dismiss(); void edit.save(); }} />}
     </ScrollView>
   </KeyboardAvoidingView>;
 }

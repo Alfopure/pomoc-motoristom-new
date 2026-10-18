@@ -150,7 +150,8 @@ Hodnoty sú v `mobile/src/design/tokens.ts`; obrazovky nepoužívajú vlastné.
 ## 5. Komponenty
 
 `mobile/src/design/list.tsx` (skupina, riadok, hlavička sekcie), `mobile/src/design/detail.tsx`
-(hlavička detailu, rad akcií, riadok údaj–hodnota, ikonové tlačidlo, štítok)
+(hlavička detailu, rad akcií, riadok údaj–hodnota, ikonové tlačidlo, štítok),
+`mobile/src/design/form.tsx` (sekcia formulára, pole, výber, voľba so ✓)
 a `mobile/src/shell/parts.tsx` (prvky kostry):
 
 - **Riadok (object cell)** – 1–3 riadky textu, voliteľný farebný pruh (priorita)
@@ -161,15 +162,26 @@ a `mobile/src/shell/parts.tsx` (prvky kostry):
   **potvrdenie** nad lištou (aj pre VoiceOver), **ikona modulu**, **náhľad lišty**.
 - **Štítok stavu** – 11 b bold v jemnom podklade, vždy na jednom riadku (v riadku
   sa skráti text vedľa neho); stav vždy aj textom.
+- **Tlačidlo** – čierne; jediná hlavná akcia formulára (Uložiť, Vytvoriť,
+  Potvrdiť) je žltá (`primary`), doplnkové sivé (`secondary`), nedostupné svetlosivé.
+- **Formulár** – sekcie s nadpisom; v riadku popis (12 b) nad poľom (16 b), ťuk
+  kamkoľvek do riadku presunie kurzor do poľa; pomocná akcia v riadku je malé
+  žlté tlačidlo s textom („Na mape“); výber hodnoty je riadok s hodnotou a ›,
+  voľba zo zoznamu riadok so ✓, krátke voľby čipy. Hlavná akcia je pod sekciami.
+  Chyba uloženia, neistý zápis a konflikt sú viditeľné hneď po ťuknutí – pri
+  tlačidle alebo navrchu, kam sa obrazovka posunie.
 
 ## 6. Šablóny obrazoviek
 
 Prehľad · Moduly · Zoznam · Kniha · Detail objektu · Tabuľa · Kalendár ·
 Mapa + list · Výjazd (krokovanie) · Nahlásenie s fotkami · Formulár v liste ·
-Hovor. Zoznam používajú Hovory/História, Prípady a Moje úlohy. **Detail**
-(hlavička so štítkami, rad 2–4 akcií s popisom, skupiny riadkov údaj–hodnota
-s ikonami Kopírovať/Mapa/Navigovať, Súvisiace, Udalosti) používa detail
-prípadu a detail hovoru. Ostatné šablóny vzniknú s modulmi pilierov 2 a 3.
+Hovor. Zoznam používajú Hovory/História, Prípady, Moje úlohy a úlohy prípadu
+(spoločný kompaktný riadok úlohy). **Detail** (hlavička so štítkami, rad 2–4 akcií
+s popisom, skupiny riadkov údaj–hodnota s ikonami Kopírovať/Mapa/Navigovať,
+Súvisiace, Udalosti) používa detail prípadu, hovoru a úlohy. **Formulár** používa
+nový prípad a jeho úpravu (Kontakt, Vozidlo, Miesto, Problém, Služba a priorita),
+poznámku, dispečera prípadu a novú úlohu. Ostatné šablóny vzniknú s modulmi
+pilierov 2 a 3.
 
 ## 7. Technické rozhodnutia
 
@@ -210,7 +222,7 @@ lišta a jej úprava fungujú ťuknutím bez gest.
 | --- | --- | --- |
 | 0 | štandard v repozitári, tokeny | hotové |
 | 1–2 | kostra: horná a spodná lišta, Prehľad, Moduly, úprava lišty, register modulov | hotové (TEST) |
-| 3 | Hovory, Prípady, Úlohy, Nástroje, Účet v novej kostre; kompaktné zoznamy; detail prípadu a hovoru; Späť v hornej lište | hotové okrem formulárov |
+| 3 | Hovory, Prípady, Úlohy, Nástroje, Účet v novej kostre; kompaktné zoznamy; detail prípadu, hovoru a úlohy; formuláre; Späť v hornej lište | hotové (odovzdanie prípadu a prílohy ešte v pôvodnom vzhľade) |
 | 4 | šablóny Kniha, Tabuľa, Kalendár, Mapa + list, Výjazd, Nahlásenie | plán |
 | 5 | globálne hľadanie a Upozornenia (hotové); serverový zoznam modulov a preferencie, push upozornenia, lišta hovoru nad lištou, doladenie | čiastočne |
 

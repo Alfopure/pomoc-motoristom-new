@@ -3,13 +3,12 @@ import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, Vie
 import { RotateCw, Search } from "lucide-react-native";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import type { MobileMyTaskFilter } from "../../../src/lib/mobile-api";
-import { Choice, priorities } from "../cases/form";
-import { formatTime } from "../lib/display";
+import { Choice } from "../cases/form";
 import { useAndroidBack } from "../lib/use-android-back";
 import { Button, Card, ErrorNotice, Loading, colors, styles } from "../ui";
 import type { WorkStore } from "./store";
 import { TaskDetail } from "./tasks-ui";
-import { workflowLabels, workError } from "./ui-shared";
+import { TaskRows, workError } from "./ui-shared";
 
 type Props = {
   store: WorkStore;
@@ -92,16 +91,7 @@ function MyTasksWorkspace({ store, queryKey, profileId, active, onOpenCase, onLe
     {view === "review" && <Text style={styles.muted}>Úlohy, pri ktorých ste kontrolórom, aj keď ešte neboli odovzdané na kontrolu.</Text>}
     {pendingRequest || pendingSearch || query.isPending ? <Loading /> : !canShow ? <ErrorNotice message={workError(query.error)} onRetry={() => { if (query.isFetchNextPageError) void query.fetchNextPage(); else void query.refetch(); }} /> : <>
       {!items.length && <Card><Text style={styles.text}>Žiadne úlohy pre tento výber.</Text></Card>}
-      {items.length > 0 && <View style={s.group}>{items.map((item, index) => <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={"Otvoriť úlohu " + item.title} onPress={() => setSelected(item.id)}
-        style={({ pressed }) => [s.row, pressed && { backgroundColor: "#ECECF0" }]}>
-        {index > 0 && <View style={s.separator} />}
-        <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
-          <View style={s.titleLine}><Text numberOfLines={1} style={s.title}>{item.title}</Text>{item.dueAt && <Text style={s.due}>{formatTime(item.dueAt)}</Text>}</View>
-          <Text numberOfLines={1} style={styles.muted}>{workflowLabels[item.workflowState]} · {priorities.find(value => value.value === item.priority)?.label}</Text>
-          <Text numberOfLines={1} style={s.meta}>{[item.assignedTo?.name ?? "Nepriradená", item.reviewer ? "Kontrolór: " + item.reviewer.name : null].filter(Boolean).join(" · ")}</Text>
-        </View>
-        <Text style={s.chevron}>›</Text>
-      </Pressable>)}</View>}
+      {items.length > 0 && <TaskRows items={items} onOpen={setSelected} />}
       {query.hasNextPage && <Button label="Ďalšie úlohy" secondary disabled={query.isFetchingNextPage} onPress={() => { void query.fetchNextPage(); }} />}
     </>}
   </ScrollView>;
@@ -110,12 +100,4 @@ const s = StyleSheet.create({
   search: { minHeight: 38, borderRadius: 19, backgroundColor: "rgba(118,118,128,0.12)", flexDirection: "row", alignItems: "center", gap: 7, paddingLeft: 12, paddingRight: 4 },
   searchInput: { flex: 1, minHeight: 38, fontSize: 16, color: colors.ink, paddingVertical: 0 },
   refresh: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center" },
-  group: { backgroundColor: colors.white, borderRadius: 16, overflow: "hidden" },
-  row: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingVertical: 8, minHeight: 60 },
-  separator: { position: "absolute", top: 0, left: 12, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: "rgba(60,60,67,0.16)" },
-  titleLine: { flexDirection: "row", alignItems: "baseline", gap: 8 },
-  title: { fontSize: 15, lineHeight: 20, fontWeight: "600", color: colors.ink, flex: 1 },
-  due: { fontSize: 12, lineHeight: 16, fontWeight: "500", color: colors.muted, fontVariant: ["tabular-nums"] },
-  meta: { fontSize: 12, lineHeight: 16, color: colors.muted },
-  chevron: { fontSize: 20, color: "#AEAEB2" },
 });

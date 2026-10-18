@@ -71,7 +71,8 @@ na schválenie; majiteľ potvrdil spustenie Expo náhľadu na fyzickom iPhone.
 Skutočné audio, APNs a systémové zvonenie na zamknutom zariadení zatiaľ
 nie sú prijaté ako funkčné. Android hlas/FCM nasleduje po iPhone pilote.
 
-Rozhranie používa žltú `#FCD703`, čierne tlačidlá a zinc/sivé plochy webu.
+Rozhranie používa žltú `#FCD703` (hlavná akcia formulára, „moje“), čierne a sivé
+tlačidlá a zinc/sivé plochy webu.
 Plávajúca spodná lišta má päť položiek s popisom (Prehľad, tri vlastné
 moduly, žlté Moduly) a používa natívny Liquid Glass na podporovanom iOS 26+.
 Dostupnosť modulu aj systémového API sa overí pred importom natívneho pohľadu.
