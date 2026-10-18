@@ -10,17 +10,6 @@ import { useForegroundVisit } from "../ui/foreground-visit";
 import type { CallbackQueueStore } from "./store";
 import { callbackFilters, callbackOriginLabels, callbackStatusLabels, callbackUrgency, deadlineText, filterCallbacks, formatWait, waitingLabel, type CallbackFilter } from "./model";
 
-export type HistoryView = "calls" | "callbacks";
-export function HistorySegment({ view, onView, open }: { view: HistoryView; onView: (view: HistoryView) => void; open?: number | null }) {
-  const items: { id: HistoryView; label: string; count?: number | null }[] = [{ id: "calls", label: "Hovory" }, { id: "callbacks", label: "Spätné volania", count: open }];
-  return <View accessibilityRole="tablist" style={s.segment}>{items.map(item => <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected: item.id === view }}
-    accessibilityLabel={item.label + (item.count ? ", " + item.count + " čaká" : "")}
-    onPress={() => onView(item.id)} style={({ pressed }) => [s.segmentItem, item.id === view && s.segmentSelected, pressed && { opacity: 0.75 }]}>
-    <Text numberOfLines={2} style={[s.segmentText, item.id === view && { color: colors.ink }]}>{item.label}</Text>
-    {Boolean(item.count) && <View style={s.badge}><Text style={s.badgeText}>{item.count! > 99 ? "99+" : item.count}</Text></View>}
-  </Pressable>)}</View>;
-}
-
 export type CallbackDialer = { available: boolean; reason: string | null; dial: (id: string, number: string, verificationId?: string) => Promise<string | null> };
 const urgencyColor = { fresh: colors.muted, due: "#9A6700", overdue: colors.danger } as const;
 
@@ -60,9 +49,7 @@ export function CallbacksPanel({ store, active, current, dialer, onShowCalls, on
   }
   return <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={state.loading && Boolean(state.counts)} onRefresh={() => { void store.refresh(); }} />}>
-    <HistorySegment view="callbacks" onView={view => { if (view === "calls") onShowCalls(); }} open={state.counts?.open} />
-    <Text accessibilityRole="header" style={styles.heading}>Spätné volania</Text>
-    {state.counts && <Card style={s.summary}>
+    {state.counts && <Card>
       <Text style={s.summaryCount}>{state.counts.open ? waitingLabel(state.counts.open) : "Nikto nečaká"}</Text>
       <Text style={styles.muted}>Vyžiadané klientom {state.counts.requested} · Zmeškané {state.counts.missed} · Zadané dispečerom {state.counts.manual}{state.counts.unknown ? " · Staršie " + state.counts.unknown : ""}</Text>
       {overdue !== null && overdue > 0 && <Text style={[styles.label, { color: colors.danger, marginBottom: 0 }]}>Po termíne: {overdue}</Text>}
@@ -70,7 +57,7 @@ export function CallbacksPanel({ store, active, current, dialer, onShowCalls, on
     </Card>}
     {!dialer.available && dialer.reason && <Text style={styles.muted}>{dialer.reason}</Text>}
     <View style={s.filters}>{callbackFilters.map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityState={{ selected: item.id === filter }}
-      onPress={() => setFilter(item.id)} style={({ pressed }) => [s.filter, item.id === filter && s.filterSelected, pressed && { opacity: 0.75 }]}>
+      hitSlop={{ top: 6, bottom: 6 }} onPress={() => setFilter(item.id)} style={({ pressed }) => [s.filter, item.id === filter && s.filterSelected, pressed && { opacity: 0.75 }]}>
       <Text style={[s.filterText, item.id === filter && { color: colors.white }]}>{item.label}</Text></Pressable>)}</View>
     {state.notice && state.notice.id === null && <Notice tone={state.notice.tone} message={state.notice.message} />}
     {state.loading && !state.counts ? <Loading label="Načítavam spätné volania…" /> : state.error && !state.counts ? <ErrorNotice message={state.error} onRetry={() => { void store.refresh(); }} /> : <>
@@ -145,22 +132,15 @@ function CallbackCard({ item, now, state, dialer, onCall, onClaim, onOpenCase, o
 }
 
 const s = StyleSheet.create({
-  segment: { flexDirection: "row", backgroundColor: "#E7E9EE", borderRadius: 16, padding: 4, gap: 4 },
-  segmentItem: { flex: 1, minHeight: 40, borderRadius: 12, flexDirection: "row", gap: 6, alignItems: "center", justifyContent: "center", paddingHorizontal: 8, paddingVertical: 4 },
-  badge: { minWidth: 22, height: 22, borderRadius: 11, paddingHorizontal: 6, backgroundColor: colors.danger, alignItems: "center", justifyContent: "center" },
-  badgeText: { color: colors.white, fontSize: 12, fontWeight: "700" },
-  segmentSelected: { backgroundColor: colors.white, shadowColor: "#000", shadowOpacity: 0.08, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 1 },
-  segmentText: { fontSize: 14, fontWeight: "600", color: colors.muted, textAlign: "center", flexShrink: 1 },
-  summary: { backgroundColor: "#FEFEFB" },
-  summaryCount: { fontSize: 26, fontWeight: "700", letterSpacing: -0.6, color: colors.ink },
-  filters: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
-  filter: { borderRadius: 22, minHeight: 44, backgroundColor: "#EDEFF2", paddingHorizontal: 15, paddingVertical: 11, alignItems: "center", justifyContent: "center" },
-  filterText: { fontSize: 14, fontWeight: "600", color: colors.muted },
+  summaryCount: { fontSize: 20, lineHeight: 25, fontWeight: "700", letterSpacing: -0.4, color: colors.ink },
+  filters: { flexDirection: "row", gap: 6, flexWrap: "wrap" },
+  filter: { borderRadius: 16, minHeight: 32, backgroundColor: colors.white, borderWidth: StyleSheet.hairlineWidth, borderColor: "rgba(60,60,67,0.16)", paddingHorizontal: 12, paddingVertical: 6, alignItems: "center", justifyContent: "center" },
+  filterText: { fontSize: 13, lineHeight: 17, fontWeight: "600", color: colors.ink },
   filterSelected: { backgroundColor: colors.ink },
-  icon: { width: 44, height: 44, borderRadius: 16, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
+  icon: { width: 32, height: 32, borderRadius: 10, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
   iconDue: { backgroundColor: "#FFF4D6" },
   iconOverdue: { backgroundColor: "#FFF0EF" },
-  overdueCard: { borderColor: "#F4C7C3" },
+  overdueCard: { borderWidth: 1, borderColor: "#F4C7C3" },
   notice: { backgroundColor: colors.notice, borderWidth: 1, borderColor: colors.noticeBorder, borderRadius: 16, padding: 12 },
   noticeError: { backgroundColor: "#FFF0EF", borderColor: "#F4C7C3" },
 });

@@ -1,26 +1,28 @@
 import type { PropsWithChildren } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 
+import { type } from "./design/tokens";
 import { colors, NAVIGATION_CONTENT_BOTTOM } from "./ui/theme";
 export { colors, NAVIGATION_CONTENT_BOTTOM } from "./ui/theme";
 
+// Compact standard: grouped white surfaces on the system background, capsule buttons.
 export const styles = StyleSheet.create({
   page: { flex: 1, backgroundColor: colors.background },
-  content: { padding: 20, gap: 18, paddingBottom: NAVIGATION_CONTENT_BOTTOM },
-  heading: { fontSize: 32, fontWeight: "700", letterSpacing: -0.8, color: colors.ink },
-  subheading: { fontSize: 19, fontWeight: "600", letterSpacing: -0.3, color: colors.ink },
-  text: { fontSize: 16, color: colors.ink, lineHeight: 24 },
-  muted: { fontSize: 14, color: colors.muted, lineHeight: 21 },
-  label: { fontSize: 14, color: colors.ink, fontWeight: "600", marginBottom: 7 },
-  input: { backgroundColor: colors.white, borderColor: colors.border, borderWidth: 1, borderRadius: 16, padding: 16, minHeight: 54, fontSize: 16, color: colors.ink },
+  content: { paddingHorizontal: 16, paddingTop: 6, gap: 12, paddingBottom: NAVIGATION_CONTENT_BOTTOM },
+  heading: { ...type.title, color: colors.ink },
+  subheading: { ...type.headline, color: colors.ink },
+  text: { ...type.body, color: colors.ink },
+  muted: { ...type.subhead, color: colors.muted },
+  label: { fontSize: 13, lineHeight: 18, color: colors.ink, fontWeight: "600", marginBottom: 6 },
+  input: { backgroundColor: colors.white, borderColor: colors.border, borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, minHeight: 44, fontSize: 16, color: colors.ink },
   row: { flexDirection: "row", alignItems: "center", gap: 10 },
-  card: { backgroundColor: colors.white, padding: 20, borderRadius: 24, borderWidth: 1, borderColor: colors.border, gap: 10 },
-  button: { backgroundColor: colors.ink, borderRadius: 17, padding: 16, minHeight: 52, alignItems: "center", justifyContent: "center" },
-  buttonText: { color: colors.white, fontSize: 16, fontWeight: "600", maxWidth: "100%", textAlign: "center" },
-  secondary: { backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border },
+  card: { backgroundColor: colors.white, padding: 14, borderRadius: 16, gap: 8 },
+  button: { backgroundColor: colors.ink, borderRadius: 22, paddingVertical: 11, paddingHorizontal: 16, minHeight: 44, alignItems: "center", justifyContent: "center" },
+  buttonText: { color: colors.white, fontSize: 15, lineHeight: 20, fontWeight: "600", maxWidth: "100%", textAlign: "center" },
+  secondary: { backgroundColor: "rgba(118,118,128,0.12)" },
   secondaryText: { color: colors.ink },
-  disabled: { backgroundColor: "#D4D4D8" },
-  disabledText: { color: colors.muted },
+  disabled: { backgroundColor: "#E5E5EA" },
+  disabledText: { color: "#8E8E93" },
 });
 export function Card({ children, style }: PropsWithChildren<{ style?: StyleProp<ViewStyle> }>) { return <View style={[styles.card, style]}>{children}</View>; }
 export function Button({ label, onPress, disabled, secondary }: { label: string; onPress: () => void; disabled?: boolean; secondary?: boolean }) {
@@ -30,7 +32,7 @@ export function Button({ label, onPress, disabled, secondary }: { label: string;
   </Pressable>;
 }
 export function Loading({ label = "Načítavam…" }: { label?: string }) {
-  return <View style={{ padding: 20, gap: 14, alignItems: "center" }}><ActivityIndicator color={colors.ink} /><Text style={styles.muted}>{label}</Text></View>;
+  return <View style={{ padding: 16, gap: 10, alignItems: "center" }}><ActivityIndicator color={colors.ink} /><Text style={styles.muted}>{label}</Text></View>;
 }
 export function ErrorNotice({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return <Card><Text accessibilityRole="alert" style={[styles.text, { color: colors.danger }]}>{message}</Text>

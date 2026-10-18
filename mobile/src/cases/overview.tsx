@@ -6,9 +6,9 @@ import { MobileApiError } from "../lib/api";
 import { formatTime } from "../lib/display";
 import { ErrorNotice, Loading, colors, styles } from "../ui";
 
-const cards: { key: CaseShortcut; label: string }[] = [
-  { key: "open", label: "Všetky otvorené" }, { key: "mine", label: "Moje otvorené" },
-  { key: "unassigned", label: "Nepriradené otvorené" }, { key: "urgent", label: "Horí · otvorené" },
+const cards: { key: CaseShortcut; label: string; accessibilityLabel: string }[] = [
+  { key: "open", label: "Otvorené", accessibilityLabel: "Všetky otvorené" }, { key: "mine", label: "Moje", accessibilityLabel: "Moje otvorené" },
+  { key: "unassigned", label: "Nepriradené", accessibilityLabel: "Nepriradené otvorené" }, { key: "urgent", label: "Horí", accessibilityLabel: "Horí · otvorené" },
 ];
 export function CaseOverview({ api, queryKey, active, pendingFilter, onSelect }: {
   api: CasesApi; queryKey: string[]; active: boolean; pendingFilter: boolean; onSelect: (value: CaseShortcut) => void;
@@ -16,17 +16,18 @@ export function CaseOverview({ api, queryKey, active, pendingFilter, onSelect }:
   const query = useQuery({ queryKey: [...queryKey, "overview"], queryFn: ({ signal }) => api.overview(signal), enabled: active });
   if (!active) return null;
   return <View style={{ gap: 8 }}>
-    <Text style={styles.subheading}>Prehľad otvorených prípadov</Text>
     {query.isError ? <ErrorNotice message={query.error instanceof MobileApiError ? query.error.message : "Prehľad sa nepodarilo načítať."} onRetry={() => { void query.refetch(); }} />
       : query.isPending || query.isFetching || pendingFilter ? <Loading />
-        : <><View style={s.grid}>{cards.map(card => <Pressable key={card.key} accessibilityRole="button" accessibilityLabel={card.label} onPress={() => onSelect(card.key)} style={s.card}>
-          <Text style={[s.count, card.key === "urgent" && { color: colors.danger }]}>{query.data.counts[card.key]}</Text>
-          <Text style={styles.muted}>{card.label}</Text>
-        </Pressable>)}</View><Text style={styles.muted}>Celá organizácia · {formatTime(query.data.checkedAt)}</Text></>}
+        : <><View style={s.grid}>{cards.map(card => <Pressable key={card.key} accessibilityRole="button" accessibilityLabel={card.accessibilityLabel + ": " + query.data.counts[card.key]} onPress={() => onSelect(card.key)}
+          style={({ pressed }) => [s.card, pressed && { opacity: 0.7 }]}>
+          <Text numberOfLines={1} adjustsFontSizeToFit style={[s.count, card.key === "urgent" && { color: colors.danger }]}>{query.data.counts[card.key]}</Text>
+          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={s.label}>{card.label}</Text>
+        </Pressable>)}</View><Text style={styles.muted}>Otvorené prípady celej organizácie · {formatTime(query.data.checkedAt)}</Text></>}
   </View>;
 }
 const s = StyleSheet.create({
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  card: { flexGrow: 1, flexBasis: "45%", padding: 18, minHeight: 106, borderRadius: 22, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border, gap: 6 },
-  count: { color: colors.ink, fontSize: 32, fontWeight: "700", letterSpacing: -1 },
+  grid: { flexDirection: "row", gap: 8 },
+  card: { flex: 1, minWidth: 0, paddingHorizontal: 10, paddingVertical: 9, minHeight: 58, borderRadius: 14, backgroundColor: colors.white, gap: 1 },
+  count: { color: colors.ink, fontSize: 20, lineHeight: 25, fontWeight: "700", letterSpacing: -0.4, fontVariant: ["tabular-nums"] },
+  label: { fontSize: 12, lineHeight: 16, fontWeight: "500", color: colors.muted },
 });
