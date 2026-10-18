@@ -69,7 +69,7 @@ export function Console({ api, me, queryKey, active, number, onNumber, phone, ph
       </Card>
       {query.data.activeCalls.length > 0 && <><Text accessibilityRole="header" style={styles.subheading}>Hovory na vašom účte</Text>
         <View style={s.group}>{query.data.activeCalls.map((call, index) => <Row key={call.id} first={index === 0} title={call.name || formatNumber(call.number)}
-          subtitle={[callStatus(call.state), call.lineLabel].filter(Boolean).join(" · ")} accessibilityLabel={"Detail hovoru " + (call.name || formatNumber(call.number))}
+          subtitle={[callStatus(call.state), call.lineLabel].filter(Boolean).join(" · ")} accessibilityLabel={["Detail hovoru " + (call.name || formatNumber(call.number)), callStatus(call.state), call.lineLabel].filter(Boolean).join(", ")}
           leading={<View style={s.callIcon}><Phone size={15} strokeWidth={2.3} color={palette.greenText} accessible={false} /></View>}
           onPress={() => onCallContext({ kind: "session", id: call.id })} trailing={<Text style={s.chevron}>›</Text>} />)}</View></>}
     </>}

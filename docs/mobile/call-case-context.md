@@ -1,6 +1,6 @@
 # Hovor a prípad v mobile
 
-V **Histórii** otvorte **Detail hovoru**. V **Ústredni** je rovnaké tlačidlo pri vlastnom hovore; počas aktuálneho mobilného hovoru sa môže zobraziť ako **Detail aktuálneho hovoru**.
+V **Histórii** otvorte **Detail hovoru**. V **Ústredni** detail otvorí riadok hovoru na vašom účte; počas aktuálneho mobilného hovoru sa môže zobraziť ako **Detail aktuálneho hovoru**.
 
 Detail ukazuje smer, číslo, stav, linku, dispečera, dostupné časy a dĺžku hovoru. Chýbajúca dĺžka sa nedopočítava. Pri priradenom prípade sa zobrazí jeho číslo, stav a stručné údaje; tlačidlo **Otvoriť prípad hovoru** načíta aktuálny detail prípadu. Telefónne ovládanie ostáva nad obrazovkou a dolné menu zostáva dostupné.
 

@@ -50,15 +50,18 @@ export function CallbacksPanel({ store, active, current, dialer, onShowCalls, on
     Alert.alert("Prevziať od kolegu?", "Požiadavku má prevzatú " + (item.claimant?.name ?? "iný dispečer") + ". Prevzatím ju budete riešiť vy.", [
       { text: "Zrušiť", style: "cancel" }, { text: "Prevziať", onPress: () => { if (allowed()) void store.claim(item.id); } }]);
   }
-  // One request is open at a time; a running action or its note editor keeps it open.
-  const pinned = state.editor?.id ?? state.pending?.id ?? null;
-  const expanded = pinned ?? openId;
-  // A new result of an action opens its request, so the message is seen.
-  const [seenNotice, setSeenNotice] = useState(state.notice);
-  if (state.notice !== seenNotice) { setSeenNotice(state.notice); if (state.notice?.id) setOpenId(state.notice.id); }
+  // The tapped request is open. A running action or its note editor also holds its own row open,
+  // and a row with an action result stays open until that row is closed; other rows stay usable.
+  const visibleIds = new Set(shown.map(item => item.id));
+  const held = [state.editor?.id, state.pending?.id].filter((id): id is string => Boolean(id && visibleIds.has(id)));
+  const resultRow = state.notice?.id && visibleIds.has(state.notice.id) ? state.notice.id : null;
+  const isOpen = (id: string) => id === openId || id === resultRow || held.includes(id);
+  // A note editor whose request this filter or page does not show stays reachable.
+  const strayEditor = state.editor && !visibleIds.has(state.editor.id) ? state.editor : null;
   function toggle(id: string) {
-    if (pinned !== null) return;
-    if (state.notice?.id) store.dismissNotice();
+    if (held.includes(id)) return;
+    // Closing the row with a result is the only way a row dismisses that result.
+    if (id === resultRow) { store.dismissNotice(); setOpenId(value => value === id ? null : value); return; }
     setOpenId(value => value === id ? null : id);
   }
   return <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={s.content}
@@ -75,12 +78,17 @@ export function CallbacksPanel({ store, active, current, dialer, onShowCalls, on
       hitSlop={{ top: 6, bottom: 6 }} onPress={() => setFilter(item.id)} style={({ pressed }) => [s.filter, item.id === filter && s.filterSelected, pressed && { opacity: 0.75 }]}>
       <Text style={[s.filterText, item.id === filter && { color: colors.white }]}>{item.label}</Text></Pressable>)}</View>
     {state.notice && state.notice.id === null && <View style={s.inset}><Notice tone={state.notice.tone} message={state.notice.message} /></View>}
+    {strayEditor && <View style={s.inset}><Card>
+      <Text style={styles.text}>Máte rozpísanú poznámku k požiadavke, ktorá nie je v tomto zozname.</Text>
+      {filter !== "all" && <Button label="Zobraziť všetky požiadavky" secondary onPress={() => setFilter("all")} />}
+      <Button label="Zahodiť rozpísanú poznámku" secondary disabled={state.pending !== null} onPress={() => store.closeEditor()} />
+    </Card></View>}
     {state.loading && !state.counts ? <Loading label="Načítavam spätné volania…" /> : state.error && !state.counts ? <View style={s.inset}><ErrorNotice message={state.error} onRetry={() => { void store.refresh(); }} /></View> : <>
       {state.error ? <View style={s.inset}><ErrorNotice message={state.error} onRetry={() => { void store.refresh(); }} /></View> : null}
       {shown.length === 0 ? <View style={s.inset}><Card><Text style={styles.text}>{state.open.length ? "Pre tento výber nie je žiadna otvorená požiadavka." : "Nikto nečaká na spätné volanie."}</Text>
         {filter !== "all" && state.nextCursor ? <Text style={styles.muted}>Ďalšie požiadavky ešte nie sú načítané.</Text> : null}</Card></View>
         : <Group>{shown.map((item, index) => <CallbackRow key={item.id} item={item} first={index === 0} now={now} state={state} dialer={dialer}
-          expanded={expanded === item.id} onToggle={() => toggle(item.id)}
+          expanded={isOpen(item.id)} held={held.includes(item.id)} onToggle={() => toggle(item.id)}
           onCall={() => { void call(item); }} onClaim={() => claim(item)} onOpenCase={() => { if (allowed() && item.caseId) onOpenCase(item.caseId); }}
           onEditor={status => store.openEditor(item.id, status)} onNotes={value => store.editNotes(value)} onCloseEditor={() => store.closeEditor()}
           onResolve={() => { if (allowed()) void store.resolve(); }} />)}</Group>}
@@ -104,8 +112,10 @@ function Notice({ tone, message }: { tone: "error" | "info"; message: string }) 
 }
 
 /** Collapsed: who, how urgent, how long. Expanded: everything known and every action, each with a label. */
-function CallbackRow({ item, first, now, state, dialer, expanded, onToggle, onCall, onClaim, onOpenCase, onEditor, onNotes, onCloseEditor, onResolve }: {
-  item: MobileCallbackRequest; first: boolean; now: number; state: ReturnType<CallbackQueueStore["snapshot"]>; dialer: CallbackDialer; expanded: boolean; onToggle: () => void;
+function CallbackRow({ item, first, now, state, dialer, expanded, held, onToggle, onCall, onClaim, onOpenCase, onEditor, onNotes, onCloseEditor, onResolve }: {
+  item: MobileCallbackRequest; first: boolean; now: number; state: ReturnType<CallbackQueueStore["snapshot"]>; dialer: CallbackDialer; expanded: boolean;
+  /** Held open by its running action or note editor. */
+  held: boolean; onToggle: () => void;
   onCall: () => void; onClaim: () => void; onOpenCase: () => void; onEditor: (status: "done" | "cancelled") => void;
   onNotes: (value: string) => void; onCloseEditor: () => void; onResolve: () => void;
 }) {
@@ -118,19 +128,21 @@ function CallbackRow({ item, first, now, state, dialer, expanded, onToggle, onCa
   const origin = item.origin === "unknown" ? callbackOriginLabels.unknown : item.origin === "missed" ? "Zmeškaný hovor" : callbackOriginLabels[item.origin];
   return <View style={[s.row, expanded && s.rowOpen]}>
     {!first && <View style={s.separator} />}
-    <Pressable accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={[title, deadline, origin, who, "čaká " + formatWait(item.createdAt, now)].filter(Boolean).join(", ")}
-      onPress={onToggle} style={({ pressed }) => [s.head, pressed && { opacity: 0.7 }]}>
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded, disabled: held }} accessibilityLabel={[title, deadline, origin, who, "čaká " + formatWait(item.createdAt, now)].filter(Boolean).join(", ")}
+      disabled={held} onPress={onToggle} style={({ pressed }) => [s.head, pressed && { opacity: 0.7 }]}>
       <View style={[s.icon, urgency === "overdue" && { backgroundColor: palette.redSoft }, urgency === "due" && { backgroundColor: palette.orangeSoft }]}>
         <Icon size={15} strokeWidth={2.3} color={urgency === "overdue" ? palette.redText : urgency === "due" ? palette.orangeText : palette.label} accessible={false} /></View>
       <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-        <View style={s.titleLine}><Text numberOfLines={1} style={s.title}>{title}</Text><Text style={s.time}>{formatWait(item.createdAt, now)}</Text></View>
+        <View style={s.titleLine}><Text numberOfLines={expanded ? undefined : 1} style={s.title}>{title}</Text><Text style={s.time}>{formatWait(item.createdAt, now)}</Text></View>
         <View style={s.meta}>{deadline ? <Tag text={deadline} tone={urgency === "overdue" ? "red" : urgency === "due" ? "orange" : "gray"} /> : null}
           <Text numberOfLines={1} style={s.metaText}>{origin} · {who}</Text></View>
       </View>
-      {expanded ? <ChevronUp size={18} color={palette.tertiaryLabel} accessible={false} /> : <ChevronDown size={18} color={palette.tertiaryLabel} accessible={false} />}
+      {held ? null : expanded ? <ChevronUp size={18} color={palette.tertiaryLabel} accessible={false} /> : <ChevronDown size={18} color={palette.tertiaryLabel} accessible={false} />}
     </Pressable>
     {expanded && <View style={s.body}>
       {item.name ? <Text selectable style={styles.text}>{formatNumber(item.number)}</Text> : null}
+      {/* The collapsed line may be cut; the open row says it in full. */}
+      <Text style={s.caption}>{callbackOriginLabels[item.origin]} · {who}</Text>
       {item.originDetail ? <Text style={s.caption}>{item.originDetail}</Text> : null}
       {/* The origin already names missed, requested and manual rows; older rows keep their route. */}
       {item.origin === "unknown" || item.lineLabel || item.partnerName ? <Text style={s.caption}>{[item.origin === "unknown" ? item.sourceLabel : null, item.lineLabel ?? item.partnerName].filter(Boolean).join(" · ")}</Text> : null}
