@@ -22,6 +22,8 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   po termíne alebo na dnes a horiace prípady organizácie, zoradené podľa naliehavosti;
   každá sekcia vedie na celý zoznam (Spätné, Moje úlohy, Prípady s filtrom Horí).
   Číta existujúce autorizované zoznamy, server ani push notifikácie nemení.
+- **Lišta hovoru:** kým beží hovor v telefóne alebo na účte dispečera, nad spodnou
+  lištou je zelený pás s menom, stavom a dĺžkou; ťuk vráti k hovoru.
 - **Hľadať:** prípady celej organizácie (číslo, meno, EČV, telefón), hovory a moduly
   v jednom poli; výsledok otvorí detail prípadu, detail hovoru alebo modul.
 - **Hovory → Ústredňa:** skutočný serverový stav operátora, jeho aktívne hovory,

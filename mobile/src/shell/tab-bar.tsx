@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { AccessibilityInfo, Animated, Keyboard, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { AccessibilityInfo, Animated, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { palette } from "../design/tokens";
 import { GlassSurface } from "../ui/glass";
 import { TAB_BAR_HEIGHT, tabBarBottom, tabBarHeight } from "../ui/theme";
 import type { ShellTab } from "./navigation";
 import { AddMark, Badge, TabGlyph, tabLabel } from "./parts";
+import { useKeyboardShown } from "./keyboard";
 
 type Props = {
   tabs: ShellTab[]; selected: ShellTab | null; badges: Partial<Record<ShellTab, number>>; showAdd: boolean;
@@ -18,7 +19,7 @@ type Item = ShellTab | "add";
 export function DockTabBar({ tabs, selected, badges, showAdd, onSelect, onAdd }: Props) {
   const insets = useSafeAreaInsets();
   const { fontScale } = useWindowDimensions();
-  const [keyboard, setKeyboard] = useState(() => Platform.OS !== "web" && Keyboard.isVisible());
+  const keyboard = useKeyboardShown();
   const [width, setWidth] = useState(0);
   const [reduceMotion, setReduceMotion] = useState(true);
   const [lens] = useState(() => new Animated.Value(0));
@@ -26,13 +27,6 @@ export function DockTabBar({ tabs, selected, badges, showAdd, onSelect, onAdd }:
   const items: Item[] = showAdd ? [...tabs.slice(0, -1), "add", tabs[tabs.length - 1]] : tabs;
   const itemWidth = width > 0 ? width / items.length : 0;
   const index = selected ? items.indexOf(selected) : -1;
-  useEffect(() => {
-    if (Platform.OS === "web") return;
-    const shown = Keyboard.addListener("keyboardDidShow", () => setKeyboard(true));
-    const hidden = Keyboard.addListener("keyboardDidHide", () => setKeyboard(false));
-    const willShow = Platform.OS === "ios" ? Keyboard.addListener("keyboardWillShow", () => setKeyboard(true)) : null;
-    return () => { shown.remove(); hidden.remove(); willShow?.remove(); };
-  }, []);
   useEffect(() => {
     let alive = true;
     void AccessibilityInfo.isReduceMotionEnabled().then(value => { if (alive) setReduceMotion(value); }).catch(() => undefined);

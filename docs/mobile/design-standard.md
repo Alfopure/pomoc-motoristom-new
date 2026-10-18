@@ -94,6 +94,17 @@ nadol. Zdroj s chybou ukáže chybu s tlačidlom Skúsiť znova; „Všetko je
 vybavené“ sa zobrazí iba vtedy, keď všetky zdroje odpovedali celé. Server ani
 notifikácie nemení – push upozornenia sú samostatná etapa.
 
+**Účet** (avatar): profil, Prostredie, Spodná lišta (Upraviť lištu, Obnoviť podľa
+roly), Odhlásiť sa ako červený riadok a Koncepty v tomto zariadení – každý koncept
+s tlačidlami Pokračovať a Zahodiť. Počas hovoru je odhlásenie nedostupné.
+
+**Lišta hovoru** (`call-bar.tsx`): kým beží hovor, nad spodnou lištou je zelený
+pás s menom alebo číslom, stavom a dĺžkou hovoru. Hovor v tomto telefóne má
+prednosť pred hovormi, ktoré server eviduje na účte (napr. na stolovom telefóne).
+Ťuk otvorí detail hovoru, pri hovore v telefóne alebo viacerých hovoroch Ústredňu.
+Na Ústredni a v detaile toho istého hovoru sa nezobrazuje; pri písaní sa skryje
+spolu s lištou a obsah končí nad ním.
+
 **Okná (sheet)**: jedno spoločné okno zdola pre úpravu lišty, výber náhrady
 a menu modulu; každé má viditeľné Hotovo, Zrušiť alebo Zavrieť. Pri začiatku
 hovoru alebo prechode do pozadia sa zatvorí (`usePhoneOverlay`), aby ovládanie
@@ -175,8 +186,8 @@ a `mobile/src/shell/parts.tsx` (prvky kostry):
 
 Prehľad · Moduly · Zoznam · Kniha · Detail objektu · Tabuľa · Kalendár ·
 Mapa + list · Výjazd (krokovanie) · Nahlásenie s fotkami · Formulár v liste ·
-Hovor. Zoznam používajú Hovory/História, Prípady, Moje úlohy a úlohy prípadu
-(spoločný kompaktný riadok úlohy). **Detail** (hlavička so štítkami, rad 2–4 akcií
+Hovor. Zoznam používajú Hovory/História, Prípady, Moje úlohy, úlohy prípadu
+(spoločný kompaktný riadok úlohy) a Nástroje (jedna skupina riadkov s ikonou). **Detail** (hlavička so štítkami, rad 2–4 akcií
 s popisom, skupiny riadkov údaj–hodnota s ikonami Kopírovať/Mapa/Navigovať,
 Súvisiace, Udalosti) používa detail prípadu, hovoru a úlohy. **Formulár** používa
 nový prípad a jeho úpravu (Kontakt, Vozidlo, Miesto, Problém, Služba a priorita),
@@ -224,7 +235,7 @@ lišta a jej úprava fungujú ťuknutím bez gest.
 | 1–2 | kostra: horná a spodná lišta, Prehľad, Moduly, úprava lišty, register modulov | hotové (TEST) |
 | 3 | Hovory, Prípady, Úlohy, Nástroje, Účet v novej kostre; kompaktné zoznamy; detail prípadu, hovoru a úlohy; formuláre; Späť v hornej lište | hotové (odovzdanie prípadu a prílohy ešte v pôvodnom vzhľade) |
 | 4 | šablóny Kniha, Tabuľa, Kalendár, Mapa + list, Výjazd, Nahlásenie | plán |
-| 5 | globálne hľadanie a Upozornenia (hotové); serverový zoznam modulov a preferencie, push upozornenia, lišta hovoru nad lištou, doladenie | čiastočne |
+| 5 | globálne hľadanie, Upozornenia a lišta hovoru nad lištou (hotové); serverový zoznam modulov a preferencie, push upozornenia, doladenie | čiastočne |
 
 ## 11. Zdroje
 

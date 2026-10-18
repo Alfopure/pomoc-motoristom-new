@@ -1,12 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { AppState, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { AppState, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import { CarFront, ChevronRight, MapPinned, Route, Truck } from "lucide-react-native";
 import type { CasesApi } from "../cases/api";
 import { CaseMapFrame } from "../cases/map-frame";
 import { CasePlacePicker } from "../cases/case-place-picker";
 import { useAndroidBack } from "../lib/use-android-back";
 import { useShellBack } from "../shell/back";
-import { Card, colors, styles } from "../ui";
+import { Card, styles } from "../ui";
+import { Row } from "../design/list";
+import { palette } from "../design/tokens";
 import type { ToolsApi } from "./api";
 import { VehicleLookup } from "./lookup";
 import { RouteTool, type ToolMapPick, type ToolMapView } from "./route";
@@ -65,12 +67,9 @@ function ScopedToolsWorkspace({ api, maps, scopeKey, active, visible, mapBlocked
         {notice && <Card><Text accessibilityRole="alert" style={styles.text}>{notice}</Text></Card>}
         {tool === "home" && <>
           <Text style={styles.muted}>Všetko potrebné pre ďalší zásah.</Text>
-          {entries.map(entry => <Pressable key={entry.id} accessibilityRole="button" accessibilityLabel={entry.title} onPress={() => { setNotice(null); setTool(entry.id); }}
-            style={({ pressed }) => [styles.card, s.entry, pressed && { opacity: 0.7 }]}>
-            <View style={s.icon}><entry.icon size={19} color={colors.ink} accessible={false} /></View>
-            <View style={s.caption}><Text style={styles.subheading}>{entry.title}</Text><Text style={styles.muted}>{entry.description}</Text></View>
-            <ChevronRight size={20} color={colors.muted} accessible={false} />
-          </Pressable>)}
+          <View style={s.group}>{entries.map((entry, index) => <Row key={entry.id} first={index === 0} title={entry.title} subtitle={entry.description}
+            onPress={() => { setNotice(null); setTool(entry.id); }} leading={<View style={s.icon}><entry.icon size={16} strokeWidth={2.2} color={palette.brandInk} accessible={false} /></View>}
+            trailing={<ChevronRight size={18} color={palette.tertiaryLabel} accessible={false} />} />)}</View>
         </>}
         <View style={tool === "lookup" ? s.tool : s.hidden}><VehicleLookup api={api} active={foreground && tool === "lookup"} /></View>
         <View style={tool === "route" ? s.tool : s.hidden}><RouteTool api={api} active={foreground && tool === "route"} pick={pick} view={view} /></View>
@@ -88,7 +87,8 @@ function ScopedToolsWorkspace({ api, maps, scopeKey, active, visible, mapBlocked
   </>;
 }
 const s = StyleSheet.create({
-  entry: { flexDirection: "row", alignItems: "center", gap: 12, minHeight: 64 },
-  icon: { width: 34, height: 34, borderRadius: 10, backgroundColor: "#FFF5B8", alignItems: "center", justifyContent: "center" },
-  caption: { flex: 1, minWidth: 0, gap: 2 }, tool: { gap: 12 }, hidden: { display: "none" },
+  // The page already insets its content; the list group needs no own margin.
+  group: { backgroundColor: palette.card, borderRadius: 16, overflow: "hidden" },
+  icon: { width: 30, height: 30, borderRadius: 8, backgroundColor: palette.brandSoft, alignItems: "center", justifyContent: "center" },
+  tool: { gap: 12 }, hidden: { display: "none" },
 });
