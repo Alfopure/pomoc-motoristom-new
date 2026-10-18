@@ -39,7 +39,8 @@ export function Console({ api, me, queryKey, active, number, onNumber, phone, ph
     } catch (error) { setTargetError({ number, message: errorMessage(error) }); }
     finally { setCheckingTarget(false); }
   }
-  const query = useQuery({ queryKey: [...queryKey, "console", me.profileId], queryFn: ({ signal }) => api.console(me.profileId, signal), enabled: active, refetchInterval: active ? 30_000 : false });
+  // The shell polls this key every 30 s for the status shown on every screen.
+  const query = useQuery({ queryKey: [...queryKey, "console", me.profileId], queryFn: ({ signal }) => api.console(me.profileId, signal), enabled: active });
   const readiness = useQuery({ queryKey: [...queryKey, "voice-readiness", me.profileId], queryFn: ({ signal }) => api.voiceReadiness(me.profileId, signal), enabled: active, refetchInterval: active ? 30_000 : false });
   function refreshPhone() {
     void Promise.allSettled([query.refetch(), readiness.refetch(), phone?.refreshDiagnostics(),

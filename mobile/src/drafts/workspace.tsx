@@ -88,7 +88,7 @@ export function DraftWorkspace(props: Props) {
   const callbacksOpen = props.view === "callbacks" && props.callTarget === null;
   // Before the scope is verified the panel is not mounted; Back still returns to calls.
   useAndroidBack(active && callbacksOpen && !verified, props.onShowCalls);
-  useAndroidBack(active && toolsVisible && !verified, props.onLeaveModule);
+  useAndroidBack(active && !verified && !props.callTarget && (toolsVisible || props.view === "cases" || props.view === "tasks"), props.onLeaveModule);
   if (!verified && props.view === "home" && !props.callTarget) return <>{props.renderHome(null, query.isPending ? null : errorText(authorityState.error ?? query.error))}</>;
   const operationsVisible = toolsVisible || props.callTarget !== null || callbacksOpen || operationViews.includes(props.view);
   if (!verified) return operationsVisible ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
@@ -180,6 +180,8 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
       setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases");
     }} />;
   const home = props.view === "home" && !props.callTarget && props.renderHome({ cases: api, homeKey: [...actorRoot, "home"] }, null);
+  // Until local drafts open, Prípady and Moje úlohy are not mounted to own Back.
+  useAndroidBack(props.active && !vault && (props.view === "cases" || props.view === "tasks"), props.onLeaveModule);
   if (!vault) return <>{callContext}{callbacks}{home}{operationViews.includes(props.view) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.view === "account" && <Account {...props} />}
     {error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading label="Načítavam miestne koncepty…" />}
@@ -199,6 +201,7 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
   useEffect(() => () => store.dispose(), [store]);
   const caseKey = useMemo(() => [...queryKey, "cases", identity.profileId], [queryKey, identity.profileId]);
   const visible = operationViews.includes(view);
+  useAndroidBack(active && !state.ready && (view === "cases" || view === "tasks"), props.onLeaveModule);
   return <>
     {visible && (!state.durable || state.saving || state.error) && <View style={{ paddingHorizontal: 16, paddingTop: 4 }}>
       {!state.durable && <Text style={styles.muted}>Koncepty v tomto náhľade ostávajú iba do zatvorenia aplikácie.</Text>}

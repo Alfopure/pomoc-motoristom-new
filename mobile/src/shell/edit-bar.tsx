@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, View, type AccessibilityActionEvent, type GestureResponderEvent } from "react-native";
-import { ArrowLeftRight, CircleMinus, CirclePlus, GripHorizontal } from "lucide-react-native";
+import { useState } from "react";
+import { Pressable, StyleSheet, Text, View, type AccessibilityActionEvent } from "react-native";
+import { ArrowLeftRight, ChevronDown, ChevronUp, CircleMinus, CirclePlus } from "lucide-react-native";
 import { palette, radius, space, type } from "../design/tokens";
 import { GROUPS, PIN_LIMIT, moduleById, type ModuleId } from "./modules";
 import { barTabs } from "./navigation";
@@ -14,10 +14,10 @@ type Props = {
 };
 
 export function DoneButton({ onPress }: { onPress: () => void }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel="Hotovo" onPress={onPress} style={({ pressed }) => [s.done, pressed && { opacity: 0.8 }]}><Text style={s.doneText}>Hotovo</Text></Pressable>;
+  return <Pressable accessibilityRole="button" accessibilityLabel="Hotovo" onPress={onPress} hitSlop={4} style={({ pressed }) => [s.done, pressed && { opacity: 0.8 }]}><Text style={s.doneText}>Hotovo</Text></Pressable>;
 }
 
-/** iOS Control Center pattern: – removes, + adds, ≡ reorders. Changes apply
+/** iOS Control Center pattern: – removes, + adds, arrows reorder. Changes apply
  * immediately; a full bar asks which module the new one replaces. */
 export function EditBarContent({ pins, available, roleLabel, customized, saveError, onChange, onReset }: Props) {
   const [pick, setPick] = useState<ModuleId | null>(null);
@@ -33,9 +33,9 @@ export function EditBarContent({ pins, available, roleLabel, customized, saveErr
     {saveError && <Text accessibilityRole="alert" style={[s.note, { color: palette.redText, textAlign: "center" }]}>Zmenu sa nepodarilo uložiť v telefóne. Platí, kým appku nezatvoríte.</Text>}
     {pickable && <View style={s.pickBar}><ArrowLeftRight size={16} color="#3D3000" accessible={false} />
       <Text style={s.pickText}>Lišta je plná. Ťuknite na modul, ktorý nahradí <Text style={{ fontWeight: "700" }}>{moduleById(pickable).name}</Text>.</Text>
-      <Pressable accessibilityRole="button" accessibilityLabel="Zrušiť výber" onPress={() => setPick(null)} hitSlop={8}><Text style={s.pickCancel}>Zrušiť</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="Zrušiť výber" onPress={() => setPick(null)} hitSlop={13}><Text style={s.pickCancel}>Zrušiť</Text></Pressable>
     </View>}
-    <SectionHeader title="V lište" detail={pins.length + " z " + PIN_LIMIT + (pins.length > 1 && !pickable ? " · poradie zmeníte ťahaním ≡" : "")} />
+    <SectionHeader title="V lište" detail={pins.length + " z " + PIN_LIMIT + (pins.length > 1 && !pickable ? " · poradie menia šípky" : "")} />
     <View style={s.group}>
       {pins.map((id, index) => pickable
         ? <Pressable key={id} accessibilityRole="button" accessibilityLabel={"Nahradiť " + moduleById(id).name} onPress={() => {
@@ -62,34 +62,31 @@ export function EditBarContent({ pins, available, roleLabel, customized, saveErr
         <Text style={[s.rowTitle, { color: customized ? palette.brandInk : palette.tertiaryLabel }]}>Obnoviť predvolené pre rolu {roleLabel}</Text>
       </Pressable>
     </View>
-    <Text style={s.note}>Ako v Ovládacom centre iPhonu: – odoberie, + pridá, ≡ presunie.</Text>
+    <Text style={s.note}>Ako v Ovládacom centre iPhonu: – odoberie, + pridá, šípky menia poradie.</Text>
   </>;
 }
 
+/** Visible arrows reorder the bar; VoiceOver gets the same actions on the row. */
 function PinRow({ id, index, count, onRemove, onMove }: { id: ModuleId; index: number; count: number; onRemove: () => void; onMove: (to: number) => void }) {
-  const [dy, setDy] = useState(0);
-  const start = useRef(0);
-  const drop = (event: GestureResponderEvent) => {
-    const to = Math.max(0, Math.min(count - 1, index + Math.round((event.nativeEvent.pageY - start.current) / ROW)));
-    setDy(0);
-    if (to !== index) onMove(to);
-  };
   const name = moduleById(id).name;
-  const actions = [{ name: "remove", label: "Odobrať z lišty" }, ...(index > 0 ? [{ name: "moveUp", label: "Posunúť vyššie" }] : []), ...(index < count - 1 ? [{ name: "moveDown", label: "Posunúť nižšie" }] : [])];
+  const first = index === 0, last = index === count - 1;
+  const actions = [{ name: "remove", label: "Odobrať z lišty" }, ...(!first ? [{ name: "moveUp", label: "Posunúť vyššie" }] : []), ...(!last ? [{ name: "moveDown", label: "Posunúť nižšie" }] : [])];
   function action(event: AccessibilityActionEvent) {
     if (event.nativeEvent.actionName === "remove") onRemove();
-    if (event.nativeEvent.actionName === "moveUp") onMove(index - 1);
-    if (event.nativeEvent.actionName === "moveDown") onMove(index + 1);
+    if (event.nativeEvent.actionName === "moveUp" && !first) onMove(index - 1);
+    if (event.nativeEvent.actionName === "moveDown" && !last) onMove(index + 1);
   }
   return <View accessible accessibilityLabel={name + ", " + (index + 1) + ". v lište"} accessibilityActions={actions} onAccessibilityAction={action}
-    style={[s.row, index > 0 && s.rowBorder, dy !== 0 && s.dragging, { transform: [{ translateY: dy }] }]}>
-    <Pressable accessibilityRole="button" accessibilityLabel={"Odobrať " + name + " z lišty"} onPress={onRemove} hitSlop={8}>
+    style={[s.row, index > 0 && s.rowBorder]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={"Odobrať " + name + " z lišty"} onPress={onRemove} hitSlop={11}>
       <CircleMinus size={22} color="#FFFFFF" fill={palette.red} accessible={false} /></Pressable>
     <ModuleTile id={id} /><Text numberOfLines={1} style={s.rowTitle}>{name}</Text>
-    <View accessibilityLabel={"Presunúť " + name} style={s.handle} onStartShouldSetResponder={() => true} onMoveShouldSetResponder={() => true}
-      onResponderTerminationRequest={() => false} onResponderGrant={event => { start.current = event.nativeEvent.pageY; setDy(0); }}
-      onResponderMove={event => setDy(event.nativeEvent.pageY - start.current)} onResponderRelease={drop} onResponderTerminate={() => setDy(0)}>
-      <GripHorizontal size={20} color={palette.tertiaryLabel} accessible={false} /></View>
+    <Pressable accessibilityRole="button" accessibilityLabel={"Posunúť " + name + " vyššie"} accessibilityState={{ disabled: first }} disabled={first}
+      onPress={() => onMove(index - 1)} style={({ pressed }) => [s.move, first && s.moveOff, pressed && { opacity: 0.6 }]}>
+      <ChevronUp size={18} strokeWidth={2.4} color={first ? palette.tertiaryLabel : palette.label} accessible={false} /></Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel={"Posunúť " + name + " nižšie"} accessibilityState={{ disabled: last }} disabled={last}
+      onPress={() => onMove(index + 1)} style={({ pressed }) => [s.move, last && s.moveOff, pressed && { opacity: 0.6 }]}>
+      <ChevronDown size={18} strokeWidth={2.4} color={last ? palette.tertiaryLabel : palette.label} accessible={false} /></Pressable>
   </View>;
 }
 const s = StyleSheet.create({
@@ -104,8 +101,8 @@ const s = StyleSheet.create({
   row: { minHeight: ROW, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: space.m, backgroundColor: palette.card },
   rowBorder: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.separator },
   rowTitle: { ...type.rowTitle, color: palette.label, flex: 1 },
-  dragging: { zIndex: 5, borderRadius: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.18)" },
-  handle: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
+  move: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
+  moveOff: { opacity: 0.5 },
   empty: { ...type.subhead, color: palette.tertiaryLabel, flex: 1 },
   pickRow: { backgroundColor: "#FFFCEB" },
   replace: { borderRadius: 13, backgroundColor: "#1C1C1E", paddingHorizontal: 11, paddingVertical: 5 },

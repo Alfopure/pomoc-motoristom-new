@@ -84,6 +84,7 @@ describe("shell navigation", () => {
     expect(reconcileShell({ ...initialShell, tab: "moduly", opened: "nastroje" }, ["nastroje"], all)).toMatchObject({ tab: "nastroje", opened: null });
     expect(reconcileShell({ ...initialShell, tab: "pripady" }, [], ["hovory"])).toMatchObject({ tab: "prehlad" });
     expect(reconcileShell({ ...initialShell, tab: "moduly", opened: "ulohy" }, [], ["hovory"])).toMatchObject({ tab: "moduly", opened: null });
+    expect(reconcileShell({ ...initialShell, tab: "prehlad", opened: "nastroje" }, ["nastroje"], all)).toMatchObject({ tab: "prehlad", opened: null });
     const same = { ...initialShell, tab: "hovory" as const };
     expect(reconcileShell(same, pins, all)).toBe(same);
   });
@@ -137,9 +138,14 @@ describe("shell preferences", () => {
     broken.setPins(["hovory"]);
     expect(broken.snapshot().pins).toEqual(["ulohy"]);
   });
-  it("treats a failed read as defaults", async () => {
-    const prefs = new ShellPreferences({ getItem: async () => { throw new Error("locked"); }, setItem: async () => {}, removeItem: async () => {} }, "k", all, ["hovory"]);
+  it("shows defaults for an unreadable value without treating it as loaded, then retries", async () => {
+    let locked = true;
+    const storage = { ...memoryStorage(), getItem: async () => { if (locked) throw new Error("locked"); return JSON.stringify({ version: 1, pins: ["nastroje"], tipDismissed: true }); } };
+    const prefs = new ShellPreferences(storage, "k", all, ["hovory"]);
     await prefs.load();
-    expect(prefs.snapshot()).toMatchObject({ pins: ["hovory"], loaded: true, customized: false });
+    expect(prefs.snapshot()).toMatchObject({ pins: ["hovory"], loaded: false, readFailed: true, customized: false });
+    locked = false;
+    await prefs.load();
+    expect(prefs.snapshot()).toMatchObject({ pins: ["nastroje"], loaded: true, readFailed: false, tipDismissed: true });
   });
 });

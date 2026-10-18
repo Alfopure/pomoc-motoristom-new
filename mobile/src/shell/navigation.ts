@@ -27,8 +27,8 @@ export function dispatchView(state: ShellState): DispatchView {
     case "nastroje": return "tools";
   }
 }
-/** Re-selecting the current tab returns to its first screen, as on iOS.
- * Other tabs keep the module opened inside Moduly. */
+/** Re-selecting Moduly returns to the module grid; other tabs keep their screen.
+ * Leaving Moduly keeps the module opened inside it for the next visit. */
 export function selectTab(state: ShellState, tab: ShellTab): ShellState {
   if (state.tab === tab) return { ...state, opened: tab === "moduly" ? null : state.opened, account: false };
   return { ...state, tab, account: false };
@@ -54,6 +54,6 @@ export function reconcileShell(state: ShellState, pins: readonly ModuleId[], ava
     if (!available.includes(next.tab)) next = { ...next, tab: "prehlad" };
     else if (!pins.includes(next.tab)) next = { ...next, tab: "moduly", opened: next.tab };
   }
-  if (next.tab === "moduly" && next.opened && pins.includes(next.opened)) next = { ...next, tab: next.opened, opened: null };
+  if (next.opened && pins.includes(next.opened)) next = next.tab === "moduly" ? { ...next, tab: next.opened, opened: null } : { ...next, opened: null };
   return next;
 }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { AccessibilityInfo, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
-import { CircleMinus, Pencil, Star, ArrowRight } from "lucide-react-native";
+import { ArrowRight, CircleMinus, Pencil, Star, X } from "lucide-react-native";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { MobileMe, MobilePresence } from "../../../src/lib/mobile-api";
 import type { MobileCallContextTarget } from "../../../src/lib/mobile-call-context";
@@ -14,7 +14,7 @@ import { presenceLabels } from "../lib/display";
 import { useAndroidBack } from "../lib/use-android-back";
 import { ErrorNotice } from "../ui";
 import { palette, space } from "../design/tokens";
-import { tabBarBottom, tabBarHeight } from "../ui/theme";
+import { NAVIGATION_CONTENT_BOTTOM, navigationContentBottom, tabBarBottom, tabBarHeight } from "../ui/theme";
 import { usePhoneOverlay } from "../ui/phone-overlays";
 import { DraftWorkspace } from "../drafts/workspace";
 import { draftId } from "../drafts/port";
@@ -28,7 +28,7 @@ import { HomeScreen, type HomeTarget } from "./home";
 import { ModulesScreen } from "./modules-screen";
 import { PIN_LIMIT, moduleAccess, moduleById, roleNames, rolePins, type ModuleId } from "./modules";
 import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, type DispatchView, type HovoryView, type ShellState, type ShellTab } from "./navigation";
-import { ModuleTile, Row, Group, Sheet, Toast } from "./parts";
+import { GlassButton, Group, ModuleTile, Row, Sheet, Toast } from "./parts";
 import { pinsFull, replacingPin, withPin, withoutPin } from "./pins";
 import { ShellPreferences, shellPreferencesKey } from "./preferences";
 import { createShellPreferencesStorage } from "./preferences-storage";
@@ -57,8 +57,10 @@ export function DispatchShell(props: Props) {
   const prefs = useMemo(() => new ShellPreferences(createShellPreferencesStorage(),
     shellPreferencesKey({ environment: config.environment, userId, profileId: identity.profileId }), available, rolePins(identity.profile.role)),
   [config.environment, userId, identity.profileId, identity.profile.role, available]);
-  useEffect(() => { void prefs.load(); return () => prefs.dispose(); }, [prefs]);
+  useEffect(() => () => prefs.dispose(), [prefs]);
   const preferences = useSyncExternalStore(prefs.subscribe, prefs.snapshot, prefs.snapshot);
+  // An unreadable Keychain (locked phone) is retried each time the app returns to the foreground.
+  useEffect(() => { if (active && !preferences.loaded) void prefs.load(); }, [active, preferences.loaded, prefs]);
   const pins = preferences.pins;
   const [shell, setShell] = useState<ShellState>(initialShell);
   const nav = reconcileShell(shell, pins, available);
@@ -112,7 +114,9 @@ export function DispatchShell(props: Props) {
   const sheetModule = sheet.value && sheet.value.kind !== "edit" ? sheet.value.id : null;
   const tabs = barTabs(pins);
   const hovoryVisible = (view === "console" || view === "history" || view === "callbacks") && !callTarget;
-  return <View style={{ flex: 1 }}>
+  // Larger text or a taller system bar grows the floating bar; content ends above it.
+  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
+  return <View style={{ flex: 1 }}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(identity.profile.displayName)} onAccount={() => go({ ...nav, account: true })}
       left={nav.account || openedInModules ? { kind: "back", label: nav.account ? "Späť" : "Späť na Moduly", onPress: back }
         : { kind: "status", label: statusLabel, tone: presence ? presenceTone[presence] : "gray", onPress: () => navigate("hovory", "console") }}
@@ -132,7 +136,7 @@ export function DispatchShell(props: Props) {
         else navigate(target === "cases" ? "pripady" : "ulohy");
       }}
       onLeaveModule={back} callTarget={callTarget} onCloseCallContext={() => setCallSelection(null)}
-      onShowCalls={() => go({ ...nav, hovory: "history" })} dialer={props.dialer}
+      onShowCalls={back} dialer={props.dialer}
       onSelectNumber={value => { setNumber(value); navigate("hovory", "console"); }}
       renderHome={(scope, notice) => <HomeScreen active={active && view === "home"} scope={scope} scopeNotice={notice}
         phone={{ label: statusLabel, tone: presence ? presenceTone[presence] : "gray", detail: phoneDetail }}
@@ -143,12 +147,14 @@ export function DispatchShell(props: Props) {
       bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} />
+    </View>
     <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting }} showAdd={pins.length < PIN_LIMIT}
       onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => sheet.open({ kind: "edit" })} />
     <Sheet visible={sheet.value !== null} large={sheet.value?.kind === "edit"} onClose={sheet.close}
       title={sheet.value?.kind === "edit" ? "Upraviť lištu" : sheet.value?.kind === "pin" ? "Do lišty" : sheetModule ? moduleById(sheetModule).name : ""}
-      left={sheet.value?.kind === "pin" ? <Pressable accessibilityRole="button" onPress={sheet.close} hitSlop={8}><Text style={s.link}>Zrušiť</Text></Pressable> : undefined}
-      right={sheet.value?.kind === "edit" ? <DoneButton onPress={sheet.close} /> : undefined}>
+      left={sheet.value?.kind === "pin" ? <Pressable accessibilityRole="button" onPress={sheet.close} style={s.cancel}><Text style={s.link}>Zrušiť</Text></Pressable> : undefined}
+      right={sheet.value?.kind === "edit" ? <DoneButton onPress={sheet.close} />
+        : sheet.value?.kind === "menu" ? <GlassButton round accessibilityLabel="Zavrieť" onPress={sheet.close} icon={<X size={18} strokeWidth={2.4} color={palette.label} accessible={false} />} /> : undefined}>
       {sheet.value?.kind === "edit" && <EditBarContent pins={pins} available={available} roleLabel={roleNames[identity.profile.role]}
         customized={preferences.customized} saveError={preferences.saveError}
         onChange={(next, message) => { prefs.setPins(next); AccessibilityInfo.announceForAccessibility?.(message); }}
@@ -175,6 +181,7 @@ export function DispatchShell(props: Props) {
 }
 const s = StyleSheet.create({
   link: { fontSize: 16, lineHeight: 20, fontWeight: "600", color: palette.brandInk },
+  cancel: { minHeight: 44, justifyContent: "center", paddingRight: 12 },
   note: { fontSize: 13, lineHeight: 18, color: palette.secondaryLabel, paddingHorizontal: 22, paddingTop: space.s, textAlign: "center" },
   replace: { borderRadius: 13, backgroundColor: "#1C1C1E", paddingHorizontal: 11, paddingVertical: 5 },
   replaceText: { fontSize: 13, lineHeight: 16, fontWeight: "700", color: "#FFFFFF" },

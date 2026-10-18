@@ -1,6 +1,6 @@
 import { PhoneOverlayProvider } from "./src/ui/phone-overlays";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
+import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { LockKeyhole, Mail, PhoneCall } from "lucide-react-native";
@@ -16,7 +16,6 @@ import { AuthIncarnation } from "./src/lib/auth-incarnation";
 import { supportsDurableDrafts } from "./src/drafts/storage";
 import { CallPanel } from "./src/voice/ui";
 import { SessionLogout, type LogoutState } from "./src/lib/logout";
-import { NAVIGATION_CONTENT_BOTTOM, navigationContentBottom } from "./src/ui/theme";
 import type { CallbackDialer } from "./src/callbacks/ui";
 import { DispatchShell } from "./src/shell/dispatch-shell";
 
@@ -101,10 +100,7 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
 
   // Signed in, the top bar shows the environment; before that the brand row does.
   return <QueryClientProvider client={queryClient}>
-    {!session && <View style={s.brand}><View style={s.brandMark}><PhoneCall size={18} strokeWidth={2.3} color={colors.ink} accessible={false} /></View>
-      <View style={s.brandText}><Text style={s.brandName}>Linka pomoci</Text><Text style={s.brandCaption}>Mobilný dispečing</Text></View>
-      {config.environment === "test" && <Text style={s.testBadge}>TEST</Text>}
-    </View>}
+    {!session && <BrandRow test={config.environment === "test"} />}
     {booting ? <Loading label="Obnovujem prihlásenie…" /> : bootError ? <View style={styles.content}>
       <ErrorNotice message={resetError ? "Uložené prihlásenie sa nepodarilo odstrániť. Skúste znova." : "Uložené prihlásenie sa nepodarilo načítať. Môžete ho obnoviť a prihlásiť sa znova."} />
       <Button label="Obnoviť prihlásenie" disabled={resetting} onPress={() => {
@@ -116,6 +112,13 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
       logoutState={logoutState} onLogout={disconnect => logout.run(disconnect)} />
       : <SignIn client={client} config={config} logoutState={logoutState} />}
   </QueryClientProvider>;
+}
+
+function BrandRow({ test }: { test: boolean }) {
+  return <View style={s.brand}><View style={s.brandMark}><PhoneCall size={18} strokeWidth={2.3} color={colors.ink} accessible={false} /></View>
+    <View style={s.brandText}><Text style={s.brandName}>Linka pomoci</Text><Text style={s.brandCaption}>Mobilný dispečing</Text></View>
+    {test && <Text style={s.testBadge}>TEST</Text>}
+  </View>;
 }
 
 function SignIn({ client, config, logoutState }: { client: SupabaseClient; config: MobileConfig; logoutState: LogoutState }) {
@@ -172,9 +175,6 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   logoutState: LogoutState; onLogout: (disconnect: () => Promise<void>) => Promise<void> }) {
   const [logoutError, setLogoutError] = useState<string | null>(null), [logoutBusy, setLogoutBusy] = useState(false);
   const preparingLogout = useRef(false);
-  const { fontScale } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
-  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
   const key = useMemo(() => ["mobile", config.environment, userId], [config.environment, userId]);
   // First authenticated snapshot must also load during a PushKit cold launch.
   // Periodic reads still stop when iOS suspends the app.
@@ -215,15 +215,15 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
       { text: "Zostať", style: "cancel" }, { text: "Odhlásiť bez uloženia", style: "destructive", onPress: () => { void logout(true); } },
     ]);
   }
-  if (me.isPending) return <Loading label="Overujem prístup do dispečingu…" />;
-  if (!identity) return <View style={styles.content}>
+  if (me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do dispečingu…" /></>;
+  if (!identity) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
     <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />
     {logoutState.message && <ErrorNotice message={logoutState.message} />}
     {logoutError && <ErrorNotice message={logoutError} />}
     <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={logoutBusy || logoutState.busy || Boolean(phoneState.call || phoneState.termination)} secondary />
     {logoutError && <Button label="Odhlásiť bez neuložených zmien" onPress={logoutWithoutSaving} disabled={logoutBusy || logoutState.busy || Boolean(phoneState.call || phoneState.termination)} secondary />}
-  </View>;
-  return <View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
+  </View></>;
+  return <View style={{ flex: 1 }}>
     <CallPanel phone={phone} state={phoneState} />
     <PhoneOverlayProvider blocked={Boolean(phoneState.call || phoneState.termination)} source={phone}>
       <DispatchShell key={identity.profileId} config={config} client={client} api={api} active={active} userId={userId} liveUser={liveUser}

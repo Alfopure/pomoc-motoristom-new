@@ -46,29 +46,35 @@ pri viacerých sa zobrazia skupiny (Komunikácia, Zásahy, Vozový park, Kancel�
 
 | Cesta | Čo urobí |
 | --- | --- |
-| Moduly → Moja lišta → **Upraviť lištu** | červené – odoberie, zelené + pridá, ≡ presunie poradie; pri plnej lište sa vyberie, čo nový modul nahradí |
+| Moduly → Moja lišta → **Upraviť lištu** | červené – odoberie, zelené + pridá, šípky ▲▼ menia poradie; pri plnej lište sa vyberie, čo nový modul nahradí |
 | Modul otvorený z Modulov → **☆ Do lišty** | pridá modul; pri plnej lište sa opýta, ktorý nahradiť |
 | Podržanie ikony v Moduloch (skratka) | Otvoriť · Pridať do lišty / Odobrať z lišty · Upraviť lištu |
 | Účet → Spodná lišta | Upraviť lištu, Obnoviť lištu podľa roly |
 
 Zmeny platia hneď. Uložia sa v telefóne pre daný účet, prostredie a profil
-(`pm-shell-v1.<prostredie>.<user>.<profil>` v samostatnej službe Keychain).
+(`pm-shell-v1.<prostredie>.<user>.<profil>` v samostatnej službe Keychain,
+čitateľnej po prvom odomknutí ako prihlásenie). Ak sa uloženú lištu nepodarí
+prečítať (napr. zamknutý telefón), zobrazí sa lišta podľa roly, nič sa cez
+uloženú hodnotu nezapíše a čítanie sa zopakuje po návrate do appky.
 Synchronizácia medzi zariadeniami príde s API preferencií na serveri.
 
 **Navigácia** (`navigation.ts`): modul v lište má vlastnú záložku; modul mimo
-lišty sa otvorí vo vnútri Modulov so šípkou Späť. Každá záložka si drží svoju
-obrazovku; opätovný ťuk na vybranú záložku sa vráti na jej začiatok. Zmena
-lišty nepreskočí obrazovku: odobratý modul ostane otvorený v Moduloch,
-pridaný sa presunie do svojej záložky. Android Späť: účet → zatvorí sa,
-modul v Moduloch → Moduly, iná záložka → Prehľad, Prehľad → systém.
+lišty sa otvorí vo vnútri Modulov so šípkou Späť. Moduly si pamätajú otvorený
+modul aj po prechode na inú záložku; opätovný ťuk na Moduly sa vráti na
+mriežku. Zmena lišty nepreskočí obrazovku: odobratý modul ostane otvorený
+v Moduloch, pridaný sa presunie do svojej záložky. Android Späť: podstránka
+modulu (detail prípadu, detail hovoru) → späť v module; účet → zatvorí sa;
+modul v Moduloch → Moduly; iná záložka vrátane všetkých častí Hovorov → Prehľad;
+Prehľad → systém.
 
 **Prehľad** (`home.tsx`): hovory na účte (ak sú), dlaždice Spätné volania,
 Prípady, Moje úlohy a Telefón; ťuk otvorí príslušný modul. Jednorazový tip
 ukáže, kde sú Moduly; zmizne po ťuknutí na OK alebo po prvej návšteve Modulov.
 
 **Okná (sheet)**: jedno spoločné okno zdola pre úpravu lišty, výber náhrady
-a menu modulu. Pri začiatku hovoru alebo prechode do pozadia sa zatvorí
-(`usePhoneOverlay`), aby ovládanie hovoru ostalo v popredí.
+a menu modulu; každé má viditeľné Hotovo, Zrušiť alebo Zavrieť. Pri začiatku
+hovoru alebo prechode do pozadia sa zatvorí (`usePhoneOverlay`), aby ovládanie
+hovoru ostalo v popredí.
 
 ## 3. Moduly, roly a prístupy
 
@@ -145,9 +151,12 @@ preklopia do šablóny Detail v ďalšej etape.
   v Expo Go, vo vlastnom builde aj v prehliadačovej skúške. Natívny `UITabBarController`
   (react-native-screens 4.26 v Expo SDK 57) zvážime po overení na zariadení:
   nepodporuje podržanie položky a výnimky ako „+ Pridať“ rieši cez `preventNativeSelection`.
-- Obrazovky modulov ostávajú pripojené a len sa skrývajú; vlastný stav sa zmenou
-  záložky nestratí. Skryté moduly rušia svoje čítania podľa prefixu kľúča, preto
-  Prehľad používa vlastné kľúče (`…, "home", …`).
+- Prípady, Moje úlohy a Nástroje ostávajú pripojené a len sa skrývajú, takže
+  rozpísaný stav sa zmenou záložky nestratí. Ústredňa, História, Spätné,
+  Prehľad a Moduly sa pri návrate načítajú znova. Skryté moduly rušia svoje
+  čítania podľa prefixu kľúča, preto Prehľad používa vlastné kľúče (`…, "home", …`).
+- Stav operátora v hornej lište sa číta každých 30 s na každej obrazovke
+  (jeden spoločný dopyt s Ústredňou).
 - Moduly dostávajú pôvodné identifikátory obrazoviek (`console`, `history`,
   `callbacks`, `cases`, `tasks`, `tools`, `account`); kostra ich odvodí zo stavu navigácie.
 
