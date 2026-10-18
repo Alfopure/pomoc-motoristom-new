@@ -28,7 +28,7 @@ import { CasePlacePicker } from "./case-place-picker";
 import { CaseMapFrame } from "./map-frame";
 import { CopyValue } from "./copy";
 import { directionsUrl } from "./maps";
-import { Choice, MenuChip, fields, jobTypes, priorities } from "./form";
+import { Choice, MenuChip } from "./form";
 import { HandoffDraft } from "../handoff/draft";
 import { Handoffs } from "../handoff/ui";
 import { WorkStore } from "../work/store";
@@ -38,6 +38,8 @@ import type { DraftVault } from "../drafts/vault";
 import { draftId } from "../drafts/port";
 import { customerCallNumber } from "../call-context/number";
 import { CallPhoneOffer } from "./call-phone-offer";
+import { CaseFieldSections, CaseServiceSection } from "./fields-ui";
+import { formLayout } from "../design/form";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Prípady sa nepodarilo načítať. Skúste znova.";
 export type CaseOpenRequest = ({ kind: "case.owner" | "detail" | "case-create" | "case-edit" | "case-note" | "task-create" | "handoff" | "attachment"; id: string | null } | { kind: "case-call-create"; id: null; number: string }
@@ -454,32 +456,26 @@ function CaseForm({ api, draft, state, active, visible, onBack, onSubmit, callOf
   useAndroidBack(active, back, saving);
   useShellBack(active, "Prípady", back, saving);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-    <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-      <Text accessibilityRole="header" style={styles.heading}>Nový prípad</Text>
-      <Text style={styles.muted}>Môžete uložiť aj neúplný koncept. Údaje doplníte neskôr v dispečingu.</Text>
-      {callOffer && <CallPhoneOffer key={callOffer.nonce} draft={draft} state={state} number={callOffer.number} active={active && visible} onDone={onOfferDone} />}
-      {fields.map(field => <View key={field.key}><Text style={styles.label}>{field.label}</Text>
-        <TextInput accessibilityLabel={field.label} value={field.key === "manualPickupAddress" ? state.input.pickup?.address ?? state.input.manualPickupAddress ?? "" : field.key === "manualDestinationAddress" ? state.input.destination?.address ?? state.input.manualDestinationAddress ?? "" : state.input[field.key] ?? ""} onChangeText={value => draft.edit({ [field.key]: value })}
-          editable={!saving} maxLength={field.max} multiline={field.multiline} keyboardType={field.key === "contactPhone" ? "phone-pad" : "default"}
-          autoCapitalize={field.key === "licensePlate" ? "characters" : "sentences"} autoCorrect={field.key !== "licensePlate" && field.key !== "contactPhone"}
-          style={[styles.input, field.multiline && { minHeight: 90, textAlignVertical: "top" }]} />
-        {(field.key === "manualPickupAddress" || field.key === "manualDestinationAddress") && <Button label="Vybrať miesto na mape" secondary disabled={state.status !== "editing" || !mapOverlay.canOpen}
-          onPress={() => mapOverlay.open(field.key === "manualPickupAddress" ? "pickup" : "destination")} />}
-      </View>)}
-      <View><Text style={styles.label}>Služba</Text><View style={s.choices}>{jobTypes.map(item => {
-        const selected = state.input.jobTypes?.includes(item.value) === true;
-        return <Choice key={item.value} label={item.label} selected={selected} disabled={saving} onPress={() => draft.edit({ jobTypes: selected
-          ? state.input.jobTypes?.filter(value => value !== item.value) : [...(state.input.jobTypes ?? []), item.value] })} />;
-      })}</View></View>
-      <View><Text style={styles.label}>Priorita</Text><View style={s.choices}>{priorities.map(item => <Choice key={item.value} label={item.label}
-        selected={state.input.priority === item.value} disabled={saving} onPress={() => draft.edit({ priority: item.value })} />)}</View></View>
-      {state.error && <ErrorNotice message={state.error} />}
-      {uncertain && <><Button label="Skontrolovať zoznam prípadov" onPress={back} secondary />
-        {state.reviewedList && <Button label="Prípad som nenašiel – povoliť opakovanie" onPress={() => draft.allowRetry()} secondary />}</>}
+    <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={formLayout.content}>
+      <View style={formLayout.head}>
+        <Text accessibilityRole="header" style={styles.heading}>Nový prípad</Text>
+        <Text style={styles.muted}>Môžete uložiť aj neúplný koncept. Údaje doplníte neskôr v dispečingu.</Text>
+      </View>
+      {callOffer && <View style={formLayout.notices}><CallPhoneOffer key={callOffer.nonce} draft={draft} state={state} number={callOffer.number} active={active && visible} onDone={onOfferDone} /></View>}
+      <CaseFieldSections editable={!saving} onChange={(key, value) => draft.edit({ [key]: value })}
+        value={key => key === "manualPickupAddress" ? state.input.pickup?.address ?? state.input.manualPickupAddress ?? "" : key === "manualDestinationAddress" ? state.input.destination?.address ?? state.input.manualDestinationAddress ?? "" : state.input[key] ?? ""}
+        mapDisabled={state.status !== "editing" || !mapOverlay.canOpen} onMap={target => mapOverlay.open(target)} />
+      <CaseServiceSection selectedJobs={state.input.jobTypes ?? []} priority={state.input.priority} disabled={saving}
+        onJobs={jobTypes => draft.edit({ jobTypes })} onPriority={priority => draft.edit({ priority })} />
+      <View style={formLayout.actions}>
+        {state.error && <ErrorNotice message={state.error} />}
+        {uncertain && <><Button label="Skontrolovať zoznam prípadov" onPress={back} secondary />
+          {state.reviewedList && <Button label="Prípad som nenašiel – povoliť opakovanie" onPress={() => draft.allowRetry()} secondary />}</>}
+        <Button label={saving ? "Ukladám prípad…" : "Uložiť prípad"} disabled={saving || uncertain || state.status === "saved"} onPress={() => { Keyboard.dismiss(); onSubmit(); }} />
+      </View>
       {mapTarget && state.status === "editing" && <CasePlacePicker key={`new:pick:${mapTarget}`} api={api} caseId={null} active={active} visible={visible} target={mapTarget}
         seed={{ selection: state.input[mapTarget] ?? null, address: state.input[mapTarget]?.address ?? state.input[mapTarget === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"] ?? "" }}
         onClose={mapOverlay.close} onApply={mapOverlay.guard(value => draft.selectPlace(mapTarget, value))} />}
-      <Button label={saving ? "Ukladám prípad…" : "Uložiť prípad"} disabled={saving || uncertain || state.status === "saved"} onPress={() => { Keyboard.dismiss(); onSubmit(); }} />
     </ScrollView>
   </KeyboardAvoidingView>;
 }

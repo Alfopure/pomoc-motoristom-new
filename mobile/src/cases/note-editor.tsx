@@ -1,10 +1,11 @@
 import { useSyncExternalStore } from "react";
-import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, View } from "react-native";
+import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, View } from "react-native";
 import { useAndroidBack } from "../lib/use-android-back";
 import { useShellBack } from "../shell/back";
 import type { MobileCaseNoteAdded } from "../../../src/lib/mobile-api";
 import { Button, Card, ErrorNotice, styles } from "../ui";
 import type { CaseNoteDraft } from "./notes";
+import { Field, FormSection, formLayout } from "../design/form";
 
 export function CaseNoteSavedNotice({ draft, onUpdated }: { draft: CaseNoteDraft; onUpdated?: (receipt: MobileCaseNoteAdded) => void }) {
   const state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot);
@@ -34,11 +35,14 @@ export function CaseNoteForm({ draft, active, onBack, onSaved }: { active: boole
     if (receipt) onSaved(receipt);
   }
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}>
-      <Text accessibilityRole="header" style={styles.heading}>Pridať poznámku</Text>
-      <Text style={styles.text}>Poznámka sa pridá do histórie prípadu spolu s vaším menom a časom.</Text>
-      <View><Text style={styles.label}>Poznámka</Text><TextInput accessibilityLabel="Nová poznámka prípadu" value={state.note} onChangeText={value => draft.edit(value)}
-        editable={!locked} multiline maxLength={10_000} textAlignVertical="top" style={[styles.input, { minHeight: 150 }]} /></View>
+    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={formLayout.content}>
+      <View style={formLayout.head}>
+        <Text accessibilityRole="header" style={styles.heading}>Pridať poznámku</Text>
+        <Text style={styles.muted}>Poznámka sa pridá do histórie prípadu spolu s vaším menom a časom.</Text>
+      </View>
+      <FormSection><Field label="Poznámka" accessibilityLabel="Nová poznámka prípadu" placeholder="Čo sa zmenilo, s kým ste hovorili…" value={state.note} onChangeText={value => draft.edit(value)}
+        editable={!locked} multiline maxLength={10_000} style={{ minHeight: 120 }} /></FormSection>
+      <View style={formLayout.actions}>
       {state.error && state.status !== "saved" && <ErrorNotice message={state.error} />}
       {state.status === "uncertain" ? <Button label="Overiť uloženie poznámky" onPress={() => { void save(true); }} />
         : state.status === "saved" && state.receipt ? <View style={{ gap: 12 }}>
@@ -46,6 +50,7 @@ export function CaseNoteForm({ draft, active, onBack, onSaved }: { active: boole
           <Button label="Otvoriť prípad" disabled={state.repairing} onPress={() => onSaved(state.receipt!)} />
         </View>
           : <Button label={state.status === "saving" ? "Ukladám…" : "Uložiť poznámku"} disabled={locked || !state.note.trim()} onPress={() => { void save(); }} />}
+      </View>
     </ScrollView>
   </KeyboardAvoidingView>;
 }

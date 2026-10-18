@@ -17,8 +17,9 @@ export const styles = StyleSheet.create({
   input: { backgroundColor: colors.white, borderColor: colors.border, borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, minHeight: 44, fontSize: 16, color: colors.ink },
   row: { flexDirection: "row", alignItems: "center", gap: 10 },
   card: { backgroundColor: colors.white, padding: 14, borderRadius: 16, gap: 8 },
-  button: { backgroundColor: colors.ink, borderRadius: 22, paddingVertical: 11, paddingHorizontal: 16, minHeight: 44, alignItems: "center", justifyContent: "center" },
-  buttonText: { color: colors.white, fontSize: 15, lineHeight: 20, fontWeight: "600", maxWidth: "100%", textAlign: "center" },
+  // The main action is yellow (design standard, principle 3); others are gray.
+  button: { backgroundColor: colors.brand, borderRadius: 22, paddingVertical: 11, paddingHorizontal: 16, minHeight: 44, alignItems: "center", justifyContent: "center" },
+  buttonText: { color: colors.ink, fontSize: 15, lineHeight: 20, fontWeight: "600", maxWidth: "100%", textAlign: "center" },
   secondary: { backgroundColor: "rgba(118,118,128,0.12)" },
   secondaryText: { color: colors.ink },
   disabled: { backgroundColor: "#E5E5EA" },
