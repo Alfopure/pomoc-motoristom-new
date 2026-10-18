@@ -1,6 +1,10 @@
 import { usePhoneOverlay } from "../ui/phone-overlays";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { KeyboardAvoidingView, Linking, Modal, Platform, RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { FileText, Film, Image as ImageIcon, Paperclip } from "lucide-react-native";
+import type { MobileCaseAttachment } from "../../../src/lib/mobile-api";
+import { Field } from "../design/form";
+import { palette, radius, space, type } from "../design/tokens";
 import { useQuery } from "@tanstack/react-query";
 import { useAndroidBack } from "../lib/use-android-back";
 import { useShellBack } from "../shell/back";
@@ -71,19 +75,23 @@ export function Attachments({ store, caseId, queryKey, active, visible: pageVisi
         <Button label="Vybrať dokument" secondary disabled={!editing || busy || !overlay.canOpen} onPress={() => { void prepare(false); }} />
         {busy && <Loading label="Pripravujem prílohu…" />}
         {editing && state.coldMissingFile && <Text style={styles.muted}>Súbor sa do konceptu neukladá. Vyberte ho znova; poznámka zostala zachovaná.</Text>}
-        {state.selected && <Card><Text style={styles.subheading}>{state.selected.fileName}</Text><Text style={styles.muted}>{state.selected.mimeType} · {sizeLabel(state.selected.sizeBytes)}</Text></Card>}
-        <View><Text style={styles.label}>Poznámka k prílohe</Text><TextInput accessibilityLabel="Poznámka k prílohe" value={state.note} onChangeText={v => draft.editNote(v)} editable={editing} maxLength={2000} multiline style={[styles.input, { minHeight: 100 }]} /></View>
+        <View style={s.group}>
+          {state.selected ? <View style={s.selected}><View style={s.fileIcon}><Paperclip size={15} strokeWidth={2.3} color={palette.label} accessible={false} /></View>
+            <View style={{ flex: 1, minWidth: 0 }}><Text style={s.caption}>{state.coldMissingFile ? "Pôvodný súbor – treba ho vybrať znova" : "Vybraný súbor"}</Text><Text style={s.fileName}>{state.selected.fileName}</Text>
+              <Text style={s.caption}>{state.selected.mimeType} · {sizeLabel(state.selected.sizeBytes)}</Text></View></View>
+            : <View style={s.selected}><Text style={s.caption}>Zatiaľ nie je vybraný súbor.</Text></View>}
+          <View style={s.separator} />
+          <Field label="Poznámka k prílohe" placeholder="Čo je na fotografii alebo v dokumente" value={state.note} onChangeText={v => draft.editNote(v)} editable={editing} maxLength={2000} multiline style={{ minHeight: 64 }} />
+        </View>
         {query.isError && <ErrorNotice message={workError(query.error)} onRetry={() => { void query.refetch(); }} />}
-        <Button label={saving ? "Prikladám…" : "Priložiť k prípadu"} disabled={!editing || busy || !state.selected || state.coldMissingFile || !query.data || query.isError || query.isFetching}
+        <Button primary label={saving ? "Prikladám…" : "Priložiť k prípadu"} disabled={!editing || busy || !state.selected || state.coldMissingFile || !query.data || query.isError || query.isFetching}
           onPress={() => { if (query.data) void draft.save(query.data.caseRevision); }} />
       </> : <>
         <Button label={state.status === "uncertain" || state.selected && state.status !== "saved" ? "Rozpracovaná príloha" : "Pridať prílohu"} onPress={() => { draft.reset(); setForm(true); }} disabled={saving} />
         {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={workError(query.error)} onRetry={() => { void query.refetch(); }} /> : <>
           {query.data?.attachments.length === 0 && <Card><Text style={styles.text}>Zatiaľ bez príloh.</Text></Card>}
-          {query.data?.attachments.map(item => <Card key={item.id}><Text style={styles.subheading}>{item.fileName}</Text>
-            <Text style={styles.muted}>{item.category === "photo" ? "Fotografia" : item.category === "video" ? "Video" : "Dokument"}{item.sizeBytes !== null ? " · " + sizeLabel(item.sizeBytes) : ""}{item.createdAt ? " · " + formatTime(item.createdAt) : ""}</Text>
-            {item.note && <Text style={styles.text}>{item.note}</Text>}<Button label={"Otvoriť " + item.fileName} secondary disabled={!item.downloadable || busy || !overlay.canOpen} onPress={() => { void open(item.id); }} />
-            {!item.downloadable && <Text style={styles.muted}>Tento súbor nie je dostupný na otvorenie.</Text>}</Card>)}
+          {query.data && query.data.attachments.length > 0 && <View style={s.group}>{query.data.attachments.map((item, index) => <AttachmentRow key={item.id} item={item} first={index === 0}
+            disabled={!item.downloadable || busy || !overlay.canOpen} onOpen={() => { void open(item.id); }} />)}</View>}
         </>}
       </>}
     </ScrollView>
@@ -95,3 +103,36 @@ export function Attachments({ store, caseId, queryKey, active, visible: pageVisi
       </View></View></Modal>
   </KeyboardAvoidingView>;
 }
+
+/** File icon, name, kind, size and time, the note in full; the whole row opens the file. */
+function AttachmentRow({ item, first, disabled, onOpen }: { item: MobileCaseAttachment; first: boolean; disabled: boolean; onOpen: () => void }) {
+  const Icon = item.category === "photo" ? ImageIcon : item.category === "video" ? Film : FileText;
+  const meta = [item.category === "photo" ? "Fotografia" : item.category === "video" ? "Video" : "Dokument", item.sizeBytes !== null ? sizeLabel(item.sizeBytes) : null, item.createdAt ? formatTime(item.createdAt) : null].filter(Boolean).join(" · ");
+  // The label replaces the row's texts for screen readers, so it carries all of them.
+  const label = ["Otvoriť " + item.fileName, meta, item.note, item.downloadable ? null : "Tento súbor nie je dostupný na otvorenie."].filter(Boolean).join(", ");
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onOpen}
+    style={({ pressed }) => [s.row, pressed && !disabled && { backgroundColor: "#ECECF0" }]}>
+    {!first && <View style={s.rowSeparator} />}
+    <View style={s.fileIcon}><Icon size={15} strokeWidth={2.3} color={palette.label} accessible={false} /></View>
+    <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+      <Text style={s.fileName}>{item.fileName}</Text>
+      <Text style={s.caption}>{meta}</Text>
+      {item.note ? <Text style={s.note}>{item.note}</Text> : null}
+      {!item.downloadable ? <Text style={s.caption}>Tento súbor nie je dostupný na otvorenie.</Text> : null}
+    </View>
+    {item.downloadable ? <Text maxFontSizeMultiplier={1.3} style={[s.open, disabled && { color: palette.tertiaryLabel }]}>Otvoriť ›</Text> : null}
+  </Pressable>;
+}
+const s = StyleSheet.create({
+  // The page already insets its content; groups need no own margin.
+  group: { backgroundColor: palette.card, borderRadius: radius.l, overflow: "hidden" },
+  row: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: space.m, paddingVertical: 9, minHeight: 56, backgroundColor: palette.card },
+  rowSeparator: { position: "absolute", top: 0, left: 50, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
+  separator: { height: StyleSheet.hairlineWidth, marginLeft: space.m, backgroundColor: palette.separator },
+  selected: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: space.m, paddingVertical: 10, minHeight: 52 },
+  fileIcon: { width: 28, height: 28, borderRadius: 8, backgroundColor: palette.fill, alignItems: "center", justifyContent: "center" },
+  fileName: { ...type.rowTitle, color: palette.label },
+  caption: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel },
+  note: { ...type.subhead, color: palette.label },
+  open: { ...type.subhead, fontWeight: "600", color: palette.brandInk },
+});
