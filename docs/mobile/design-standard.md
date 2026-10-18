@@ -189,7 +189,8 @@ a `mobile/src/shell/parts.tsx` (prvky kostry):
 Prehľad · Moduly · Zoznam · Kniha · Detail objektu · Tabuľa · Kalendár ·
 Mapa + list · Výjazd (krokovanie) · Nahlásenie s fotkami · Formulár v liste ·
 Hovor. Zoznam používajú Hovory/História, Prípady, Moje úlohy, úlohy prípadu
-(spoločný kompaktný riadok úlohy) a Nástroje (jedna skupina riadkov s ikonou).
+(spoločný kompaktný riadok úlohy), Nástroje (jedna skupina riadkov s ikonou)
+a Prílohy (ikona, názov, druh, veľkosť, čas a celá poznámka; ťuk otvorí súbor).
 **Rozbaľovací zoznam** používajú Spätné volania: riadok ukáže kto, termín (štítok),
 pôvod, prevzatie a čakanie; ťuk ho rozbalí s údajmi a všetkými akciami s popisom
 (Zavolať späť, Prevziať, Vybavené, Zrušiť, Otvoriť prípad). Ťuk otvorí jeden riadok.
@@ -199,7 +200,7 @@ Rozpísanú poznámku k požiadavke mimo zoznamu možno zobraziť alebo zahodiť
 s popisom, skupiny riadkov údaj–hodnota s ikonami Kopírovať/Mapa/Navigovať,
 Súvisiace, Udalosti) používa detail prípadu, hovoru a úlohy. **Formulár** používa
 nový prípad a jeho úpravu (Kontakt, Vozidlo, Miesto, Problém, Služba a priorita),
-poznámku, dispečera prípadu a novú úlohu. Ostatné šablóny vzniknú s modulmi
+poznámku, dispečera prípadu, novú úlohu a pridanie prílohy (vybraný súbor a poznámka). Ostatné šablóny vzniknú s modulmi
 pilierov 2 a 3.
 
 ## 7. Technické rozhodnutia
@@ -241,7 +242,7 @@ lišta a jej úprava fungujú ťuknutím bez gest.
 | --- | --- | --- |
 | 0 | štandard v repozitári, tokeny | hotové |
 | 1–2 | kostra: horná a spodná lišta, Prehľad, Moduly, úprava lišty, register modulov | hotové (TEST) |
-| 3 | Hovory, Prípady, Úlohy, Nástroje, Účet v novej kostre; kompaktné zoznamy; detail prípadu, hovoru a úlohy; formuláre; Späť v hornej lište | hotové (odovzdanie prípadu a prílohy ešte v pôvodnom vzhľade) |
+| 3 | Hovory, Prípady, Úlohy, Nástroje, Účet v novej kostre; kompaktné zoznamy; detail prípadu, hovoru a úlohy; formuláre; prílohy; Späť v hornej lište | hotové (odovzdanie prípadu ešte v pôvodnom vzhľade) |
 | 4 | šablóny Kniha, Tabuľa, Kalendár, Mapa + list, Výjazd, Nahlásenie | plán |
 | 5 | globálne hľadanie, Upozornenia a lišta hovoru nad lištou (hotové); serverový zoznam modulov a preferencie, push upozornenia, doladenie | čiastočne |
 
