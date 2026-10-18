@@ -26,20 +26,24 @@ import { createCallWrapUpApi } from "../call-context/wrap-up-api";
 import type { WrapUpDependencies } from "../call-context/wrap-up-ui";
 import { customerCallNumber } from "../call-context/number";
 import { useAndroidBack } from "../lib/use-android-back";
+import { useShellBack } from "../shell/back";
 import { createCallbacksApi } from "../callbacks/api";
 import { CallbackQueueStore } from "../callbacks/store";
 import { CallbacksPanel, type CallbackDialer } from "../callbacks/ui";
 import type { DispatchView } from "../shell/navigation";
 import type { HomeScope } from "../shell/home";
+import type { SearchScope } from "../shell/search";
 import { roleNames } from "../shell/modules";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
   active: boolean; view: DispatchView; onView: (view: "cases" | "tasks" | "console" | "account") => void; onSelectNumber: (number: string) => void;
   /** Android Back on a module's first screen; the shell decides where it leads. */
   onLeaveModule: () => void;
-  callTarget: MobileCallContextTarget | null; onCloseCallContext: () => void;
+  callTarget: MobileCallContextTarget | null; onCloseCallContext: () => void; callBackLabel: string;
   onShowCalls: () => void; dialer: CallbackDialer;
   renderHome: (scope: HomeScope | null, notice: string | null) => ReactNode;
+  /** openCase is null until drafts can receive an open request. */
+  renderSearch: (scope: SearchScope | null, notice: string | null, openCase: ((id: string) => void) | null) => ReactNode;
   bar: { customized: boolean; onEdit: () => void; onReset: () => void };
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; hasCall: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void };
 const operationViews: readonly DispatchView[] = ["cases", "tasks", "account"];
@@ -89,11 +93,13 @@ export function DraftWorkspace(props: Props) {
   // Before the scope is verified the panel is not mounted; Back still returns to calls.
   useAndroidBack(active && callbacksOpen && !verified, props.onShowCalls);
   useAndroidBack(active && !verified && !props.callTarget && (toolsVisible || props.view === "cases" || props.view === "tasks"), props.onLeaveModule);
+  useAndroidBack(active && !verified && Boolean(props.callTarget), props.onCloseCallContext);
+  useShellBack(active && !verified && Boolean(props.callTarget), props.callBackLabel, props.onCloseCallContext);
   if (!verified && props.view === "home" && !props.callTarget) return <>{props.renderHome(null, query.isPending ? null : errorText(authorityState.error ?? query.error))}</>;
+  if (!verified && props.view === "search") return <>{props.renderSearch(null, query.isPending ? null : errorText(authorityState.error ?? query.error), null)}</>;
   const operationsVisible = toolsVisible || props.callTarget !== null || callbacksOpen || operationViews.includes(props.view);
   if (!verified) return operationsVisible ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.view === "account" && <Account {...props} />}
-    {props.callTarget && <Button label="Späť na hovory" secondary onPress={props.onCloseCallContext} />}
     {query.isPending ? <Loading label="Overujem prístup k prípadom a konceptom…" /> : <View style={styles.content}><ErrorNotice message={errorText(authorityState.error ?? query.error)} onRetry={() => { void query.refetch(); }} /></View>}
   </ScrollView> : null;
   return <>
@@ -164,7 +170,7 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
     searchCases: async (q, signal) => (await api.list({ ownership: "all", category: "open", q, ownerId: null, status: null, priority: null, cursor: null }, signal)).cases
       .slice(0, 10).map(item => ({ id: item.id, caseNumber: item.caseNumber, statusLabel: item.statusLabel, contactName: item.contact.name, licensePlate: item.vehicle.licensePlate })),
   }), [config, verified.profileId, verified.organizationId, getToken, current, api]);
-  const callContext = props.callTarget && <CallContextPanel key={props.callTarget.kind + ":" + props.callTarget.id} api={callApi} target={props.callTarget} active={props.active} current={current} wrapUp={wrapUp}
+  const callContext = props.callTarget && <CallContextPanel key={props.callTarget.kind + ":" + props.callTarget.id} api={callApi} target={props.callTarget} active={props.active} current={current} wrapUp={wrapUp} backLabel={props.callBackLabel}
     onBack={props.onCloseCallContext} onSelectNumber={props.onSelectNumber} onOpenCase={id => {
       if (!current()) return;
       setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onCloseCallContext(); props.onView("cases");
@@ -180,14 +186,22 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
       setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases");
     }} />;
   const home = props.view === "home" && !props.callTarget && props.renderHome({ cases: api, homeKey: [...actorRoot, "home"] }, null);
+  const search = props.view === "search" && <SearchSlot render={props.renderSearch} scope={{ cases: api, homeKey: [...actorRoot, "home"] }} onCase={id => {
+    if (!current()) return;
+    setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases");
+  }} />;
   // Until local drafts open, Prípady and Moje úlohy are not mounted to own Back.
   useAndroidBack(props.active && !vault && (props.view === "cases" || props.view === "tasks"), props.onLeaveModule);
-  if (!vault) return <>{callContext}{callbacks}{home}{operationViews.includes(props.view) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
+  if (!vault) return <>{callContext}{callbacks}{home}{search}{operationViews.includes(props.view) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.view === "account" && <Account {...props} />}
     {error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading label="Načítavam miestne koncepty…" />}
   </ScrollView> : null}</>;
-  return <>{callContext}{callbacks}{home}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
+  return <>{callContext}{callbacks}{home}{search}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
     onOpenCase={id => { setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases"); }} onResume={resume} onDiscarded={() => { setCaseRequest(undefined); setTaskRequest(undefined); setEpoch(value => value + 1); }} /></>;
+}
+
+function SearchSlot({ render, scope, onCase }: { render: Props["renderSearch"]; scope: SearchScope; onCase: (id: string) => void }) {
+  return <>{render(scope, null, onCase)}</>;
 }
 
 function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; queryKey: string[]; caseRequest?: CaseOpenRequest; taskRequest?: { taskId: string; nonce: number };

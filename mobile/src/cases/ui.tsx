@@ -1,9 +1,12 @@
 import { usePhoneOverlay } from "../ui/phone-overlays";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Keyboard, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { Search } from "lucide-react-native";
+import { MapPinned, MessageSquarePlus, Navigation, Pencil, PhoneForwarded, Search } from "lucide-react-native";
+import { ActionBar, DetailHeader, IconButton, InfoRow, Tag } from "../design/detail";
+import { Group, Row, SectionHeader } from "../design/list";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAndroidBack } from "../lib/use-android-back";
+import { useShellBack } from "../shell/back";
 import type { MobileCaseDetailData, MobileCaseFilter, MobileCaseNoteAdded, MobileCaseSummary } from "../../../src/lib/mobile-api";
 import { isClosedCaseStatus } from "../../../src/lib/mobile-case-filters";
 import { caseShortcut, caseRecoverySelection, canReviewCaseCreation, statusForCategory, type CaseSelection, type CaseShortcut } from "./filters";
@@ -11,7 +14,7 @@ import { CaseFilterControls } from "./filter-controls";
 import { CaseOverview } from "./overview";
 import { MobileApiError } from "../lib/api";
 import { dialable, formatNumber, formatTime } from "../lib/display";
-import { Button, Card, ErrorNotice, Loading, colors, styles } from "../ui";
+import { Button, Card, ErrorNotice, Loading, NAVIGATION_CONTENT_BOTTOM, colors, styles } from "../ui";
 import type { CasesApi } from "./api";
 import { CaseDraft, type DraftState } from "./draft";
 import { randomUUID } from "expo-crypto";
@@ -221,6 +224,7 @@ function ResumeCaseEditor({ api, id, active, initialError, onLoaded, onBack }: {
   const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string | null>(initialError ?? null);
   useAndroidBack(active, onBack);
+  useShellBack(active, "Prípady", onBack);
   useEffect(() => {
     if (!active || initialError && attempt === 0) return;
     const read = new AbortController();
@@ -235,7 +239,6 @@ function ResumeCaseEditor({ api, id, active, initialError, onLoaded, onBack }: {
     return () => read.abort();
   }, [api, id, active, attempt, initialError, onLoaded]);
   return <View style={styles.content}>
-    <Button label="Späť na prípady" secondary onPress={onBack} />
     {error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading />}
   </View>;
 }
@@ -329,13 +332,7 @@ function CaseRow({ item, first, onPress }: { item: MobileCaseSummary; first: boo
     </View>
   </Pressable>;
 }
-function CaseHeading({ item }: { item: MobileCaseSummary }) {
-  return <View style={{ gap: 5 }}><Text style={styles.subheading}>{item.caseNumber}</Text>
-    <Text style={[styles.muted, item.priority === "urgent" && { color: colors.danger }]}>{item.statusLabel} · {item.priorityLabel}</Text></View>;
-}
-function Info({ label, value }: { label: string; value: string | null }) {
-  return <View><Text style={styles.label}>{label}</Text><Text selectable style={styles.text}>{value || "Nedoplnené"}</Text></View>;
-}
+const placeSources: Record<string, string> = { google_places: "Google Places", client_gps: "GPS klienta", approximate: "Približný bod", manual: "Ručne zadané" };
 function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, onAttachments, onTasks, onSelectNumber, onEdit, onNote, savedNote, onNoteUpdated, onOwner }: {
   api: CasesApi; queryKey: string[]; active: boolean; id: string; created: DraftState["created"]; onBack: () => void; onOwner: () => void; onHandoffs: () => void; onAttachments: () => void; onTasks: () => void; onSelectNumber: (number: string) => void; onEdit: (item: MobileCaseDetailData) => void; onNote: (id: string) => void; savedNote?: CaseNoteDraft; onNoteUpdated: (receipt: MobileCaseNoteAdded) => void;
 }) {
@@ -343,52 +340,99 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
   const item = query.isError ? null : query.data?.case;
   const mapOverlay = usePhoneOverlay<"pickup" | "destination">(active);
   const mapTarget = mapOverlay.value;
-  return <ScrollView contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { void query.refetch(); }} />}>
-    <Button label="Späť na prípady" onPress={onBack} secondary />
-    {savedNote && <CaseNoteSavedNotice draft={savedNote} onUpdated={onNoteUpdated} />}
-    {created && <Card><Text accessibilityRole="alert" style={styles.subheading}>Prípad {created.caseNumber} je uložený.</Text>
-      {created.warnings.map((warning, index) => <Text key={warning.code + index} style={styles.text}>{warning.message}</Text>)}</Card>}
-    {query.isPending ? <Loading /> : query.isError ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} />
-      : item && <><Text style={styles.muted}>Údaje overené {formatTime(query.data!.checkedAt)}</Text><Button label="Dispečer prípadu" secondary onPress={onOwner} /><Button label="Upraviť prípad" onPress={() => onEdit(item)} /><Button label="Pridať poznámku" secondary onPress={() => onNote(item.id)} /><Button label="Prílohy prípadu" secondary onPress={onAttachments} /><Button label="Úlohy prípadu" secondary onPress={onTasks} /><Button label="Odovzdať prípad" secondary onPress={onHandoffs} /><Card><CaseHeading item={item} /><CopyValue scopeKey={id} active={active} label="Kopírovať číslo prípadu" value={item.caseNumber} /><Text style={styles.muted}>{item.owner.mine ? "Môj prípad" : item.owner.name || "Bez vlastníka"} · {formatTime(item.createdAt)}</Text></Card>
-        <Card><Info label="Kontakt" value={item.contact.name} /><Info label="Telefón" value={item.contact.phone ? formatNumber(item.contact.phone) : null} />
-          <CopyValue scopeKey={id} active={active} label="Kopírovať telefón" value={item.contact.phone} />
-          {dialable(item.contact.phone) && <Button label="Vybrať číslo v ústredni" onPress={() => { if (item.contact.phone) onSelectNumber(item.contact.phone); }} secondary />}</Card>
-        <Card><Info label="EČV" value={item.vehicle.licensePlate} /><CopyValue scopeKey={id} active={active} label="Kopírovať EČV" value={item.vehicle.licensePlate} /><Info label="Vozidlo" value={item.vehicle.description} /><Info label="Služba" value={item.jobTypeLabels.join(", ")} /></Card>
-        <Card><Info label="Vyzdvihnutie" value={item.pickupAddress} /><Info label="Cieľ" value={item.destinationAddress} />
-          <CopyValue scopeKey={id} active={active} label="Kopírovať vyzdvihnutie" value={item.pickupAddress} /><CopyValue scopeKey={id} active={active} label="Kopírovať cieľ" value={item.destinationAddress} />
-          {(["pickup", "destination"] as const).map(target => { const place = item.map?.[target]; return place?.point && <View key={target} style={{ gap: 8 }}>
-            <Info label={target === "pickup" ? "Poloha vyzdvihnutia" : "Poloha cieľa"} value={`${place.point.lat}, ${place.point.lng}`} />
-            <Text style={styles.muted}>Zdroj: {place.source === "google_places" ? "Google Places" : place.source === "client_gps" ? "GPS klienta" : place.source === "approximate" ? "Približný bod" : place.source === "manual" ? "Ručne zadané" : "Neznámy"}</Text>
-            <CopyValue scopeKey={id} active={active} label="Kopírovať súradnice" value={`${place.point.lat}, ${place.point.lng}`} />
-            <Button label={target === "pickup" ? "Mapa vyzdvihnutia" : "Mapa cieľa"} secondary disabled={!mapOverlay.canOpen} onPress={() => mapOverlay.open(target)} />
-          </View>; })}
-          {item.map?.clientLocation?.point && <View style={{ gap: 8 }}>
-            <Info label="Prijatá poloha klienta" value={`${item.map.clientLocation.point.lat}, ${item.map.clientLocation.point.lng}`} />
-            <Text style={styles.muted}>{item.map.clientLocation.capturedAt ? formatTime(item.map.clientLocation.capturedAt) : "Čas nezistený"}{item.map.clientLocation.accuracyMeters !== null ? ` · presnosť približne ${Math.round(item.map.clientLocation.accuracyMeters)} m` : ""}</Text>
-            <CopyValue scopeKey={id} active={active} label="Kopírovať GPS klienta" value={`${item.map.clientLocation.point.lat}, ${item.map.clientLocation.point.lng}`} />
-            <Button label="Mapa polohy klienta" secondary disabled={!mapOverlay.canOpen} onPress={() => mapOverlay.open("pickup")} />
-          </View>}
-          <Navigate label="Navigovať na vyzdvihnutie" address={item.pickupAddress} /><Navigate label="Navigovať do cieľa" address={item.destinationAddress} /></Card>
-        <Card><Info label="Problém" value={item.incidentDescription || item.summary} /><Info label="Poznámka" value={item.mainNote} /></Card>
-        <Text style={styles.subheading}>Posledné udalosti</Text>
-        {item.timeline.length === 0 && <Text style={styles.muted}>Zatiaľ bez udalostí.</Text>}
-        {item.timeline.map(event => <Card key={event.id}><Text style={styles.label}>{event.title}</Text>{Boolean(event.body) && <Text selectable style={styles.text}>{event.body}</Text>}
-          <Text style={styles.muted}>{formatTime(event.createdAt)}{event.actorName ? " · " + event.actorName : ""}</Text></Card>)}
+  const [navigation, setNavigation] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
+  useShellBack(active, "Prípady", onBack);
+  function navigate(address: string | null) {
+    if (!address?.trim() || navigation.busy) return;
+    setNavigation({ busy: true, error: null });
+    void (async () => {
+      try { await Linking.openURL(directionsUrl(address)); setNavigation({ busy: false, error: null }); }
+      catch (error) { setNavigation({ busy: false, error: error instanceof Error && error.message.startsWith("Adresa") ? error.message : "Navigáciu sa nepodarilo otvoriť. Skúste znova." }); }
+    })();
+  }
+  const copy = (label: string, value: string | null) => <CopyValue compact scopeKey={id} active={active} label={label} value={value} />;
+  const place = (target: "pickup" | "destination") => item?.map?.[target]?.point ? item.map[target] : null;
+  return <ScrollView contentContainerStyle={s.detail} refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { void query.refetch(); }} />}>
+    {(savedNote || created) && <View style={s.notices}>
+      {savedNote && <CaseNoteSavedNotice draft={savedNote} onUpdated={onNoteUpdated} />}
+      {created && <Card><Text accessibilityRole="alert" style={styles.subheading}>Prípad {created.caseNumber} je uložený.</Text>
+        {created.warnings.map((warning, index) => <Text key={warning.code + index} style={styles.text}>{warning.message}</Text>)}</Card>}
+    </View>}
+    {query.isPending ? <Loading /> : query.isError ? <View style={s.notices}><ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} /></View>
+      : item && <>
+        <DetailHeader title={item.caseNumber} subtitle={[item.contact.name || "Kontakt bez mena", item.vehicle.licensePlate].filter(Boolean).join(" · ")}
+          meta={"Založený " + formatTime(item.createdAt) + " · overené " + formatTime(query.data!.checkedAt)}
+          trailing={copy("Kopírovať číslo prípadu", item.caseNumber)}
+          tags={<>
+            {(item.priority === "urgent" || item.priority === "high") && <Tag text={item.priorityLabel} tone={item.priority === "urgent" ? "red" : "orange"} />}
+            <Tag text={item.statusLabel} tone="gray" />
+            <Tag text={item.owner.mine ? "Môj prípad" : item.owner.name || "Bez dispečera"} tone={item.owner.mine ? "yellow" : "gray"} />
+          </>} />
+        <ActionBar actions={[
+          { icon: PhoneForwarded, label: "Volať", accessibilityLabel: "Vybrať číslo kontaktu v ústredni", disabled: !dialable(item.contact.phone), onPress: () => { if (item.contact.phone) onSelectNumber(item.contact.phone); } },
+          { icon: Navigation, label: "Navigovať", accessibilityLabel: "Navigovať na miesto vyzdvihnutia", disabled: !item.pickupAddress?.trim() || navigation.busy, onPress: () => navigate(item.pickupAddress) },
+          { icon: MessageSquarePlus, label: "Poznámka", accessibilityLabel: "Pridať poznámku", onPress: () => onNote(item.id) },
+          { icon: Pencil, label: "Upraviť", accessibilityLabel: "Upraviť prípad", primary: true, onPress: () => onEdit(item) },
+        ]} />
+        {navigation.error && <View style={s.notices}><ErrorNotice message={navigation.error} /></View>}
+        <SectionHeader title="Kontakt" />
+        <Group>
+          <InfoRow first label="Meno" value={item.contact.name} />
+          <InfoRow label="Telefón" value={item.contact.phone ? formatNumber(item.contact.phone) : null} actions={<>
+            {copy("Kopírovať telefón", item.contact.phone)}
+            {dialable(item.contact.phone) && <IconButton icon={PhoneForwarded} label="Vybrať číslo v ústredni" onPress={() => { if (item.contact.phone) onSelectNumber(item.contact.phone); }} />}
+          </>} />
+        </Group>
+        <SectionHeader title="Vozidlo a služba" />
+        <Group>
+          <InfoRow first label="EČV" value={item.vehicle.licensePlate} actions={copy("Kopírovať EČV", item.vehicle.licensePlate)} />
+          <InfoRow label="Vozidlo" value={item.vehicle.description} />
+          <InfoRow label="Služba" value={item.jobTypeLabels.join(", ")} />
+        </Group>
+        <SectionHeader title="Miesto" />
+        <Group>
+          {(["pickup", "destination"] as const).map((target, index) => {
+            const address = target === "pickup" ? item.pickupAddress : item.destinationAddress, point = place(target);
+            return <InfoRow key={target} first={index === 0} label={target === "pickup" ? "Vyzdvihnutie" : "Cieľ"} value={address}
+              detail={point?.point ? `GPS ${point.point.lat}, ${point.point.lng} · ${placeSources[point.source] ?? "Neznámy zdroj"}` : null}
+              actions={<>
+                {copy(target === "pickup" ? "Kopírovať vyzdvihnutie" : "Kopírovať cieľ", address)}
+                {point && <IconButton icon={MapPinned} label={target === "pickup" ? "Mapa vyzdvihnutia" : "Mapa cieľa"} disabled={!mapOverlay.canOpen} onPress={() => mapOverlay.open(target)} />}
+                <IconButton icon={Navigation} label={target === "pickup" ? "Navigovať na vyzdvihnutie" : "Navigovať do cieľa"} disabled={navigation.busy} onPress={() => navigate(address)} />
+              </>} />;
+          })}
+          {(["pickup", "destination"] as const).map(target => { const point = place(target)?.point; return point && <InfoRow key={"gps:" + target}
+            label={target === "pickup" ? "Súradnice vyzdvihnutia" : "Súradnice cieľa"} value={`${point.lat}, ${point.lng}`}
+            actions={copy("Kopírovať súradnice", `${point.lat}, ${point.lng}`)} />; })}
+          {item.map?.clientLocation?.point && <InfoRow label="Prijatá poloha klienta" value={`${item.map.clientLocation.point.lat}, ${item.map.clientLocation.point.lng}`}
+            detail={(item.map.clientLocation.capturedAt ? formatTime(item.map.clientLocation.capturedAt) : "Čas nezistený") + (item.map.clientLocation.accuracyMeters !== null ? ` · presnosť približne ${Math.round(item.map.clientLocation.accuracyMeters)} m` : "")}
+            actions={<>
+              {copy("Kopírovať GPS klienta", `${item.map.clientLocation.point.lat}, ${item.map.clientLocation.point.lng}`)}
+              <IconButton icon={MapPinned} label="Mapa polohy klienta" disabled={!mapOverlay.canOpen} onPress={() => mapOverlay.open("pickup")} />
+            </>} />}
+        </Group>
+        <SectionHeader title="Problém a poznámka" />
+        <Group>
+          <InfoRow first label="Problém" value={item.incidentDescription || item.summary} />
+          <InfoRow label="Poznámka" value={item.mainNote} />
+        </Group>
+        <SectionHeader title="Prípad" />
+        <Group>
+          <Row first title="Úlohy prípadu" onPress={onTasks} trailing={<Text style={s.chevron}>›</Text>} />
+          <Row title="Prílohy" onPress={onAttachments} trailing={<Text style={s.chevron}>›</Text>} />
+          <Row title="Odovzdanie prípadu" onPress={onHandoffs} trailing={<Text style={s.chevron}>›</Text>} />
+          <Row title="Dispečer prípadu" subtitle={item.owner.mine ? "Vy" : item.owner.name || "Nepriradené"} onPress={onOwner} trailing={<Text style={s.chevron}>›</Text>} />
+        </Group>
+        <SectionHeader title="Posledné udalosti" detail={item.timeline.length ? String(item.timeline.length) : null} />
+        {item.timeline.length === 0 ? <Text style={s.empty}>Zatiaľ bez udalostí.</Text> : <Group>{item.timeline.map((event, index) => <View key={event.id} style={s.event}>
+          {index > 0 && <View style={s.eventSeparator} />}
+          <Text style={s.eventTitle}>{event.title}</Text>
+          {Boolean(event.body) && <Text selectable style={styles.text}>{event.body}</Text>}
+          <Text style={styles.muted}>{formatTime(event.createdAt)}{event.actorName ? " · " + event.actorName : ""}</Text>
+        </View>)}</Group>}
       </>}
     {active && item && mapTarget && <CaseMapFrame key={`${id}:view:${mapTarget}`} api={api} caseId={id} mode="view" target={mapTarget} seed={{ selection: null, address: "" }} onClose={mapOverlay.close} />}
   </ScrollView>;
-}
-function Navigate({ label, address }: { label: string; address: string | null }) {
-  const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState(false);
-  if (!address?.trim()) return null;
-  return <View style={{ gap: 8 }}><Button label={label} secondary disabled={busy} onPress={() => {
-    setBusy(true); setError(null);
-    void (async () => {
-      try { await Linking.openURL(directionsUrl(address)); }
-      catch (error) { setError(error instanceof Error && error.message.startsWith("Adresa") ? error.message : "Navigáciu sa nepodarilo otvoriť. Skúste znova."); }
-      finally { setBusy(false); }
-    })();
-  }} />{error && <ErrorNotice message={error} />}</View>;
 }
 function CaseForm({ api, draft, state, active, visible, onBack, onSubmit, callOffer, onOfferDone }: { api: CasesApi; active: boolean; visible: boolean; draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: () => void; callOffer?: CallOffer; onOfferDone: () => void }) {
   const mapOverlay = usePhoneOverlay<"pickup" | "destination">(visible, active);
@@ -396,9 +440,10 @@ function CaseForm({ api, draft, state, active, visible, onBack, onSubmit, callOf
   const saving = state.status === "saving", uncertain = state.status === "uncertain";
   const back = () => { if (draft.snapshot().status !== "saving") onBack(); };
   useAndroidBack(active, back, saving);
+  useShellBack(active, "Prípady", back, saving);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-      <Button label="Späť na prípady" onPress={back} disabled={saving} secondary /><Text style={styles.heading}>Nový prípad</Text>
+      <Text style={styles.heading}>Nový prípad</Text>
       <Text style={styles.muted}>Môžete uložiť aj neúplný koncept. Údaje doplníte neskôr v dispečingu.</Text>
       {callOffer && <CallPhoneOffer key={callOffer.nonce} draft={draft} state={state} number={callOffer.number} active={active && visible} onDone={onOfferDone} />}
       {fields.map(field => <View key={field.key}><Text style={styles.label}>{field.label}</Text>
@@ -444,4 +489,11 @@ const s = StyleSheet.create({
   tagRed: { backgroundColor: "#FFE7E6", color: "#C4161B" }, tagOrange: { backgroundColor: "#FFF0E0", color: "#B35A00" },
   tagGray: { backgroundColor: "rgba(118,118,128,0.12)", color: "#3A3A3C" }, tagYellow: { backgroundColor: "#FFF6BF", color: "#7D6300" },
   owner: { fontSize: 12, lineHeight: 16, color: colors.muted, flexShrink: 1 },
+  detail: { paddingTop: 6, paddingBottom: NAVIGATION_CONTENT_BOTTOM },
+  notices: { paddingHorizontal: 16, paddingBottom: 8, gap: 8 },
+  chevron: { fontSize: 20, color: "#AEAEB2" },
+  empty: { fontSize: 13, lineHeight: 18, color: colors.muted, paddingHorizontal: 20 },
+  event: { paddingHorizontal: 12, paddingVertical: 9, gap: 2, backgroundColor: colors.white },
+  eventSeparator: { position: "absolute", top: 0, left: 12, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: "rgba(60,60,67,0.16)" },
+  eventTitle: { fontSize: 13, lineHeight: 18, fontWeight: "700", color: colors.ink },
 });

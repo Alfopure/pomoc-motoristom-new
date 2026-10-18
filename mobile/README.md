@@ -16,7 +16,9 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   upraví cez Moduly → Upraviť lištu alebo „☆ Do lišty“ v module; voľba sa
   uloží v telefóne pre účet a profil. Podrobnosti sú v
   [dizajnovom štandarde](../docs/mobile/design-standard.md).
-- **Prehľad:** hovory na účte, spätné volania, prípady, moje úlohy a stav telefónu.
+- **Prehľad:** hľadanie, hovory na účte, spätné volania, prípady, moje úlohy a stav telefónu.
+- **Hľadať:** prípady celej organizácie (číslo, meno, EČV, telefón), hovory a moduly
+  v jednom poli; výsledok otvorí detail prípadu, detail hovoru alebo modul.
 - **Hovory → Ústredňa:** skutočný serverový stav operátora, jeho aktívne hovory,
   obnova potiahnutím a každých 30 sekúnd v popredí, pole pre číslo.
 - **Hovory → História:** existujúce autorizované serverové vyhľadávanie, filtre,

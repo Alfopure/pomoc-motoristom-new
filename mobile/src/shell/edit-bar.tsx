@@ -5,7 +5,8 @@ import { palette, radius, space, type } from "../design/tokens";
 import { GROUPS, PIN_LIMIT, moduleById, type ModuleId } from "./modules";
 import { barTabs } from "./navigation";
 import { movingPin, pinsFull, replacingPin, withPin, withoutPin } from "./pins";
-import { AddMark, MiniBar, ModuleTile, SectionHeader } from "./parts";
+import { SectionHeader } from "../design/list";
+import { AddMark, MiniBar, ModuleTile } from "./parts";
 
 const ROW = 52;
 type Props = {

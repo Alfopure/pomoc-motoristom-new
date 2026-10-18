@@ -5,7 +5,8 @@ import { palette, radius, space, type } from "../design/tokens";
 import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import { GROUPS, moduleById, type ModuleId } from "./modules";
 import type { ShellTab } from "./navigation";
-import { Badge, Group, MiniBar, ModuleTile, Row, SectionHeader, shellStyles } from "./parts";
+import { Group, Row, SectionHeader } from "../design/list";
+import { Badge, MiniBar, ModuleTile, shellStyles } from "./parts";
 
 type Props = {
   available: ModuleId[]; pins: ModuleId[]; tabs: ShellTab[]; showAdd: boolean; badges: Partial<Record<ModuleId, number>>;

@@ -5,7 +5,7 @@ import { GlassButton } from "./parts";
 
 export type PresenceTone = "green" | "orange" | "red" | "gray";
 type Props = {
-  left: { kind: "status"; label: string; tone: PresenceTone; onPress: () => void } | { kind: "back"; label: string; onPress: () => void };
+  left: { kind: "status"; label: string; tone: PresenceTone; onPress: () => void } | { kind: "back"; label: string; onPress: () => void; disabled?: boolean };
   onPin?: (() => void) | null; test: boolean; initials: string; onAccount: () => void;
 };
 const toneColor: Record<PresenceTone, string> = { green: palette.green, orange: palette.orange, red: palette.red, gray: "#AEAEB2" };
@@ -14,7 +14,8 @@ const toneColor: Record<PresenceTone, string> = { green: palette.green, orange: 
 export function ShellTopBar({ left, onPin, test, initials, onAccount }: Props) {
   return <View style={s.bar}>
     {left.kind === "back"
-      ? <GlassButton round accessibilityLabel={left.label} onPress={left.onPress} icon={<ChevronLeft size={21} strokeWidth={2.4} color={palette.label} accessible={false} />} />
+      ? <View style={s.backWrap}><GlassButton label={left.label} accessibilityLabel={"Späť na " + left.label} onPress={left.onPress} disabled={left.disabled}
+        icon={<ChevronLeft size={20} strokeWidth={2.5} color={palette.label} accessible={false} style={{ marginLeft: -4 }} />} /></View>
       : <GlassButton accessibilityLabel={"Váš stav: " + left.label + ". Otvoriť ústredňu"} onPress={left.onPress} label={left.label}
         icon={<View style={[s.dot, { backgroundColor: toneColor[left.tone] }]} />} />}
     <View style={s.spacer} />
@@ -33,6 +34,7 @@ export function initialsOf(name: string): string {
 const s = StyleSheet.create({
   bar: { flexDirection: "row", alignItems: "center", gap: space.s, paddingHorizontal: 14, paddingTop: space.xs, paddingBottom: space.xs, minHeight: 48 },
   spacer: { flex: 1 },
+  backWrap: { flexShrink: 1, maxWidth: "55%" },
   dot: { width: 8, height: 8, borderRadius: 4 },
   test: { fontSize: 10, lineHeight: 13, fontWeight: "800", letterSpacing: 0.8, color: palette.label, backgroundColor: "#FFF4AF", borderRadius: 8, paddingHorizontal: 7, paddingVertical: 4, overflow: "hidden" },
   initials: { fontSize: 12, lineHeight: 15, fontWeight: "700", color: palette.label },

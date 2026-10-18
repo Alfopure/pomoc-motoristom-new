@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, View } from "react-native";
 import { useAndroidBack } from "../lib/use-android-back";
+import { useShellBack } from "../shell/back";
 import type { MobileCaseNoteAdded } from "../../../src/lib/mobile-api";
 import { Button, Card, ErrorNotice, styles } from "../ui";
 import type { CaseNoteDraft } from "./notes";
@@ -26,6 +27,7 @@ export function CaseNoteForm({ draft, active, onBack, onSaved }: { active: boole
   const locked = state.status !== "editing";
   const back = () => { const current = draft.snapshot(); if (current.status !== "saving" && !current.repairing) onBack(); };
   useAndroidBack(active, back, state.status === "saving" || state.repairing);
+  useShellBack(active, "Prípad", back, state.status === "saving" || state.repairing);
   async function save(reconcile = false) {
     Keyboard.dismiss();
     const receipt = await (reconcile ? draft.reconcile() : draft.submit());
@@ -33,7 +35,6 @@ export function CaseNoteForm({ draft, active, onBack, onSaved }: { active: boole
   }
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}>
-      <Button label="Späť na prípad" secondary disabled={state.status === "saving" || state.repairing} onPress={back} />
       <Text style={styles.heading}>Pridať poznámku</Text>
       <Text style={styles.text}>Poznámka sa pridá do histórie prípadu spolu s vaším menom a časom.</Text>
       <View><Text style={styles.label}>Poznámka</Text><TextInput accessibilityLabel="Nová poznámka prípadu" value={state.note} onChangeText={value => draft.edit(value)}

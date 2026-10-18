@@ -2,6 +2,7 @@ import { usePhoneOverlay } from "../ui/phone-overlays";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, View } from "react-native";
 import { useAndroidBack } from "../lib/use-android-back";
+import { useShellBack } from "../shell/back";
 import { Button, Card, ErrorNotice, styles } from "../ui";
 import { CaseEdit, changedFields } from "./edit";
 import type { CasesApi } from "./api";
@@ -13,6 +14,7 @@ export function CaseEditor({ api, edit, active, visible = active, onBack, onSave
   const state = useSyncExternalStore(edit.subscribe, edit.snapshot, edit.snapshot);
   const back = () => { if (edit.snapshot().status !== "saving") onBack(); };
   useAndroidBack(active, back, state.status === "saving");
+  useShellBack(active, "Prípad", back, state.status === "saving");
   const scroll = useRef<ScrollView>(null);
   useEffect(() => {
     if (active && (state.error || ["uncertain", "conflict", "blocked", "committed", "saved"].includes(state.status))) scroll.current?.scrollTo({ y: 0, animated: false });
@@ -33,7 +35,7 @@ export function CaseEditor({ api, edit, active, visible = active, onBack, onSave
   const addressKey = JSON.stringify([state.base.updatedAt, state.input.manualPickupAddress, state.input.manualDestinationAddress, state.input.pickup, state.input.destination]);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-      <Button label="Späť na detail" secondary disabled={state.status === "saving"} onPress={back} /><Text style={styles.heading}>Upraviť {state.base.caseNumber}</Text>
+      <Text style={styles.heading}>Upraviť {state.base.caseNumber}</Text>
       <Text style={styles.muted}>Zmeny zostanú rozpracované, kým ich neuložíte. Poznámka tu upravuje hlavný text prípadu.</Text>
       {state.receipt && <Card><Text accessibilityRole="alert" style={styles.subheading}>Zmeny sú uložené.</Text>
         {state.receipt.warnings.map((item, i) => <Text key={item.code + i} style={styles.text}>{item.message}</Text>)}

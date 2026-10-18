@@ -25,10 +25,14 @@ import { History, type HistoryCategory } from "../calls/history";
 import { HovoryHeader } from "../calls/header";
 import { DoneButton, EditBarContent } from "./edit-bar";
 import { HomeScreen, type HomeTarget } from "./home";
+import { SearchScreen } from "./search";
 import { ModulesScreen } from "./modules-screen";
 import { PIN_LIMIT, moduleAccess, moduleById, roleNames, rolePins, type ModuleId } from "./modules";
 import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, type DispatchView, type HovoryView, type ShellState, type ShellTab } from "./navigation";
-import { GlassButton, Group, ModuleTile, Row, Sheet, Toast } from "./parts";
+import { Group, Row } from "../design/list";
+import { GlassButton, ModuleTile, Sheet, Toast, tabLabel } from "./parts";
+import { ShellBackContext } from "./back";
+import { ShellBackStore } from "./back-store";
 import { pinsFull, replacingPin, withPin, withoutPin } from "./pins";
 import { ShellPreferences, shellPreferencesKey } from "./preferences";
 import { createShellPreferencesStorage } from "./preferences-storage";
@@ -42,7 +46,7 @@ type Props = {
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void;
 };
 type ShellSheet = { kind: "edit" } | { kind: "pin"; id: ModuleId } | { kind: "menu"; id: ModuleId };
-const shellOwnedBack: readonly DispatchView[] = ["modules", "console", "history", "account"];
+const shellOwnedBack: readonly DispatchView[] = ["modules", "console", "history", "account", "search"];
 const presenceTone: Record<MobilePresence, PresenceTone> = { available: "green", paused: "orange", after_call_work: "orange", ringing: "red", on_call: "red", offline: "gray" };
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
 
@@ -71,6 +75,8 @@ export function DispatchShell(props: Props) {
   const [callSelection, setCallSelection] = useState<{ target: MobileCallContextTarget; view: DispatchView } | null>(null);
   const [toast, setToast] = useState<{ message: string; key: number } | null>(null);
   const sheet = usePhoneOverlay<ShellSheet>(active);
+  const [backStore] = useState(() => new ShellBackStore());
+  const moduleBack = useSyncExternalStore(backStore.subscribe, backStore.snapshot, backStore.snapshot);
   const callTarget = callSelection?.view === view ? callSelection.target : null;
   const consoleQuery = useQuery({ queryKey: [...queryKey, "console", identity.profileId], queryFn: ({ signal }) => api.console(identity.profileId, signal),
     enabled: active, refetchInterval: active ? 30_000 : false });
@@ -116,11 +122,14 @@ export function DispatchShell(props: Props) {
   const hovoryVisible = (view === "console" || view === "history" || view === "callbacks") && !callTarget;
   // Larger text or a taller system bar grows the floating bar; content ends above it.
   const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
-  return <View style={{ flex: 1 }}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
+  // A module sub-screen (detail, form) owns Back first; then account, then the module opened in Moduly.
+  const left = moduleBack && !nav.account && !nav.search ? { kind: "back" as const, label: moduleBack.label, onPress: moduleBack.onBack, disabled: moduleBack.disabled }
+    : nav.account || nav.search ? { kind: "back" as const, label: nav.tab === "moduly" && nav.opened ? moduleById(nav.opened).short : tabLabel(nav.tab), onPress: back }
+      : openedInModules ? { kind: "back" as const, label: "Moduly", onPress: back }
+        : { kind: "status" as const, label: statusLabel, tone: presence ? presenceTone[presence] : "gray" as const, onPress: () => navigate("hovory", "console") };
+  return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(identity.profile.displayName)} onAccount={() => go({ ...nav, account: true })}
-      left={nav.account || openedInModules ? { kind: "back", label: nav.account ? "Späť" : "Späť na Moduly", onPress: back }
-        : { kind: "status", label: statusLabel, tone: presence ? presenceTone[presence] : "gray", onPress: () => navigate("hovory", "console") }}
-      onPin={openedInModules && nav.opened && !pins.includes(nav.opened) ? () => pin(nav.opened!) : null} />
+      left={left} onPin={openedInModules && !moduleBack && nav.opened && !pins.includes(nav.opened) ? () => pin(nav.opened!) : null} />
     {Boolean(props.meError) && <View style={{ paddingHorizontal: space.l }}><ErrorNotice message={errorMessage(props.meError)} onRetry={props.onRetryMe} /></View>}
     {hovoryVisible && <HovoryHeader view={nav.hovory} onView={value => go({ ...nav, hovory: value })} waiting={callbackSummary.data ? waiting : null} />}
     {view === "console" && !callTarget && <Console api={api} me={identity} queryKey={queryKey} active={active} number={number} onNumber={setNumber}
@@ -135,10 +144,13 @@ export function DispatchShell(props: Props) {
         else if (target === "console") navigate("hovory", "console");
         else navigate(target === "cases" ? "pripady" : "ulohy");
       }}
-      onLeaveModule={back} callTarget={callTarget} onCloseCallContext={() => setCallSelection(null)}
+      onLeaveModule={back} callTarget={callTarget} onCloseCallContext={() => setCallSelection(null)} callBackLabel={callSelection?.view === "home" ? "Prehľad" : "Hovory"}
       onShowCalls={back} dialer={props.dialer}
       onSelectNumber={value => { setNumber(value); navigate("hovory", "console"); }}
-      renderHome={(scope, notice) => <HomeScreen active={active && view === "home"} scope={scope} scopeNotice={notice}
+      renderSearch={(scope, notice, openCase) => <SearchScreen active={active && view === "search"} api={api} profileId={identity.profileId} queryKey={queryKey}
+        available={available} scope={scope} scopeNotice={notice} onModule={id => navigate(id)} onCase={id => openCase?.(id)}
+        onCall={id => { if (!draftId(id)) return; go(openModule(nav, pins, "hovory", "history")); setCallSelection({ target: { kind: "call", id: id.toLowerCase() }, view: "history" }); }} />}
+      renderHome={(scope, notice) => <HomeScreen active={active && view === "home"} scope={scope} scopeNotice={notice} onSearch={() => go({ ...nav, search: true })}
         phone={{ label: statusLabel, tone: presence ? presenceTone[presence] : "gray", detail: phoneDetail }}
         callbacks={callbackSummary} activeCalls={consoleQuery.data?.activeCalls ?? []}
         tip={preferences.loaded && !preferences.tipDismissed} onDismissTip={() => prefs.dismissTip()}
@@ -147,7 +159,7 @@ export function DispatchShell(props: Props) {
       bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} />
-    </View>
+    </View></ShellBackContext.Provider>
     <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting }} showAdd={pins.length < PIN_LIMIT}
       onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => sheet.open({ kind: "edit" })} />
     <Sheet visible={sheet.value !== null} large={sheet.value?.kind === "edit"} onClose={sheet.close}

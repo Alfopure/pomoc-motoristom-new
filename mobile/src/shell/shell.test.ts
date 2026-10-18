@@ -4,6 +4,7 @@ import { MODULES, PIN_LIMIT, isModuleId, moduleAccess, moduleById, rolePins, typ
 import { movingPin, normalizePins, pinsFull, replacingPin, samePins, withPin, withoutPin } from "./pins";
 import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, shellLocation, type ShellState } from "./navigation";
 import { ShellPreferences, parseShellPreferences, shellPreferencesKey } from "./preferences";
+import { ShellBackStore } from "./back-store";
 
 const all: ModuleId[] = ["hovory", "pripady", "ulohy", "nastroje"];
 
@@ -60,6 +61,8 @@ describe("shell navigation", () => {
     expect(dispatchView({ ...initialShell, tab: "moduly", opened: "nastroje" })).toBe("tools");
     expect(dispatchView({ ...initialShell, tab: "pripady", account: true })).toBe("account");
     expect(shellLocation({ ...initialShell, tab: "moduly", opened: "ulohy" })).toBe("ulohy");
+    expect(dispatchView({ ...initialShell, tab: "pripady", search: true })).toBe("search");
+    expect(dispatchView({ ...initialShell, search: true, account: true })).toBe("account");
   });
   it("opens modules in their tab or inside Moduly and keeps stacks per tab", () => {
     const tools = openModule(initialShell, pins, "nastroje");
@@ -78,6 +81,9 @@ describe("shell navigation", () => {
     expect(shellBack({ ...initialShell, tab: "moduly" })).toMatchObject({ tab: "prehlad" });
     expect(shellBack({ ...initialShell, tab: "pripady" })).toMatchObject({ tab: "prehlad" });
     expect(shellBack(initialShell)).toBeNull();
+    expect(shellBack({ ...initialShell, search: true })).toMatchObject({ search: false, tab: "prehlad" });
+    expect(selectTab({ ...initialShell, search: true }, "pripady")).toMatchObject({ tab: "pripady", search: false });
+    expect(openModule({ ...initialShell, search: true }, ["pripady"], "pripady")).toMatchObject({ tab: "pripady", search: false });
   });
   it("keeps the visible screen when the bar or access changes", () => {
     expect(reconcileShell({ ...initialShell, tab: "pripady" }, ["hovory"], all)).toMatchObject({ tab: "moduly", opened: "pripady" });
@@ -147,5 +153,26 @@ describe("shell preferences", () => {
     locked = false;
     await prefs.load();
     expect(prefs.snapshot()).toMatchObject({ pins: ["nastroje"], loaded: true, readFailed: false, tipDismissed: true });
+  });
+});
+
+describe("shell back store", () => {
+  it("shows the latest active registration and notifies only on change", () => {
+    const store = new ShellBackStore();
+    let notified = 0;
+    store.subscribe(() => { notified++; });
+    const detail = store.nextId(), form = store.nextId();
+    expect(store.snapshot()).toBeNull();
+    const back = () => {};
+    store.set(detail, { label: "Prípady", onBack: back, disabled: false });
+    expect(store.snapshot()?.label).toBe("Prípady");
+    store.set(form, { label: "Prípad", onBack: back, disabled: true });
+    expect(store.snapshot()).toMatchObject({ label: "Prípad", disabled: true });
+    store.set(form, null);
+    expect(store.snapshot()?.label).toBe("Prípady");
+    store.set(form, null);
+    store.set(detail, null);
+    expect(store.snapshot()).toBeNull();
+    expect(notified).toBe(4);
   });
 });
