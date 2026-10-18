@@ -86,7 +86,7 @@ export function CaseEditor({ api, edit, active, visible = active, onBack, onSave
         <Choice label="Potvrdzujem nahradenie miesta" selected={addressAcknowledged === addressKey} disabled={!editing}
           onPress={() => setAddressAcknowledged(addressAcknowledged === addressKey ? "" : addressKey)} /></Card>}
       {state.status === "saved" ? <Button label="Zobraziť uložený detail" onPress={back} />
-        : <Button label={state.status === "saving" ? "Ukladám zmeny…" : "Uložiť zmeny"} disabled={!editing || keys.length === 0 || addressChange && addressAcknowledged !== addressKey}
+        : <Button primary label={state.status === "saving" ? "Ukladám zmeny…" : "Uložiť zmeny"} disabled={!editing || keys.length === 0 || addressChange && addressAcknowledged !== addressKey}
           onPress={() => { Keyboard.dismiss(); void edit.save(); }} />}
       </View>
       {mapTarget && editing && <CasePlacePicker key={`${state.base.id}:pick:${mapTarget}`} api={api} caseId={state.base.id} active={active} visible={visible} target={mapTarget}

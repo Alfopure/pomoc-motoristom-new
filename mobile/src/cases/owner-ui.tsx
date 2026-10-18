@@ -37,7 +37,7 @@ export function CaseOwnerForm({ draft, active, onBack, onSaved }: { draft: CaseO
         <Text style={styles.text}>Aktuálne: {context.owner.name || "Nepriradené"}</Text><Button label="Porovnal som údaje – pokračovať výberom" onPress={() => draft.review()} />
         {state.status === "conflict" && <Button label="Zahodiť výber dispečera" secondary onPress={() => draft.reset()} />}</Card>}
       {editable && selected && <Card><Text style={styles.text}>{context?.owner.name || "Nepriradené"} → {selected.name}</Text>
-        <Text style={styles.muted}>Zmení sa iba dispečer prípadu. Súvisiace úlohy sa nepresúvajú.</Text><Button label="Potvrdiť priradenie" onPress={() => { void draft.submit(); }} /></Card>}
+        <Text style={styles.muted}>Zmení sa iba dispečer prípadu. Súvisiace úlohy sa nepresúvajú.</Text><Button primary label="Potvrdiť priradenie" onPress={() => { void draft.submit(); }} /></Card>}
       {state.status === "saving" && <Text accessibilityRole="alert" style={styles.text}>Ukladám priradenie…</Text>}
       {state.status === "saved" && <Button label="Pripraviť ďalšie priradenie" secondary onPress={() => { draft.reset(); void draft.refresh(); }} />}
     </View>}

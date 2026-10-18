@@ -7,7 +7,7 @@ dispečera nie je poloha zákazníka.
 
 ## Postup
 
-1. Pri mieste otvoriť **Vybrať miesto na mape**.
+1. Pri mieste ťuknúť na **Na mape** (VoiceOver: „Vybrať miesto na mape: …“).
 2. Stlačiť **Použiť polohu telefónu** a podľa potreby povoliť polohu počas
    používania aplikácie. Samotné otvorenie mapy polohu nežiada.
 3. Skontrolovať zobrazenú približnú presnosť a vybrať

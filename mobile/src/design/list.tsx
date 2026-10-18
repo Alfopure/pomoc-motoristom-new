@@ -6,20 +6,23 @@ import { palette, radius, space, type } from "./tokens";
 export function Group({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
   return <View style={[s.group, style]}>{children}</View>;
 }
-export function Row({ title, subtitle, leading, trailing, onPress, first, accessibilityLabel, tone }: {
+export function Row({ title, subtitle, leading, trailing, onPress, first, accessibilityLabel, tone, disabled }: {
   title: string; subtitle?: string | null; leading?: ReactNode; trailing?: ReactNode; onPress?: () => void; first?: boolean; accessibilityLabel?: string; tone?: "link" | "danger";
+  /** Shown dimmed and announced as unavailable. */
+  disabled?: boolean;
 }) {
   const body = <>
     {!first && <View style={[s.separator, { left: leading ? 52 : space.m }]} />}
     {leading}
     <View style={{ flex: 1, minWidth: 0 }}>
-      <Text numberOfLines={2} style={[s.rowTitle, tone === "link" && { color: palette.brandInk }, tone === "danger" && { color: palette.redText }]}>{title}</Text>
+      <Text numberOfLines={2} style={[s.rowTitle, tone === "link" && { color: palette.brandInk }, tone === "danger" && { color: palette.redText }, disabled && { color: palette.tertiaryLabel }]}>{title}</Text>
       {subtitle ? <Text numberOfLines={2} style={s.rowSubtitle}>{subtitle}</Text> : null}
     </View>
     {trailing}
   </>;
   if (!onPress) return <View style={s.row}>{body}</View>;
-  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? title} onPress={onPress} style={({ pressed }) => [s.row, pressed && { backgroundColor: "#ECECF0" }]}>{body}</Pressable>;
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? title} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
+    style={({ pressed }) => [s.row, pressed && !disabled && { backgroundColor: "#ECECF0" }]}>{body}</Pressable>;
 }
 export function SectionHeader({ title, detail }: { title: string; detail?: string | null }) {
   return <View style={s.sectionHeader}><Text accessibilityRole="header" style={s.sectionTitle}>{title}</Text>{detail ? <Text numberOfLines={1} style={s.sectionDetail}>{detail}</Text> : null}</View>;

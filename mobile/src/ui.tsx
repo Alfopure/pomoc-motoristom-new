@@ -17,19 +17,22 @@ export const styles = StyleSheet.create({
   input: { backgroundColor: colors.white, borderColor: colors.border, borderWidth: 1, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, minHeight: 44, fontSize: 16, color: colors.ink },
   row: { flexDirection: "row", alignItems: "center", gap: 10 },
   card: { backgroundColor: colors.white, padding: 14, borderRadius: 16, gap: 8 },
-  // The main action is yellow (design standard, principle 3); others are gray.
-  button: { backgroundColor: colors.brand, borderRadius: 22, paddingVertical: 11, paddingHorizontal: 16, minHeight: 44, alignItems: "center", justifyContent: "center" },
-  buttonText: { color: colors.ink, fontSize: 15, lineHeight: 20, fontWeight: "600", maxWidth: "100%", textAlign: "center" },
+  button: { backgroundColor: colors.ink, borderRadius: 22, paddingVertical: 11, paddingHorizontal: 16, minHeight: 44, alignItems: "center", justifyContent: "center" },
+  buttonText: { color: colors.white, fontSize: 15, lineHeight: 20, fontWeight: "600", maxWidth: "100%", textAlign: "center" },
+  // The one main action of a form or list (design standard, principle 3).
+  primary: { backgroundColor: colors.brand },
+  primaryText: { color: colors.ink },
   secondary: { backgroundColor: "rgba(118,118,128,0.12)" },
   secondaryText: { color: colors.ink },
   disabled: { backgroundColor: "#E5E5EA" },
   disabledText: { color: "#8E8E93" },
 });
 export function Card({ children, style }: PropsWithChildren<{ style?: StyleProp<ViewStyle> }>) { return <View style={[styles.card, style]}>{children}</View>; }
-export function Button({ label, onPress, disabled, secondary }: { label: string; onPress: () => void; disabled?: boolean; secondary?: boolean }) {
+/** Black by default; `primary` is yellow, at most once per screen; `secondary` is gray. */
+export function Button({ label, onPress, disabled, secondary, primary }: { label: string; onPress: () => void; disabled?: boolean; secondary?: boolean; primary?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
-    style={({ pressed }) => [styles.button, secondary && styles.secondary, disabled && styles.disabled, pressed && { opacity: 0.7 }]}>
-    <Text style={[styles.buttonText, secondary && styles.secondaryText, disabled && styles.disabledText]}>{label}</Text>
+    style={({ pressed }) => [styles.button, primary && styles.primary, secondary && styles.secondary, disabled && styles.disabled, pressed && { opacity: 0.7 }]}>
+    <Text style={[styles.buttonText, primary && styles.primaryText, secondary && styles.secondaryText, disabled && styles.disabledText]}>{label}</Text>
   </Pressable>;
 }
 export function Loading({ label = "Načítavam…" }: { label?: string }) {

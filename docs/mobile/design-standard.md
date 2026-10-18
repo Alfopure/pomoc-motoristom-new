@@ -162,8 +162,8 @@ a `mobile/src/shell/parts.tsx` (prvky kostry):
   **potvrdenie** nad lištou (aj pre VoiceOver), **ikona modulu**, **náhľad lišty**.
 - **Štítok stavu** – 11 b bold v jemnom podklade, vždy na jednom riadku (v riadku
   sa skráti text vedľa neho); stav vždy aj textom.
-- **Tlačidlo** – hlavná akcia je žltá s čiernym textom, ostatné sivé; nedostupná
-  je svetlosivá. Žltých tlačidiel je na obrazovke čo najmenej, spravidla jedno.
+- **Tlačidlo** – čierne; jediná hlavná akcia formulára (Uložiť, Vytvoriť,
+  Potvrdiť) je žltá (`primary`), doplnkové sivé (`secondary`), nedostupné svetlosivé.
 - **Formulár** – sekcie s nadpisom; v riadku popis (12 b) nad poľom (16 b), ťuk
   kamkoľvek do riadku presunie kurzor do poľa; pomocná akcia v riadku je malé
   žlté tlačidlo s textom („Na mape“); výber hodnoty je riadok s hodnotou a ›,

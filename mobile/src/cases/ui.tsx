@@ -471,7 +471,7 @@ function CaseForm({ api, draft, state, active, visible, onBack, onSubmit, callOf
         {state.error && <ErrorNotice message={state.error} />}
         {uncertain && <><Button label="Skontrolovať zoznam prípadov" onPress={back} secondary />
           {state.reviewedList && <Button label="Prípad som nenašiel – povoliť opakovanie" onPress={() => draft.allowRetry()} secondary />}</>}
-        <Button label={saving ? "Ukladám prípad…" : "Uložiť prípad"} disabled={saving || uncertain || state.status === "saved"} onPress={() => { Keyboard.dismiss(); onSubmit(); }} />
+        <Button primary label={saving ? "Ukladám prípad…" : "Uložiť prípad"} disabled={saving || uncertain || state.status === "saved"} onPress={() => { Keyboard.dismiss(); onSubmit(); }} />
       </View>
       {mapTarget && state.status === "editing" && <CasePlacePicker key={`new:pick:${mapTarget}`} api={api} caseId={null} active={active} visible={visible} target={mapTarget}
         seed={{ selection: state.input[mapTarget] ?? null, address: state.input[mapTarget]?.address ?? state.input[mapTarget === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"] ?? "" }}

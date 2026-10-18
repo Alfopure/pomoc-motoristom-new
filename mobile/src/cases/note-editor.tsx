@@ -49,7 +49,7 @@ export function CaseNoteForm({ draft, active, onBack, onSaved }: { active: boole
           <CaseNoteSavedNotice draft={draft} />
           <Button label="Otvoriť prípad" disabled={state.repairing} onPress={() => onSaved(state.receipt!)} />
         </View>
-          : <Button label={state.status === "saving" ? "Ukladám…" : "Uložiť poznámku"} disabled={locked || !state.note.trim()} onPress={() => { void save(); }} />}
+          : <Button primary label={state.status === "saving" ? "Ukladám…" : "Uložiť poznámku"} disabled={locked || !state.note.trim()} onPress={() => { void save(); }} />}
       </View>
     </ScrollView>
   </KeyboardAvoidingView>;

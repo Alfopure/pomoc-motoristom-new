@@ -30,7 +30,7 @@ export function Field({ label, action, hint, multiline, editable = true, style, 
   label: string; action?: ReactNode; hint?: string | null;
 }) {
   const ref = useRef<TextInput>(null);
-  return <Pressable accessible={false} onPress={() => { if (editable) ref.current?.focus(); }} style={s.field}>
+  return <Pressable accessible={false} focusable={false} importantForAccessibility="no" onPress={() => { if (editable) ref.current?.focus(); }} style={s.field}>
     <View style={s.labelLine}><Text style={s.label}>{label}</Text>{action}</View>
     <TextInput ref={ref} accessibilityLabel={accessibilityLabel ?? label} placeholderTextColor={palette.tertiaryLabel} editable={editable} multiline={multiline}
       textAlignVertical={multiline ? "top" : "center"} style={[s.input, multiline && s.multiline, !editable && { color: palette.secondaryLabel }, style]} {...input} />
@@ -40,8 +40,9 @@ export function Field({ label, action, hint, multiline, editable = true, style, 
 
 /** Small labeled button in a field's label line, e.g. "Na mape". */
 export function FieldAction({ icon: Icon, label, accessibilityLabel, onPress, disabled }: { icon: LucideIcon; label: string; accessibilityLabel?: string; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
-    hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }} style={({ pressed }) => [s.action, disabled && { opacity: 0.4 }, pressed && { opacity: 0.6 }]}>
+  // Stays touchable while disabled: a refused tap would fall through and focus the field.
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ disabled: Boolean(disabled) }} onPress={disabled ? undefined : onPress}
+    hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }} style={({ pressed }) => [s.action, disabled && { opacity: 0.4 }, pressed && !disabled && { opacity: 0.6 }]}>
     <Icon size={13} strokeWidth={2.4} color={palette.brandInk} accessible={false} />
     <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.actionLabel}>{label}</Text>
   </Pressable>;

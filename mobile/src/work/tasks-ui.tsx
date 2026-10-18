@@ -77,7 +77,7 @@ function TaskForm({ store, caseId, queryKey, active, draft, onBack, onSaved }: {
     <View style={formLayout.actions}>
       {query.isError && <ErrorNotice message={workError(query.error)} onRetry={() => { void query.refetch(); }} />}
       {query.data && !query.data.capabilities.create && <Text style={styles.muted}>Vytváranie úloh momentálne nie je dostupné. Rozpracované údaje zostali zachované.</Text>}
-      <Button label={state.status === "saving" ? "Vytváram úlohu…" : "Vytvoriť úlohu"} disabled={!editing || !query.data?.capabilities.create || query.isError} onPress={() => { Keyboard.dismiss(); void draft.submit().then(receipt => { if (receipt) onSaved(receipt.taskId); }); }} />
+      <Button primary label={state.status === "saving" ? "Vytváram úlohu…" : "Vytvoriť úlohu"} disabled={!editing || !query.data?.capabilities.create || query.isError} onPress={() => { Keyboard.dismiss(); void draft.submit().then(receipt => { if (receipt) onSaved(receipt.taskId); }); }} />
     </View>
   </ScrollView></KeyboardAvoidingView>;
 }
@@ -145,10 +145,12 @@ export function TaskDetail({ store, taskId, queryKey, active, profileId, onBack,
         {task.reviewReturnReason ? <InfoRow label="Na dopracovanie" value={task.reviewReturnReason} /> : null}
       </Group>
       {task.originLocked && <Text style={s.note}>Úloha vznikla z naviazanej udalosti.</Text>}
-      {(query.data?.linkedCases.length ?? 0) > 0 && <><SectionHeader title="Prípad" /><Group>{query.data!.linkedCases.map((item, index) => <Row key={item.id} first={index === 0}
-        title={item.caseNumber} subtitle={isMobileCaseStatus(item.status) ? caseStatusLabels[item.status] : null}
-        accessibilityLabel={"Otvoriť prípad " + item.caseNumber} onPress={onOpenCase && !saving ? () => openCase(item.id) : undefined}
-        trailing={onOpenCase ? <Text style={s.chevron}>›</Text> : null} />)}</Group></>}
+      {(query.data?.linkedCases.length ?? 0) > 0 && <><SectionHeader title="Prípad" /><Group>{query.data!.linkedCases.map((item, index) => {
+        const status = isMobileCaseStatus(item.status) ? caseStatusLabels[item.status] : null;
+        return <Row key={item.id} first={index === 0} title={item.caseNumber} subtitle={status} disabled={saving}
+          accessibilityLabel={"Otvoriť prípad " + item.caseNumber + (status ? ", " + status : "")} onPress={onOpenCase ? () => openCase(item.id) : undefined}
+          trailing={onOpenCase ? <Text style={s.chevron}>›</Text> : null} />;
+      })}</Group></>}
       {!capability?.workflow && <Text style={s.note}>Zmeny stavu momentálne nie sú dostupné. Neoverená požiadavka zostáva zachovaná.</Text>}
       {workflow.status === "saved" && current && <View style={formLayout.notices}><Button label="Ďalšia zmena stavu" secondary onPress={() => retained.workflow.reset()} /></View>}
       {workflow.status === "editing" && capability?.workflow && <>
