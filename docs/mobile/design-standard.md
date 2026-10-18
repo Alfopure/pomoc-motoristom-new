@@ -98,12 +98,14 @@ notifikácie nemení – push upozornenia sú samostatná etapa.
 roly), Odhlásiť sa ako červený riadok a Koncepty v tomto zariadení – každý koncept
 s tlačidlami Pokračovať a Zahodiť. Počas hovoru je odhlásenie nedostupné.
 
-**Lišta hovoru** (`call-bar.tsx`): kým beží hovor, nad spodnou lištou je zelený
-pás s menom alebo číslom, stavom a dĺžkou hovoru. Hovor v tomto telefóne má
-prednosť pred hovormi, ktoré server eviduje na účte (napr. na stolovom telefóne).
-Ťuk otvorí detail hovoru, pri hovore v telefóne alebo viacerých hovoroch Ústredňu.
-Na Ústredni a v detaile toho istého hovoru sa nezobrazuje; pri písaní sa skryje
-spolu s lištou a obsah končí nad ním.
+**Lišta hovoru** (`call-bar.tsx`): kým server eviduje hovor na účte dispečera mimo
+tohto telefónu (napr. na stolovom telefóne), nad spodnou lištou je zelený pás
+s menom alebo číslom, stavom a pri jednom hovore aj dĺžkou. Ťuk otvorí detail
+hovoru, pri viacerých hovoroch Ústredňu. Hovor v tomto telefóne ukazuje panel
+hovoru hore, preto ho lišta vynechá. Stav sa číta každých 30 s, hovor zo stolového
+telefónu sa teda ukáže a zmizne s oneskorením do 30 s. Zavesenie v tomto telefóne
+obnoví čítanie hneď a hovor ukončený v telefóne sa v lište už neukáže. Na Ústredni a v detaile toho istého hovoru sa nezobrazuje;
+pri písaní sa skryje a obsah končí nad ním.
 
 **Okná (sheet)**: jedno spoločné okno zdola pre úpravu lišty, výber náhrady
 a menu modulu; každé má viditeľné Hotovo, Zrušiť alebo Zavrieť. Pri začiatku

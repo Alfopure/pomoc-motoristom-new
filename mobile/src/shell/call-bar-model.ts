@@ -1,26 +1,23 @@
 import type { MobileActiveCall } from "../../../src/lib/mobile-api";
 import { callStatus, formatNumber } from "../lib/display";
-import type { PhoneState } from "../voice/phone";
 
 /** Height of the bar and its gap above the tab bar; content ends above it. */
 export const CALL_BAR_SPACE = 52;
 
-export type CallBarCall =
-  | { kind: "phone"; title: string; status: string }
-  | { kind: "server"; id: string; title: string; status: string; startedAt: string; count: number };
+export type CallBarCall = { id: string; title: string; status: string; startedAt: string; count: number };
 
-/** What the bar shows: the call in this phone first, then calls the server
- * knows on the dispatcher's account (for example on a desk phone). */
-export function callBarCall(phone: PhoneState["call"], active: readonly MobileActiveCall[]): CallBarCall | null {
-  if (phone) {
-    const status = phone.state === "HELD" ? "Podržaný" : ["DROPPED", "RECONNECTING"].includes(phone.state) ? "Obnovuje sa"
-      : phone.connected ? "Prebieha" : phone.outgoing ? "Vytáča sa" : "Zvoní";
-    return { kind: "phone", title: phone.displayName || formatNumber(phone.number), status };
-  }
-  const first = active[0];
+const calls = (count: number) => count + (count <= 4 ? " hovory" : " hovorov");
+
+/** Calls the server lists on the dispatcher's account, for example on a desk
+ * phone. The call in this phone is excluded: the call panel already shows it,
+ * and a call it just ended stays listed until the next console read. */
+export function callBarCall(active: readonly MobileActiveCall[], exclude: readonly string[]): CallBarCall | null {
+  const skipped = new Set(exclude.map(id => id.toLowerCase()));
+  const shown = active.filter(call => !skipped.has(call.id.toLowerCase()));
+  const first = shown[0];
   if (!first) return null;
-  return { kind: "server", id: first.id, title: active.length > 1 ? active.length + " hovory na vašom účte" : first.name || formatNumber(first.number),
-    status: active.length > 1 ? "Otvoriť Ústredňu" : callStatus(first.state), startedAt: first.startedAt, count: active.length };
+  return shown.length > 1 ? { id: first.id, title: calls(shown.length) + " na vašom účte", status: "Ústredňa", startedAt: first.startedAt, count: shown.length }
+    : { id: first.id, title: first.name || formatNumber(first.number), status: callStatus(first.state), startedAt: first.startedAt, count: 1 };
 }
 
 /** "0:07", "12:31", "1:02:09"; empty when the start is unknown. */

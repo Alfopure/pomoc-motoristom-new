@@ -39,6 +39,7 @@ import { ShellPreferences, shellPreferencesKey } from "./preferences";
 import { createShellPreferencesStorage } from "./preferences-storage";
 import { DockTabBar } from "./tab-bar";
 import { CALL_BAR_SPACE, CallBar, callBarCall, type CallBarCall } from "./call-bar";
+import { useKeyboardShown } from "./keyboard";
 import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
 
 type Props = {
@@ -83,6 +84,13 @@ export function DispatchShell(props: Props) {
   const callTarget = callSelection?.view === view ? callSelection.target : null;
   const consoleQuery = useQuery({ queryKey: [...queryKey, "console", identity.profileId], queryFn: ({ signal }) => api.console(identity.profileId, signal),
     enabled: active, refetchInterval: active ? 30_000 : false });
+  const keyboard = useKeyboardShown();
+  // A session that ended in this phone never runs again, though the server may list it for a while.
+  const phoneSession = (phoneState.call?.sessionId ?? phoneState.termination ?? null)?.toLowerCase() ?? null;
+  const [sessions, setSessions] = useState<{ current: string | null; ended: string[] }>({ current: phoneSession, ended: [] });
+  if (sessions.current !== phoneSession) setSessions({ current: phoneSession, ended: sessions.current ? [...sessions.ended, sessions.current].slice(-20) : sessions.ended });
+  const refetchConsole = consoleQuery.refetch;
+  useEffect(() => { if (sessions.ended.length) void refetchConsole(); }, [sessions.ended, refetchConsole]);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 2400); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => { if (view === "modules" && preferences.loaded && !preferences.tipDismissed) prefs.dismissTip(); }, [view, preferences.loaded, preferences.tipDismissed, prefs]);
 
@@ -123,11 +131,12 @@ export function DispatchShell(props: Props) {
   const sheetModule = sheet.value && sheet.value.kind !== "edit" ? sheet.value.id : null;
   const tabs = barTabs(pins);
   const hovoryVisible = (view === "console" || view === "history" || view === "callbacks") && !callTarget;
-  // Ústredňa and the call's own detail already show the call.
-  const barCall = callBarCall(phoneState.call, consoleQuery.data?.activeCalls ?? []);
-  const callBar = barCall && !(view === "console" && !callTarget) && !(barCall.kind === "server" && callTarget?.kind === "session" && callTarget.id === barCall.id.toLowerCase()) ? barCall : null;
+  // The bar lists calls on the account outside this phone; the call panel shows the phone's own.
+  const barCall = callBarCall(consoleQuery.data?.activeCalls ?? [], phoneSession ? [phoneSession, ...sessions.ended] : sessions.ended);
+  // Ústredňa and the call's own detail already show it; with the keyboard up it steps aside.
+  const callBar = barCall && !keyboard && !(view === "console" && !callTarget) && !(callTarget?.kind === "session" && callTarget.id === barCall.id.toLowerCase()) ? barCall : null;
   const openBarCall = (call: CallBarCall) => {
-    if (call.kind === "phone" || call.count > 1 || !draftId(call.id)) { navigate("hovory", "console"); return; }
+    if (call.count > 1 || !draftId(call.id)) { navigate("hovory", "console"); return; }
     go(openModule(nav, pins, "hovory", "history"));
     setCallSelection({ target: { kind: "session", id: call.id.toLowerCase() }, view: "history" });
   };
