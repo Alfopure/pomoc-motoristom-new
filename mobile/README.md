@@ -32,6 +32,9 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   prevzatie, vybavenie/zrušenie s poznámkou a volanie späť v natívnej aplikácii.
   Volanie aj bežné vytáčanie potvrdzuje overené náhradné číslo kontaktu
   ([podrobnosti](../docs/mobile/callbacks.md)).
+- **Po hovore:** v detaile hovoru výsledok s poznámkou, naplánovanie spätného
+  volania a priradenie hovoru k prípadu s návrhmi podľa čísla
+  ([podrobnosti](../docs/mobile/call-wrap-up.md)).
 - **Moje úlohy:** všetky vlastné otvorené úlohy, výber úloh na kontrolu,
   aj dokončené, vyhľadávanie podľa názvu a prechod na prípad.
 - **Účet:** meno, e-mail, rola, prostredie, miestne koncepty a odhlásenie.

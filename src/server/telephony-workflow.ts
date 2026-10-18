@@ -46,7 +46,7 @@ export function isCallOutcome(value: unknown): value is CallOutcome {
   return typeof value === "string" && value in outcomeLabels;
 }
 
-export async function findCallerMatches(rawNumber: string): Promise<{ degraded: boolean; matches: CallerMatch[] }> {
+export async function findCallerMatches(rawNumber: string, options: { organizationId?: string } = {}): Promise<{ degraded: boolean; matches: CallerMatch[] }> {
   if (!rawNumber.trim()) {
     throw new TelephonyWorkflowError("Telefónne číslo je povinné.", 400);
   }
@@ -68,6 +68,7 @@ export async function findCallerMatches(rawNumber: string): Promise<{ degraded: 
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
   const organizationId = organization.id;
+  if (options.organizationId && options.organizationId !== organizationId) throw new TelephonyWorkflowError("Hovor patrí inej organizácii.", 403);
   const [contactsResult, casesResult, callsResult] = await Promise.all([
     supabase.from("motorist_contacts").select("*").eq("organization_id", organizationId).order("updated_at", { ascending: false }).limit(300),
     supabase.from("motorist_cases").select("*").eq("organization_id", organizationId).order("updated_at", { ascending: false }).limit(300),
@@ -140,7 +141,24 @@ export async function findCallerMatches(rawNumber: string): Promise<{ degraded: 
   };
 }
 
+export type CallWorkflowActor = { profileId: string; organizationId: string };
+type CallWorkflowSource = "dispatch_console" | "mobile_app";
+
 export async function linkCallToCase(callId: string, caseId: string) {
+  await recordCallCaseLink(callId, caseId);
+  return loadDispatchData();
+}
+
+/**
+ * The link write without the dispatch snapshot. `expectedCaseId` makes the
+ * write conditional on the link the caller saw, so a stale screen cannot
+ * silently move a colleague's link; repeating the same link is a no-op.
+ */
+export async function recordCallCaseLink(
+  callId: string,
+  caseId: string,
+  options: { actor?: CallWorkflowActor; expectedCaseId?: string | null; source?: CallWorkflowSource } = {},
+): Promise<{ changed: boolean }> {
   ensureUuid(callId, "callId");
   ensureUuid(caseId, "caseId");
 
@@ -148,27 +166,40 @@ export async function linkCallToCase(callId: string, caseId: string) {
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
   const organizationId = organization.id;
+  if (options.actor && options.actor.organizationId !== organizationId) throw new TelephonyWorkflowError("Hovor patrí inej organizácii.", 403);
+  let changed = true;
   await withCallOwnership(supabase, organizationId, callId, async (call) => {
+    if (options.expectedCaseId !== undefined) {
+      if (call.case_id === caseId) { changed = false; return; }
+      if ((call.case_id ?? null) !== options.expectedCaseId) throw new TelephonyWorkflowError("Hovor medzitým priradil kolega k inému prípadu. Obnovte detail hovoru.", 409);
+    }
     const caseRow = await getCase(supabase, organizationId, caseId);
-    const actorId = await resolveDefaultOwnerId(supabase, organizationId);
+    const actorId = options.actor?.profileId ?? await resolveDefaultOwnerId(supabase, organizationId);
+    const source = options.source ?? "dispatch_console";
     const now = new Date().toISOString();
     const latestPayload = {
       ...jsonRecord(call.raw_latest_payload),
       linkedCaseId: caseId,
       linkedAt: now,
-      linkedBy: "dispatch_console",
+      linkedBy: source,
     };
 
-    await throwOnResult(
-      supabase
-        .from("motorist_calls")
-        .update({
-          case_id: caseId,
-          raw_latest_payload: toJson(latestPayload),
-        })
-        .eq("organization_id", organizationId)
-        .eq("id", callId),
-    );
+    const linkUpdate = supabase
+      .from("motorist_calls")
+      .update({
+        case_id: caseId,
+        raw_latest_payload: toJson(latestPayload),
+      })
+      .eq("organization_id", organizationId)
+      .eq("id", callId);
+    if (options.expectedCaseId !== undefined) {
+      // A call without a session has no lease: the write itself must still match the link the caller saw.
+      const updated = await (options.expectedCaseId === null ? linkUpdate.is("case_id", null) : linkUpdate.eq("case_id", options.expectedCaseId)).select("id");
+      await throwOnResult(updated);
+      if (!updated.data?.length) throw new TelephonyWorkflowError("Hovor medzitým priradil kolega k inému prípadu. Obnovte detail hovoru.", 409);
+    } else {
+      await throwOnResult(linkUpdate);
+    }
     if (call.session_id) {
       // The live-call panel reads the session, while history reads the call-log
       // row. Keep both projections aligned after an explicit dispatcher action.
@@ -218,22 +249,34 @@ export async function linkCallToCase(callId: string, caseId: string) {
       call_id: callId,
       case_id: caseId,
       case_number: caseRow.case_number,
-    });
+    }, source);
 
   });
+  return { changed };
+}
+
+export type CallOutcomeInput = {
+  outcome: unknown;
+  note?: unknown;
+  callbackMinutes?: unknown;
+  callbackActionId?: unknown;
+};
+
+export async function setCallOutcome(callId: string, input: CallOutcomeInput, actor?: CallWorkflowActor) {
+  await recordCallOutcome(callId, input, actor);
   return loadDispatchData();
 }
 
-export async function setCallOutcome(
+/**
+ * The outcome write without the dispatch snapshot. A `mutationId` already
+ * recorded on the call is answered as a replay instead of a second write.
+ */
+export async function recordCallOutcome(
   callId: string,
-  input: {
-    outcome: unknown;
-    note?: unknown;
-    callbackMinutes?: unknown;
-    callbackActionId?: unknown;
-  },
-  actor?: { profileId: string; organizationId: string },
-) {
+  input: CallOutcomeInput,
+  actor?: CallWorkflowActor,
+  options: { mutationId?: string; source?: CallWorkflowSource } = {},
+): Promise<{ replayed: boolean }> {
   ensureUuid(callId, "callId");
 
   if (!isCallOutcome(input.outcome)) {
@@ -245,8 +288,11 @@ export async function setCallOutcome(
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
   const organizationId = organization.id;
+  let replayed = false;
   await withCallOwnership(supabase, organizationId, callId, async (call) => {
     if (actor && actor.organizationId !== organizationId) throw new TelephonyWorkflowError("Hovor patrí inej organizácii.", 403);
+    if (options.mutationId && jsonRecord(call.raw_latest_payload).outcomeMutationId === options.mutationId) { replayed = true; return; }
+    const source = options.source ?? "dispatch_console";
     const actorId = actor?.profileId ?? call.operator_id ?? (await resolveDefaultOwnerId(supabase, organizationId));
     const now = new Date().toISOString();
     const note = readString(input.note);
@@ -269,7 +315,10 @@ export async function setCallOutcome(
       outcomeNote: note,
       callbackMinutes: input.outcome === "callback" ? callbackMinutes : undefined,
       outcomeAt: now,
-      outcomeBy: "dispatch_console",
+      outcomeBy: source,
+      // A marker describes only the command that wrote this outcome; it is added after every effect below.
+      outcomeMutationId: undefined,
+      outcomeActorId: undefined,
     };
 
     await throwOnResult(
@@ -329,10 +378,20 @@ export async function setCallOutcome(
       case_id: call.case_id,
       outcome,
       note,
-    });
+    }, source);
 
+    if (options.mutationId) {
+      // Only a completed command is answered as a replay; an interrupted one runs again.
+      await throwOnResult(
+        supabase
+          .from("motorist_calls")
+          .update({ raw_latest_payload: toJson({ ...latestPayload, outcomeMutationId: options.mutationId, outcomeActorId: actorId }) })
+          .eq("organization_id", organizationId)
+          .eq("id", callId),
+      );
+    }
   });
-  return loadDispatchData();
+  return { replayed };
 }
 
 async function withCallOwnership(supabase: AdminClient, organizationId: string, callId: string, work: (call: CallRow) => Promise<void>) {
@@ -467,6 +526,7 @@ async function audit(
   entityType: string,
   entityId: string,
   payload: Json,
+  source: CallWorkflowSource = "dispatch_console",
 ) {
   await insertSingle<AuditLogRow>(
     supabase
@@ -477,7 +537,7 @@ async function audit(
         action,
         entity_type: entityType,
         entity_id: entityId,
-        source: "dispatch_console",
+        source,
         after_payload: payload,
       })
       .select("*")

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { RefreshControl, ScrollView, Text, View } from "react-native";
 import type { MobileCallContext, MobileCallContextTarget } from "../../../src/lib/mobile-call-context";
 import { useAndroidBack } from "../lib/use-android-back";
@@ -9,10 +9,12 @@ import { useToolRequest } from "../tools/use-request";
 import type { CallContextApi } from "./api";
 import { customerCallNumber } from "./number";
 import { useForegroundVisit } from "../ui/foreground-visit";
+import { WrapUpSection, type WrapUpDependencies } from "./wrap-up-ui";
 
-export function CallContextPanel({ api, target, active, current, onBack, onOpenCase, onNewCase, onSelectNumber }: {
+export function CallContextPanel({ api, target, active, current, onBack, onOpenCase, onNewCase, onSelectNumber, wrapUp }: {
   api: CallContextApi; target: MobileCallContextTarget; active: boolean; current: () => boolean; onBack: () => void;
   onOpenCase: (id: string) => void; onNewCase: (number: string) => void; onSelectNumber: (number: string) => void;
+  wrapUp?: WrapUpDependencies;
 }) {
   const state = useToolRequest<MobileCallContext>(active), { request } = state;
   const visit = useForegroundVisit(active, () => request.invalidate());
@@ -23,6 +25,12 @@ export function CallContextPanel({ api, target, active, current, onBack, onOpenC
   const data = active && current() ? state.data : null;
   const allowed = () => visit.current() && current() && request.snapshot().data === data && data !== null;
   const phone = data ? customerCallNumber(data.call.direction, data.call.number) : null;
+  // A history reference is the call-log ID itself; a console session keeps the
+  // call-log ID it resolved, so the section survives the card's own reloads.
+  const [resolvedCallId, setResolvedCallId] = useState<string | null>(null);
+  if (data?.call.id && data.call.id !== resolvedCallId) setResolvedCallId(data.call.id);
+  const wrapUpCallId = target.kind === "call" ? target.id : resolvedCallId;
+  const wrapUpAllowed = () => visit.current() && current();
   return <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={state.busy} onRefresh={reload} />}>
     <Button label="Späť na hovory" secondary onPress={back} />
@@ -56,9 +64,11 @@ export function CallContextPanel({ api, target, active, current, onBack, onOpenC
       {phone && <View style={{ gap: 10 }}>
         <Button label="Vybrať číslo na volanie" secondary onPress={() => { if (allowed()) onSelectNumber(phone); }} />
         <Button label="Použiť číslo v novom prípade" secondary onPress={() => { if (allowed()) onNewCase(phone); }} />
-        <Text style={styles.muted}>Číslo pred uložením potvrdíte vo formulári. Vytvorenie prípadu samo nepriradí tento hovor.</Text>
+        <Text style={styles.muted}>Číslo pred uložením potvrdíte vo formulári. Vytvorenie prípadu samo nepriradí tento hovor{wrapUp && wrapUpCallId ? "; priradíte ho nižšie v časti Po hovore" : ""}.</Text>
       </View>}
       {data.call.direction === "internal" && <Text style={styles.muted}>Interná linka sa nepoužíva ako telefón zákazníka.</Text>}
+      {wrapUp && !data.call.id && <Text style={styles.muted}>Výsledok a priradenie k prípadu zapíšete, keď sa hovor objaví v histórii.</Text>}
     </>}
+    {wrapUp && wrapUpCallId && <WrapUpSection key={wrapUpCallId} deps={wrapUp} callId={wrapUpCallId} active={active && current()} allowed={wrapUpAllowed} onLinked={reload} />}
   </ScrollView>;
 }

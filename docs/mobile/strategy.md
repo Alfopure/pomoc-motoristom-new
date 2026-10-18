@@ -103,6 +103,8 @@ Bežné notifikácie zostávajú ďalším rozsahom.
 [Spätné volania](callbacks.md) prenášajú webovú frontu do mobilu: prehľad podľa
 priority, prevzatie, uzavretie s poznámkou a volanie späť cez natívny telefón.
 Bežné aj spätné volanie z mobilu teraz potvrdzuje overené náhradné číslo kontaktu.
+[Práca po hovore](call-wrap-up.md) dopĺňa do detailu hovoru výsledok s poznámkou,
+naplánovanie spätného volania a priradenie hovoru k prípadu s návrhmi podľa čísla.
 Zakladanie je výslovná online operácia; výpadok nesmie spustiť automatické
 opakované odoslanie. Úspešný zápis sa oddelí od následného načítania detailu.
 Podrobný kontrakt a TEST skúšky sú v [mobilných prípadoch](cases.md).
