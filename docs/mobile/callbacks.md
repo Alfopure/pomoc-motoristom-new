@@ -2,7 +2,7 @@
 
 V **Histórii** prepnite na **Spätné volania**. Rovnaký zoznam otvorí aj karta **Spätné volania** v **Ústredni**, ktorá ukazuje počet čakajúcich požiadaviek, nepridelené, vlastné, vyžiadané klientom a požiadavky po termíne.
 
-Zoznam používa rovnakú frontu ako web. Najprv sú požiadavky, pri ktorých volajúci výslovne požiadal o spätné volanie, potom zmeškané hovory a ručne zadané požiadavky. Pri každej požiadavke vidíte čakanie, termín sľúbený volajúcemu (štandardne 30 minút), linku, kto ju prevzal, posledné volanie a poznámku. Farba upozorní 15 minút pred termínom a po ňom. Filtre **Nepridelené**, **Moje** a **Vyžiadané** pôsobia na načítanú stranu; celkové počty počíta server. Uzavreté požiadavky za posledných 24 hodín možno zobraziť pod zoznamom.
+Zoznam používa rovnakú frontu ako web. Najprv sú požiadavky, pri ktorých volajúci výslovne požiadal o spätné volanie, potom zmeškané hovory a ručne zadané požiadavky. Každá požiadavka je kompaktný riadok s menom alebo číslom, termínom sľúbeným volajúcemu (štandardne 30 minút), pôvodom, prevzatím a čakaním. Ťuk na riadok ho rozbalí: ukáže číslo, linku, posledné volanie, poznámku a tlačidlá úkonov. Naraz je rozbalený jeden riadok; počas úkonu alebo písania poznámky ostáva otvorený. Farba upozorní 15 minút pred termínom a po ňom. Filtre **Nepridelené**, **Moje** a **Vyžiadané** pôsobia na načítanú stranu; celkové počty počíta server. Uzavreté požiadavky za posledných 24 hodín možno zobraziť pod zoznamom.
 
 ## Úkony
 

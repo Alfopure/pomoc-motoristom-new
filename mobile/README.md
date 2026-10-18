@@ -46,6 +46,7 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   Ide o polohu dispečerovho telefónu; [podrobnosti a skúšky](../docs/mobile/device-location.md).
 - **Spätné volania:** v Histórii a v súhrne Ústredne; rovnaká fronta ako web,
   prevzatie, vybavenie/zrušenie s poznámkou a volanie späť v natívnej aplikácii.
+  Zoznam má kompaktné riadky; ťuk na riadok ukáže údaje a akcie.
   Volanie aj bežné vytáčanie potvrdzuje overené náhradné číslo kontaktu
   ([podrobnosti](../docs/mobile/callbacks.md)).
 - **Po hovore:** v detaile hovoru výsledok s poznámkou, naplánovanie spätného
