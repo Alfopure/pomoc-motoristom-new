@@ -1,4 +1,5 @@
 import type { MobileConsole, MobileDraftScope, MobileHistory, MobileMe, MobileScope, MobileVoiceReadiness, MobileVoiceColleagues } from "../../../src/lib/mobile-api";
+import type { MobileCallbackCounts, MobileCallbackSummary, MobileCallTarget } from "../../../src/lib/mobile-callbacks";
 import type { MobileConfig } from "./config";
 import { draftDate } from "../drafts/port";
 
@@ -31,6 +32,13 @@ function scope(value: unknown, config: MobileConfig, profileId?: string): Mobile
     || !text(body.profileId) || !text(body.checkedAt) || !Number.isFinite(Date.parse(body.checkedAt))
     || profileId && body.profileId !== profileId) throw contractError();
   return body as MobileScope;
+}
+/** Exact independent counters; origin totals must add up to the open total. */
+export function callbackCounts(value: unknown, extra: readonly string[] = []): MobileCallbackCounts & Record<string, number> {
+  const body = object(value), keys = ["open", "requested", "missed", "manual", "unknown", ...extra];
+  if (Object.keys(body).length !== keys.length || keys.some(key => !(typeof body[key] === "number" && Number.isSafeInteger(body[key]) && (body[key] as number) >= 0))
+    || (body.requested as number) + (body.missed as number) + (body.manual as number) + (body.unknown as number) !== body.open) throw contractError();
+  return body as MobileCallbackCounts & Record<string, number>;
 }
 function capabilities(value: unknown) {
   const data = object(value);
@@ -127,6 +135,29 @@ export function createMobileApi(config: MobileConfig, getToken: TokenGetter, tra
       capabilities(body.capabilities);
       return body as MobileConsole;
     },
+    callbackSummary: async (profileId: string, signal?: AbortSignal): Promise<MobileCallbackSummary> => {
+      const body = object(await read("callbacks/summary", signal));
+      scope(body, config, profileId);
+      const counts = callbackCounts(body.counts, ["mine", "unclaimed", "overdue"]);
+      if (counts.mine > counts.open || counts.unclaimed > counts.open || counts.overdue > counts.open) throw contractError();
+      return body as MobileCallbackSummary;
+    },
+    callTarget: async (profileId: string, number: string, signal?: AbortSignal): Promise<MobileCallTarget["target"]> => {
+      const value = number.trim();
+      if (!value || value.length > 100) throw new MobileApiError("Zadajte platné telefónne číslo.", 400);
+      const body = object(await read("calls/target?" + new URLSearchParams({ number: value }), signal));
+      scope(body, config, profileId);
+      const target = object(body.target);
+      const phone = (item: unknown) => text(item) && item.trim().length > 0 && item.length <= 100;
+      const name = (item: unknown) => item === null || text(item) && item.length <= 200;
+      if (!["original", "verified_alternative", "blocked"].includes(target.status as string) || !phone(target.originalNumber)
+        || !name(target.sourceName) || !name(target.targetName)
+        || target.status === "original" && (target.dialNumber !== target.originalNumber || target.verificationId !== null)
+        || target.status === "blocked" && (target.dialNumber !== null || target.verificationId !== null)
+        || target.status === "verified_alternative" && (!phone(target.dialNumber) || !text(target.verificationId)
+          || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(target.verificationId))) throw contractError();
+      return target as MobileCallTarget["target"];
+    },
     history: async (profileId: string, filter: HistoryFilter, signal?: AbortSignal): Promise<MobileHistory> => {
       const params = new URLSearchParams({ category: filter.category, q: filter.q, limit: "25" });
       if (filter.cursor) params.set("cursor", filter.cursor);
@@ -138,6 +169,11 @@ export function createMobileApi(config: MobileConfig, getToken: TokenGetter, tra
         if (!text(call.status) || !text(call.lineLabel) || !nullableText(call.operatorName)
           || !nullableText(call.answeredAt) || !nullableText(call.endedAt)
           || !(call.durationSeconds === null || typeof call.durationSeconds === "number" && Number.isFinite(call.durationSeconds) && call.durationSeconds >= 0)) throw contractError();
+        // Older deployments omit the callback projection; it is display-only.
+        if (call.callback !== undefined && call.callback !== null) {
+          const callback = object(call.callback);
+          if (!["open", "scheduled", "done", "cancelled"].includes(callback.status as string) || !nullableText(callback.claimedByName)) throw contractError();
+        }
       }
       return body as MobileHistory;
     },

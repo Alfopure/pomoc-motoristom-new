@@ -3,12 +3,15 @@ import "server-only";
 import { canOperateTelephony, resolveAppEnvironment } from "@/lib/app-environment";
 import { isUuid } from "@/lib/telephony/uuid";
 import type { MotoristActor } from "@/server/api-auth";
-import { findInitialCall, initialOperationIdentity } from "@/server/telephony/initial-call-operation";
+import { findInitialCall, findInitialCallByRequest, initialOperationIdentity, readInitialCallPlan } from "@/server/telephony/initial-call-operation";
 import { callColleague } from "@/server/telephony/call-actions";
+import { nativeOutboundInput } from "./voice-input";
+import { callBackRequest } from "@/server/telephony/callbacks";
+import { resolveCallbackTarget } from "@/server/callback-targets";
 import { mobileColleagueName, requireMobileColleague } from "./voice-colleagues";
 import { MutationError } from "@/server/mutation-error";
 import { getOperatorDevice } from "@/server/telephony/operator-devices";
-import { createTelephonyDeps, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
+import { createTelephonyDeps, toCallActor, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { readMeta, telnyxSipUri, type LegRow, type SessionRow } from "@/server/telephony/state/types";
 import { nativeVoiceTestEnabled } from "@/lib/app-environment";
 
@@ -53,21 +56,72 @@ export async function startNativeInternalCall(deps: TelephonyRuntimeDeps, actor:
     targetProfileId: target.id, to: mobileColleagueName(target.display_name) };
 }
 
+const optionalVerification = (value: unknown) => value === undefined || typeof value === "string" && isUuid(value);
+
+/** Rings a queued caller back through the web's callback path; the request stays open until resolved. */
+export async function startNativeCallback(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new MutationError("Neplatný pokus o spätné volanie.", 400);
+  const body = value as Record<string, unknown>;
+  await requireNativeLease(deps, actor, body.deviceSessionId);
+  if (Object.keys(body).some(key => !["deviceSessionId", "requestId", "callbackRequestId", "verificationId"].includes(key))
+    || typeof body.requestId !== "string" || !isUuid(body.requestId)
+    || typeof body.callbackRequestId !== "string" || !isUuid(body.callbackRequestId) || !optionalVerification(body.verificationId)) {
+    throw new MutationError("Chýba identita pokusu alebo požiadavky na spätné volanie.", 400);
+  }
+  const callbackRequestId = body.callbackRequestId.toLowerCase();
+  let verificationId = body.verificationId as string | undefined;
+  const prior = await findInitialCallByRequest(deps, actor.profileId, body.requestId);
+  const plan = prior ? readInitialCallPlan(prior) : null;
+  if (plan) {
+    // A retry replays the recorded command, including the server's earlier target decision.
+    if (plan.callbackRequestId?.toLowerCase() !== callbackRequestId) throw new MutationError("Identita volania už patrí inému cieľu.", 409);
+    const recorded = plan.request?.callbackTargetVerificationId;
+    verificationId = typeof recorded === "string" ? recorded : undefined;
+  } else if (verificationId) {
+    // A confirmation names one replacement number. If the directory changed since,
+    // the dispatcher confirms again instead of ringing a different number.
+    const { data: row, error } = await deps.admin.from("motorist_callback_requests").select("caller_number")
+      .eq("organization_id", actor.organizationId).eq("id", callbackRequestId).maybeSingle();
+    if (error) throw new MutationError("Požiadavku sa nepodarilo overiť.", 503);
+    if (row) {
+      const target = await resolveCallbackTarget(deps.admin, actor.organizationId, row.caller_number);
+      if (target.status !== "verified_alternative" || target.verificationId !== verificationId) {
+        throw new MutationError("Overené číslo sa medzitým zmenilo. Overte číslo znova.", 409, "callback_target_changed");
+      }
+    }
+  }
+  const result = await callBackRequest(deps, toCallActor(actor), callbackRequestId, verificationId, body.requestId);
+  return { sessionId: result.call.sessionId, operatorLegCallControlId: result.call.operatorLegCallControlId, to: result.call.to,
+    callbackRequestId: result.request.id, linked: result.linked };
+}
+
 /** Resolve the immutable original attempt, never a new destination or an absence proof. */
 export async function resolveNativeAttempt(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new MutationError("Neplatný pokus o volanie.", 400);
   const body = value as Record<string, unknown>;
   await requireNativeLease(deps, actor, body.deviceSessionId, { cleanup: true });
-  const targetKey = body.kind === "external" ? "to" : "targetProfileId";
-  if ((body.kind !== "external" && body.kind !== "internal")
-    || Object.keys(body).some(key => !["deviceSessionId", "requestId", "kind", targetKey].includes(key))
-    || typeof body.requestId !== "string" || !isUuid(body.requestId)
+  const targetKeys = body.kind === "external" ? ["to", "verificationId"] : body.kind === "callback" ? ["callbackRequestId", "verificationId"] : ["targetProfileId"];
+  if ((body.kind !== "external" && body.kind !== "internal" && body.kind !== "callback")
+    || Object.keys(body).some(key => !["deviceSessionId", "requestId", "kind", ...targetKeys].includes(key))
+    || typeof body.requestId !== "string" || !isUuid(body.requestId) || !optionalVerification(body.verificationId)
     || body.kind === "external" && (typeof body.to !== "string" || !body.to || body.to.length > 200)
+    || body.kind === "callback" && (typeof body.callbackRequestId !== "string" || !isUuid(body.callbackRequestId))
     || body.kind === "internal" && (typeof body.targetProfileId !== "string" || !isUuid(body.targetProfileId))) {
     throw new MutationError("Chýba pôvodná identita pokusu o volanie.", 400);
   }
+  if (body.kind === "callback") {
+    // callBackRequest derives the destination from the request row; its
+    // immutable plan records which request this attempt belongs to.
+    const session = await findInitialCallByRequest(deps, actor.profileId, body.requestId);
+    if (!session) return null;
+    if (readInitialCallPlan(session)?.callbackRequestId?.toLowerCase() !== (body.callbackRequestId as string).toLowerCase()) {
+      throw new MutationError("Identita volania už patrí inému cieľu.", 409);
+    }
+    if (readMeta(session).environment !== deps.environment) throw new MutationError("Hovor nepatrí vášmu telefónu.", 403);
+    return requireNativeSession(deps, actor, session.id);
+  }
   const input = body.kind === "external"
-    ? { requestId: body.requestId, to: body.to as string }
+    ? nativeOutboundInput(body.requestId, body.to as string, body.verificationId as string | undefined)
     : { requestId: body.requestId, targetProfileId: body.targetProfileId as string };
   const identity = initialOperationIdentity(actor, body.kind === "external" ? "outbound" : "internal", input);
   const session = await findInitialCall(deps, identity);
