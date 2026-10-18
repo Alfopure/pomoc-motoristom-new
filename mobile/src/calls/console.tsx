@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Alert, KeyboardAvoidingView, Platform, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { PhoneCall } from "lucide-react-native";
+import { Phone, PhoneCall } from "lucide-react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { MobileMe } from "../../../src/lib/mobile-api";
 import type { MobileCallContextTarget } from "../../../src/lib/mobile-call-context";
@@ -8,6 +8,7 @@ import { MobileApiError, type MobileApi } from "../lib/api";
 import { callStatus, dialable, formatNumber, formatTime, presenceLabels } from "../lib/display";
 import { Button, Card, ErrorNotice, Loading, colors, styles } from "../ui";
 import { palette } from "../design/tokens";
+import { Row } from "../design/list";
 import { PhoneReadinessCard } from "../voice/readiness-ui";
 import { ColleaguesCard } from "../voice/colleagues-ui";
 import type { DispatchPhone, PhoneState } from "../voice/phone";
@@ -66,11 +67,11 @@ export function Console({ api, me, queryKey, active, number, onNumber, phone, ph
             onPress={() => { void presence(status); }} />
         </View>)}</View>}
       </Card>
-      {query.data.activeCalls.length > 0 && <><Text style={styles.subheading}>Hovory na vašom účte</Text>{query.data.activeCalls.map(call => <Card key={call.id}>
-        <Text style={styles.subheading}>{call.name || formatNumber(call.number)}</Text><Text style={styles.text}>{callStatus(call.state)}</Text>
-        <Text style={styles.muted}>{call.lineLabel ?? ""}</Text>
-        <Button label="Detail hovoru" secondary onPress={() => onCallContext({ kind: "session", id: call.id })} />
-      </Card>)}</>}
+      {query.data.activeCalls.length > 0 && <><Text accessibilityRole="header" style={styles.subheading}>Hovory na vašom účte</Text>
+        <View style={s.group}>{query.data.activeCalls.map((call, index) => <Row key={call.id} first={index === 0} title={call.name || formatNumber(call.number)}
+          subtitle={[callStatus(call.state), call.lineLabel].filter(Boolean).join(" · ")} accessibilityLabel={["Detail hovoru " + (call.name || formatNumber(call.number)), callStatus(call.state), call.lineLabel].filter(Boolean).join(", ")}
+          leading={<View style={s.callIcon}><Phone size={15} strokeWidth={2.3} color={palette.greenText} accessible={false} /></View>}
+          onPress={() => onCallContext({ kind: "session", id: call.id })} trailing={<Text style={s.chevron}>›</Text>} />)}</View></>}
     </>}
     {phoneState.call && !query.data?.activeCalls.some(call => call.id === phoneState.call?.sessionId) && <Button label="Detail aktuálneho hovoru" secondary
       onPress={() => { if (phoneState.call) onCallContext({ kind: "session", id: phoneState.call.sessionId }); }} />}
@@ -106,4 +107,8 @@ const s = StyleSheet.create({
   presenceIndicator: { width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center" },
   presenceTitle: { fontSize: 20, lineHeight: 25, fontWeight: "700", letterSpacing: -0.4, color: colors.ink, flexShrink: 1 },
   dot: { width: 10, height: 10, borderRadius: 5 },
+  // The page already insets its content; the call group needs no own margin.
+  group: { backgroundColor: palette.card, borderRadius: 16, overflow: "hidden" },
+  callIcon: { width: 28, height: 28, borderRadius: 8, backgroundColor: palette.greenSoft, alignItems: "center", justifyContent: "center" },
+  chevron: { fontSize: 20, color: palette.tertiaryLabel },
 });

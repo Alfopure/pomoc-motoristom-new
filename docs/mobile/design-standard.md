@@ -189,7 +189,13 @@ a `mobile/src/shell/parts.tsx` (prvky kostry):
 Prehľad · Moduly · Zoznam · Kniha · Detail objektu · Tabuľa · Kalendár ·
 Mapa + list · Výjazd (krokovanie) · Nahlásenie s fotkami · Formulár v liste ·
 Hovor. Zoznam používajú Hovory/História, Prípady, Moje úlohy, úlohy prípadu
-(spoločný kompaktný riadok úlohy) a Nástroje (jedna skupina riadkov s ikonou). **Detail** (hlavička so štítkami, rad 2–4 akcií
+(spoločný kompaktný riadok úlohy) a Nástroje (jedna skupina riadkov s ikonou).
+**Rozbaľovací zoznam** používajú Spätné volania: riadok ukáže kto, termín (štítok),
+pôvod, prevzatie a čakanie; ťuk ho rozbalí s údajmi a všetkými akciami s popisom
+(Zavolať späť, Prevziať, Vybavené, Zrušiť, Otvoriť prípad). Ťuk otvorí jeden riadok.
+Riadok s prebiehajúcim úkonom alebo rozpísanou poznámkou ostáva otvorený a ostatné
+sú pritom použiteľné; riadok s výsledkom úkonu ostáva otvorený, kým ho nezavriete.
+Rozpísanú poznámku k požiadavke mimo zoznamu možno zobraziť alebo zahodiť. **Detail** (hlavička so štítkami, rad 2–4 akcií
 s popisom, skupiny riadkov údaj–hodnota s ikonami Kopírovať/Mapa/Navigovať,
 Súvisiace, Udalosti) používa detail prípadu, hovoru a úlohy. **Formulár** používa
 nový prípad a jeho úpravu (Kontakt, Vozidlo, Miesto, Problém, Služba a priorita),
