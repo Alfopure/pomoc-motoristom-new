@@ -10,7 +10,7 @@ Zobrazuje sa iba výslovné uložené priradenie. Rovnaké telefónne číslo sa
 
 - **Vybrať číslo na volanie** prenesie číslo do ústredne; samotné vytáčanie vyžaduje stlačenie **Zavolať**.
 - **Použiť číslo v novom prípade** otvorí existujúci formulár a zobrazí ponuku **Číslo z hovoru**. Vloženie vyžaduje potvrdenie; ak je telefón už vyplnený, ukáže sa pôvodné aj nové číslo a voľba nahradiť iba telefón. Ostatné rozpracované údaje zostanú zachované.
-- **Pokračovať bez prenosu čísla** ponechá formulár bez zmeny. Prípad sa vytvorí až bežným uložením formulára; jeho vytvorenie samo nepriradí tento hovor.
+- **Pokračovať bez prenosu čísla** ponechá formulár bez zmeny. Prípad sa vytvorí až bežným uložením formulára; jeho vytvorenie samo nepriradí tento hovor. Hovor priradíte v časti [Po hovore](call-wrap-up.md).
 
 Prenos je zablokovaný počas ukladania, pri neoverenom výsledku pôvodného uloženia, neplatnom koncepte alebo neuložených miestnych zmenách. Uložené potvrdenie prípadu sa musí najskôr bezpečne uchovať, až potom možno pripraviť nový koncept. Interná linka, skryté číslo a SIP adresa sa nepoužívajú ako telefón zákazníka. Medzinárodné predvoľby sa zachovávajú; národnému číslu sa nehádá krajina.
 

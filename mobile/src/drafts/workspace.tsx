@@ -22,6 +22,8 @@ import { DraftAuthority, DraftScopeSuperseded } from "./authority";
 import type { MobileCallContextTarget } from "../../../src/lib/mobile-call-context";
 import { createCallContextApi } from "../call-context/api";
 import { CallContextPanel } from "../call-context/ui";
+import { createCallWrapUpApi } from "../call-context/wrap-up-api";
+import type { WrapUpDependencies } from "../call-context/wrap-up-ui";
 import { customerCallNumber } from "../call-context/number";
 import { useAndroidBack } from "../lib/use-android-back";
 import { createCallbacksApi } from "../callbacks/api";
@@ -149,7 +151,12 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
       if (record.resourceId) { setTaskRequest({ taskId: record.resourceId, nonce: ++request.current }); props.onTab("tasks"); }
     } else { setCaseRequest({ kind: record.kind, id: record.resourceId, nonce: ++request.current }); props.onTab("cases"); }
   }
-  const callContext = props.callTarget && <CallContextPanel key={props.callTarget.kind + ":" + props.callTarget.id} api={callApi} target={props.callTarget} active={props.active} current={current}
+  const wrapUp = useMemo<WrapUpDependencies>(() => ({
+    api: createCallWrapUpApi(config, verified.profileId, verified.organizationId, getToken, current), uuid: randomUUID,
+    searchCases: async (q, signal) => (await api.list({ ownership: "all", category: "open", q, ownerId: null, status: null, priority: null, cursor: null }, signal)).cases
+      .slice(0, 10).map(item => ({ id: item.id, caseNumber: item.caseNumber, statusLabel: item.statusLabel, contactName: item.contact.name, licensePlate: item.vehicle.licensePlate })),
+  }), [config, verified.profileId, verified.organizationId, getToken, current, api]);
+  const callContext = props.callTarget && <CallContextPanel key={props.callTarget.kind + ":" + props.callTarget.id} api={callApi} target={props.callTarget} active={props.active} current={current} wrapUp={wrapUp}
     onBack={props.onCloseCallContext} onSelectNumber={props.onSelectNumber} onOpenCase={id => {
       if (!current()) return;
       setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onCloseCallContext(); props.onTab("cases");
