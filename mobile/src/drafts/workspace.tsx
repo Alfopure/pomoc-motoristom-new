@@ -15,7 +15,7 @@ import { WorkStore } from "../work/store";
 import { createToolsApi } from "../tools/api";
 import { ToolsWorkspace } from "../tools/ui";
 import { Button, Card, ErrorNotice, Loading, styles } from "../ui";
-import { DraftNotSentError } from "./port";
+import { DraftNotSentError, draftId } from "./port";
 import { createDraftStorage } from "./storage";
 import { DraftVault, type DraftKind, type DraftScope, type StoredDraft } from "./vault";
 import { DraftAuthority, DraftScopeSuperseded } from "./authority";
@@ -31,8 +31,7 @@ import { createCallbacksApi } from "../callbacks/api";
 import { CallbackQueueStore } from "../callbacks/store";
 import { CallbacksPanel, type CallbackDialer } from "../callbacks/ui";
 import type { DispatchView } from "../shell/navigation";
-import type { HomeScope } from "../shell/home";
-import type { SearchScope } from "../shell/search";
+import type { ShellLayer, ShellOpeners, ShellScope } from "../shell/layers";
 import { roleNames } from "../shell/modules";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
@@ -41,9 +40,8 @@ type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe;
   onLeaveModule: () => void;
   callTarget: MobileCallContextTarget | null; onCloseCallContext: () => void; callBackLabel: string;
   onShowCalls: () => void; dialer: CallbackDialer;
-  renderHome: (scope: HomeScope | null, notice: string | null) => ReactNode;
-  /** openCase is null until drafts can receive an open request. */
-  renderSearch: (scope: SearchScope | null, notice: string | null, openCase: ((id: string) => void) | null) => ReactNode;
+  /** Prehľad, Hľadať and Upozornenia; scope and openers are null until the organization is verified. */
+  renderLayer: (layer: ShellLayer, scope: ShellScope | null, notice: string | null, open: ShellOpeners | null) => ReactNode;
   bar: { customized: boolean; onEdit: () => void; onReset: () => void };
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; hasCall: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void };
 const operationViews: readonly DispatchView[] = ["cases", "tasks", "account"];
@@ -95,8 +93,8 @@ export function DraftWorkspace(props: Props) {
   useAndroidBack(active && !verified && !props.callTarget && (toolsVisible || props.view === "cases" || props.view === "tasks"), props.onLeaveModule);
   useAndroidBack(active && !verified && Boolean(props.callTarget), props.onCloseCallContext);
   useShellBack(active && !verified && Boolean(props.callTarget), props.callBackLabel, props.onCloseCallContext);
-  if (!verified && props.view === "home" && !props.callTarget) return <>{props.renderHome(null, query.isPending ? null : errorText(authorityState.error ?? query.error))}</>;
-  if (!verified && props.view === "search") return <>{props.renderSearch(null, query.isPending ? null : errorText(authorityState.error ?? query.error), null)}</>;
+  const layer = layerOf(props.view, props.callTarget);
+  if (!verified && layer) return <>{props.renderLayer(layer, null, query.isPending ? null : errorText(authorityState.error ?? query.error), null)}</>;
   const operationsVisible = toolsVisible || props.callTarget !== null || callbacksOpen || operationViews.includes(props.view);
   if (!verified) return operationsVisible ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.view === "account" && <Account {...props} />}
@@ -158,7 +156,9 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
     return new CallbackQueueStore(createCallbacksApi(config, verified.profileId, verified.organizationId, getToken, current), lookup);
   }, [config, verified.profileId, verified.organizationId, getToken, current]);
   useEffect(() => () => callbackStore.dispose(), [callbackStore]);
-  const [caseRequest, setCaseRequest] = useState<CaseOpenRequest>(), [taskRequest, setTaskRequest] = useState<{ taskId: string; nonce: number }>();
+  // A plain reader for Upozornenia; the queue store above stays the only writer.
+  const alertsCallbacks = useMemo(() => createCallbacksApi(config, verified.profileId, verified.organizationId, getToken, current), [config, verified.profileId, verified.organizationId, getToken, current]);
+  const [caseRequest, setCaseRequest] = useState<CaseOpenRequest>(), [taskRequest, setTaskRequest] = useState<{ taskId: string | null; nonce: number }>();
   const request = useRef(0);
   function resume(record: StoredDraft) {
     if (record.kind === "task-state") {
@@ -185,26 +185,43 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
       if (!current()) return;
       setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases");
     }} />;
-  const home = props.view === "home" && !props.callTarget && props.renderHome({ cases: api, homeKey: [...actorRoot, "home"] }, null);
-  const search = props.view === "search" && <SearchSlot render={props.renderSearch} scope={{ cases: api, homeKey: [...actorRoot, "home"] }} onCase={id => {
-    if (!current()) return;
-    setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases");
-  }} />;
+  const layer = layerOf(props.view, props.callTarget);
+  const layerView = layer && <LayerSlot render={props.renderLayer} layer={layer} scope={{ cases: api, callbacks: alertsCallbacks, homeKey: [...actorRoot, "home"] }}
+    openCase={id => {
+      if (!current() || !draftId(id)) return;
+      setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases");
+    }}
+    openTask={id => {
+      if (!current() || !draftId(id)) return;
+      setTaskRequest({ taskId: id, nonce: ++request.current }); props.onView("tasks");
+    }}
+    openCases={shortcut => {
+      if (!current()) return;
+      setCaseRequest({ kind: "case-list", id: null, shortcut, nonce: ++request.current }); props.onView("cases");
+    }}
+    openTasks={() => {
+      if (!current()) return;
+      setTaskRequest({ taskId: null, nonce: ++request.current }); props.onView("tasks");
+    }} />;
   // Until local drafts open, Prípady and Moje úlohy are not mounted to own Back.
   useAndroidBack(props.active && !vault && (props.view === "cases" || props.view === "tasks"), props.onLeaveModule);
-  if (!vault) return <>{callContext}{callbacks}{home}{search}{operationViews.includes(props.view) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
+  if (!vault) return <>{callContext}{callbacks}{layerView}{operationViews.includes(props.view) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.view === "account" && <Account {...props} />}
     {error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading label="Načítavam miestne koncepty…" />}
   </ScrollView> : null}</>;
-  return <>{callContext}{callbacks}{home}{search}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
+  return <>{callContext}{callbacks}{layerView}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
     onOpenCase={id => { setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases"); }} onResume={resume} onDiscarded={() => { setCaseRequest(undefined); setTaskRequest(undefined); setEpoch(value => value + 1); }} /></>;
 }
 
-function SearchSlot({ render, scope, onCase }: { render: Props["renderSearch"]; scope: SearchScope; onCase: (id: string) => void }) {
-  return <>{render(scope, null, onCase)}</>;
+function layerOf(view: DispatchView, callTarget: MobileCallContextTarget | null): ShellLayer | null {
+  if (view === "home") return callTarget ? null : "home";
+  return view === "search" || view === "alerts" ? view : null;
+}
+function LayerSlot({ render, layer, scope, ...open }: { render: Props["renderLayer"]; layer: ShellLayer; scope: ShellScope } & ShellOpeners) {
+  return <>{render(layer, scope, null, open)}</>;
 }
 
-function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; queryKey: string[]; caseRequest?: CaseOpenRequest; taskRequest?: { taskId: string; nonce: number };
+function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; queryKey: string[]; caseRequest?: CaseOpenRequest; taskRequest?: { taskId: string | null; nonce: number };
   onOpenCase: (id: string) => void; onResume: (record: StoredDraft) => void; onDiscarded: () => void }) {
   const { api, vault, queryKey, view, active, identity, onDiscarded } = props;
   const client = useQueryClient(), state = useSyncExternalStore(vault.subscribe, vault.snapshot, vault.snapshot);

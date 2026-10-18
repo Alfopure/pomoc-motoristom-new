@@ -16,7 +16,12 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   upraví cez Moduly → Upraviť lištu alebo „☆ Do lišty“ v module; voľba sa
   uloží v telefóne pre účet a profil. Podrobnosti sú v
   [dizajnovom štandarde](../docs/mobile/design-standard.md).
-- **Prehľad:** hľadanie, hovory na účte, spätné volania, prípady, moje úlohy a stav telefónu.
+- **Prehľad:** hľadanie, hovory na účte, spätné volania, prípady, moje úlohy, stav telefónu
+  a sekcia Treba riešiť s najnaliehavejšími upozorneniami.
+- **Upozornenia:** spätné volania po termíne alebo s termínom do 15 minút, vaše úlohy
+  po termíne alebo na dnes a horiace prípady organizácie, zoradené podľa naliehavosti;
+  každá sekcia vedie na celý zoznam (Spätné, Moje úlohy, Prípady s filtrom Horí).
+  Číta existujúce autorizované zoznamy, server ani push notifikácie nemení.
 - **Hľadať:** prípady celej organizácie (číslo, meno, EČV, telefón), hovory a moduly
   v jednom poli; výsledok otvorí detail prípadu, detail hovoru alebo modul.
 - **Hovory → Ústredňa:** skutočný serverový stav operátora, jeho aktívne hovory,

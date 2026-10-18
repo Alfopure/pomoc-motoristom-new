@@ -12,7 +12,7 @@ const tagColors: Record<TagTone, [string, string]> = {
 };
 export function Tag({ text, tone }: { text: string; tone: TagTone }) {
   const [background, color] = tagColors[tone];
-  return <Text style={[s.tag, { backgroundColor: background, color }]}>{text}</Text>;
+  return <Text numberOfLines={1} style={[s.tag, { backgroundColor: background, color }]}>{text}</Text>;
 }
 
 export function DetailHeader({ title, subtitle, tags, meta, trailing }: { title: string; subtitle?: string | null; tags?: ReactNode; meta?: string | null; trailing?: ReactNode }) {
@@ -64,7 +64,8 @@ export function InfoRow({ label, value, detail, actions, first, empty = "Nedopln
 }
 
 const s = StyleSheet.create({
-  tag: { ...type.tag, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 1, overflow: "hidden" },
+  // A tag keeps its width in a row; the text beside it shrinks instead.
+  tag: { ...type.tag, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 1, overflow: "hidden", flexShrink: 0, maxWidth: "100%" },
   header: { flexDirection: "row", alignItems: "flex-start", gap: space.m, paddingHorizontal: space.l, paddingTop: 2, paddingBottom: space.m },
   title: { ...type.objectTitle, color: palette.label },
   subtitle: { ...type.body, color: palette.label },

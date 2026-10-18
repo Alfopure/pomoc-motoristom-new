@@ -40,7 +40,9 @@ import { customerCallNumber } from "../call-context/number";
 import { CallPhoneOffer } from "./call-phone-offer";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Prípady sa nepodarilo načítať. Skúste znova.";
-export type CaseOpenRequest = ({ kind: "case.owner" | "detail" | "case-create" | "case-edit" | "case-note" | "task-create" | "handoff" | "attachment"; id: string | null } | { kind: "case-call-create"; id: null; number: string }) & { nonce: number };
+export type CaseOpenRequest = ({ kind: "case.owner" | "detail" | "case-create" | "case-edit" | "case-note" | "task-create" | "handoff" | "attachment"; id: string | null } | { kind: "case-call-create"; id: null; number: string }
+  | { kind: "case-list"; id: null; shortcut: CaseShortcut }) & { nonce: number };
+const shortcuts: readonly CaseShortcut[] = ["open", "mine", "unassigned", "urgent"];
 type CallOffer = { number: string; nonce: number };
 type Page = { kind: "case.owner"; id: string; draft: CaseOwnerDraft } | { kind: "resume-edit"; id: string; nonce: number; initialError?: string; normalEntry?: boolean } | { kind: "handoffs"; id: string; draft: HandoffDraft } | { kind: "attachments"; id: string } | { kind: "tasks"; id: string; nonce?: number } | { kind: "list" } | { kind: "new"; callOffer?: CallOffer } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
 
@@ -179,6 +181,13 @@ export function Cases({ api, environment, userId, profileId, active, visible = a
       setPage({ kind: "new", callOffer: { number: phone, nonce } });
       return;
     }
+    if (kind === "case-list") {
+      if (id !== null || !shortcuts.includes(openRequest.shortcut)) return;
+      // Reviewing an unknown save needs the unfiltered list; it wins over a shortcut.
+      if (draft.snapshot().status === "uncertain") showList();
+      else { setPage({ kind: "list" }); selectFilters(caseShortcut(openRequest.shortcut)); }
+      return;
+    }
     if (kind === "case-create") {
       if (id !== null) return;
       if (draft.snapshot().status === "uncertain") showList();
@@ -193,7 +202,7 @@ export function Cases({ api, environment, userId, profileId, active, visible = a
     else if (kind === "handoff") openHandoffs(id);
     else if (kind === "task-create") setPage({ kind: "tasks", id, nonce });
     else if (kind === "attachment") setPage({ kind: "attachments", id });
-  }, [active, openRequest, draft, showList, showDetail, openNote, openHandoffs, openOwner]);
+  }, [active, openRequest, draft, showList, showDetail, openNote, openHandoffs, openOwner, selectFilters]);
   useAndroidBack(active && (page.kind === "detail" || page.kind === "list" && !!onLeaveCases), () => page.kind === "list" ? onLeaveCases?.() : showList());
   function showForm() { draft.newDraft(); setPage({ kind: "new" }); }
   return <View style={{ flex: 1 }}>
@@ -273,7 +282,7 @@ function CaseList({ api, queryKey, active, ownership, category, search, ownerId,
     key === "priority" ? value !== "normal" : Array.isArray(value) ? value.length > 0 : typeof value === "string" && value.trim().length > 0);
   return <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { if (active) { void query.refetch(); void queryClient.invalidateQueries({ queryKey: [...queryKey, "overview"] }); } }} />}>
-    <Text style={styles.heading}>Prípady</Text>
+    <Text accessibilityRole="header" style={styles.heading}>Prípady</Text>
     <Button label={draftState.status === "saving" ? "Ukladanie prípadu…" : draftState.status === "uncertain" ? "Overiť uloženie prípadu" : hasDraft ? "Rozpracovaný prípad" : "Nový prípad"} onPress={onNew} />
     {draftState.status === "uncertain" && <Card><Text style={styles.text}>Skontrolujte, či sa váš prípad už uložil. Nájdete ho podľa mena, EČV alebo času vytvorenia.</Text>
       {draftState.reviewedList && <Text style={styles.muted}>Ak ho nenájdete, v rozpracovanom formulári môžete vedome povoliť opakovanie.</Text>}</Card>}
@@ -446,7 +455,7 @@ function CaseForm({ api, draft, state, active, visible, onBack, onSubmit, callOf
   useShellBack(active, "Prípady", back, saving);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-      <Text style={styles.heading}>Nový prípad</Text>
+      <Text accessibilityRole="header" style={styles.heading}>Nový prípad</Text>
       <Text style={styles.muted}>Môžete uložiť aj neúplný koncept. Údaje doplníte neskôr v dispečingu.</Text>
       {callOffer && <CallPhoneOffer key={callOffer.nonce} draft={draft} state={state} number={callOffer.number} active={active && visible} onDone={onOfferDone} />}
       {fields.map(field => <View key={field.key}><Text style={styles.label}>{field.label}</Text>

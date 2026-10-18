@@ -68,15 +68,31 @@ mriežku. Zmena lišty nepreskočí obrazovku: odobratý modul ostane otvorený
 v Moduloch, pridaný sa presunie do svojej záložky. Android Späť: podstránka
 modulu (detail prípadu, detail hovoru) → späť v module; účet → zatvorí sa;
 modul v Moduloch → Moduly; iná záložka vrátane všetkých častí Hovorov → Prehľad;
-Prehľad → systém.
+Prehľad → systém. Hľadať a Upozornenia sú vrstvy nad záložkou (účet > hľadanie >
+upozornenia); Späť ich zatvorí a vráti záložku, z ktorej boli otvorené.
 
 **Hľadať** (`search.tsx`): pole na Prehľade otvorí obrazovku Hľadať. Od dvoch
 znakov hľadá v prípadoch celej organizácie (číslo, meno, EČV, telefón),
 v hovoroch a v moduloch; ťuk otvorí detail prípadu, detail hovoru alebo modul.
 
 **Prehľad** (`home.tsx`): hľadanie, hovory na účte (ak sú), dlaždice Spätné volania,
-Prípady, Moje úlohy a Telefón; ťuk otvorí príslušný modul. Jednorazový tip
-ukáže, kde sú Moduly; zmizne po ťuknutí na OK alebo po prvej návšteve Modulov.
+Prípady, Moje úlohy a Telefón; ťuk otvorí príslušný modul. Pod nimi sekcia
+**Treba riešiť**: najviac štyri najnaliehavejšie položky a riadok **Všetky
+upozornenia**. Jednorazový tip ukáže, kde sú Moduly; zmizne po ťuknutí na OK
+alebo po prvej návšteve Modulov.
+
+**Upozornenia** (`mobile/src/alerts/`): jedna schránka toho, čo čaká na človeka,
+zoradená podľa naliehavosti – spätné volania po termíne, vaše úlohy po termíne,
+horiaci prípad bez dispečera, spätné volania s termínom do 15 minút, vaše úlohy
+na dnes, ostatné horiace prípady. Každá sekcia (Spätné volania, Moje úlohy,
+Horiace prípady) končí odkazom na celý zoznam: Spätné, zoznam Moje úlohy
+alebo Prípady s filtrom priorita Horí. V rámci rovnakej naliehavosti ide
+navrch najstarší termín; úloha v stave po termíne sa počíta ako na webe.
+Číta prvú stránku každého zdroja („3+“ aj „0+“ znamená, že ďalšie stránky sa
+nečítali), obnovuje sa každú minútu, hneď po návrate do appky a potiahnutím
+nadol. Zdroj s chybou ukáže chybu s tlačidlom Skúsiť znova; „Všetko je
+vybavené“ sa zobrazí iba vtedy, keď všetky zdroje odpovedali celé. Server ani
+notifikácie nemení – push upozornenia sú samostatná etapa.
 
 **Okná (sheet)**: jedno spoločné okno zdola pre úpravu lišty, výber náhrady
 a menu modulu; každé má viditeľné Hotovo, Zrušiť alebo Zavrieť. Pri začiatku
@@ -143,7 +159,8 @@ a `mobile/src/shell/parts.tsx` (prvky kostry):
 - **Skupina** s odsadenými deliacimi čiarami, **hlavička sekcie**, **segment**
   (2–5 častí, s odznakom), **sklenené tlačidlo** hornej lišty, **okno zdola**,
   **potvrdenie** nad lištou (aj pre VoiceOver), **ikona modulu**, **náhľad lišty**.
-- **Štítok stavu** – 11 b bold v jemnom podklade; stav vždy aj textom.
+- **Štítok stavu** – 11 b bold v jemnom podklade, vždy na jednom riadku (v riadku
+  sa skráti text vedľa neho); stav vždy aj textom.
 
 ## 6. Šablóny obrazoviek
 
@@ -195,7 +212,7 @@ lišta a jej úprava fungujú ťuknutím bez gest.
 | 1–2 | kostra: horná a spodná lišta, Prehľad, Moduly, úprava lišty, register modulov | hotové (TEST) |
 | 3 | Hovory, Prípady, Úlohy, Nástroje, Účet v novej kostre; kompaktné zoznamy; detail prípadu a hovoru; Späť v hornej lište | hotové okrem formulárov |
 | 4 | šablóny Kniha, Tabuľa, Kalendár, Mapa + list, Výjazd, Nahlásenie | plán |
-| 5 | globálne hľadanie (hotové); serverový zoznam modulov a preferencie, lišta hovoru nad lištou, doladenie | čiastočne |
+| 5 | globálne hľadanie a Upozornenia (hotové); serverový zoznam modulov a preferencie, push upozornenia, lišta hovoru nad lištou, doladenie | čiastočne |
 
 ## 11. Zdroje
 

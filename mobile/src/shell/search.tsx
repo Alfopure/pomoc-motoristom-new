@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDownLeft, ArrowUpRight, Phone, Search, X } from "lucide-react-native";
-import type { CasesApi } from "../cases/api";
 import { Group, Row, SectionHeader } from "../design/list";
 import { palette, space, type } from "../design/tokens";
 import { MobileApiError, type MobileApi } from "../lib/api";
@@ -11,8 +10,9 @@ import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import { moduleById, type ModuleId } from "./modules";
 import { ModuleTile } from "./parts";
 
+import type { ShellScope } from "./layers";
 /** Organization-scoped search; absent until the workspace scope is verified. */
-export type SearchScope = { cases: CasesApi; homeKey: readonly unknown[] };
+export type SearchScope = Pick<ShellScope, "cases" | "homeKey">;
 type Props = {
   active: boolean; api: MobileApi; profileId: string; queryKey: readonly unknown[]; available: ModuleId[];
   /** Owned by the shell, so the text survives the screen moving once the scope is verified. */

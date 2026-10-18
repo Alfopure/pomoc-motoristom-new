@@ -51,7 +51,7 @@ export function CaseMapFrame({ api, caseId, mode, target, seed, controls, title,
   return <Modal visible animationType="slide" onRequestClose={close}>
     <ScrollView style={{ flex: 1 }} keyboardShouldPersistTaps="handled" contentContainerStyle={[styles.content, { paddingTop: Math.max(24, insets.top), paddingBottom: Math.max(24, insets.bottom) }]}>
       <Button label="Zatvoriť mapu" onPress={close} secondary />
-      <Text style={styles.heading}>{title ?? (mode === "view" ? "Mapa prípadu" : target === "pickup" ? "Vybrať vyzdvihnutie" : "Vybrať cieľ")}</Text>
+      <Text accessibilityRole="header" style={styles.heading}>{title ?? (mode === "view" ? "Mapa prípadu" : target === "pickup" ? "Vybrať vyzdvihnutie" : "Vybrať cieľ")}</Text>
       {controls}
       {Platform.OS === "web" ? <ErrorNotice message="Mapa je dostupná v mobilnej aplikácii. Tu môžete adresu zadať ručne alebo použiť navigáciu." />
         : error ? <ErrorNotice message={error} /> : !frame || !WebView ? <Loading /> : <WebView ref={webview}
