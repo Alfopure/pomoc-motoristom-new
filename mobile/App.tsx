@@ -4,8 +4,8 @@ import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, Pressable, Re
 import { StatusBar } from "expo-status-bar";
 import Svg, { Defs, LinearGradient as SvgGradient, Rect, Stop } from "react-native-svg";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { ArrowDownLeft, ArrowUpRight, LockKeyhole, Mail, Phone, PhoneCall, Search } from "lucide-react-native";
-import { QueryClient, QueryClientProvider, focusManager, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowDownLeft, ArrowUpRight, LockKeyhole, Mail, Phone, PhoneCall, PhoneMissed, Search } from "lucide-react-native";
+import { QueryClient, QueryClientProvider, focusManager, useInfiniteQuery, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import type { MobileMe } from "../src/lib/mobile-api";
 import { createMobileApi, MobileApiError, usableMobileIdentity, type MobileApi } from "./src/lib/api";
@@ -27,7 +27,10 @@ import { useAndroidBack } from "./src/lib/use-android-back";
 import { GlassTabBar, type DispatchTab } from "./src/ui/navigation";
 import { NAVIGATION_CONTENT_BOTTOM, navigationContentBottom } from "./src/ui/theme";
 import type { MobileCallContextTarget } from "../src/lib/mobile-call-context";
+import type { MobileCallbackSummary } from "../src/lib/mobile-callbacks";
 import { draftId } from "./src/drafts/port";
+import { HistorySegment, type CallbackDialer, type HistoryView } from "./src/callbacks/ui";
+import { callbackStatusLabels, dialDecision, waitingLabel } from "./src/callbacks/model";
 
 type Tab = DispatchTab;
 type Category = "all" | "missed" | "received" | "outbound";
@@ -194,13 +197,15 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   const [category, setCategory] = useState<Category>("all");
   const [search, setSearch] = useState("");
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [historyView, setHistoryView] = useState<HistoryView>("calls");
   const [callSelection, setCallSelection] = useState<{ target: MobileCallContextTarget; profileId: string; tab: Tab } | null>(null);
   const [logoutError, setLogoutError] = useState<string | null>(null), [logoutBusy, setLogoutBusy] = useState(false);
   const preparingLogout = useRef(false);
   const { fontScale } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
-  useAndroidBack(active && !callSelection && tab !== "console" && tab !== "cases" && tab !== "tasks", () => setTab("console"));
+  const callbacksOpen = tab === "history" && historyView === "callbacks";
+  useAndroidBack(active && !callSelection && !callbacksOpen && tab !== "console" && tab !== "cases" && tab !== "tasks", () => setTab("console"));
   const key = ["mobile", config.environment, userId];
   // First authenticated snapshot must also load during a PushKit cold launch.
   // Periodic reads still stop when iOS suspends the app.
@@ -214,6 +219,19 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     setCallSelection({ target: { ...target, id: target.id.toLowerCase() }, profileId: identity.profileId, tab });
   }
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
+  const callbackSummary = useQuery({ queryKey: [...key, "callback-summary", identity?.profileId], enabled: active && Boolean(identity),
+    queryFn: ({ signal }) => api.callbackSummary(identity!.profileId, signal), refetchInterval: active ? 30_000 : false });
+  const dialBlocked = !phone ? "Zavolať späť z mobilu bude možné v natívnej aplikácii s pripojeným telefónom. V tomto náhľade môžete požiadavky prevziať a uzavrieť."
+    : phoneState.registration !== "registered" ? "Telefón nie je pripojený k ústredni. Pripojte ho v Ústredni."
+      : phoneState.microphonePermission === "denied" ? "Na volanie povoľte prístup k mikrofónu."
+        : phoneState.call || phoneState.termination ? "Počas hovoru nemožno začať ďalší."
+          : phoneState.retryTarget ? "Najprv v Ústredni dokončite nepotvrdené volanie."
+            : phoneState.dialing || phoneState.cancelingAttempt ? "Telefón práve vytáča." : null;
+  const dialer: CallbackDialer = { available: dialBlocked === null, reason: dialBlocked, dial: async (id, value, verificationId) => {
+    if (!phone) return "Telefón nie je dostupný.";
+    if (!await phone.dialCallback(id, value, verificationId)) return phone.snapshot().error ?? "Telefón práve nie je pripravený na nový hovor. Skúste to znova.";
+    return phone.snapshot().error;
+  } };
   async function logout(leaveUnsaved = false) {
     const currentPhone = phone?.snapshot();
     if (currentPhone?.call || currentPhone?.termination || preparingLogout.current || logoutState.busy) return;
@@ -247,12 +265,15 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     <CallPanel phone={phone} state={phoneState} />
     <PhoneOverlayProvider blocked={Boolean(phoneState.call || phoneState.termination)} source={phone}>
     {me.isError && <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />}
-    {tab === "console" && !toolsOpen && !callTarget ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} onTools={() => setToolsOpen(true)} onCallContext={openCallContext} />
-      : tab === "history" && !callTarget ? <History api={api} me={identity} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
-        onCallContext={openCallContext} onSelect={value => { setNumber(value); selectTab("console"); }} />
+    {tab === "console" && !toolsOpen && !callTarget ? <Console api={api} me={identity} queryKey={key} active={active} number={number} onNumber={setNumber} phone={phone} phoneState={phoneState} onTools={() => setToolsOpen(true)} onCallContext={openCallContext}
+      callbacks={callbackSummary} onOpenCallbacks={() => { setHistoryView("callbacks"); selectTab("history"); }} />
+      : tab === "history" && !callbacksOpen && !callTarget ? <History api={api} me={identity} queryKey={key} active={active} category={category} onCategory={setCategory} search={search} onSearch={setSearch}
+        onCallContext={openCallContext} onSelect={value => { setNumber(value); selectTab("console"); }}
+        callbacksOpen={callbackSummary.data?.counts.open ?? null} onShowCallbacks={() => setHistoryView("callbacks")} />
       : null}
     <DraftWorkspace key={identity.profileId} config={config} client={client} identity={identity} userId={userId} liveUser={liveUser} active={active} tab={tab} onTab={selectTab}
       callTarget={callTarget} onCloseCallContext={() => setCallSelection(null)}
+      callbacksOpen={callbacksOpen && !callTarget} onShowCalls={() => setHistoryView("calls")} dialer={dialer}
       toolsOpen={toolsOpen} onCloseTools={() => setToolsOpen(false)}
       onSelectNumber={value => { setNumber(value); selectTab("console"); }} logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} />
@@ -261,12 +282,30 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   </View>;
 }
 
-function Console({ api, me, queryKey, active, number, onNumber, phone, phoneState, onTools, onCallContext }: { api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; number: string; onNumber: (value: string) => void; phone: DispatchPhone | null; phoneState: PhoneState; onTools: () => void; onCallContext: (target: MobileCallContextTarget) => void }) {
+function Console({ api, me, queryKey, active, number, onNumber, phone, phoneState, onTools, onCallContext, callbacks, onOpenCallbacks }: { api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; number: string; onNumber: (value: string) => void; phone: DispatchPhone | null; phoneState: PhoneState; onTools: () => void; onCallContext: (target: MobileCallContextTarget) => void;
+  callbacks: UseQueryResult<MobileCallbackSummary>; onOpenCallbacks: () => void }) {
   const cache = useQueryClient();
   const [changingPresence, setChangingPresence] = useState(false);
+  const [checkingTarget, setCheckingTarget] = useState(false);
+  // An error describes the number it was checked for; editing the number hides it.
+  const [targetError, setTargetError] = useState<{ number: string; message: string } | null>(null);
+  // The directory may forbid ringing a number back or name a verified
+  // replacement. The server enforces the same decision when the call starts.
+  async function dial() {
+    const value = number.trim();
+    if (!phone || checkingTarget) return;
+    setCheckingTarget(true); setTargetError(null);
+    try {
+      const decision = dialDecision(await api.callTarget(me.profileId, value));
+      if (decision.kind === "blocked") setTargetError({ number, message: decision.message });
+      else if (decision.kind === "dial") await phone.dial(value);
+      else Alert.alert(decision.title, decision.message, [{ text: "Zrušiť", style: "cancel" }, { text: "Zavolať", onPress: () => { void phone.dial(value, decision.verificationId); } }]);
+    } catch (error) { setTargetError({ number, message: errorMessage(error) }); }
+    finally { setCheckingTarget(false); }
+  }
   const query = useQuery({ queryKey: [...queryKey, "console", me.profileId], queryFn: ({ signal }) => api.console(me.profileId, signal), enabled: active, refetchInterval: active ? 30_000 : false });
   const readiness = useQuery({ queryKey: [...queryKey, "voice-readiness", me.profileId], queryFn: ({ signal }) => api.voiceReadiness(me.profileId, signal), enabled: active, refetchInterval: active ? 30_000 : false });
-  function refreshPhone() { void Promise.allSettled([query.refetch(), readiness.refetch(), phone?.refreshDiagnostics(), cache.invalidateQueries({ queryKey: [...queryKey, "voice-colleagues", me.profileId] })]); }
+  function refreshPhone() { void Promise.allSettled([query.refetch(), readiness.refetch(), callbacks.refetch(), phone?.refreshDiagnostics(), cache.invalidateQueries({ queryKey: [...queryKey, "voice-colleagues", me.profileId] })]); }
   async function presence(status: "available" | "paused") {
     if (!phone || changingPresence) return;
     setChangingPresence(true);
@@ -297,6 +336,7 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
         <Button label="Detail hovoru" secondary onPress={() => onCallContext({ kind: "session", id: call.id })} />
       </Card>)}</>}
     </>}
+    <CallbackSummaryCard query={callbacks} onOpen={onOpenCallbacks} />
     {phoneState.call && !query.data?.activeCalls.some(call => call.id === phoneState.call?.sessionId) && <Button label="Detail aktuálneho hovoru" secondary
       onPress={() => { if (phoneState.call) onCallContext({ kind: "session", id: phoneState.call.sessionId }); }} />}
     <PhoneReadinessCard state={phoneState} configuration={readiness.data} configurationError={readiness.isError}
@@ -306,6 +346,8 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
       ])} />
     {phoneState.retryTarget && !phoneState.dialing && <Card><Text style={styles.subheading}>Nepotvrdené volanie</Text>
       <Text style={styles.text}>{phoneState.retryTarget.kind === "internal" ? phoneState.retryTarget.name : formatNumber(phoneState.retryTarget.number)}</Text>
+      {phoneState.retryTarget.kind === "callback" && <Text style={styles.muted}>Spätné volanie z fronty požiadaviek.</Text>}
+      {phoneState.retryTarget.kind === "external" && phoneState.retryTarget.verificationId && <Text style={styles.muted}>Volanie na overené náhradné číslo kontaktu.</Text>}
       <Text style={styles.muted}>Zopakujeme pôvodný pokus o volanie. Tým sa nevytvorí druhý súbežný pokus.</Text>
       <Button label="Zopakovať pôvodné volanie" disabled={!phone || phoneState.registration !== "registered" || phoneState.cancelingAttempt || phoneState.microphonePermission === "denied" || Boolean(phoneState.call || phoneState.termination)}
         onPress={() => { void phone?.retryDial(); }} />
@@ -315,18 +357,19 @@ function Console({ api, me, queryKey, active, number, onNumber, phone, phoneStat
     <Card><View style={styles.row}><View style={s.smallEmblem}><PhoneCall size={20} color={colors.ink} accessible={false} /></View><Text style={styles.subheading}>Nový hovor</Text></View>
       <TextInput accessibilityLabel="Telefónne číslo" placeholder="Telefónne číslo" placeholderTextColor={colors.muted}
       selectionColor={colors.brand} keyboardType="phone-pad" maxLength={40} value={number} onChangeText={onNumber} style={[styles.input, s.phoneInput]} />
-      <Button label={phoneState.dialing ? "Vytáčam…" : "Zavolať"} disabled={!phone || phoneState.registration !== "registered" || phoneState.microphonePermission === "denied" || Boolean(phoneState.retryTarget) || !dialable(number) || phoneState.dialing || phoneState.cancelingAttempt || Boolean(phoneState.call || phoneState.termination)}
-        onPress={() => { void phone?.dial(number.trim()); }} />
+      {targetError?.number === number && <ErrorNotice message={targetError.message} />}
+      <Button label={checkingTarget ? "Overujem číslo…" : phoneState.dialing ? "Vytáčam…" : "Zavolať"} disabled={!phone || checkingTarget || phoneState.registration !== "registered" || phoneState.microphonePermission === "denied" || Boolean(phoneState.retryTarget) || !dialable(number) || phoneState.dialing || phoneState.cancelingAttempt || Boolean(phoneState.call || phoneState.termination)}
+        onPress={() => { void dial(); }} />
     </Card>
     <ColleaguesCard key={me.profileId} api={api} profileId={me.profileId} queryKey={queryKey} active={active} phone={phone} state={phoneState} />
     </ScrollView>
   </KeyboardAvoidingView>;
 }
 
-function History({ api, me, queryKey, active, category, onCategory, search, onSearch, onSelect, onCallContext }: {
+function History({ api, me, queryKey, active, category, onCategory, search, onSearch, onSelect, onCallContext, callbacksOpen, onShowCallbacks }: {
   api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; category: Category; onCategory: (value: Category) => void;
   search: string; onSearch: (value: string) => void; onSelect: (number: string) => void;
-  onCallContext: (target: MobileCallContextTarget) => void;
+  onCallContext: (target: MobileCallContextTarget) => void; callbacksOpen: number | null; onShowCallbacks: () => void;
 }) {
   const [debounced, setDebounced] = useState(search.trim());
   useEffect(() => { const timer = setTimeout(() => setDebounced(search.trim()), 300); return () => clearTimeout(timer); }, [search]);
@@ -342,6 +385,7 @@ function History({ api, me, queryKey, active, category, onCategory, search, onSe
   const calls = [...new Map(query.data?.pages.flatMap(page => page.calls).map(call => [call.id, call]) ?? []).values()];
   return <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { void query.refetch(); }} />}>
+    <HistorySegment view="calls" onView={view => { if (view === "callbacks") onShowCallbacks(); }} open={callbacksOpen} />
     <Text accessibilityRole="header" style={styles.heading}>História hovorov</Text>
     <View style={s.inputWrap}><View pointerEvents="none" style={s.inputIcon}><Search size={20} color={colors.muted} accessible={false} /></View>
       <TextInput accessibilityLabel="Hľadať hovory" placeholder="Číslo alebo meno" placeholderTextColor={colors.muted} value={search} onChangeText={onSearch} maxLength={160} style={[styles.input, s.inputWithIcon]} autoCorrect={false} selectionColor={colors.brand} />
@@ -361,6 +405,7 @@ function History({ api, me, queryKey, active, category, onCategory, search, onSe
                 <Text style={styles.muted}>{formatTime(call.startedAt)}</Text></View>
             </View></View>
           <Text style={styles.muted}>{callStatus(call.status)} · {call.lineLabel}{call.durationSeconds === null ? "" : " · " + Math.floor(call.durationSeconds / 60) + ":" + String(Math.floor(call.durationSeconds % 60)).padStart(2, "0")}</Text>
+          {call.callback && <Text style={[styles.muted, { color: call.callback.status === "open" ? colors.danger : colors.muted }]}>Spätné volanie: {callbackStatusLabels[call.callback.status]}{call.callback.status === "scheduled" && call.callback.claimedByName ? " · " + call.callback.claimedByName : ""}</Text>}
           <Button label="Detail hovoru" secondary onPress={() => onCallContext({ kind: "call", id: call.id })} />
           {call.direction !== "internal" && dialable(call.number) && <Button label="Vybrať číslo" secondary onPress={() => { if (call.number) onSelect(call.number); }} />}
         </Card>; })}
@@ -368,6 +413,20 @@ function History({ api, me, queryKey, active, category, onCategory, search, onSe
         {query.hasNextPage && !query.isFetchNextPageError && <Button label={query.isFetchingNextPage ? "Načítavam…" : "Ďalšie hovory"} secondary disabled={query.isFetchingNextPage} onPress={() => { void query.fetchNextPage(); }} />}
       </>}
   </ScrollView>;
+}
+
+function CallbackSummaryCard({ query, onOpen }: { query: UseQueryResult<MobileCallbackSummary>; onOpen: () => void }) {
+  const counts = query.data?.counts;
+  return <Card><View style={styles.row}><View style={[s.smallEmblem, counts?.overdue ? { backgroundColor: "#FFF0EF" } : null]}><PhoneMissed size={20} color={counts?.overdue ? colors.danger : colors.ink} accessible={false} /></View>
+    <Text style={styles.subheading}>Spätné volania</Text></View>
+    {query.isPending ? <Text style={styles.muted}>Načítavam požiadavky…</Text> : !counts ? <Text style={styles.muted}>Počty sa nepodarilo načítať. Zoznam môžete otvoriť.</Text>
+      : counts.open === 0 ? <Text style={styles.muted}>Nikto nečaká na spätné volanie.</Text> : <>
+        <Text style={s.presenceTitle}>{waitingLabel(counts.open)}</Text>
+        <Text style={styles.muted}>Nepridelené {counts.unclaimed} · Moje {counts.mine}{counts.requested ? " · Vyžiadané klientom " + counts.requested : ""}</Text>
+        {counts.overdue > 0 && <Text style={[styles.label, { color: colors.danger, marginBottom: 0 }]}>Po termíne: {counts.overdue}</Text>}
+      </>}
+    <Button label="Otvoriť spätné volania" secondary onPress={onOpen} />
+  </Card>;
 }
 
 const s = StyleSheet.create({

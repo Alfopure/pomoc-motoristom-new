@@ -23,11 +23,16 @@ import type { MobileCallContextTarget } from "../../../src/lib/mobile-call-conte
 import { createCallContextApi } from "../call-context/api";
 import { CallContextPanel } from "../call-context/ui";
 import { customerCallNumber } from "../call-context/number";
+import { useAndroidBack } from "../lib/use-android-back";
+import { createCallbacksApi } from "../callbacks/api";
+import { CallbackQueueStore } from "../callbacks/store";
+import { CallbacksPanel, HistorySegment, type CallbackDialer } from "../callbacks/ui";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
   active: boolean; tab: string; onTab: (tab: "cases" | "tasks" | "console" | "account") => void; onSelectNumber: (number: string) => void;
   toolsOpen: boolean; onCloseTools: () => void;
   callTarget: MobileCallContextTarget | null; onCloseCallContext: () => void;
+  callbacksOpen: boolean; onShowCalls: () => void; dialer: CallbackDialer;
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; hasCall: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void };
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Prístup ku konceptom sa nepodarilo overiť.";
 
@@ -71,9 +76,12 @@ export function DraftWorkspace(props: Props) {
   const current = useMemo(() => () => organizationId !== null && authority.current(organizationId), [authority, organizationId]);
   const validate = useMemo(() => () => revalidate({ organizationId: organizationId ?? "", profileId: identity.profileId }), [revalidate, organizationId, identity.profileId]);
   const toolsVisible = props.toolsOpen && props.tab === "console";
-  const operationsVisible = toolsVisible || props.callTarget !== null || ["cases", "tasks", "account"].includes(props.tab);
+  // Before the scope is verified the panel is not mounted; Back still returns to calls.
+  useAndroidBack(active && props.callbacksOpen && !verified, props.onShowCalls);
+  const operationsVisible = toolsVisible || props.callTarget !== null || props.callbacksOpen || ["cases", "tasks", "account"].includes(props.tab);
   if (!verified) return operationsVisible ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.tab === "account" && <Account {...props} />}
+    {props.callbacksOpen && <HistorySegment view="callbacks" onView={view => { if (view === "calls") props.onShowCalls(); }} />}
     {toolsVisible && <Button label="Späť do ústredne" secondary onPress={props.onCloseTools} />}
     {props.callTarget && <Button label="Späť na hovory" secondary onPress={props.onCloseCallContext} />}
     {query.isPending ? <Loading label="Overujem prístup k prípadom a konceptom…" /> : <View style={styles.content}><ErrorNotice message={errorText(authorityState.error ?? query.error)} onRetry={() => { void query.refetch(); }} /></View>}
@@ -123,6 +131,17 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
   const api = useMemo(() => createCasesApi(config, verified.profileId, getToken, undefined, verified.organizationId), [config, verified.profileId, verified.organizationId, getToken]);
   const callApi = useMemo(() => createCallContextApi(config, verified.profileId, verified.organizationId, getToken, current), [config, verified.profileId, verified.organizationId, getToken, current]);
   const actorRoot = useMemo(() => ["mobile", config.environment, userId, verified.profileId, verified.organizationId], [config.environment, userId, verified.profileId, verified.organizationId]);
+  const callbackStore = useMemo(() => {
+    const base = createMobileApi(config, getToken);
+    const lookup = async (number: string, signal?: AbortSignal) => {
+      if (!current()) throw new MobileApiError("Prihlásenie alebo organizácia sa zmenili. Otvorte spätné volania znova.", 401);
+      const target = await base.callTarget(verified.profileId, number, signal);
+      if (!current()) throw new MobileApiError("Prihlásenie alebo organizácia sa zmenili. Otvorte spätné volania znova.", 401);
+      return target;
+    };
+    return new CallbackQueueStore(createCallbacksApi(config, verified.profileId, verified.organizationId, getToken, current), lookup);
+  }, [config, verified.profileId, verified.organizationId, getToken, current]);
+  useEffect(() => () => callbackStore.dispose(), [callbackStore]);
   const [caseRequest, setCaseRequest] = useState<CaseOpenRequest>(), [taskRequest, setTaskRequest] = useState<{ taskId: string; nonce: number }>();
   const request = useRef(0);
   function resume(record: StoredDraft) {
@@ -140,11 +159,16 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
       if (!phone) return;
       setCaseRequest({ kind: "case-call-create", id: null, number: phone, nonce: ++request.current }); props.onCloseCallContext(); props.onTab("cases");
     }} />;
-  if (!vault) return <>{callContext}{["cases", "tasks", "account"].includes(props.tab) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
+  const callbacks = props.callbacksOpen && <CallbacksPanel store={callbackStore} active={props.active} current={current} dialer={props.dialer}
+    onShowCalls={props.onShowCalls} onOpenCase={id => {
+      if (!current()) return;
+      setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onTab("cases");
+    }} />;
+  if (!vault) return <>{callContext}{callbacks}{["cases", "tasks", "account"].includes(props.tab) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
     {props.tab === "account" && <Account {...props} />}
     {error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading label="Načítavam miestne koncepty…" />}
   </ScrollView> : null}</>;
-  return <>{callContext}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
+  return <>{callContext}{callbacks}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
     onOpenCase={id => { setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onTab("cases"); }} onResume={resume} onDiscarded={() => { setCaseRequest(undefined); setTaskRequest(undefined); setEpoch(value => value + 1); }} /></>;
 }
 

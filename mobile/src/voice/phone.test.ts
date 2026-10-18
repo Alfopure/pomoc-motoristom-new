@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DispatchPhone, type NativePhone, type VoiceEvent } from "./phone";
+import { DispatchPhone, sameDialTarget, type NativePhone, type VoiceEvent } from "./phone";
 import { createVoiceApi, type VoiceApi, type VoiceHoldCommand, type VoiceHoldResult } from "./api";
 import { MobileApiError } from "../lib/api";
 
@@ -23,6 +23,7 @@ function fixture() {
     heartbeat: vi.fn().mockResolvedValue(undefined), authorize: vi.fn().mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "inbound", role: "callee", displayName: null, number: "+421900000001" }),
     start: vi.fn().mockResolvedValue({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "+421900000002" }),
     startInternal: vi.fn().mockResolvedValue({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "Jana", targetProfileId: lease }),
+    startCallback: vi.fn().mockResolvedValue({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "+421900000003", callbackRequestId: lease, linked: true }),
     cancelAttempt: vi.fn().mockResolvedValue({ resolved: true, sessionId: sid, terminationPending: false }),
     end: vi.fn().mockResolvedValue({ terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } }), status: vi.fn().mockResolvedValue({ sessionId: sid, state: "ringing", connected: false, ended: false, terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } }),
     hold: vi.fn(), holdStatus: vi.fn(),
@@ -436,8 +437,8 @@ describe("native phone lifecycle", () => {
     const f = await connected(); vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("timeout", 0));
     await f.phone.dial("+421900000002"); expect(f.phone.state.retryTarget).toEqual({ kind: "external", number: "+421900000002" });
     await f.phone.retryDial();
-    expect(f.api.start).toHaveBeenNthCalledWith(1, lease, id, "+421900000002");
-    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002");
+    expect(f.api.start).toHaveBeenNthCalledWith(1, lease, id, "+421900000002", undefined);
+    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002", undefined);
     expect(f.phone.state.retryTarget).toBeNull();
   });
   it("preserves the original uncertain command across an untrusted start response and safe reconnect", async () => {
@@ -451,7 +452,7 @@ describe("native phone lifecycle", () => {
     expect(f.native.disconnect).toHaveBeenCalled();
     await f.phone.connect(); await f.phone.retryDial();
     expect(f.uuid).toHaveBeenCalledTimes(1);
-    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002");
+    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002", undefined);
     expect(transport.mock.calls.map(call => JSON.parse(String(call[1].body)).requestId)).toEqual([id, id]);
   });
   it("does not discard an uncertain outgoing command when another device owns reconnect", async () => {
@@ -801,4 +802,54 @@ describe("native phone lifecycle", () => {
     expect(f.phone.state.call).toBeNull(); expect(f.api.end).not.toHaveBeenCalled();
   });
 
+});
+
+describe("callback and confirmed-target dialing", () => {
+  const callbackId = "00000000-0000-4000-8000-0000000000cb", verification = "00000000-0000-4000-8000-0000000000ef";
+  it("compares the complete immutable target", () => {
+    expect(sameDialTarget({ kind: "external", number: "+1" }, { kind: "external", number: "+1" })).toBe(true);
+    expect(sameDialTarget({ kind: "external", number: "+1" }, { kind: "external", number: "+1", verificationId: verification })).toBe(false);
+    expect(sameDialTarget({ kind: "callback", callbackRequestId: callbackId, number: "+1" }, { kind: "callback", callbackRequestId: callbackId, number: "+2" })).toBe(true);
+    expect(sameDialTarget({ kind: "callback", callbackRequestId: callbackId, number: "+1" }, { kind: "external", number: "+1" })).toBe(false);
+    expect(sameDialTarget({ kind: "internal", profileId: lease, name: "Jana" }, { kind: "internal", profileId: lease, name: "Iné" })).toBe(true);
+  });
+  it("rings a queued caller back through the callback command and expects the dialed number", async () => {
+    const f = await connected();
+    await f.phone.dialCallback(callbackId.toUpperCase(), "+421900000003", verification);
+    expect(f.api.startCallback).toHaveBeenCalledExactlyOnceWith(lease, id, callbackId, verification);
+    expect(f.api.start).not.toHaveBeenCalled();
+    expect(f.native.expectOutgoing).toHaveBeenCalledWith("exact-leg", sid, "+421900000003", false);
+  });
+  it("retries and cancels only the original uncertain callback", async () => {
+    const f = await connected(); vi.mocked(f.api.startCallback).mockRejectedValueOnce(new MobileApiError("network", 0));
+    await f.phone.dialCallback(callbackId, "+421900000003");
+    expect(f.phone.state.retryTarget).toEqual({ kind: "callback", callbackRequestId: callbackId, number: "+421900000003" });
+    await f.phone.dial("+421900000003"); await f.phone.dialCallback(lease, "+421900000003");
+    expect(f.api.start).not.toHaveBeenCalled(); expect(f.api.startCallback).toHaveBeenCalledTimes(1);
+    expect(f.phone.state.error).toBe("Najprv zopakujte pôvodný pokus o volanie.");
+    await f.phone.cancelAttempt();
+    expect(f.api.cancelAttempt).toHaveBeenCalledWith(lease, id, { kind: "callback", callbackRequestId: callbackId, number: "+421900000003" });
+    expect(f.phone.state.retryTarget).toBeNull(); expect(f.uuid).toHaveBeenCalledTimes(1);
+  });
+  it("keeps a confirmed alternative in the dial and in its retry", async () => {
+    const f = await connected(); vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("timeout", 0));
+    await f.phone.dial("+421232408700", verification);
+    expect(f.phone.state.retryTarget).toEqual({ kind: "external", number: "+421232408700", verificationId: verification });
+    await f.phone.dial("+421232408700"); expect(f.api.start).toHaveBeenCalledTimes(1);
+    await f.phone.retryDial();
+    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421232408700", verification);
+  });
+  it("reports whether a callback command was actually sent", async () => {
+    const f = await connected();
+    expect(await f.phone.dialCallback(callbackId, "+421900000003")).toBe(true);
+    expect(await f.phone.dialCallback(callbackId, "+421900000003")).toBe(false);
+    expect(f.api.startCallback).toHaveBeenCalledTimes(1);
+    const idle = fixture();
+    expect(await idle.phone.dialCallback(callbackId, "+421900000003")).toBe(false); expect(idle.api.startCallback).not.toHaveBeenCalled();
+  });
+  it("drops a server-refused callback without a retry", async () => {
+    const f = await connected(); vi.mocked(f.api.startCallback).mockRejectedValueOnce(new MobileApiError("Požiadavku má prevzatú Peter.", 409, "already_claimed"));
+    await f.phone.dialCallback(callbackId, "+421900000003");
+    expect(f.phone.state.retryTarget).toBeNull(); expect(f.phone.state.error).toContain("Peter");
+  });
 });

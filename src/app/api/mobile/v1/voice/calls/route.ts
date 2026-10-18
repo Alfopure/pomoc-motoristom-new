@@ -1,6 +1,7 @@
 import { requireMobileActor } from "@/server/mobile/auth";
 import { mobileError, mobileJson, mobileScope } from "@/server/mobile/http";
 import { nativeVoiceDeps, requireNativeLease } from "@/server/mobile/voice";
+import { nativeOutboundInput } from "@/server/mobile/voice-input";
 import { startOutboundCall } from "@/server/telephony/call-actions";
 import { readJsonBody, toCallActor } from "@/server/telephony/runtime";
 import { isUuid } from "@/lib/telephony/uuid";
@@ -14,9 +15,9 @@ export async function POST(request: Request) {
     const body = await readJsonBody<Record<string, unknown>>(request);
     await requireNativeLease(deps, actor, body.deviceSessionId);
     if (typeof body.requestId !== "string" || !isUuid(body.requestId)) throw new MutationError("Chýba identita pokusu o volanie.", 400);
-    const result = await startOutboundCall(deps, toCallActor(actor), {
-      requestId: body.requestId as string, to: typeof body.to === "string" ? body.to : "",
-    });
+    if (body.verificationId !== undefined && (typeof body.verificationId !== "string" || !isUuid(body.verificationId))) throw new MutationError("Neplatné potvrdenie overeného čísla.", 400);
+    const result = await startOutboundCall(deps, toCallActor(actor),
+      nativeOutboundInput(body.requestId, typeof body.to === "string" ? body.to : "", body.verificationId as string | undefined));
     return mobileJson({ ...mobileScope(actor), sessionId: result.sessionId, operatorLegCallControlId: result.operatorLegCallControlId, to: result.to });
   } catch (error) { return mobileError(error, "Hovor sa nepodarilo vytočiť."); }
 }

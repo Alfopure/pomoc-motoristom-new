@@ -20,5 +20,8 @@ export function mobileHistoryCall(call: CallCenterCall): MobileHistoryCall {
     lineLabel: call.lineLabel, operatorName: call.operatorName ?? null, startedAt: call.startedAt,
     answeredAt: call.answeredAt ?? null, endedAt: call.endedAt ?? null,
     durationSeconds: typeof call.durationSeconds === "number" && Number.isFinite(call.durationSeconds) && call.durationSeconds >= 0 ? call.durationSeconds : null,
+    callback: call.callback && ["open", "scheduled", "done", "cancelled"].includes(call.callback.status)
+      ? { status: call.callback.status, claimedByName: typeof call.callback.claimedByName === "string" && call.callback.claimedByName.trim() ? call.callback.claimedByName.trim().slice(0, 200) : null }
+      : null,
   };
 }

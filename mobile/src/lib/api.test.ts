@@ -125,3 +125,48 @@ describe("native API transport", () => {
     expect(usableMobileIdentity(identity, new Error("Unexpected failure"))).toBeNull();
   });
 });
+
+describe("callback summary and dial target transport", () => {
+  const counts = { open: 4, requested: 1, missed: 2, manual: 1, unknown: 0, mine: 1, unclaimed: 2, overdue: 1 };
+  it("reads exact console counters", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, counts }));
+    expect((await createMobileApi(config, async () => "token", transport).callbackSummary("profile")).counts).toEqual(counts);
+    expect(transport).toHaveBeenCalledWith(config.apiOrigin + "/api/mobile/v1/callbacks/summary", expect.objectContaining({ method: "GET", credentials: "omit" }));
+  });
+  it.each([{ open: 5 }, { mine: 5 }, { overdue: -1 }, { unclaimed: 1.5 }, { extra: 1 }])("rejects inconsistent counters %j", async change => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, counts: { ...counts, ...change } }));
+    await expect(createMobileApi(config, async () => "token", transport).callbackSummary("profile")).rejects.toMatchObject({ status: 502 });
+  });
+  const verification = "00000000-0000-4000-8000-0000000000ef";
+  it("asks the server about the exact trimmed number", async () => {
+    const target = { status: "verified_alternative", originalNumber: "+421232408700", dialNumber: "+421905444555", sourceName: "Recepcia", targetName: null, verificationId: verification };
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, target }));
+    expect(await createMobileApi(config, async () => "token", transport).callTarget("profile", " +421 232 408 700 ")).toEqual(target);
+    expect(new URL(transport.mock.calls[0][0] as string).searchParams.get("number")).toBe("+421 232 408 700");
+  });
+  it.each([
+    { status: "original", originalNumber: "+421905111222", dialNumber: "+421905999999", sourceName: null, targetName: null, verificationId: null },
+    { status: "original", originalNumber: "+421905111222", dialNumber: "+421905111222", sourceName: null, targetName: null, verificationId: verification },
+    { status: "blocked", originalNumber: "+421905111222", dialNumber: "+421905111222", sourceName: null, targetName: null, verificationId: null },
+    { status: "verified_alternative", originalNumber: "+421905111222", dialNumber: "+421905444555", sourceName: null, targetName: null, verificationId: "v1" },
+    { status: "maybe", originalNumber: "+421905111222", dialNumber: null, sourceName: null, targetName: null, verificationId: null },
+  ])("rejects a contradictory directory decision %#", async target => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, target }));
+    await expect(createMobileApi(config, async () => "token", transport).callTarget("profile", "+421905111222")).rejects.toMatchObject({ status: 502 });
+  });
+  it("refuses an empty number locally", async () => {
+    const transport = vi.fn<MobileTransport>();
+    await expect(createMobileApi(config, async () => "token", transport).callTarget("profile", "  ")).rejects.toMatchObject({ status: 400 });
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it("accepts a history callback badge and older rows without it", async () => {
+    const call = { id: "call", direction: "inbound", number: "+421900000001", name: null, startedAt: scope.checkedAt, status: "missed", lineLabel: "Dispečing",
+      operatorName: null, answeredAt: null, endedAt: null, durationSeconds: null };
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, nextCursor: null,
+      calls: [{ ...call, callback: { status: "scheduled", claimedByName: "Peter" } }, { ...call, id: "old" }, { ...call, id: "none", callback: null }] }));
+    const result = await createMobileApi(config, async () => "token", transport).history("profile", { category: "missed", q: "" });
+    expect(result.calls.map(item => item.callback ?? null)).toEqual([{ status: "scheduled", claimedByName: "Peter" }, null, null]);
+    transport.mockResolvedValue(Response.json({ ...scope, nextCursor: null, calls: [{ ...call, callback: { status: "reopened", claimedByName: null } }] }));
+    await expect(createMobileApi(config, async () => "token", transport).history("profile", { category: "missed", q: "" })).rejects.toMatchObject({ status: 502 });
+  });
+});

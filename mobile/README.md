@@ -28,6 +28,10 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   Pri novom aj upravovanom mieste možno vedome získať polohu telefónu,
   skontrolovať presnosť a zobraziť bod na mape pred potvrdením do formulára.
   Ide o polohu dispečerovho telefónu; [podrobnosti a skúšky](../docs/mobile/device-location.md).
+- **Spätné volania:** v Histórii a v súhrne Ústredne; rovnaká fronta ako web,
+  prevzatie, vybavenie/zrušenie s poznámkou a volanie späť v natívnej aplikácii.
+  Volanie aj bežné vytáčanie potvrdzuje overené náhradné číslo kontaktu
+  ([podrobnosti](../docs/mobile/callbacks.md)).
 - **Moje úlohy:** všetky vlastné otvorené úlohy, výber úloh na kontrolu,
   aj dokončené, vyhľadávanie podľa názvu a prechod na prípad.
 - **Účet:** meno, e-mail, rola, prostredie, miestne koncepty a odhlásenie.

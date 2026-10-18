@@ -5,7 +5,10 @@ export type VoiceToken = { token: string; expiresAt: string; deviceSessionId: st
 export type VoiceOffer = { sessionId: string; callControlId: string; direction: "inbound" | "outbound" | "internal"; number: string | null; role: "caller" | "callee"; displayName: string | null };
 export type VoiceOutgoing = { sessionId: string; operatorLegCallControlId: string; to: string };
 export type VoiceInternalOutgoing = VoiceOutgoing & { targetProfileId: string };
-export type VoiceCallTarget = { kind: "external"; number: string } | { kind: "internal"; profileId: string; name: string };
+/** `verificationId` confirms a directory-verified alternative number; the server revalidates it. */
+export type VoiceCallTarget = { kind: "external"; number: string; verificationId?: string } | { kind: "internal"; profileId: string; name: string }
+  | { kind: "callback"; callbackRequestId: string; number: string; verificationId?: string };
+export type VoiceCallbackOutgoing = VoiceOutgoing & { callbackRequestId: string; linked: boolean };
 export type VoiceAttemptEnd = { resolved: false; sessionId: null; terminationPending: false } | { resolved: true; sessionId: string; terminationPending: boolean };
 export type VoiceMediaState = "active" | "held" | "pending" | "unavailable";
 export type VoiceMedia = { version: number; state: VoiceMediaState; canHold: boolean; callControlId: string | null };
@@ -89,8 +92,9 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
         || body.direction === "outbound" && body.role !== "caller" || body.direction === "inbound" && body.role !== "callee") throw invalid();
       return body as unknown as VoiceOffer;
     },
-    start: async (deviceSessionId: string, requestId: string, to: string): Promise<VoiceOutgoing> => {
-      const body = await request("calls", { deviceSessionId, requestId, to });
+    start: async (deviceSessionId: string, requestId: string, to: string, verificationId?: string): Promise<VoiceOutgoing> => {
+      if (verificationId !== undefined && !uuid(verificationId)) throw invalid();
+      const body = await request("calls", { deviceSessionId, requestId, to, ...(verificationId ? { verificationId } : {}) });
       if (!uuid(body.sessionId) || !nonempty(body.operatorLegCallControlId) || !nonempty(body.to)) throw invalid();
       return body as unknown as VoiceOutgoing;
     },
@@ -100,9 +104,18 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
         || body.targetProfileId !== targetProfileId || !name(body.to)) throw invalid();
       return body as unknown as VoiceInternalOutgoing;
     },
+    startCallback: async (deviceSessionId: string, requestId: string, callbackRequestId: string, verificationId?: string): Promise<VoiceCallbackOutgoing> => {
+      if (!uuid(callbackRequestId) || verificationId !== undefined && !uuid(verificationId)) throw invalid();
+      const body = await request("calls/callback", { deviceSessionId, requestId, callbackRequestId, ...(verificationId ? { verificationId } : {}) });
+      if (!uuid(body.sessionId) || !nonempty(body.operatorLegCallControlId) || !nonempty(body.to) || body.to.length > 100
+        || typeof body.callbackRequestId !== "string" || body.callbackRequestId.toLowerCase() !== callbackRequestId.toLowerCase() || typeof body.linked !== "boolean") throw invalid();
+      return body as unknown as VoiceCallbackOutgoing;
+    },
     cancelAttempt: async (deviceSessionId: string, requestId: string, target: VoiceCallTarget): Promise<VoiceAttemptEnd> => {
-      const body = await request("calls/attempt/end", { deviceSessionId, requestId, kind: target.kind,
-        ...(target.kind === "internal" ? { targetProfileId: target.profileId } : { to: target.number }) });
+      const identity = target.kind === "internal" ? { targetProfileId: target.profileId }
+        : target.kind === "callback" ? { callbackRequestId: target.callbackRequestId, ...(target.verificationId ? { verificationId: target.verificationId } : {}) }
+          : { to: target.number, ...(target.verificationId ? { verificationId: target.verificationId } : {}) };
+      const body = await request("calls/attempt/end", { deviceSessionId, requestId, kind: target.kind, ...identity });
       if (body.resolved === false) {
         if (body.sessionId !== null || body.terminationPending !== false) throw invalid();
         return { resolved: false, sessionId: null, terminationPending: false };

@@ -29,6 +29,9 @@ export type MobileVoiceColleagues = MobileScope & { colleagues: MobileVoiceColle
 export type MobileVoiceInternalStarted = MobileScope & {
   sessionId: string; operatorLegCallControlId: string; to: string; targetProfileId: string;
 };
+export type MobileVoiceCallbackStarted = MobileScope & {
+  sessionId: string; operatorLegCallControlId: string; to: string; callbackRequestId: string; linked: boolean;
+};
 export type MobileVoiceAttemptEnded = MobileScope & {
   resolved: boolean; sessionId: string | null; terminationPending: boolean;
 };
@@ -63,6 +66,8 @@ export type MobileHistoryCall = {
   answeredAt: string | null;
   endedAt: string | null;
   durationSeconds: number | null;
+  /** Callback request created for this call; status only, never its notes. */
+  callback: { status: "open" | "scheduled" | "done" | "cancelled"; claimedByName: string | null } | null;
 };
 export type MobileHistory = MobileScope & {
   calls: MobileHistoryCall[];
