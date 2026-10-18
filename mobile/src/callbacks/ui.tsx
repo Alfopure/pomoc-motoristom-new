@@ -70,23 +70,23 @@ export function CallbacksPanel({ store, active, current, dialer, onShowCalls, on
       </View>
       <Text style={s.caption}>Vyžiadané klientom {state.counts.requested} · Zmeškané {state.counts.missed} · Zadané dispečerom {state.counts.manual}{state.counts.unknown ? " · Staršie " + state.counts.unknown : ""}{state.checkedAt ? " · overené " + formatTime(state.checkedAt) : ""}</Text>
     </View>}
-    {!dialer.available && dialer.reason && <Text style={[s.caption, s.inset]}>{dialer.reason}</Text>}
+    {!dialer.available && dialer.reason ? <Text style={[s.caption, s.inset]}>{dialer.reason}</Text> : null}
     <View style={[s.filters, s.inset]}>{callbackFilters.map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityState={{ selected: item.id === filter }}
       hitSlop={{ top: 6, bottom: 6 }} onPress={() => setFilter(item.id)} style={({ pressed }) => [s.filter, item.id === filter && s.filterSelected, pressed && { opacity: 0.75 }]}>
       <Text style={[s.filterText, item.id === filter && { color: colors.white }]}>{item.label}</Text></Pressable>)}</View>
     {state.notice && state.notice.id === null && <View style={s.inset}><Notice tone={state.notice.tone} message={state.notice.message} /></View>}
     {state.loading && !state.counts ? <Loading label="Načítavam spätné volania…" /> : state.error && !state.counts ? <View style={s.inset}><ErrorNotice message={state.error} onRetry={() => { void store.refresh(); }} /></View> : <>
-      {state.error && <View style={s.inset}><ErrorNotice message={state.error} onRetry={() => { void store.refresh(); }} /></View>}
+      {state.error ? <View style={s.inset}><ErrorNotice message={state.error} onRetry={() => { void store.refresh(); }} /></View> : null}
       {shown.length === 0 ? <View style={s.inset}><Card><Text style={styles.text}>{state.open.length ? "Pre tento výber nie je žiadna otvorená požiadavka." : "Nikto nečaká na spätné volanie."}</Text>
-        {filter !== "all" && state.nextCursor && <Text style={styles.muted}>Ďalšie požiadavky ešte nie sú načítané.</Text>}</Card></View>
+        {filter !== "all" && state.nextCursor ? <Text style={styles.muted}>Ďalšie požiadavky ešte nie sú načítané.</Text> : null}</Card></View>
         : <Group>{shown.map((item, index) => <CallbackRow key={item.id} item={item} first={index === 0} now={now} state={state} dialer={dialer}
           expanded={expanded === item.id} onToggle={() => toggle(item.id)}
           onCall={() => { void call(item); }} onClaim={() => claim(item)} onOpenCase={() => { if (allowed() && item.caseId) onOpenCase(item.caseId); }}
           onEditor={status => store.openEditor(item.id, status)} onNotes={value => store.editNotes(value)} onCloseEditor={() => store.closeEditor()}
           onResolve={() => { if (allowed()) void store.resolve(); }} />)}</Group>}
       <View style={s.more}>
-        {state.moreError && <ErrorNotice message={state.moreError} onRetry={() => { void store.loadMore(); }} />}
-        {state.nextCursor && !state.moreError && <Button label={state.loadingMore ? "Načítavam…" : "Ďalšie požiadavky"} secondary disabled={state.loadingMore} onPress={() => { void store.loadMore(); }} />}
+        {state.moreError ? <ErrorNotice message={state.moreError} onRetry={() => { void store.loadMore(); }} /> : null}
+        {state.nextCursor && !state.moreError ? <Button label={state.loadingMore ? "Načítavam…" : "Ďalšie požiadavky"} secondary disabled={state.loadingMore} onPress={() => { void store.loadMore(); }} /> : null}
         {state.resolved.length > 0 && <Button label={(showResolved ? "Skryť" : "Zobraziť") + " uzavreté za 24 h (" + state.resolved.length + ")"} secondary onPress={() => setShowResolved(value => !value)} />}
       </View>
       {showResolved && state.resolved.length > 0 && <Group>{state.resolved.map((item, index) => <View key={item.id} style={s.resolved}>
@@ -130,15 +130,15 @@ function CallbackRow({ item, first, now, state, dialer, expanded, onToggle, onCa
       {expanded ? <ChevronUp size={18} color={palette.tertiaryLabel} accessible={false} /> : <ChevronDown size={18} color={palette.tertiaryLabel} accessible={false} />}
     </Pressable>
     {expanded && <View style={s.body}>
-      {item.name && <Text selectable style={styles.text}>{formatNumber(item.number)}</Text>}
-      {item.originDetail && <Text style={s.caption}>{item.originDetail}</Text>}
+      {item.name ? <Text selectable style={styles.text}>{formatNumber(item.number)}</Text> : null}
+      {item.originDetail ? <Text style={s.caption}>{item.originDetail}</Text> : null}
       {/* The origin already names missed, requested and manual rows; older rows keep their route. */}
-      {(item.origin === "unknown" || item.lineLabel || item.partnerName) && <Text style={s.caption}>{[item.origin === "unknown" ? item.sourceLabel : null, item.lineLabel ?? item.partnerName].filter(Boolean).join(" · ")}</Text>}
+      {item.origin === "unknown" || item.lineLabel || item.partnerName ? <Text style={s.caption}>{[item.origin === "unknown" ? item.sourceLabel : null, item.lineLabel ?? item.partnerName].filter(Boolean).join(" · ")}</Text> : null}
       <Text style={[s.caption, urgency !== "fresh" && { color: urgency === "overdue" ? palette.redText : palette.orangeText }]}>Čaká {formatWait(item.createdAt, now)}{deadline ? " · " + deadline : ""}</Text>
-      {item.lastCalledAt && <Text style={s.caption}>Naposledy volané {formatTime(item.lastCalledAt)}</Text>}
-      {item.notes && <Text style={styles.text}>{item.notes}</Text>}
+      {item.lastCalledAt ? <Text style={s.caption}>Naposledy volané {formatTime(item.lastCalledAt)}</Text> : null}
+      {item.notes ? <Text style={styles.text}>{item.notes}</Text> : null}
       {state.notice?.id === item.id && <Notice tone={state.notice.tone} message={state.notice.message} />}
-      {item.actions.blockedReason && <Text style={s.caption}>{item.actions.blockedReason}</Text>}
+      {item.actions.blockedReason ? <Text style={s.caption}>{item.actions.blockedReason}</Text> : null}
       {editor ? <View style={{ gap: 10 }}>
         <Text style={styles.label}>{editor.status === "done" ? "Poznámka k vybaveniu (nepovinné)" : "Dôvod zrušenia (nepovinné)"}</Text>
         <TextInput accessibilityLabel={editor.status === "done" ? "Poznámka k vybaveniu" : "Dôvod zrušenia"} value={editor.notes} onChangeText={onNotes} multiline maxLength={MOBILE_CALLBACK_NOTE_LIMIT}
@@ -153,7 +153,7 @@ function CallbackRow({ item, first, now, state, dialer, expanded, onToggle, onCa
           <View style={{ flex: 1 }}><Button label="Vybavené" secondary disabled={busy} onPress={() => onEditor("done")} /></View>
           <View style={{ flex: 1 }}><Button label="Zrušiť" secondary disabled={busy} onPress={() => onEditor("cancelled")} /></View>
         </View>}
-        {item.caseId && <Button label="Otvoriť prípad" secondary onPress={onOpenCase} />}
+        {item.caseId ? <Button label="Otvoriť prípad" secondary onPress={onOpenCase} /> : null}
       </View>}
     </View>}
   </View>;
