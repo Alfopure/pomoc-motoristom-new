@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MobileCaseSummary, MobileTask } from "../../../src/lib/mobile-api";
 import type { MobileCallbackRequest } from "../../../src/lib/mobile-callbacks";
-import { callbackAlerts, caseAlerts, dayKey, sortAlerts, taskAlerts } from "./model";
+import { alertSummary, callbackAlerts, caseAlerts, dayKey, sortAlerts, taskAlerts } from "./model";
 
 const now = Date.parse("2026-10-19T08:00:00Z"); // 10:00 in Bratislava
 const minutes = (value: number) => new Date(now + value * 60_000).toISOString();
@@ -51,5 +51,22 @@ describe("alerts", () => {
       ...taskAlerts([task("late", minutes(-5))], now), ...callbackAlerts([callback("late", minutes(-1))], now)]);
     expect(items.map(item => item.key)).toEqual(["callback:late", "task:late", "case:c", "case:a"]);
     expect(items.find(item => item.id === "c")?.tag).toBe("Horí · bez dispečera");
+  });
+  it("counts the overdue status as late, as the web does", () => {
+    const items = taskAlerts([task("flagged", null, { status: "overdue" }), task("flaggedLater", minutes(120), { status: "overdue" }), task("flaggedTomorrow", minutes(60 * 20), { status: "overdue" })], now);
+    expect(items.map(item => [item.id, item.tag, item.tone])).toEqual([["flagged", "Po termíne", "red"], ["flaggedLater", "Po termíne", "red"], ["flaggedTomorrow", "Po termíne", "red"]]);
+  });
+  it("orders equal ranks by the earliest deadline, undated last", () => {
+    const items = sortAlerts([
+      ...callbackAlerts([callback("recent", minutes(-1)), callback("days", "2026-10-16T08:00:00Z")], now),
+      ...taskAlerts([task("minute", minutes(-1)), task("flagged", null, { status: "overdue" }), task("week", "2026-10-12T08:00:00Z")], now),
+    ]);
+    expect(items.map(item => item.key)).toEqual(["callback:days", "callback:recent", "task:week", "task:minute", "task:flagged"]);
+  });
+  it("never reports all clear on failed or partial reads", () => {
+    expect(alertSummary({ count: 0, partial: false, failed: false })).toMatchObject({ count: null, empty: { title: "Všetko je vybavené", clear: true } });
+    expect(alertSummary({ count: 0, partial: true, failed: false })).toMatchObject({ count: "0+", empty: { title: "Na prvých stránkach nič", clear: false } });
+    expect(alertSummary({ count: 0, partial: false, failed: true })).toEqual({ count: null, empty: null });
+    expect(alertSummary({ count: 3, partial: true, failed: true })).toEqual({ count: "3+", empty: null });
   });
 });

@@ -86,9 +86,12 @@ zoradená podľa naliehavosti – spätné volania po termíne, vaše úlohy po 
 horiaci prípad bez dispečera, spätné volania s termínom do 15 minút, vaše úlohy
 na dnes, ostatné horiace prípady. Každá sekcia (Spätné volania, Moje úlohy,
 Horiace prípady) končí odkazom na celý zoznam: Spätné, zoznam Moje úlohy
-alebo Prípady s filtrom priorita Horí. Číta prvú stránku každého zdroja
-(„3+“ znamená, že ďalšie stránky sa nečítali), obnovuje sa každú minútu a
-potiahnutím nadol; každý zdroj má vlastné načítanie a chybu. Server ani
+alebo Prípady s filtrom priorita Horí. V rámci rovnakej naliehavosti ide
+navrch najstarší termín; úloha v stave po termíne sa počíta ako na webe.
+Číta prvú stránku každého zdroja („3+“ aj „0+“ znamená, že ďalšie stránky sa
+nečítali), obnovuje sa každú minútu, hneď po návrate do appky a potiahnutím
+nadol. Zdroj s chybou ukáže chybu s tlačidlom Skúsiť znova; „Všetko je
+vybavené“ sa zobrazí iba vtedy, keď všetky zdroje odpovedali celé. Server ani
 notifikácie nemení – push upozornenia sú samostatná etapa.
 
 **Okná (sheet)**: jedno spoločné okno zdola pre úpravu lišty, výber náhrady

@@ -10,11 +10,17 @@ export type AlertKind = "callback" | "task" | "case";
 export type AlertItem = {
   key: string; kind: AlertKind; id: string; title: string; detail: string;
   tag: string; tone: "red" | "orange"; rank: number;
+  /** Deadline (or start of a burning case) that orders items of equal rank. */
+  at: number | null;
 };
 const ZONE = "Europe/Bratislava";
 
 export function dayKey(time: number): string {
   return new Date(time).toLocaleDateString("en-CA", { timeZone: ZONE });
+}
+function time(value: string | null | undefined): number | null {
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 function clock(time: number): string {
   return new Date(time).toLocaleTimeString("sk-SK", { timeZone: ZONE, hour: "2-digit", minute: "2-digit" });
@@ -27,22 +33,22 @@ export function callbackAlerts(open: readonly MobileCallbackRequest[], now: numb
     const claimed = item.claimant ? item.claimant.mine ? "prevzali ste" : "prevzal " + (item.claimant.name ?? "kolega") : "nikto neprevzal";
     return [{ key: "callback:" + item.id, kind: "callback" as const, id: item.id, title: item.name || formatNumber(item.number),
       detail: ["Spätné volanie", item.lineLabel, claimed].filter(Boolean).join(" · "), tag: deadlineText(item, now) ?? "",
-      tone: urgency === "overdue" ? "red" as const : "orange" as const, rank: urgency === "overdue" ? 0 : 3 }];
+      tone: urgency === "overdue" ? "red" as const : "orange" as const, rank: urgency === "overdue" ? 0 : 3, at: time(item.deadlineAt) }];
   });
 }
 
 export function taskAlerts(tasks: readonly MobileTask[], now: number): AlertItem[] {
   const today = dayKey(now);
   return tasks.flatMap(task => {
-    if (!task.dueAt || task.status === "done") return [];
-    const due = Date.parse(task.dueAt);
-    if (!Number.isFinite(due)) return [];
-    const late = due < now;
-    if (!late && dayKey(due) !== today) return [];
+    if (task.status === "done") return [];
+    const due = time(task.dueAt);
+    // As on the web: the "overdue" status counts even without a past due date.
+    const late = task.status === "overdue" || due !== null && due < now;
+    if (!late && (due === null || dayKey(due) !== today)) return [];
     return [{ key: "task:" + task.id, kind: "task" as const, id: task.id, title: task.title,
       detail: ["Úloha", task.assignedTo?.name ?? null].filter(Boolean).join(" · "),
-      tag: late ? (dayKey(due) === today ? "Po termíne " + clock(due) : "Po termíne") : "Dnes " + clock(due),
-      tone: late ? "red" as const : "orange" as const, rank: late ? 1 : 4 }];
+      tag: late ? (due !== null && due < now && dayKey(due) === today ? "Po termíne " + clock(due) : "Po termíne") : "Dnes " + clock(due!),
+      tone: late ? "red" as const : "orange" as const, rank: late ? 1 : 4, at: due }];
   });
 }
 
@@ -52,10 +58,24 @@ export function caseAlerts(cases: readonly MobileCaseSummary[]): AlertItem[] {
     title: [item.contact.name || "Kontakt bez mena", item.vehicle.licensePlate].filter(Boolean).join(" · "),
     detail: [item.caseNumber, item.statusLabel, item.owner.mine ? "váš prípad" : item.owner.name].filter(Boolean).join(" · "),
     tag: item.owner.id ? item.priorityLabel : item.priorityLabel + " · bez dispečera", tone: "red" as const, rank: item.owner.id ? 5 : 2,
+    at: time(item.createdAt),
   }));
 }
 
-/** Most pressing first; equal ranks keep their source order. */
+/** Most pressing first; within a rank the earliest deadline (the longest
+ * burning case) leads, then the source order. */
 export function sortAlerts(items: readonly AlertItem[]): AlertItem[] {
-  return items.map((item, index) => ({ item, index })).sort((a, b) => a.item.rank - b.item.rank || a.index - b.index).map(entry => entry.item);
+  const at = (item: AlertItem) => item.at ?? Number.POSITIVE_INFINITY;
+  return items.map((item, index) => ({ item, index })).sort((a, b) => a.item.rank - b.item.rank || at(a.item) - at(b.item) || a.index - b.index).map(entry => entry.item);
+}
+
+/** Header count and empty state. Never "all clear" unless every source
+ * answered completely: a failed source shows an error, unread pages say so. */
+export function alertSummary({ count, partial, failed }: { count: number; partial: boolean; failed: boolean }): {
+  count: string | null; empty: { title: string; subtitle: string; clear: boolean } | null;
+} {
+  const label = count || partial ? String(count) + (partial ? "+" : "") : null;
+  if (count || failed) return { count: label, empty: null };
+  return { count: label, empty: partial ? { title: "Na prvých stránkach nič", subtitle: "Ďalšie položky sa nečítali. Otvorte celý zoznam.", clear: false }
+    : { title: "Všetko je vybavené", subtitle: "Žiadne spätné volanie po termíne, úloha na dnes ani horiaci prípad.", clear: true } };
 }

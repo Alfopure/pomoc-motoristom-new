@@ -6,9 +6,10 @@ import { Tag } from "../design/detail";
 import { Group, Row, SectionHeader } from "../design/list";
 import { palette, space, type } from "../design/tokens";
 import { MobileApiError } from "../lib/api";
+import { ErrorNotice } from "../ui";
 import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import type { ShellOpeners, ShellScope } from "../shell/layers";
-import { callbackAlerts, caseAlerts, sortAlerts, taskAlerts, type AlertItem, type AlertKind } from "./model";
+import { alertSummary, callbackAlerts, caseAlerts, sortAlerts, taskAlerts, type AlertItem, type AlertKind } from "./model";
 
 const icons: Record<AlertKind, LucideIcon> = { callback: PhoneMissed, task: ClipboardList, case: Flame };
 const errorText = (error: unknown) => error instanceof MobileApiError ? error.message : "Nepodarilo sa načítať.";
@@ -16,24 +17,39 @@ export type AlertTargets = ShellOpeners & { openCallbacks: () => void };
 
 /** Reads at most one page of each source; shares the task read with Prehľad. */
 export function useAlerts(scope: ShellScope, active: boolean) {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => { if (!active) return; const timer = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(timer); }, [active]);
+  const [clock, setClock] = useState(Date.now);
+  useEffect(() => {
+    if (!active) return;
+    // Back in the foreground the clock restarts at once, not after the next tick.
+    const tick = () => setClock(Date.now()), first = setTimeout(tick, 0), timer = setInterval(tick, 30_000);
+    return () => { clearTimeout(first); clearInterval(timer); };
+  }, [active]);
   const poll = active ? 60_000 : false;
   const callbacks = useQuery({ queryKey: [...scope.homeKey, "alerts", "callbacks"], enabled: active, refetchInterval: poll, queryFn: ({ signal }) => scope.callbacks.list(null, signal) });
   const tasks = useQuery({ queryKey: [...scope.homeKey, "tasks"], enabled: active, refetchInterval: poll,
     queryFn: ({ signal }) => scope.cases.work.myTasks({ view: "assigned", category: "open", q: "" }, signal) });
   const cases = useQuery({ queryKey: [...scope.homeKey, "alerts", "urgent"], enabled: active, refetchInterval: poll,
     queryFn: ({ signal }) => scope.cases.list({ ownership: "all", ownerId: null, category: "open", status: null, priority: "urgent", q: "", cursor: null }, signal) });
+  // Fresh data is never judged against an older clock.
+  const now = Math.max(clock, callbacks.dataUpdatedAt, tasks.dataUpdatedAt, cases.dataUpdatedAt);
   const items = useMemo(() => sortAlerts([...callbackAlerts(callbacks.data?.open ?? [], now), ...taskAlerts(tasks.data?.tasks ?? [], now), ...caseAlerts(cases.data?.cases ?? [])]),
     [callbacks.data, tasks.data, cases.data, now]);
   return {
+    // Pending means no data yet, so nothing may be claimed until every source answered.
     items, loading: callbacks.isPending || tasks.isPending || cases.isPending,
+    /** A source failed; its items may be missing or out of date. */
+    failed: callbacks.isError || tasks.isError || cases.isError,
     sources: { callback: callbacks, task: tasks, case: cases },
     /** The source has further pages that were not read. */
     more: { callback: Boolean(callbacks.data?.nextCursor), task: Boolean(tasks.data?.nextCursor), case: Boolean(cases.data?.nextCursor) } satisfies Record<AlertKind, boolean>,
     partial: Boolean(callbacks.data?.nextCursor || tasks.data?.nextCursor || cases.data?.nextCursor),
     refresh: () => Promise.allSettled([callbacks.refetch(), tasks.refetch(), cases.refetch()]),
   };
+}
+type Alerts = ReturnType<typeof useAlerts>;
+const summary = (alerts: Alerts) => alertSummary({ count: alerts.items.length, partial: alerts.partial, failed: alerts.failed });
+function Retry({ alerts }: { alerts: Alerts }) {
+  return <View style={s.retry}><ErrorNotice message="Niektoré upozornenia sa nepodarilo načítať." onRetry={() => { void alerts.refresh(); }} /></View>;
 }
 
 function open(item: AlertItem, targets: AlertTargets) {
@@ -60,16 +76,19 @@ function AlertRow({ item, first, targets }: { item: AlertItem; first: boolean; t
 /** Prehľad section: the few most pressing items and a way to all of them. */
 export function AlertsPreview({ scope, active, targets, onAll }: { scope: ShellScope; active: boolean; targets: AlertTargets; onAll: () => void }) {
   const alerts = useAlerts(scope, active);
-  const shown = alerts.items.slice(0, 4);
+  const shown = alerts.items.slice(0, 4), { count, empty } = summary(alerts);
   return <>
-    <SectionHeader title="Treba riešiť" detail={alerts.loading ? null : alerts.items.length ? String(alerts.items.length) + (alerts.partial ? "+" : "") : null} />
-    {alerts.loading ? <ActivityIndicator color={palette.secondaryLabel} /> : <Group>
-      {shown.length === 0 ? <Row first title="Všetko je vybavené" subtitle="Žiadne spätné volanie po termíne, úloha na dnes ani horiaci prípad."
-        leading={<View style={[s.icon, { backgroundColor: palette.greenSoft }]}><CircleCheck size={15} strokeWidth={2.3} color={palette.greenText} accessible={false} /></View>} />
-        : shown.map((item, index) => <AlertRow key={item.key} item={item} first={index === 0} targets={targets} />)}
-      <Row title={"Všetky upozornenia" + (alerts.items.length > shown.length ? " (" + alerts.items.length + (alerts.partial ? "+" : "") + ")" : "")} tone="link"
-        onPress={onAll} trailing={<Text style={s.chevron}>›</Text>} />
-    </Group>}
+    <SectionHeader title="Treba riešiť" detail={alerts.loading ? null : count} />
+    {alerts.loading ? <ActivityIndicator color={palette.secondaryLabel} /> : <>
+      {alerts.failed && <Retry alerts={alerts} />}
+      <Group>
+        {shown.map((item, index) => <AlertRow key={item.key} item={item} first={index === 0} targets={targets} />)}
+        {empty && <Row first title={empty.title} subtitle={empty.subtitle} leading={!empty.clear ? null
+          : <View style={[s.icon, { backgroundColor: palette.greenSoft }]}><CircleCheck size={15} strokeWidth={2.3} color={palette.greenText} accessible={false} /></View>} />}
+        <Row first={shown.length === 0 && !empty} title={"Všetky upozornenia" + (alerts.items.length > shown.length || alerts.partial ? " (" + count + ")" : "")} tone="link"
+          onPress={onAll} trailing={<Text style={s.chevron}>›</Text>} />
+      </Group>
+    </>}
   </>;
 }
 
@@ -92,18 +111,22 @@ function AlertsBody({ scope, active, targets }: { scope: ShellScope; active: boo
   return <ScrollView contentContainerStyle={s.content} refreshControl={<RefreshControl refreshing={refreshing}
     onRefresh={() => { setRefreshing(true); void alerts.refresh().finally(() => setRefreshing(false)); }} />}>
     <View style={s.titleRow}><Text accessibilityRole="header" style={s.title}>Upozornenia</Text></View>
-    <Text style={s.lead}>{alerts.loading ? "Načítavam…" : alerts.items.length ? alerts.items.length + (alerts.partial ? "+" : "") + " na vybavenie, najnaliehavejšie navrchu." : "Všetko je vybavené."}</Text>
+    <Text style={s.lead}>{alerts.loading ? "Načítavam…" : alerts.failed ? "Niektoré zdroje sa nepodarilo načítať; zoznam nemusí byť úplný."
+      : alerts.items.length ? summary(alerts).count + " na vybavenie, najnaliehavejšie navrchu." : summary(alerts).empty?.title + "."}</Text>
     {sections.map(section => {
-      const source = alerts.sources[section.kind], items = alerts.items.filter(item => item.kind === section.kind);
+      const source = alerts.sources[section.kind], items = alerts.items.filter(item => item.kind === section.kind), more = alerts.more[section.kind];
       return <View key={section.kind}>
-        <SectionHeader title={section.title} detail={items.length ? String(items.length) + (alerts.more[section.kind] ? "+" : "") : null} />
-        {source.isPending ? <ActivityIndicator color={palette.secondaryLabel} /> : <Group>
-          {source.isError ? <Row first title="Nepodarilo sa načítať" subtitle={errorText(source.error) + " Potiahnite nadol pre nový pokus."} />
-            : items.length === 0 ? <Row first title="Nič na vybavenie" subtitle={section.empty} />
-              : items.map((item, index) => <AlertRow key={item.key} item={item} first={index === 0} targets={targets} />)}
-          {/* Every section leads to its full list, also past the first page read here. */}
-          <Row title={section.link} tone="link" onPress={() => section.open(targets)} trailing={<Text style={s.chevron}>›</Text>} />
-        </Group>}
+        <SectionHeader title={section.title} detail={items.length || more ? String(items.length) + (more ? "+" : "") : null} />
+        {source.isPending ? <ActivityIndicator color={palette.secondaryLabel} /> : <>
+          {source.isError && <View style={s.retry}><ErrorNotice message={errorText(source.error)} onRetry={() => { void source.refetch(); }} /></View>}
+          <Group>
+            {items.map((item, index) => <AlertRow key={item.key} item={item} first={index === 0} targets={targets} />)}
+            {items.length === 0 && !source.isError && <Row first title={more ? "Na prvej stránke nič" : "Nič na vybavenie"}
+              subtitle={more ? "Ďalšie položky sa nečítali. Otvorte celý zoznam." : section.empty} />}
+            {/* Every section leads to its full list, also past the first page read here. */}
+            <Row first={items.length === 0 && source.isError} title={section.link} tone="link" onPress={() => section.open(targets)} trailing={<Text style={s.chevron}>›</Text>} />
+          </Group>
+        </>}
       </View>;
     })}
     <Text style={s.note}>Vychádza z prvej stránky spätných volaní, vašich otvorených úloh a horiacich prípadov celej organizácie. Obnovuje sa každú minútu.</Text>
@@ -123,4 +146,5 @@ const s = StyleSheet.create({
   rowMeta: { flexDirection: "row", alignItems: "center", gap: 6, overflow: "hidden" },
   rowDetail: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, flexShrink: 1 },
   chevron: { fontSize: 20, color: palette.tertiaryLabel },
+  retry: { paddingHorizontal: space.l, paddingBottom: space.s },
 });
