@@ -18,7 +18,8 @@ type Props = {
   active: boolean;
   onOpenCase?: (id: string) => void;
   onLeave?: () => void;
-  openTaskRequest?: { taskId: string; nonce: number };
+  /** A null task opens the list with the default filter. */
+  openTaskRequest?: { taskId: string | null; nonce: number };
 };
 
 /** Root keeps this account-scoped screen mounted across tab changes. */
@@ -36,9 +37,10 @@ function MyTasksWorkspace({ store, queryKey, profileId, active, onOpenCase, onLe
   const [q, setQuery] = useState("");
   const [handledRequest, setHandledRequest] = useState<string | null>(null);
   const requestedId = openTaskRequest?.taskId;
-  const requestKey = requestedId && /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(requestedId) ? JSON.stringify([requestedId, openTaskRequest.nonce]) : null;
+  const requestKey = openTaskRequest && (requestedId === null || requestedId && /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(requestedId))
+    ? JSON.stringify([requestedId, openTaskRequest.nonce]) : null;
   const pendingRequest = requestKey !== null && requestKey !== handledRequest;
-  if (pendingRequest && requestedId) {
+  if (pendingRequest && requestedId !== undefined) {
     setHandledRequest(requestKey);
     setView("assigned"); setCategory("open"); setSearch(""); setQuery(""); setSelected(requestedId);
   }
@@ -73,7 +75,7 @@ function MyTasksWorkspace({ store, queryKey, profileId, active, onOpenCase, onLe
   const canShow = !pendingRequest && !pendingSearch && !query.isError;
   return <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { if (listActive && !pendingSearch) void query.refetch(); }} />}>
-    <Text style={styles.heading}>Moje úlohy</Text>
+    <Text accessibilityRole="header" style={styles.heading}>Moje úlohy</Text>
     <Text style={styles.muted}>Úlohy naprieč prípadmi, ktoré riešite alebo kontrolujete.</Text>
     <View style={s.search}><Search size={16} color={colors.muted} accessible={false} />
       <TextInput accessibilityLabel="Hľadať úlohu podľa názvu" placeholder="Hľadať podľa názvu úlohy" placeholderTextColor={colors.muted} value={search} onChangeText={setSearch} maxLength={200} autoCorrect={false} style={s.searchInput} returnKeyType="search" />

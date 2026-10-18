@@ -63,6 +63,9 @@ describe("shell navigation", () => {
     expect(shellLocation({ ...initialShell, tab: "moduly", opened: "ulohy" })).toBe("ulohy");
     expect(dispatchView({ ...initialShell, tab: "pripady", search: true })).toBe("search");
     expect(dispatchView({ ...initialShell, search: true, account: true })).toBe("account");
+    expect(dispatchView({ ...initialShell, alerts: true })).toBe("alerts");
+    expect(shellBack({ ...initialShell, alerts: true })).toMatchObject({ alerts: false });
+    expect(openModule({ ...initialShell, alerts: true }, ["hovory"], "hovory", "callbacks")).toMatchObject({ alerts: false, tab: "hovory", hovory: "callbacks" });
   });
   it("opens modules in their tab or inside Moduly and keeps stacks per tab", () => {
     const tools = openModule(initialShell, pins, "nastroje");

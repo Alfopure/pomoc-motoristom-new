@@ -33,7 +33,7 @@ function TaskList({ store, caseId, queryKey, active, onBack, onNew, onOpen }: { 
   const canShow = !query.isError || query.isFetchNextPageError;
   const items = [...new Map(query.data?.pages.flatMap(page => page.tasks).map(item => [item.id, item]) ?? []).values()];
   return <ScrollView contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { void query.refetch(); }} />}>
-    <Text style={styles.heading}>Úlohy prípadu</Text>
+    <Text accessibilityRole="header" style={styles.heading}>Úlohy prípadu</Text>
     <Button label={state.status === "uncertain" ? "Overiť vytvorenie úlohy" : state.input.title && state.status !== "saved" ? "Rozpracovaná úloha" : "Nová úloha"}
       disabled={state.status === "editing" && !hasDraft && (!query.data?.pages[0]?.capabilities.create || query.isError)} onPress={onNew} />
     {state.status === "uncertain" && <Card><Text style={styles.text}>Skontrolujte, či už bola úloha vytvorená. Rovnaký názov sám o sebe nepotvrdzuje výsledok odoslania.</Text></Card>}
@@ -57,7 +57,7 @@ function TaskForm({ store, caseId, queryKey, active, draft, onBack, onSaved }: {
   const query = useQuery({ queryKey: [...queryKey, "task-create-capability", caseId], queryFn: ({ signal }) => store.api.tasks(caseId, null, signal), enabled: active });
   useEffect(() => { if (state.error) scroll.current?.scrollTo({ y: 0, animated: true }); }, [state.error]);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}><ScrollView ref={scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}>
-    <Text style={styles.heading}>Nová úloha</Text>
+    <Text accessibilityRole="header" style={styles.heading}>Nová úloha</Text>
     {state.error && <ErrorNotice message={state.error} />}
     {state.status === "uncertain" && <><Button label="Skontrolovať zoznam úloh" secondary onPress={back} />{state.reviewed && <Button label="Úlohu som nenašiel – povoliť opakovanie" secondary onPress={() => draft.allowRetry()} />}</>}
     <View><Text style={styles.label}>Názov úlohy</Text><TextInput accessibilityLabel="Názov úlohy" value={state.input.title} onChangeText={title => draft.edit({ title })} editable={editing} multiline maxLength={500} style={styles.input} /></View>
@@ -108,7 +108,7 @@ export function TaskDetail({ store, taskId, queryKey, active, profileId, onBack,
   const visibleMessages = orderedMessages(messages.data?.pages ?? []);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}><ScrollView ref={scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching || messages.isRefetching} onRefresh={() => { void query.refetch(); void messages.refetch(); }} />}>
-    <Text style={styles.heading}>Detail úlohy</Text>
+    <Text accessibilityRole="header" style={styles.heading}>Detail úlohy</Text>
     {created && <Card><Text accessibilityRole="alert" style={styles.subheading}>Úloha je vytvorená.</Text></Card>}
     {error && <ErrorNotice message={error} />}{workflow.error && <><ErrorNotice message={workflow.error} /><Button label="Obnoviť detail úlohy" secondary disabled={query.isFetching} onPress={() => { void query.refetch(); }} /></>}{message.error && <ErrorNotice message={message.error} />}
     {workflow.status === "uncertain" && <Button label="Overiť pôvodnú zmenu stavu" onPress={() => { void retained.workflow.reconcile(); }} />}

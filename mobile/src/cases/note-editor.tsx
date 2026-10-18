@@ -35,7 +35,7 @@ export function CaseNoteForm({ draft, active, onBack, onSaved }: { active: boole
   }
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}>
-      <Text style={styles.heading}>Pridať poznámku</Text>
+      <Text accessibilityRole="header" style={styles.heading}>Pridať poznámku</Text>
       <Text style={styles.text}>Poznámka sa pridá do histórie prípadu spolu s vaším menom a časom.</Text>
       <View><Text style={styles.label}>Poznámka</Text><TextInput accessibilityLabel="Nová poznámka prípadu" value={state.note} onChangeText={value => draft.edit(value)}
         editable={!locked} multiline maxLength={10_000} textAlignVertical="top" style={[styles.input, { minHeight: 150 }]} /></View>

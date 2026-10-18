@@ -93,7 +93,7 @@ export function Handoffs({ draft, active, onBack }: {
       keyboardDismissMode="on-drag"
       contentContainerStyle={styles.content}>
 
-      <Text style={styles.heading}>Odovzdanie prípadu</Text>
+      <Text accessibilityRole="header" style={styles.heading}>Odovzdanie prípadu</Text>
 
       {state.receipt && <Card>
         <Text accessibilityRole="alert" style={styles.subheading}>Odovzdanie uložené</Text>

@@ -16,7 +16,7 @@ export function CaseOwnerForm({ draft, active, onBack, onSaved }: { draft: CaseO
   const context = state.context, editable = state.status === "editing" && !state.refreshing;
   const selected = context?.targets.find(item => item.id === state.selectedId);
   return <ScrollView ref={scroll} contentContainerStyle={styles.content}>
-    <Text style={styles.heading}>Dispečer prípadu</Text>
+    <Text accessibilityRole="header" style={styles.heading}>Dispečer prípadu</Text>
     {state.receipt && <Card><Text accessibilityRole="alert" style={styles.subheading}>Priradenie je uložené.</Text><Text style={styles.muted}>Obnova detailu neopakuje priradenie.</Text></Card>}
     {state.error && <ErrorNotice message={state.error} />}
     {state.status === "uncertain" && <Button label="Overiť pôvodné priradenie" onPress={() => { void draft.reconcile(); }} />}

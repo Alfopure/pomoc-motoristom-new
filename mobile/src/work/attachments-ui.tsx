@@ -56,7 +56,7 @@ export function Attachments({ store, caseId, queryKey, active, visible: pageVisi
   useShellBack(active, form ? "Prílohy" : "Prípad", back, saving || busy);
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
     <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={query.isRefetching} onRefresh={() => { if (active) void query.refetch(); }} />}>
-      <Text style={styles.heading}>{form ? "Pridať prílohu" : "Prílohy prípadu"}</Text>
+      <Text accessibilityRole="header" style={styles.heading}>{form ? "Pridať prílohu" : "Prílohy prípadu"}</Text>
       {error && <ErrorNotice message={error} />}{state.error && <ErrorNotice message={state.error} />}
       {state.status === "saved" && <Card><Text accessibilityRole="alert" style={styles.subheading}>Príloha je uložená.</Text><Text style={styles.text}>{state.receipt?.attachment.fileName}</Text></Card>}
       {state.status === "uncertain" && (state.coldMissingFile ? <Card>

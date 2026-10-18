@@ -4,22 +4,24 @@ import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { ClipboardList, FolderOpen, Phone, PhoneMissed, Search, type LucideIcon } from "lucide-react-native";
 import type { MobileActiveCall } from "../../../src/lib/mobile-api";
 import type { MobileCallbackSummary } from "../../../src/lib/mobile-callbacks";
-import type { CasesApi } from "../cases/api";
 import { palette, radius, space, type } from "../design/tokens";
 import { callStatus, formatNumber } from "../lib/display";
 import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import { Group, Row, SectionHeader } from "../design/list";
 import { ModulesMark, shellStyles } from "./parts";
 import type { PresenceTone } from "./top-bar";
+import type { ShellScope } from "./layers";
+import { AlertsPreview, type AlertTargets } from "../alerts/ui";
 
 export type HomeTarget = "console" | "callbacks" | "cases" | "tasks";
 /** Organization-scoped reads; absent until the workspace scope is verified. */
-export type HomeScope = { cases: CasesApi; homeKey: readonly unknown[] };
+export type HomeScope = ShellScope;
 type Props = {
   active: boolean; phone: { label: string; tone: PresenceTone; detail: string };
   callbacks: UseQueryResult<MobileCallbackSummary>; activeCalls: MobileActiveCall[];
   scope: HomeScope | null; scopeNotice: string | null; tip: boolean; onDismissTip: () => void;
   onOpen: (target: HomeTarget) => void; onCall: (id: string) => void; onRefresh: () => void; onSearch: () => void;
+  alerts: { scope: ShellScope; targets: AlertTargets; onAll: () => void } | null;
 };
 const toneColors: Record<PresenceTone, [string, string]> = {
   green: [palette.greenSoft, palette.greenText], orange: [palette.orangeSoft, palette.orangeText], red: [palette.redSoft, palette.redText], gray: [palette.fill, palette.secondaryLabel],
@@ -31,7 +33,7 @@ export function todayLabel(now = new Date()): string {
 }
 
 /** What needs attention now: live calls first, then one tile per module. */
-export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scopeNotice, tip, onDismissTip, onOpen, onCall, onRefresh, onSearch }: Props) {
+export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scopeNotice, tip, onDismissTip, onOpen, onCall, onRefresh, onSearch, alerts }: Props) {
   const counts = callbacks.data?.counts;
   return <ScrollView contentContainerStyle={s.content} refreshControl={<RefreshControl refreshing={false} onRefresh={onRefresh} />}>
     <View style={s.titleRow}><Text accessibilityRole="header" style={s.title}>Prehľad</Text><Text style={s.date}>{todayLabel()}</Text></View>
@@ -56,6 +58,7 @@ export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scope
       </>}
       <Tile title="Telefón" icon={Phone} colors={toneColors[phone.tone]} value={phone.label} small detail={phone.detail} onPress={() => onOpen("console")} />
     </View>
+    {alerts && <AlertsPreview scope={alerts.scope} active={active} targets={alerts.targets} onAll={alerts.onAll} />}
     {tip && <View style={s.tip}>
       <ModulesMark size={30} />
       <View style={{ flex: 1, gap: 2 }}><Text style={s.tipTitle}>Všetky moduly sú pod žltou ikonou Moduly</Text>
