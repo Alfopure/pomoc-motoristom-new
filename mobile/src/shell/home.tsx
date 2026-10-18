@@ -1,14 +1,15 @@
 import type { ReactNode } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import { ClipboardList, FolderOpen, Phone, PhoneMissed, type LucideIcon } from "lucide-react-native";
+import { ClipboardList, FolderOpen, Phone, PhoneMissed, Search, type LucideIcon } from "lucide-react-native";
 import type { MobileActiveCall } from "../../../src/lib/mobile-api";
 import type { MobileCallbackSummary } from "../../../src/lib/mobile-callbacks";
 import type { CasesApi } from "../cases/api";
 import { palette, radius, space, type } from "../design/tokens";
 import { callStatus, formatNumber } from "../lib/display";
 import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
-import { Group, ModulesMark, Row, SectionHeader, shellStyles } from "./parts";
+import { Group, Row, SectionHeader } from "../design/list";
+import { ModulesMark, shellStyles } from "./parts";
 import type { PresenceTone } from "./top-bar";
 
 export type HomeTarget = "console" | "callbacks" | "cases" | "tasks";
@@ -18,7 +19,7 @@ type Props = {
   active: boolean; phone: { label: string; tone: PresenceTone; detail: string };
   callbacks: UseQueryResult<MobileCallbackSummary>; activeCalls: MobileActiveCall[];
   scope: HomeScope | null; scopeNotice: string | null; tip: boolean; onDismissTip: () => void;
-  onOpen: (target: HomeTarget) => void; onCall: (id: string) => void; onRefresh: () => void;
+  onOpen: (target: HomeTarget) => void; onCall: (id: string) => void; onRefresh: () => void; onSearch: () => void;
 };
 const toneColors: Record<PresenceTone, [string, string]> = {
   green: [palette.greenSoft, palette.greenText], orange: [palette.orangeSoft, palette.orangeText], red: [palette.redSoft, palette.redText], gray: [palette.fill, palette.secondaryLabel],
@@ -30,10 +31,13 @@ export function todayLabel(now = new Date()): string {
 }
 
 /** What needs attention now: live calls first, then one tile per module. */
-export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scopeNotice, tip, onDismissTip, onOpen, onCall, onRefresh }: Props) {
+export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scopeNotice, tip, onDismissTip, onOpen, onCall, onRefresh, onSearch }: Props) {
   const counts = callbacks.data?.counts;
   return <ScrollView contentContainerStyle={s.content} refreshControl={<RefreshControl refreshing={false} onRefresh={onRefresh} />}>
     <View style={s.titleRow}><Text accessibilityRole="header" style={s.title}>Prehľad</Text><Text style={s.date}>{todayLabel()}</Text></View>
+    <Pressable accessibilityRole="search" accessibilityLabel="Hľadať prípad, EČV, telefón alebo modul" onPress={onSearch} hitSlop={{ top: 3, bottom: 3 }} style={({ pressed }) => [s.search, pressed && { opacity: 0.7 }]}>
+      <Search size={16} color={palette.secondaryLabel} accessible={false} /><Text numberOfLines={1} style={s.searchText}>Hľadať prípad, EČV, telefón, modul…</Text>
+    </Pressable>
     {activeCalls.length > 0 && <>
       <SectionHeader title="Hovory na vašom účte" detail={activeCalls.length > 1 ? String(activeCalls.length) : null} />
       <Group>{activeCalls.map((call, index) => <Row key={call.id} first={index === 0} title={call.name || formatNumber(call.number)}
@@ -97,6 +101,8 @@ const s = StyleSheet.create({
   titleRow: { flexDirection: "row", alignItems: "baseline", gap: space.s, paddingHorizontal: space.l, paddingTop: 2, paddingBottom: space.s, flexWrap: "wrap" },
   title: { ...type.title, color: palette.label },
   date: { ...type.subhead, fontWeight: "500", color: palette.secondaryLabel },
+  search: { marginHorizontal: space.l, marginBottom: space.xs, minHeight: 38, borderRadius: 19, backgroundColor: palette.fill, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: space.m },
+  searchText: { fontSize: 16, color: palette.secondaryLabel, flex: 1 },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 10, paddingHorizontal: space.l, paddingTop: space.s },
   tile: { flexBasis: "47%", flexGrow: 1, minHeight: 92, backgroundColor: palette.card, borderRadius: radius.l, paddingHorizontal: space.m, paddingVertical: 11, justifyContent: "space-between", gap: space.s },
   tileHead: { flexDirection: "row", alignItems: "center", gap: 6 },

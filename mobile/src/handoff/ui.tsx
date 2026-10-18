@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { AppState, KeyboardAvoidingView, Platform, ScrollView, Share, Text, TextInput, View } from 'react-native';
 import { useAndroidBack } from "../lib/use-android-back";
+import { useShellBack } from "../shell/back";
 import type { MobileHandoffInput } from '../../../src/lib/mobile-api';
 import { Button, Card, ErrorNotice, Loading, styles } from '../ui';
 import { HandoffDraft, previewSnapshot } from './draft';
@@ -25,6 +26,7 @@ export function Handoffs({ draft, active, onBack }: {
   const state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot), scroll = useRef<ScrollView>(null);
   const back = () => { if (!draft.busy) onBack(); };
   useAndroidBack(active, back, draft.busy);
+  useShellBack(active, 'Prípad', back, draft.busy);
   const [shareError, setShareError] = useState<string | null>(null), [expanded, setExpanded] = useState<string | null>(null), [sharing, setSharing] = useState(false);
   useEffect(() => {
     if (active) {
@@ -92,11 +94,6 @@ export function Handoffs({ draft, active, onBack }: {
       contentContainerStyle={styles.content}>
 
       <Text style={styles.heading}>Odovzdanie prípadu</Text>
-      <Button
-        label="Späť na prípad"
-        secondary
-        onPress={back}
-        disabled={draft.busy} />
 
       {state.receipt && <Card>
         <Text accessibilityRole="alert" style={styles.subheading}>Odovzdanie uložené</Text>

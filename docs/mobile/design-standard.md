@@ -25,8 +25,11 @@ modul do nej zapadne bez nového dizajnu.
 ## 2. Kostra appky
 
 **Horná lišta** (`mobile/src/shell/top-bar.tsx`): vľavo stav operátora
-(Dostupný / Pauza / Na hovore…, ťuk otvorí Ústredňu) alebo šípka Späť; vpravo
-**☆ Do lišty** pri module otvorenom z Modulov, štítok TEST a žltý avatar (Účet).
+(Dostupný / Pauza / Na hovore…, ťuk otvorí Ústredňu) alebo šípka Späť s názvom
+cieľa (‹ Prípady, ‹ Prípad, ‹ Hovory, ‹ Moduly); vpravo **☆ Do lišty** pri
+module otvorenom z Modulov, štítok TEST a žltý avatar (Účet). Podstránky modulov
+(detail, formulár, prílohy, úlohy…) nemajú vlastné tlačidlo Späť v obsahu –
+zaregistrujú ho cez `useShellBack(active, "Prípady", back, ukladanie)`.
 
 **Spodná lišta** (`mobile/src/shell/tab-bar.tsx`): `Prehľad · 3 vlastné moduly · Moduly`.
 
@@ -67,7 +70,11 @@ modulu (detail prípadu, detail hovoru) → späť v module; účet → zatvorí
 modul v Moduloch → Moduly; iná záložka vrátane všetkých častí Hovorov → Prehľad;
 Prehľad → systém.
 
-**Prehľad** (`home.tsx`): hovory na účte (ak sú), dlaždice Spätné volania,
+**Hľadať** (`search.tsx`): pole na Prehľade otvorí obrazovku Hľadať. Od dvoch
+znakov hľadá v prípadoch celej organizácie (číslo, meno, EČV, telefón),
+v hovoroch a v moduloch; ťuk otvorí detail prípadu, detail hovoru alebo modul.
+
+**Prehľad** (`home.tsx`): hľadanie, hovory na účte (ak sú), dlaždice Spätné volania,
 Prípady, Moje úlohy a Telefón; ťuk otvorí príslušný modul. Jednorazový tip
 ukáže, kde sú Moduly; zmizne po ťuknutí na OK alebo po prvej návšteve Modulov.
 
@@ -126,7 +133,9 @@ Hodnoty sú v `mobile/src/design/tokens.ts`; obrazovky nepoužívajú vlastné.
 
 ## 5. Komponenty
 
-`mobile/src/shell/parts.tsx` a priamo použité vzory:
+`mobile/src/design/list.tsx` (skupina, riadok, hlavička sekcie), `mobile/src/design/detail.tsx`
+(hlavička detailu, rad akcií, riadok údaj–hodnota, ikonové tlačidlo, štítok)
+a `mobile/src/shell/parts.tsx` (prvky kostry):
 
 - **Riadok (object cell)** – 1–3 riadky textu, voliteľný farebný pruh (priorita)
   alebo ikona 28 b, čas/suma vpravo, celý riadok je ťuková plocha; najviac jedna
@@ -140,9 +149,10 @@ Hodnoty sú v `mobile/src/design/tokens.ts`; obrazovky nepoužívajú vlastné.
 
 Prehľad · Moduly · Zoznam · Kniha · Detail objektu · Tabuľa · Kalendár ·
 Mapa + list · Výjazd (krokovanie) · Nahlásenie s fotkami · Formulár v liste ·
-Hovor. Zoznam používajú Hovory/História, Prípady a Moje úlohy; ostatné
-šablóny vzniknú s modulmi pilierov 2 a 3. Detaily prípadu a hovoru sa
-preklopia do šablóny Detail v ďalšej etape.
+Hovor. Zoznam používajú Hovory/História, Prípady a Moje úlohy. **Detail**
+(hlavička so štítkami, rad 2–4 akcií s popisom, skupiny riadkov údaj–hodnota
+s ikonami Kopírovať/Mapa/Navigovať, Súvisiace, Udalosti) používa detail
+prípadu a detail hovoru. Ostatné šablóny vzniknú s modulmi pilierov 2 a 3.
 
 ## 7. Technické rozhodnutia
 
@@ -167,7 +177,9 @@ preklopia do šablóny Detail v ďalšej etape.
 3. Každá akcia má viditeľné tlačidlo s textom; gesto je len skratka.
 4. Ťukacie plochy ≥ 44 b, kontrast textu ≥ 4,5 : 1, VoiceOver popisy ikon.
 5. Overlay (okno, výber) používa `usePhoneOverlay`, aby ho zatvoril hovor.
-6. Pri PR: snímky 390 a 320 b, kontrola zoznamu Expo „native slop“, existujúce testy prejdú.
+6. Podstránka modulu nemá tlačidlo Späť v obsahu; volá `useShellBack` s názvom cieľa
+   a počas ukladania ho vypne. Android Späť ostáva v `useAndroidBack` tej istej obrazovky.
+7. Pri PR: snímky 390 a 320 b, kontrola zoznamu Expo „native slop“, existujúce testy prejdú.
 
 ## 9. Kritériá prijatia
 
@@ -181,9 +193,9 @@ lišta a jej úprava fungujú ťuknutím bez gest.
 | --- | --- | --- |
 | 0 | štandard v repozitári, tokeny | hotové |
 | 1–2 | kostra: horná a spodná lišta, Prehľad, Moduly, úprava lišty, register modulov | hotové (TEST) |
-| 3 | Hovory, Prípady, Úlohy, Nástroje, Účet v novej kostre; kompaktné zoznamy | čiastočne: zoznamy hotové, detaily a formuláre ďalej |
+| 3 | Hovory, Prípady, Úlohy, Nástroje, Účet v novej kostre; kompaktné zoznamy; detail prípadu a hovoru; Späť v hornej lište | hotové okrem formulárov |
 | 4 | šablóny Kniha, Tabuľa, Kalendár, Mapa + list, Výjazd, Nahlásenie | plán |
-| 5 | serverový zoznam modulov a preferencie, globálne hľadanie, lišta hovoru nad lištou, doladenie | plán |
+| 5 | globálne hľadanie (hotové); serverový zoznam modulov a preferencie, lišta hovoru nad lištou, doladenie | čiastočne |
 
 ## 11. Zdroje
 

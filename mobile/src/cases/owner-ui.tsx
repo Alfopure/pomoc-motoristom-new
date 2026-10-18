@@ -4,17 +4,19 @@ import { CaseOwnerDraft } from "./owner";
 import { Button, Card, ErrorNotice, Loading, styles } from "../ui";
 import { Choice } from "./form";
 import { useAndroidBack } from "../lib/use-android-back";
+import { useShellBack } from "../shell/back";
 export function CaseOwnerForm({ draft, active, onBack, onSaved }: { draft: CaseOwnerDraft; active: boolean; onBack: () => void; onSaved: () => void }) {
   const state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot), scroll = useRef<ScrollView>(null);
   const back = () => { if (draft.snapshot().status !== "saving") onBack(); };
   useAndroidBack(active, back, state.status === "saving");
+  useShellBack(active, "Prípad", back, state.status === "saving");
   useEffect(() => { draft.setActive(active); if (active) void draft.refresh(); return () => draft.setActive(false); }, [active, draft]);
   useEffect(() => { if (state.status === "saved") { onSaved(); if (active) void draft.refresh(); } }, [active, state.status, onSaved, draft]);
   useEffect(() => { if (active && (state.error || state.status === "saved")) scroll.current?.scrollTo({ y: 0, animated: false }); }, [active, state.error, state.status]);
   const context = state.context, editable = state.status === "editing" && !state.refreshing;
   const selected = context?.targets.find(item => item.id === state.selectedId);
   return <ScrollView ref={scroll} contentContainerStyle={styles.content}>
-    <Button label="Späť na detail" secondary onPress={back} disabled={state.status === "saving"} /><Text style={styles.heading}>Dispečer prípadu</Text>
+    <Text style={styles.heading}>Dispečer prípadu</Text>
     {state.receipt && <Card><Text accessibilityRole="alert" style={styles.subheading}>Priradenie je uložené.</Text><Text style={styles.muted}>Obnova detailu neopakuje priradenie.</Text></Card>}
     {state.error && <ErrorNotice message={state.error} />}
     {state.status === "uncertain" && <Button label="Overiť pôvodné priradenie" onPress={() => { void draft.reconcile(); }} />}

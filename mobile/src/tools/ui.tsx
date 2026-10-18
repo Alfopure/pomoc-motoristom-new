@@ -5,7 +5,8 @@ import type { CasesApi } from "../cases/api";
 import { CaseMapFrame } from "../cases/map-frame";
 import { CasePlacePicker } from "../cases/case-place-picker";
 import { useAndroidBack } from "../lib/use-android-back";
-import { Button, Card, colors, styles } from "../ui";
+import { useShellBack } from "../shell/back";
+import { Card, colors, styles } from "../ui";
 import type { ToolsApi } from "./api";
 import { VehicleLookup } from "./lookup";
 import { RouteTool, type ToolMapPick, type ToolMapView } from "./route";
@@ -49,6 +50,7 @@ function ScopedToolsWorkspace({ api, maps, scopeKey, active, visible, mapBlocked
   }, []);
   const back = () => { if (tool === "home") onClose(); else { closeMap(); setNotice(null); setTool("home"); } };
   useAndroidBack(foreground && !map, back);
+  useShellBack(foreground && tool !== "home", "Nástroje", back);
   function openMap(value: MapContent) {
     if (!context.current.active || !context.current.visible) return;
     if (context.current.mapBlocked) { setNotice("Počas hovoru zostáva ovládanie telefónu v popredí. Mapu môžete otvoriť po ukončení hovoru."); return; }
@@ -59,7 +61,6 @@ function ScopedToolsWorkspace({ api, maps, scopeKey, active, visible, mapBlocked
   return <>
     <KeyboardAvoidingView style={visible ? { flex: 1 } : s.hidden} behavior={Platform.OS === "ios" ? "padding" : undefined}>
       <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-        {tool !== "home" && <Button label="Späť na nástroje" secondary onPress={back} />}
         <Text accessibilityRole="header" style={styles.heading}>{tool === "home" ? "Nástroje" : entries.find(entry => entry.id === tool)?.title}</Text>
         {notice && <Card><Text accessibilityRole="alert" style={styles.text}>{notice}</Text></Card>}
         {tool === "home" && <>
