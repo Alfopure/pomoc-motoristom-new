@@ -51,9 +51,13 @@ On 2026-10-03 the owner explicitly removed the restriction to individual tester 
 
 ### What this project must never touch
 
-The retired VIPTel original: Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispatching-old`, `dev.dispecing.linkapomoci.sk`, and the previous telephony provider with its listener host.
+On 2026-10-18 the owner had the retired VIPTel original removed: Vercel `pomoc-motoristom-dispatching-old` with `dev.dispecing.linkapomoci.sk`, and its tables in Supabase `sjcsrygkkmersoczpunh`. Its repository `Alfopure/pomoc-motoristom-dispecing` is deprecated and scheduled for deletion. Do not recreate any of them. The previous telephony provider and its listener host stay out of scope. Older documents may still name these resources.
 
-That Supabase project is **not** dormant. It also holds the Watchdog vehicle-handover application — 10 254 `rental_photos` rows and 10 320 files in storage — so it is somebody's live database, not an old copy waiting to be deleted.
+Supabase `sjcsrygkkmersoczpunh` itself was **not** deleted and must not be. It is now only the database of a separate live application of the same client: the Polish vehicle-handover app (`Alfopure/Pomoc-Motoristom`, Vercel `pomoc-motoristom`) with its rentals, about 12 900 photo rows and their files in storage. It is not Watchdog. This application must never read, write or migrate it.
+
+Watchdog (Waze alerts) is another separate application with its own Supabase project `nkhrzdftvskgcwzenfnr`, Vercel project `watch-dog` and repository `Alfopure/watchDog`. It is also out of this application's scope.
+
+The standalone AI-demo Vercel project `pomoc-motoristom-aidemo`, which was connected to the production database, was deleted on 2026-10-18. The AI demo is part of this application. Do not create additional copies of this application that connect to the production database.
 
 ### TEST handoff and owner approval
 

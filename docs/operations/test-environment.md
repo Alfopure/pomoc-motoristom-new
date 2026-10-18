@@ -21,7 +21,7 @@ Konfigurácia od 2026-09-21 oddeľuje nové Preview nasadenia vrátane vetvy `de
 
 Obe databázy sú vo Frankfurte (`eu-central-1`). Vercel projekt je `pomoc-motoristom-dispatching` (`prj_DN3smSO1EbGowAmw3nHLQUYoSVJG`, tím `team_56GjBnBw6zGSG83LJAnQCB8T`, región `fra1`).
 
-Kanonická adresa testu je `https://test.dispecing.linkapomoci.sk`, určená výhradne pre Preview vetvy `dev`. [Generovaný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) zostáva záložnou adresou. `dispecing-test.vercel.app` je napriek názvu produkčný alias. `dev.dispecing.linkapomoci.sk` patrí odstavenému VIPTel projektu a nesmie sa použiť. Rovnako sa nesmie čítať ani meniť Supabase `sjcsrygkkmersoczpunh`: obsahuje inú živú aplikáciu.
+Kanonická adresa testu je `https://test.dispecing.linkapomoci.sk`, určená výhradne pre Preview vetvy `dev`. [Generovaný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) zostáva záložnou adresou. `dispecing-test.vercel.app` je napriek názvu produkčný alias. `dev.dispecing.linkapomoci.sk` zanikla 18. 10. 2026 spolu s VIPTel projektom a nesmie sa znovu použiť. Supabase `sjcsrygkkmersoczpunh` je databáza samostatnej PL aplikácie na odovzdávanie vozidiel, preto sa nesmie čítať ani meniť.
 
 Vercel cieľ **Development** sa pri oddelení nemenil. Lokálny `.env.local` musí vývojár výslovne naplniť testovacími URL a kľúčmi; staré súbory ani `vercel env pull` bez správneho cieľa nedokazujú izoláciu. Všetky Preview zdieľajú jednu testovaciu databázu, takže ich zápisy vidia ostatní testujúci.
 
