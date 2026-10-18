@@ -38,6 +38,8 @@ import { pinsFull, replacingPin, withPin, withoutPin } from "./pins";
 import { ShellPreferences, shellPreferencesKey } from "./preferences";
 import { createShellPreferencesStorage } from "./preferences-storage";
 import { DockTabBar } from "./tab-bar";
+import { CALL_BAR_SPACE, CallBar, callBarCall, type CallBarCall } from "./call-bar";
+import { useKeyboardShown } from "./keyboard";
 import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
 
 type Props = {
@@ -82,6 +84,13 @@ export function DispatchShell(props: Props) {
   const callTarget = callSelection?.view === view ? callSelection.target : null;
   const consoleQuery = useQuery({ queryKey: [...queryKey, "console", identity.profileId], queryFn: ({ signal }) => api.console(identity.profileId, signal),
     enabled: active, refetchInterval: active ? 30_000 : false });
+  const keyboard = useKeyboardShown();
+  // A session that ended in this phone never runs again, though the server may list it for a while.
+  const phoneSession = (phoneState.call?.sessionId ?? phoneState.termination ?? null)?.toLowerCase() ?? null;
+  const [sessions, setSessions] = useState<{ current: string | null; ended: string[] }>({ current: phoneSession, ended: [] });
+  if (sessions.current !== phoneSession) setSessions({ current: phoneSession, ended: sessions.current ? [...sessions.ended, sessions.current].slice(-20) : sessions.ended });
+  const refetchConsole = consoleQuery.refetch;
+  useEffect(() => { if (sessions.ended.length) void refetchConsole(); }, [sessions.ended, refetchConsole]);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 2400); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => { if (view === "modules" && preferences.loaded && !preferences.tipDismissed) prefs.dismissTip(); }, [view, preferences.loaded, preferences.tipDismissed, prefs]);
 
@@ -122,8 +131,17 @@ export function DispatchShell(props: Props) {
   const sheetModule = sheet.value && sheet.value.kind !== "edit" ? sheet.value.id : null;
   const tabs = barTabs(pins);
   const hovoryVisible = (view === "console" || view === "history" || view === "callbacks") && !callTarget;
+  // The bar lists calls on the account outside this phone; the call panel shows the phone's own.
+  const barCall = callBarCall(consoleQuery.data?.activeCalls ?? [], phoneSession ? [phoneSession, ...sessions.ended] : sessions.ended);
+  // Ústredňa and the call's own detail already show it; with the keyboard up it steps aside.
+  const callBar = barCall && !keyboard && !(view === "console" && !callTarget) && !(callTarget?.kind === "session" && callTarget.id === barCall.id.toLowerCase()) ? barCall : null;
+  const openBarCall = (call: CallBarCall) => {
+    if (call.count > 1 || !draftId(call.id)) { navigate("hovory", "console"); return; }
+    go(openModule(nav, pins, "hovory", "history"));
+    setCallSelection({ target: { kind: "session", id: call.id.toLowerCase() }, view: "history" });
+  };
   // Larger text or a taller system bar grows the floating bar; content ends above it.
-  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
+  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM) + (callBar ? CALL_BAR_SPACE : 0);
   // A module sub-screen (detail, form) owns Back first; then account, then the module opened in Moduly.
   const layerOpen = nav.account || nav.search || nav.alerts;
   const left = moduleBack && !layerOpen ? { kind: "back" as const, label: moduleBack.label, onPress: moduleBack.onBack, disabled: moduleBack.disabled }
@@ -169,6 +187,7 @@ export function DispatchShell(props: Props) {
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} />
     </View></ShellBackContext.Provider>
+    {callBar && <CallBar call={callBar} active={active} onPress={() => openBarCall(callBar)} />}
     <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting }} showAdd={pins.length < PIN_LIMIT}
       onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => sheet.open({ kind: "edit" })} />
     <Sheet visible={sheet.value !== null} large={sheet.value?.kind === "edit"} onClose={sheet.close}
@@ -197,7 +216,7 @@ export function DispatchShell(props: Props) {
         <Row title="Upraviť lištu…" leading={<View style={s.menuIcon}><Pencil size={17} color={palette.label} accessible={false} /></View>} onPress={sheet.guard(() => sheet.open({ kind: "edit" }))} />
       </Group>}
     </Sheet>
-    <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 12} />
+    <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 12 + (callBar ? CALL_BAR_SPACE : 0)} />
   </View>;
 }
 const s = StyleSheet.create({

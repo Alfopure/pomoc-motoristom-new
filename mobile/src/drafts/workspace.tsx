@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { Alert, ScrollView, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -14,7 +14,7 @@ import { MyTasks } from "../work/my-tasks-ui";
 import { WorkStore } from "../work/store";
 import { createToolsApi } from "../tools/api";
 import { ToolsWorkspace } from "../tools/ui";
-import { Button, Card, ErrorNotice, Loading, styles } from "../ui";
+import { Button, ErrorNotice, Loading, styles } from "../ui";
 import { DraftNotSentError, draftId } from "./port";
 import { createDraftStorage } from "./storage";
 import { DraftVault, type DraftKind, type DraftScope, type StoredDraft } from "./vault";
@@ -33,6 +33,11 @@ import { CallbacksPanel, type CallbackDialer } from "../callbacks/ui";
 import type { DispatchView } from "../shell/navigation";
 import type { ShellLayer, ShellOpeners, ShellScope } from "../shell/layers";
 import { roleNames } from "../shell/modules";
+import { initialsOf } from "../shell/top-bar";
+import { InfoRow } from "../design/detail";
+import { formLayout } from "../design/form";
+import { Group, Row, SectionHeader } from "../design/list";
+import { palette, space, type } from "../design/tokens";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
   active: boolean; view: DispatchView; onView: (view: "cases" | "tasks" | "console" | "account") => void; onSelectNumber: (number: string) => void;
@@ -96,9 +101,10 @@ export function DraftWorkspace(props: Props) {
   const layer = layerOf(props.view, props.callTarget);
   if (!verified && layer) return <>{props.renderLayer(layer, null, query.isPending ? null : errorText(authorityState.error ?? query.error), null)}</>;
   const operationsVisible = toolsVisible || props.callTarget !== null || callbacksOpen || operationViews.includes(props.view);
-  if (!verified) return operationsVisible ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
+  if (!verified) return operationsVisible ? <ScrollView style={{ flex: 1 }} contentContainerStyle={formLayout.content}>
     {props.view === "account" && <Account {...props} />}
-    {query.isPending ? <Loading label="Overujem prístup k prípadom a konceptom…" /> : <View style={styles.content}><ErrorNotice message={errorText(authorityState.error ?? query.error)} onRetry={() => { void query.refetch(); }} /></View>}
+    <View style={formLayout.notices}>{query.isPending ? <Loading label="Overujem prístup k prípadom a konceptom…" />
+      : <ErrorNotice message={errorText(authorityState.error ?? query.error)} onRetry={() => { void query.refetch(); }} />}</View>
   </ScrollView> : null;
   return <>
     <ScopedTools key={"tools:" + verified.profileId + ":" + verified.organizationId} config={config} verified={verified} getToken={getToken} current={current}
@@ -205,9 +211,9 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
     }} />;
   // Until local drafts open, Prípady and Moje úlohy are not mounted to own Back.
   useAndroidBack(props.active && !vault && (props.view === "cases" || props.view === "tasks"), props.onLeaveModule);
-  if (!vault) return <>{callContext}{callbacks}{layerView}{operationViews.includes(props.view) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
+  if (!vault) return <>{callContext}{callbacks}{layerView}{operationViews.includes(props.view) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={formLayout.content}>
     {props.view === "account" && <Account {...props} />}
-    {error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading label="Načítavam miestne koncepty…" />}
+    <View style={formLayout.notices}>{error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading label="Načítavam miestne koncepty…" />}</View>
   </ScrollView> : null}</>;
   return <>{callContext}{callbacks}{layerView}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
     onOpenCase={id => { setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases"); }} onResume={resume} onDiscarded={() => { setCaseRequest(undefined); setTaskRequest(undefined); setEpoch(value => value + 1); }} /></>;
@@ -239,7 +245,7 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
       {state.saving && <Text style={styles.muted}>{state.durable ? "Ukladám koncepty v telefóne…" : "Zapamätávam koncepty…"}</Text>}
       {state.error && <ErrorNotice message={state.error} onRetry={() => { void vault.retry().catch(() => undefined); }} />}
     </View>}
-    {view === "account" && <ScrollView contentContainerStyle={styles.content}><Account {...props} /><LocalDrafts vault={vault} onResume={props.onResume} onDiscarded={props.onDiscarded} needsReset={needsReset} deferReset={() => setNeedsReset(true)} /></ScrollView>}
+    {view === "account" && <ScrollView contentContainerStyle={formLayout.content}><Account {...props} /><LocalDrafts vault={vault} onResume={props.onResume} onDiscarded={props.onDiscarded} needsReset={needsReset} deferReset={() => setNeedsReset(true)} /></ScrollView>}
     {!state.ready && visible && view !== "account" && <View style={styles.content}><Text style={styles.text}>Pred otvorením formulárov obnovte miestne koncepty v účte.</Text><Button label="Otvoriť účet" onPress={() => props.onView("account")} secondary /></View>}
     {state.ready && <>
       <View style={view === "cases" ? { flex: 1 } : { display: "none" }}><Cases api={api} environment={props.config.environment} userId={props.userId} profileId={identity.profileId}
@@ -251,16 +257,35 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
 }
 
 function Account(props: Props) {
-  return <View style={{ gap: 12 }}><Text accessibilityRole="header" style={styles.heading}>Účet</Text><Card><Text style={styles.subheading}>{props.identity.profile.displayName}</Text><Text style={styles.text}>{props.identity.profile.email ?? ""}</Text>
-    <Text style={styles.muted}>{roleNames[props.identity.profile.role]}</Text></Card>
-    <Card><Text style={styles.label}>Prostredie</Text><Text style={styles.text}>{props.config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"}</Text><Text style={styles.muted}>Verzia 0.1.0</Text></Card>
-    <Card><Text style={styles.label}>Spodná lišta</Text><Text style={styles.muted}>Prehľad, tri vaše moduly a Moduly. Platí pre tento telefón.</Text>
-      <Button label="Upraviť lištu" onPress={props.bar.onEdit} secondary />
-      {props.bar.customized && <Button label="Obnoviť lištu podľa roly" onPress={props.bar.onReset} secondary />}</Card>
-    {props.logoutState.message && <ErrorNotice message={props.logoutState.message} />}{props.logoutError && <ErrorNotice message={props.logoutError} />}
-    {props.hasCall && <Text style={styles.muted}>Pred odhlásením ukončite hovor.</Text>}
-    <Button label={props.logoutBusy || props.logoutState.busy ? "Odhlasujem…" : "Odhlásiť sa"} disabled={props.logoutBusy || props.logoutState.busy || props.hasCall} onPress={props.onLogout} secondary />
-    {props.logoutError && <Button label="Odhlásiť bez neuložených zmien" disabled={props.logoutBusy || props.logoutState.busy || props.hasCall} onPress={props.onLogoutWithoutSaving} secondary />}
+  const profile = props.identity.profile, busy = props.logoutBusy || props.logoutState.busy;
+  return <View>
+    <View style={formLayout.head}><Text accessibilityRole="header" style={styles.heading}>Účet</Text></View>
+    <Group style={{ marginTop: space.m }}><View style={account.profile}>
+      <View style={account.avatar}><Text style={account.initials}>{initialsOf(profile.displayName)}</Text></View>
+      <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+        <Text numberOfLines={2} style={account.name}>{profile.displayName}</Text>
+        {profile.email ? <Text numberOfLines={1} style={account.detail}>{profile.email}</Text> : null}
+        <Text style={account.detail}>{roleNames[profile.role]}</Text>
+      </View>
+    </View></Group>
+    <SectionHeader title="Prostredie" />
+    <Group>
+      <InfoRow first label="Dispečing" value={props.config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"} />
+      <InfoRow label="Verzia appky" value="0.1.0" />
+    </Group>
+    <SectionHeader title="Spodná lišta" />
+    <Group>
+      <Row first title="Upraviť lištu" subtitle="Prehľad, tri vaše moduly a Moduly. Platí pre tento telefón." tone="link" onPress={props.bar.onEdit} trailing={<Text style={account.chevron}>›</Text>} />
+      {props.bar.customized && <Row title="Obnoviť lištu podľa roly" tone="link" onPress={props.bar.onReset} />}
+    </Group>
+    {(props.logoutState.message || props.logoutError || props.hasCall) && <View style={formLayout.notices}>
+      {props.logoutState.message && <ErrorNotice message={props.logoutState.message} />}{props.logoutError && <ErrorNotice message={props.logoutError} />}
+      {props.hasCall && <Text style={styles.muted}>Pred odhlásením ukončite hovor.</Text>}
+    </View>}
+    <Group style={{ marginTop: space.xl }}>
+      <Row first title={busy ? "Odhlasujem…" : "Odhlásiť sa"} tone="danger" disabled={busy || props.hasCall} onPress={props.onLogout} />
+      {props.logoutError && <Row title="Odhlásiť bez neuložených zmien" tone="danger" disabled={busy || props.hasCall} onPress={props.onLogoutWithoutSaving} />}
+    </Group>
   </View>;
 }
 const labels: Record<DraftKind, string> = { "case-create": "Nový prípad", "case-edit": "Úprava prípadu", "case-note": "Poznámka prípadu", "case.owner": "Priradenie dispečera", "task-create": "Nová úloha", "task-state": "Správa alebo stav úlohy", handoff: "Odovzdanie prípadu", attachment: "Príloha prípadu" };
@@ -277,13 +302,45 @@ function LocalDrafts({ vault, onResume, onDiscarded, needsReset, deferReset }: {
       } },
     ]);
   }
-  return <View style={{ gap: 12 }}><Text style={styles.subheading}>Koncepty v tomto zariadení</Text>
-    <Text style={styles.muted}>{state.durable ? "Rozpísané údaje ostanú v chránenom úložisku aj po odhlásení. Otvoríte ich po prihlásení do rovnakého účtu. Fotografie a dokumenty sa miestne neuchovávajú." : "Tento náhľad obnoví údaje iba počas otvorenia aplikácie. Fotografie a dokumenty sa miestne neuchovávajú."}</Text>
-    {error && <ErrorNotice message={error} />}{!state.records.length && state.ready && <Text style={styles.muted}>Zatiaľ bez miestnych konceptov.</Text>}
-    {state.records.map(record => <Card key={record.key}><Text style={styles.subheading}>{labels[record.kind]}</Text><Text style={styles.muted}>{formatTime(record.updatedAt)}</Text>
-      <Button label={"Pokračovať: " + labels[record.kind]} disabled={busy || !state.ready} onPress={() => onResume(record)} />
-      <Button label={"Zahodiť: " + labels[record.kind]} secondary disabled={busy || state.saving || state.busy} onPress={() => discard(record)} /></Card>)}
-    {needsReset && <Button label="Obnoviť formuláre po odstránení" secondary disabled={busy || state.saving || state.busy || !!state.error} onPress={onDiscarded} />}
-    <Button label="Zahodiť všetky miestne koncepty" secondary disabled={busy || state.saving || state.ready && !state.records.length} onPress={() => discard()} />
+  return <View>
+    <SectionHeader title="Koncepty v tomto zariadení" detail={state.records.length ? String(state.records.length) : null} />
+    {state.records.length > 0 && <Group>{state.records.map((record, index) => <View key={record.key} style={account.draft}>
+      {index > 0 && <View style={account.separator} />}
+      <View style={account.draftHead}><Text numberOfLines={2} style={account.draftTitle}>{labels[record.kind]}</Text><Text style={account.time}>{formatTime(record.updatedAt)}</Text></View>
+      <View style={account.draftActions}>
+        <DraftAction label="Pokračovať" accessibilityLabel={"Pokračovať: " + labels[record.kind]} disabled={busy || !state.ready} onPress={() => onResume(record)} />
+        <DraftAction label="Zahodiť" danger accessibilityLabel={"Zahodiť: " + labels[record.kind]} disabled={busy || state.saving || state.busy} onPress={() => discard(record)} />
+      </View>
+    </View>)}</Group>}
+    <Text style={account.note}>{!state.records.length && state.ready ? "Zatiaľ bez miestnych konceptov. " : ""}{state.durable ? "Rozpísané údaje ostanú v chránenom úložisku aj po odhlásení. Otvoríte ich po prihlásení do rovnakého účtu. Fotografie a dokumenty sa miestne neuchovávajú." : "Tento náhľad obnoví údaje iba počas otvorenia aplikácie. Fotografie a dokumenty sa miestne neuchovávajú."}</Text>
+    <View style={formLayout.notices}>
+      {error && <ErrorNotice message={error} />}
+      {needsReset && <Button label="Obnoviť formuláre po odstránení" secondary disabled={busy || state.saving || state.busy || !!state.error} onPress={onDiscarded} />}
+      <Button label="Zahodiť všetky miestne koncepty" secondary disabled={busy || state.saving || state.ready && !state.records.length} onPress={() => discard()} />
+    </View>
   </View>;
 }
+
+function DraftAction({ label, accessibilityLabel, onPress, disabled, danger }: { label: string; accessibilityLabel: string; onPress: () => void; disabled?: boolean; danger?: boolean }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
+    hitSlop={{ top: 6, bottom: 6 }} style={({ pressed }) => [account.action, danger && { backgroundColor: palette.redSoft }, disabled && { opacity: 0.4 }, pressed && { opacity: 0.6 }]}>
+    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={[account.actionLabel, danger && { color: palette.redText }]}>{label}</Text>
+  </Pressable>;
+}
+const account = StyleSheet.create({
+  profile: { flexDirection: "row", alignItems: "center", gap: space.m, padding: space.m },
+  avatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: palette.brand, alignItems: "center", justifyContent: "center" },
+  initials: { fontSize: 18, fontWeight: "700", color: palette.label },
+  name: { ...type.headline, color: palette.label },
+  detail: { ...type.subhead, color: palette.secondaryLabel },
+  chevron: { fontSize: 20, color: palette.tertiaryLabel },
+  note: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, paddingHorizontal: 20, paddingTop: space.s },
+  draft: { gap: space.s, paddingHorizontal: space.m, paddingVertical: 10, backgroundColor: palette.card },
+  draftHead: { flexDirection: "row", alignItems: "baseline", gap: space.s },
+  draftActions: { flexDirection: "row", flexWrap: "wrap", gap: space.s },
+  time: { ...type.caption, color: palette.secondaryLabel, fontVariant: ["tabular-nums"] },
+  separator: { position: "absolute", top: 0, left: space.m, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
+  draftTitle: { ...type.rowTitle, color: palette.label, flex: 1 },
+  action: { minHeight: 32, borderRadius: 16, paddingHorizontal: 12, alignItems: "center", justifyContent: "center", backgroundColor: palette.brandSoft },
+  actionLabel: { fontSize: 13, lineHeight: 17, fontWeight: "600", color: palette.brandInk },
+});
