@@ -1,0 +1,182 @@
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { AccessibilityInfo, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
+import { CircleMinus, Pencil, Star, ArrowRight } from "lucide-react-native";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { MobileMe, MobilePresence } from "../../../src/lib/mobile-api";
+import type { MobileCallContextTarget } from "../../../src/lib/mobile-call-context";
+import type { MobileCallbackSummary } from "../../../src/lib/mobile-callbacks";
+import { MobileApiError, type MobileApi } from "../lib/api";
+import type { MobileConfig } from "../lib/config";
+import type { LogoutState } from "../lib/logout";
+import { presenceLabels } from "../lib/display";
+import { useAndroidBack } from "../lib/use-android-back";
+import { ErrorNotice } from "../ui";
+import { palette, space } from "../design/tokens";
+import { tabBarBottom, tabBarHeight } from "../ui/theme";
+import { usePhoneOverlay } from "../ui/phone-overlays";
+import { DraftWorkspace } from "../drafts/workspace";
+import { draftId } from "../drafts/port";
+import type { CallbackDialer } from "../callbacks/ui";
+import type { DispatchPhone, PhoneState } from "../voice/phone";
+import { Console } from "../calls/console";
+import { History, type HistoryCategory } from "../calls/history";
+import { HovoryHeader } from "../calls/header";
+import { DoneButton, EditBarContent } from "./edit-bar";
+import { HomeScreen, type HomeTarget } from "./home";
+import { ModulesScreen } from "./modules-screen";
+import { PIN_LIMIT, moduleAccess, moduleById, roleNames, rolePins, type ModuleId } from "./modules";
+import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, type DispatchView, type HovoryView, type ShellState, type ShellTab } from "./navigation";
+import { ModuleTile, Row, Group, Sheet, Toast } from "./parts";
+import { pinsFull, replacingPin, withPin, withoutPin } from "./pins";
+import { ShellPreferences, shellPreferencesKey } from "./preferences";
+import { createShellPreferencesStorage } from "./preferences-storage";
+import { DockTabBar } from "./tab-bar";
+import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
+
+type Props = {
+  config: MobileConfig; client: SupabaseClient; api: MobileApi; active: boolean; userId: string; liveUser: () => string | null;
+  identity: MobileMe; queryKey: string[]; meError: unknown; onRetryMe: () => void;
+  phone: DispatchPhone | null; phoneState: PhoneState; callbackSummary: UseQueryResult<MobileCallbackSummary>; dialer: CallbackDialer;
+  logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void;
+};
+type ShellSheet = { kind: "edit" } | { kind: "pin"; id: ModuleId } | { kind: "menu"; id: ModuleId };
+const shellOwnedBack: readonly DispatchView[] = ["modules", "console", "history", "account"];
+const presenceTone: Record<MobilePresence, PresenceTone> = { available: "green", paused: "orange", after_call_work: "orange", ringing: "red", on_call: "red", offline: "gray" };
+const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
+
+/** App frame: top bar, the visible module and the bottom bar. Module screens
+ * keep their own state; the frame only decides where each one is shown. */
+export function DispatchShell(props: Props) {
+  const { config, api, active, userId, identity, queryKey, phone, phoneState, callbackSummary } = props;
+  const queryClient = useQueryClient();
+  const insets = useSafeAreaInsets();
+  const { fontScale } = useWindowDimensions();
+  const available = useMemo(() => moduleAccess(identity.profile.role), [identity.profile.role]);
+  const prefs = useMemo(() => new ShellPreferences(createShellPreferencesStorage(),
+    shellPreferencesKey({ environment: config.environment, userId, profileId: identity.profileId }), available, rolePins(identity.profile.role)),
+  [config.environment, userId, identity.profileId, identity.profile.role, available]);
+  useEffect(() => { void prefs.load(); return () => prefs.dispose(); }, [prefs]);
+  const preferences = useSyncExternalStore(prefs.subscribe, prefs.snapshot, prefs.snapshot);
+  const pins = preferences.pins;
+  const [shell, setShell] = useState<ShellState>(initialShell);
+  const nav = reconcileShell(shell, pins, available);
+  const view = dispatchView(nav);
+  const [number, setNumber] = useState("");
+  const [category, setCategory] = useState<HistoryCategory>("all");
+  const [search, setSearch] = useState("");
+  const [callSelection, setCallSelection] = useState<{ target: MobileCallContextTarget; view: DispatchView } | null>(null);
+  const [toast, setToast] = useState<{ message: string; key: number } | null>(null);
+  const sheet = usePhoneOverlay<ShellSheet>(active);
+  const callTarget = callSelection?.view === view ? callSelection.target : null;
+  const consoleQuery = useQuery({ queryKey: [...queryKey, "console", identity.profileId], queryFn: ({ signal }) => api.console(identity.profileId, signal),
+    enabled: active, refetchInterval: active ? 30_000 : false });
+  useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 2400); return () => clearTimeout(timer); }, [toast]);
+  useEffect(() => { if (view === "modules" && preferences.loaded && !preferences.tipDismissed) prefs.dismissTip(); }, [view, preferences.loaded, preferences.tipDismissed, prefs]);
+
+  const go = (next: ShellState) => { setCallSelection(null); setShell(next); };
+  const navigate = (id: ModuleId, hovory?: HovoryView) => go(openModule(nav, pins, id, hovory));
+  const back = () => { const next = shellBack(nav); if (next) go(next); };
+  const notify = (message: string) => setToast(current => ({ message, key: (current?.key ?? 0) + 1 }));
+  useAndroidBack(active && !callTarget && !sheet.value && shellOwnedBack.includes(view), back);
+  function openCallContext(target: MobileCallContextTarget) {
+    if (!draftId(target.id)) return;
+    setCallSelection({ target: { ...target, id: target.id.toLowerCase() }, view });
+  }
+  function pin(id: ModuleId) {
+    if (pins.includes(id)) return;
+    if (pinsFull(pins)) { sheet.open({ kind: "pin", id }); return; }
+    prefs.setPins(withPin(pins, id));
+    notify(moduleById(id).name + " je v lište");
+  }
+  function replace(replaced: ModuleId, id: ModuleId) {
+    sheet.close();
+    prefs.setPins(replacingPin(pins, replaced, id));
+    notify(moduleById(id).name + " je v lište namiesto " + moduleById(replaced).name);
+  }
+  function unpin(id: ModuleId) {
+    sheet.close();
+    prefs.setPins(withoutPin(pins, id));
+    notify(moduleById(id).name + " odobraté z lišty");
+  }
+  function homeTarget(target: HomeTarget) {
+    if (target === "console" || target === "callbacks") navigate("hovory", target);
+    else navigate(target === "cases" ? "pripady" : "ulohy");
+  }
+  const presence = consoleQuery.data?.presence.status;
+  const statusLabel = presence ? (presence === "after_call_work" ? "Po hovore" : presenceLabels[presence]) : consoleQuery.isError ? "Stav neznámy" : "Stav…";
+  const phoneDetail = !phone ? "Volanie v natívnej appke" : phoneState.registration === "registered" ? "Pripojený k ústredni" : phoneState.registration === "connecting" ? "Pripájam…" : "Nepripojený";
+  const waiting = callbackSummary.data?.counts.open ?? 0;
+  const openedInModules = nav.tab === "moduly" && nav.opened !== null && !nav.account;
+  const sheetModule = sheet.value && sheet.value.kind !== "edit" ? sheet.value.id : null;
+  const tabs = barTabs(pins);
+  const hovoryVisible = (view === "console" || view === "history" || view === "callbacks") && !callTarget;
+  return <View style={{ flex: 1 }}>
+    <ShellTopBar test={config.environment === "test"} initials={initialsOf(identity.profile.displayName)} onAccount={() => go({ ...nav, account: true })}
+      left={nav.account || openedInModules ? { kind: "back", label: nav.account ? "Späť" : "Späť na Moduly", onPress: back }
+        : { kind: "status", label: statusLabel, tone: presence ? presenceTone[presence] : "gray", onPress: () => navigate("hovory", "console") }}
+      onPin={openedInModules && nav.opened && !pins.includes(nav.opened) ? () => pin(nav.opened!) : null} />
+    {Boolean(props.meError) && <View style={{ paddingHorizontal: space.l }}><ErrorNotice message={errorMessage(props.meError)} onRetry={props.onRetryMe} /></View>}
+    {hovoryVisible && <HovoryHeader view={nav.hovory} onView={value => go({ ...nav, hovory: value })} waiting={callbackSummary.data ? waiting : null} />}
+    {view === "console" && !callTarget && <Console api={api} me={identity} queryKey={queryKey} active={active} number={number} onNumber={setNumber}
+      phone={phone} phoneState={phoneState} onCallContext={openCallContext} />}
+    {view === "history" && !callTarget && <History api={api} me={identity} queryKey={queryKey} active={active} category={category} onCategory={setCategory}
+      search={search} onSearch={setSearch} onCallContext={openCallContext} onSelect={value => { setNumber(value); navigate("hovory", "console"); }} />}
+    {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={pins.length < PIN_LIMIT} badges={{ hovory: waiting }}
+      onOpen={id => navigate(id)} onMenu={id => sheet.open({ kind: "menu", id })} onEdit={() => sheet.open({ kind: "edit" })} onAccount={() => go({ ...nav, account: true })} />}
+    <DraftWorkspace key={identity.profileId} config={config} client={props.client} identity={identity} userId={userId} liveUser={props.liveUser} active={active}
+      view={view} onView={target => {
+        if (target === "account") go({ ...nav, account: true });
+        else if (target === "console") navigate("hovory", "console");
+        else navigate(target === "cases" ? "pripady" : "ulohy");
+      }}
+      onLeaveModule={back} callTarget={callTarget} onCloseCallContext={() => setCallSelection(null)}
+      onShowCalls={() => go({ ...nav, hovory: "history" })} dialer={props.dialer}
+      onSelectNumber={value => { setNumber(value); navigate("hovory", "console"); }}
+      renderHome={(scope, notice) => <HomeScreen active={active && view === "home"} scope={scope} scopeNotice={notice}
+        phone={{ label: statusLabel, tone: presence ? presenceTone[presence] : "gray", detail: phoneDetail }}
+        callbacks={callbackSummary} activeCalls={consoleQuery.data?.activeCalls ?? []}
+        tip={preferences.loaded && !preferences.tipDismissed} onDismissTip={() => prefs.dismissTip()}
+        onOpen={homeTarget} onCall={id => openCallContext({ kind: "session", id })}
+        onRefresh={() => { void Promise.allSettled([callbackSummary.refetch(), consoleQuery.refetch(), queryClient.invalidateQueries({ queryKey: [...queryKey, identity.profileId] })]); }} />}
+      bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
+      logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
+      hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} />
+    <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting }} showAdd={pins.length < PIN_LIMIT}
+      onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => sheet.open({ kind: "edit" })} />
+    <Sheet visible={sheet.value !== null} large={sheet.value?.kind === "edit"} onClose={sheet.close}
+      title={sheet.value?.kind === "edit" ? "Upraviť lištu" : sheet.value?.kind === "pin" ? "Do lišty" : sheetModule ? moduleById(sheetModule).name : ""}
+      left={sheet.value?.kind === "pin" ? <Pressable accessibilityRole="button" onPress={sheet.close} hitSlop={8}><Text style={s.link}>Zrušiť</Text></Pressable> : undefined}
+      right={sheet.value?.kind === "edit" ? <DoneButton onPress={sheet.close} /> : undefined}>
+      {sheet.value?.kind === "edit" && <EditBarContent pins={pins} available={available} roleLabel={roleNames[identity.profile.role]}
+        customized={preferences.customized} saveError={preferences.saveError}
+        onChange={(next, message) => { prefs.setPins(next); AccessibilityInfo.announceForAccessibility?.(message); }}
+        onReset={() => { prefs.reset(); AccessibilityInfo.announceForAccessibility?.("Lišta je podľa roly"); }} />}
+      {sheet.value?.kind === "pin" && sheetModule && <>
+        <Text style={s.note}>Lišta má {PIN_LIMIT} miesta a je plná. Ktorý modul nahradí <Text style={{ fontWeight: "700", color: palette.label }}>{moduleById(sheetModule).name}</Text>?</Text>
+        <Group style={{ marginTop: space.m }}>{pins.map((id, index) => <Row key={id} first={index === 0} title={moduleById(id).name} leading={<ModuleTile id={id} />}
+          accessibilityLabel={"Nahradiť " + moduleById(id).name} onPress={sheet.guard(() => replace(id, sheetModule))}
+          trailing={<View style={s.replace}><Text style={s.replaceText}>Nahradiť</Text></View>} />)}</Group>
+        <Text style={s.note}>Nahradený modul zostane v Moduloch.</Text>
+      </>}
+      {sheet.value?.kind === "menu" && sheetModule && <Group style={{ marginTop: space.s }}>
+        <Row first title="Otvoriť" leading={<ModuleTile id={sheetModule} />} trailing={<ArrowRight size={18} color={palette.secondaryLabel} accessible={false} />}
+          onPress={sheet.guard(() => { sheet.close(); navigate(sheetModule); })} />
+        {pins.includes(sheetModule)
+          ? <Row title="Odobrať z lišty" tone="danger" leading={<View style={s.menuIcon}><CircleMinus size={18} color={palette.redText} accessible={false} /></View>} onPress={sheet.guard(() => unpin(sheetModule))} />
+          : <Row title={pinsFull(pins) ? "Pridať do lišty…" : "Pridať do lišty"} leading={<View style={s.menuIcon}><Star size={18} color={palette.label} accessible={false} /></View>}
+            onPress={sheet.guard(() => { if (pinsFull(pins)) sheet.open({ kind: "pin", id: sheetModule }); else { sheet.close(); pin(sheetModule); } })} />}
+        <Row title="Upraviť lištu…" leading={<View style={s.menuIcon}><Pencil size={17} color={palette.label} accessible={false} /></View>} onPress={sheet.guard(() => sheet.open({ kind: "edit" }))} />
+      </Group>}
+    </Sheet>
+    <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 12} />
+  </View>;
+}
+const s = StyleSheet.create({
+  link: { fontSize: 16, lineHeight: 20, fontWeight: "600", color: palette.brandInk },
+  note: { fontSize: 13, lineHeight: 18, color: palette.secondaryLabel, paddingHorizontal: 22, paddingTop: space.s, textAlign: "center" },
+  replace: { borderRadius: 13, backgroundColor: "#1C1C1E", paddingHorizontal: 11, paddingVertical: 5 },
+  replaceText: { fontSize: 13, lineHeight: 16, fontWeight: "700", color: "#FFFFFF" },
+  menuIcon: { width: 28, height: 28, alignItems: "center", justifyContent: "center" },
+});

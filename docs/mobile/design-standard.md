@@ -1,0 +1,195 @@
+# Mobilný dizajnový štandard
+
+Platí pre každú obrazovku mobilnej appky Linka pomoci. Režim: iba svetlý
+(tmavý a režim „Rukavice“ pre terén prídu neskôr). Majiteľ 18. 10. 2026
+schválil prestavbu navigácie a variant lišty **A · Dock** z klikacieho
+prototypu: Prehľad, tri vlastné moduly a žltá ikona Moduly.
+
+Cieľ: jedna appka pre celú firmu s mnohými modulmi a rolami, ktorá pôsobí ako
+natívna iPhone appka (Liquid Glass), ukáže veľa údajov prehľadne a každý nový
+modul do nej zapadne bez nového dizajnu.
+
+## 1. Princípy
+
+1. Čo treba teraz, je navrchu: prebiehajúci hovor, oneskorené termíny, moje veci.
+2. Hustota cez typografiu a rozostupy, nie cez malé ťukacie plochy (≥ 44 b).
+3. Minimalizmus: jedna farba = jeden význam, žltá pre hlavnú akciu a „moje“.
+4. Stav vždy farbou aj textom, nikdy iba farbou.
+5. Sklo len pre navigáciu a ovládače; obsah je nepriehľadný.
+6. **Každá akcia má viditeľné tlačidlo s popisom.** Podržanie a potiahnutie sú
+   iba skratky k niečomu, čo sa dá ťuknúť. Žiadna navigácia schovaná za ikonou bez textu.
+7. Rovnaký vzor všade: kto pozná jeden modul, ovláda všetky.
+8. Dynamika s účelom: plynulé prechody, žiadne samoúčelné animácie; rešpektuje
+   „Obmedziť pohyb“ a „Znížiť priehľadnosť“.
+
+## 2. Kostra appky
+
+**Horná lišta** (`mobile/src/shell/top-bar.tsx`): vľavo stav operátora
+(Dostupný / Pauza / Na hovore…, ťuk otvorí Ústredňu) alebo šípka Späť; vpravo
+**☆ Do lišty** pri module otvorenom z Modulov, štítok TEST a žltý avatar (Účet).
+
+**Spodná lišta** (`mobile/src/shell/tab-bar.tsx`): `Prehľad · 3 vlastné moduly · Moduly`.
+
+- Všetky položky majú ikonu aj text. Vybraná je na sivom podklade (šošovka sa presúva).
+- **Moduly** majú žltý štvorec: všetky povolené moduly ako plocha iPhonu.
+- Voľné miesto po odobratí modulu je položka **+ Pridať** (otvorí úpravu lišty).
+- Odznak iba pre to, čo čaká na človeka (napr. čakajúce spätné volania).
+- Lupa v lište nie je. Hľadanie je pole na obrazovke (Moduly, História, Prípady, Úlohy).
+- Pri písaní sa lišta skryje; zväčšené písmo zväčší lištu najviac 1,3×.
+
+**Moduly** (`modules-screen.tsx`): hľadanie modulu, karta **Moja lišta** s náhľadom
+lišty a žltým tlačidlom **Upraviť lištu**, mriežka modulov (★ = v lište, odznak počtu)
+a riadok **Účet a koncepty**. Pri najviac ôsmich moduloch je jedna mriežka,
+pri viacerých sa zobrazia skupiny (Komunikácia, Zásahy, Vozový park, Kancelária…).
+
+**Prispôsobenie lišty** (všetky cesty sú viditeľné):
+
+| Cesta | Čo urobí |
+| --- | --- |
+| Moduly → Moja lišta → **Upraviť lištu** | červené – odoberie, zelené + pridá, ≡ presunie poradie; pri plnej lište sa vyberie, čo nový modul nahradí |
+| Modul otvorený z Modulov → **☆ Do lišty** | pridá modul; pri plnej lište sa opýta, ktorý nahradiť |
+| Podržanie ikony v Moduloch (skratka) | Otvoriť · Pridať do lišty / Odobrať z lišty · Upraviť lištu |
+| Účet → Spodná lišta | Upraviť lištu, Obnoviť lištu podľa roly |
+
+Zmeny platia hneď. Uložia sa v telefóne pre daný účet, prostredie a profil
+(`pm-shell-v1.<prostredie>.<user>.<profil>` v samostatnej službe Keychain).
+Synchronizácia medzi zariadeniami príde s API preferencií na serveri.
+
+**Navigácia** (`navigation.ts`): modul v lište má vlastnú záložku; modul mimo
+lišty sa otvorí vo vnútri Modulov so šípkou Späť. Každá záložka si drží svoju
+obrazovku; opätovný ťuk na vybranú záložku sa vráti na jej začiatok. Zmena
+lišty nepreskočí obrazovku: odobratý modul ostane otvorený v Moduloch,
+pridaný sa presunie do svojej záložky. Android Späť: účet → zatvorí sa,
+modul v Moduloch → Moduly, iná záložka → Prehľad, Prehľad → systém.
+
+**Prehľad** (`home.tsx`): hovory na účte (ak sú), dlaždice Spätné volania,
+Prípady, Moje úlohy a Telefón; ťuk otvorí príslušný modul. Jednorazový tip
+ukáže, kde sú Moduly; zmizne po ťuknutí na OK alebo po prvej návšteve Modulov.
+
+**Okná (sheet)**: jedno spoločné okno zdola pre úpravu lišty, výber náhrady
+a menu modulu. Pri začiatku hovoru alebo prechode do pozadia sa zatvorí
+(`usePhoneOverlay`), aby ovládanie hovoru ostalo v popredí.
+
+## 3. Moduly, roly a prístupy
+
+Moduly a ich poradie určuje register `mobile/src/shell/modules.ts`
+(ID, názov, krátky názov do lišty, skupina, farba ikony, popis). Lišta,
+Moduly, Prehľad a úprava lišty sa z neho poskladajú samy.
+
+| Modul | Obsah | Predvolene v lište |
+| --- | --- | --- |
+| Hovory | Ústredňa · História · Spätné (segment hore) | áno |
+| Prípady | zoznam, detail, založenie, poznámky, prílohy, úlohy, odovzdanie | áno |
+| Moje úlohy | úlohy naprieč prípadmi | áno |
+| Nástroje | vozidlo podľa EČV/VIN, trasa, mapa, flotila | nie (v Moduloch) |
+
+Roly mobilu dnes: dispečer, vedúci dispečer, manažér, administrátor – všetky
+vidia tieto štyri moduly. Viditeľnosť v appke je iba prezentácia; **o prístupe
+rozhoduje server pri každej požiadavke**. Neskôr server pošle zoznam modulov
+s úrovňou prístupu (bez prístupu / čítanie / úpravy / správa); modul bez
+prístupu sa nikde nezobrazí. Plánované moduly a roly (výjazdy a pristavenia,
+kniha odťahov, partneri, vozidlá, tabuľa vozidiel, kniha poškodení,
+kalendár, fakturácia, adresár, reporty, upozornenia; vodič, pristavovač,
+fakturácia, správca vozového parku, predajca) pribudnú do registra.
+Rola s najviac štyrmi modulmi (napr. vodič) dostane pevnú lištu iba so svojimi modulmi.
+
+## 4. Vizuálny jazyk (kompaktná hustota)
+
+Hodnoty sú v `mobile/src/design/tokens.ts`; obrazovky nepoužívajú vlastné.
+
+| Rola textu | Veľkosť / riadok | Rez |
+| --- | --- | --- |
+| Nadpis obrazovky | 28 / 34 | bold |
+| Názov objektu v detaile | 22 / 28 | bold |
+| Číslo v dlaždici | 24 / 29 | bold, pevná šírka číslic |
+| Nadpis listu, sekcie karty | 17 / 22 | semibold |
+| Názov v riadku | 15 / 20 | semibold |
+| Telo, podnadpis | 13–15 / 18–20 | regular |
+| Atribúty, čas, čipy | 12 / 16 | medium |
+| Štítky | 11 / 14 | bold – nikdy menej |
+
+- Rozostupy 4 · 8 · 12 · 16 (okraj obrazovky) · 24 · 32.
+- Skupiny riadkov a dlaždice: biele na `#F2F2F7`, zaoblenie 16, bez rámčekov.
+- Tlačidlá: kapsula výšky 44; hlavná akcia čierna alebo žltá (najviac jedna žltá na obrazovku).
+- Čipy filtrov: biele kapsuly 36 b (ťuková plocha 44), vybraný čierny; výber
+  zo zoznamu má šípku ▾.
+- Farby: žltá `#FCD703` (hlavná akcia, „moje“, avatar), jantárová `#7D6300`
+  pre žltý text, stavové tóny červený/oranžový/zelený/modrý/sivý v plnej aj jemnej podobe.
+- Ikony modulov majú vlastnú farbu ako Nastavenia iPhonu (Hovory zelená,
+  Prípady žltá, Úlohy modrá, Nástroje sivá).
+
+## 5. Komponenty
+
+`mobile/src/shell/parts.tsx` a priamo použité vzory:
+
+- **Riadok (object cell)** – 1–3 riadky textu, voliteľný farebný pruh (priorita)
+  alebo ikona 28 b, čas/suma vpravo, celý riadok je ťuková plocha; najviac jedna
+  akcia vpravo (napr. „Vybrať číslo“ v Histórii).
+- **Skupina** s odsadenými deliacimi čiarami, **hlavička sekcie**, **segment**
+  (2–5 častí, s odznakom), **sklenené tlačidlo** hornej lišty, **okno zdola**,
+  **potvrdenie** nad lištou (aj pre VoiceOver), **ikona modulu**, **náhľad lišty**.
+- **Štítok stavu** – 11 b bold v jemnom podklade; stav vždy aj textom.
+
+## 6. Šablóny obrazoviek
+
+Prehľad · Moduly · Zoznam · Kniha · Detail objektu · Tabuľa · Kalendár ·
+Mapa + list · Výjazd (krokovanie) · Nahlásenie s fotkami · Formulár v liste ·
+Hovor. Zoznam používajú Hovory/História, Prípady a Moje úlohy; ostatné
+šablóny vzniknú s modulmi pilierov 2 a 3. Detaily prípadu a hovoru sa
+preklopia do šablóny Detail v ďalšej etape.
+
+## 7. Technické rozhodnutia
+
+- Lišta je komponent appky na systémovom skle (`GlassSurface` → `expo-glass-effect`
+  na iOS 26, rozmazanie na staršom iOS, nepriehľadný povrch inde). Funguje rovnako
+  v Expo Go, vo vlastnom builde aj v prehliadačovej skúške. Natívny `UITabBarController`
+  (react-native-screens 4.26 v Expo SDK 57) zvážime po overení na zariadení:
+  nepodporuje podržanie položky a výnimky ako „+ Pridať“ rieši cez `preventNativeSelection`.
+- Obrazovky modulov ostávajú pripojené a len sa skrývajú; vlastný stav sa zmenou
+  záložky nestratí. Skryté moduly rušia svoje čítania podľa prefixu kľúča, preto
+  Prehľad používa vlastné kľúče (`…, "home", …`).
+- Moduly dostávajú pôvodné identifikátory obrazoviek (`console`, `history`,
+  `callbacks`, `cases`, `tasks`, `tools`, `account`); kostra ich odvodí zo stavu navigácie.
+
+## 8. Pravidlá pre ďalší vývoj
+
+1. Nový modul = záznam v registri modulov + obrazovky zo šablón a komponentov.
+2. Žiadne vlastné farby, veľkosti písma, hlavičky ani spodné menu mimo tokenov a kostry.
+3. Každá akcia má viditeľné tlačidlo s textom; gesto je len skratka.
+4. Ťukacie plochy ≥ 44 b, kontrast textu ≥ 4,5 : 1, VoiceOver popisy ikon.
+5. Overlay (okno, výber) používa `usePhoneOverlay`, aby ho zatvoril hovor.
+6. Pri PR: snímky 390 a 320 b, kontrola zoznamu Expo „native slop“, existujúce testy prejdú.
+
+## 9. Kritériá prijatia
+
+Nepovolené moduly sa nikde nezobrazia; dynamické písmo bez orezania kľúčových
+údajov; „Obmedziť pohyb“ a „Znížiť priehľadnosť“ funkčné; stav nikdy iba farbou;
+lišta a jej úprava fungujú ťuknutím bez gest.
+
+## 10. Plán
+
+| Etapa | Obsah | Stav |
+| --- | --- | --- |
+| 0 | štandard v repozitári, tokeny | hotové |
+| 1–2 | kostra: horná a spodná lišta, Prehľad, Moduly, úprava lišty, register modulov | hotové (TEST) |
+| 3 | Hovory, Prípady, Úlohy, Nástroje, Účet v novej kostre; kompaktné zoznamy | čiastočne: zoznamy hotové, detaily a formuláre ďalej |
+| 4 | šablóny Kniha, Tabuľa, Kalendár, Mapa + list, Výjazd, Nahlásenie | plán |
+| 5 | serverový zoznam modulov a preferencie, globálne hľadanie, lišta hovoru nad lištou, doladenie | plán |
+
+## 11. Zdroje
+
+- Apple HIG – Tab bars: https://developer.apple.com/design/human-interface-guidelines/tab-bars
+- Apple – Liquid Glass / Adopting Liquid Glass: https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass
+- Apple HIG – Typography: https://developer.apple.com/design/human-interface-guidelines/typography
+- Apple HIG – Searching: https://developer.apple.com/design/human-interface-guidelines/searching
+- Apple – TabViewCustomization: https://developer.apple.com/documentation/swiftui/tabviewcustomization
+- Donny Wals – Tab bars on iOS 26: https://www.donnywals.com/exploring-tab-bars-on-ios-26-with-liquid-glass/
+- NN/g – Hamburger menus and hidden navigation: https://www.nngroup.com/articles/hamburger-menus/
+- NN/g – Customization vs. personalization: https://www.nngroup.com/articles/customization-personalization/
+- NN/g – Bottom sheets: https://www.nngroup.com/articles/bottom-sheet/
+- SAP Fiori for iOS – Object Cell: https://experience.sap.com/fiori-design-ios/article/object-cell/
+- SAP Fiori – Content density: https://experience.sap.com/fiori-design-web/cozy-compact/
+- Expo SDK 57 – Glass effect: https://docs.expo.dev/versions/v57.0.0/sdk/glass-effect/
+- React Navigation – Native bottom tabs: https://reactnavigation.org/docs/native-bottom-tab-navigator
+- WCAG 2.2 – Target size (minimum): https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html
+- WCAG 2.2 – Use of color: https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html

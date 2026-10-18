@@ -97,3 +97,7 @@ The owner authorized this path on 2026-10-02. A clear instruction such as “daj
 For both release paths, retain separate databases, credentials, integration boundaries and the single existing cron. Database changes need the exact target and SQL scope already authorized by the owner; prepare these together with the release when required. Never apply all pending migrations just because `dev` has them.
 
 The short operating procedure and remaining environment work are in [the release workflow](docs/operations/release-workflow.md).
+
+## Mobile UI standard
+
+Mobile screens follow [the mobile design standard](docs/mobile/design-standard.md): light mode only for now, compact tokens from `mobile/src/design/tokens.ts`, the shell in `mobile/src/shell/` (Prehľad · three of the user's modules · Moduly) and visible, labeled controls for every action (gestures are only shortcuts). A new mobile feature adds its manifest to `mobile/src/shell/modules.ts` and reuses the shared components; it does not introduce its own colors, font sizes, headers or navigation bar. Module visibility in the app is presentation only; the server keeps authorizing every request.

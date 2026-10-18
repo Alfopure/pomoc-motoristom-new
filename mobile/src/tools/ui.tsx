@@ -59,14 +59,14 @@ function ScopedToolsWorkspace({ api, maps, scopeKey, active, visible, mapBlocked
   return <>
     <KeyboardAvoidingView style={visible ? { flex: 1 } : s.hidden} behavior={Platform.OS === "ios" ? "padding" : undefined}>
       <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}>
-        <Button label={tool === "home" ? "Späť do ústredne" : "Späť na nástroje"} secondary onPress={back} />
+        {tool !== "home" && <Button label="Späť na nástroje" secondary onPress={back} />}
         <Text accessibilityRole="header" style={styles.heading}>{tool === "home" ? "Nástroje" : entries.find(entry => entry.id === tool)?.title}</Text>
         {notice && <Card><Text accessibilityRole="alert" style={styles.text}>{notice}</Text></Card>}
         {tool === "home" && <>
           <Text style={styles.muted}>Všetko potrebné pre ďalší zásah.</Text>
           {entries.map(entry => <Pressable key={entry.id} accessibilityRole="button" accessibilityLabel={entry.title} onPress={() => { setNotice(null); setTool(entry.id); }}
             style={({ pressed }) => [styles.card, s.entry, pressed && { opacity: 0.7 }]}>
-            <View style={s.icon}><entry.icon size={24} color={colors.ink} accessible={false} /></View>
+            <View style={s.icon}><entry.icon size={19} color={colors.ink} accessible={false} /></View>
             <View style={s.caption}><Text style={styles.subheading}>{entry.title}</Text><Text style={styles.muted}>{entry.description}</Text></View>
             <ChevronRight size={20} color={colors.muted} accessible={false} />
           </Pressable>)}
@@ -87,7 +87,7 @@ function ScopedToolsWorkspace({ api, maps, scopeKey, active, visible, mapBlocked
   </>;
 }
 const s = StyleSheet.create({
-  entry: { flexDirection: "row", alignItems: "center", gap: 12, minHeight: 96 },
-  icon: { width: 46, height: 46, borderRadius: 16, backgroundColor: "#FFF5B8", alignItems: "center", justifyContent: "center" },
-  caption: { flex: 1, minWidth: 0, gap: 5 }, tool: { gap: 18 }, hidden: { display: "none" },
+  entry: { flexDirection: "row", alignItems: "center", gap: 12, minHeight: 64 },
+  icon: { width: 34, height: 34, borderRadius: 10, backgroundColor: "#FFF5B8", alignItems: "center", justifyContent: "center" },
+  caption: { flex: 1, minWidth: 0, gap: 2 }, tool: { gap: 12 }, hidden: { display: "none" },
 });

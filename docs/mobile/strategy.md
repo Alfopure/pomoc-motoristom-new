@@ -238,6 +238,15 @@ nasledujúcim implementačným krokom po iPhone pilote.
 Merať čas od požiadavky po systémovú ponuku a po začiatok obojstranného
 audia. Toleranciu dohodnúť podľa merania pred širšou službou.
 
+## Kostra appky a dizajnový štandard (október 2026)
+
+Majiteľ schválil prestavbu navigácie a rozloženia (iba svetlý režim) a z
+klikacieho prototypu variant A: Prehľad · tri vlastné moduly · žlté Moduly,
+bez lupy v lište a s viditeľnými tlačidlami na úpravu lišty. Pravidlá,
+register modulov, tokeny a plán ďalších etáp sú v
+[dizajnovom štandarde](design-standard.md). Každá nová mobilná funkcia
+vzniká ako modul v tejto kostre.
+
 ## Hranice nasadzovania
 
 Zdroj prvého základu: [mobile/README.md](../../mobile/README.md).

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Alert, ScrollView, Text, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
@@ -28,14 +28,21 @@ import { customerCallNumber } from "../call-context/number";
 import { useAndroidBack } from "../lib/use-android-back";
 import { createCallbacksApi } from "../callbacks/api";
 import { CallbackQueueStore } from "../callbacks/store";
-import { CallbacksPanel, HistorySegment, type CallbackDialer } from "../callbacks/ui";
+import { CallbacksPanel, type CallbackDialer } from "../callbacks/ui";
+import type { DispatchView } from "../shell/navigation";
+import type { HomeScope } from "../shell/home";
+import { roleNames } from "../shell/modules";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
-  active: boolean; tab: string; onTab: (tab: "cases" | "tasks" | "console" | "account") => void; onSelectNumber: (number: string) => void;
-  toolsOpen: boolean; onCloseTools: () => void;
+  active: boolean; view: DispatchView; onView: (view: "cases" | "tasks" | "console" | "account") => void; onSelectNumber: (number: string) => void;
+  /** Android Back on a module's first screen; the shell decides where it leads. */
+  onLeaveModule: () => void;
   callTarget: MobileCallContextTarget | null; onCloseCallContext: () => void;
-  callbacksOpen: boolean; onShowCalls: () => void; dialer: CallbackDialer;
+  onShowCalls: () => void; dialer: CallbackDialer;
+  renderHome: (scope: HomeScope | null, notice: string | null) => ReactNode;
+  bar: { customized: boolean; onEdit: () => void; onReset: () => void };
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; hasCall: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void };
+const operationViews: readonly DispatchView[] = ["cases", "tasks", "account"];
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Prístup ku konceptom sa nepodarilo overiť.";
 
 /** A fresh organization read precedes all private hydration. A same-user token
@@ -77,20 +84,21 @@ export function DraftWorkspace(props: Props) {
   const organizationId = verified?.organizationId ?? null;
   const current = useMemo(() => () => organizationId !== null && authority.current(organizationId), [authority, organizationId]);
   const validate = useMemo(() => () => revalidate({ organizationId: organizationId ?? "", profileId: identity.profileId }), [revalidate, organizationId, identity.profileId]);
-  const toolsVisible = props.toolsOpen && props.tab === "console";
+  const toolsVisible = props.view === "tools";
+  const callbacksOpen = props.view === "callbacks" && props.callTarget === null;
   // Before the scope is verified the panel is not mounted; Back still returns to calls.
-  useAndroidBack(active && props.callbacksOpen && !verified, props.onShowCalls);
-  const operationsVisible = toolsVisible || props.callTarget !== null || props.callbacksOpen || ["cases", "tasks", "account"].includes(props.tab);
+  useAndroidBack(active && callbacksOpen && !verified, props.onShowCalls);
+  useAndroidBack(active && toolsVisible && !verified, props.onLeaveModule);
+  if (!verified && props.view === "home" && !props.callTarget) return <>{props.renderHome(null, query.isPending ? null : errorText(authorityState.error ?? query.error))}</>;
+  const operationsVisible = toolsVisible || props.callTarget !== null || callbacksOpen || operationViews.includes(props.view);
   if (!verified) return operationsVisible ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
-    {props.tab === "account" && <Account {...props} />}
-    {props.callbacksOpen && <HistorySegment view="callbacks" onView={view => { if (view === "calls") props.onShowCalls(); }} />}
-    {toolsVisible && <Button label="Späť do ústredne" secondary onPress={props.onCloseTools} />}
+    {props.view === "account" && <Account {...props} />}
     {props.callTarget && <Button label="Späť na hovory" secondary onPress={props.onCloseCallContext} />}
     {query.isPending ? <Loading label="Overujem prístup k prípadom a konceptom…" /> : <View style={styles.content}><ErrorNotice message={errorText(authorityState.error ?? query.error)} onRetry={() => { void query.refetch(); }} /></View>}
   </ScrollView> : null;
   return <>
     <ScopedTools key={"tools:" + verified.profileId + ":" + verified.organizationId} config={config} verified={verified} getToken={getToken} current={current}
-      active={active} visible={toolsVisible} mapBlocked={props.hasCall} onClose={props.onCloseTools} />
+      active={active} visible={toolsVisible} mapBlocked={props.hasCall} onClose={props.onLeaveModule} />
     <AuthorizedDraftWorkspace key={"drafts:" + verified.profileId + ":" + verified.organizationId} {...props} verified={verified} getToken={getToken}
       current={current} revalidate={validate} />
   </>;
@@ -148,8 +156,8 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
   const request = useRef(0);
   function resume(record: StoredDraft) {
     if (record.kind === "task-state") {
-      if (record.resourceId) { setTaskRequest({ taskId: record.resourceId, nonce: ++request.current }); props.onTab("tasks"); }
-    } else { setCaseRequest({ kind: record.kind, id: record.resourceId, nonce: ++request.current }); props.onTab("cases"); }
+      if (record.resourceId) { setTaskRequest({ taskId: record.resourceId, nonce: ++request.current }); props.onView("tasks"); }
+    } else { setCaseRequest({ kind: record.kind, id: record.resourceId, nonce: ++request.current }); props.onView("cases"); }
   }
   const wrapUp = useMemo<WrapUpDependencies>(() => ({
     api: createCallWrapUpApi(config, verified.profileId, verified.organizationId, getToken, current), uuid: randomUUID,
@@ -159,29 +167,30 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
   const callContext = props.callTarget && <CallContextPanel key={props.callTarget.kind + ":" + props.callTarget.id} api={callApi} target={props.callTarget} active={props.active} current={current} wrapUp={wrapUp}
     onBack={props.onCloseCallContext} onSelectNumber={props.onSelectNumber} onOpenCase={id => {
       if (!current()) return;
-      setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onCloseCallContext(); props.onTab("cases");
+      setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onCloseCallContext(); props.onView("cases");
     }} onNewCase={number => {
       if (!current()) return;
       const phone = customerCallNumber("inbound", number);
       if (!phone) return;
-      setCaseRequest({ kind: "case-call-create", id: null, number: phone, nonce: ++request.current }); props.onCloseCallContext(); props.onTab("cases");
+      setCaseRequest({ kind: "case-call-create", id: null, number: phone, nonce: ++request.current }); props.onCloseCallContext(); props.onView("cases");
     }} />;
-  const callbacks = props.callbacksOpen && <CallbacksPanel store={callbackStore} active={props.active} current={current} dialer={props.dialer}
+  const callbacks = props.view === "callbacks" && !props.callTarget && <CallbacksPanel store={callbackStore} active={props.active} current={current} dialer={props.dialer}
     onShowCalls={props.onShowCalls} onOpenCase={id => {
       if (!current()) return;
-      setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onTab("cases");
+      setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases");
     }} />;
-  if (!vault) return <>{callContext}{callbacks}{["cases", "tasks", "account"].includes(props.tab) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
-    {props.tab === "account" && <Account {...props} />}
+  const home = props.view === "home" && !props.callTarget && props.renderHome({ cases: api, homeKey: [...actorRoot, "home"] }, null);
+  if (!vault) return <>{callContext}{callbacks}{home}{operationViews.includes(props.view) ? <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
+    {props.view === "account" && <Account {...props} />}
     {error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading label="Načítavam miestne koncepty…" />}
   </ScrollView> : null}</>;
-  return <>{callContext}{callbacks}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
-    onOpenCase={id => { setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onTab("cases"); }} onResume={resume} onDiscarded={() => { setCaseRequest(undefined); setTaskRequest(undefined); setEpoch(value => value + 1); }} /></>;
+  return <>{callContext}{callbacks}{home}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
+    onOpenCase={id => { setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases"); }} onResume={resume} onDiscarded={() => { setCaseRequest(undefined); setTaskRequest(undefined); setEpoch(value => value + 1); }} /></>;
 }
 
 function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; queryKey: string[]; caseRequest?: CaseOpenRequest; taskRequest?: { taskId: string; nonce: number };
   onOpenCase: (id: string) => void; onResume: (record: StoredDraft) => void; onDiscarded: () => void }) {
-  const { api, vault, queryKey, tab, active, identity, onDiscarded } = props;
+  const { api, vault, queryKey, view, active, identity, onDiscarded } = props;
   const client = useQueryClient(), state = useSyncExternalStore(vault.subscribe, vault.snapshot, vault.snapshot);
   const [needsReset, setNeedsReset] = useState(false);
   const resetReady = needsReset && !state.error && !state.saving && !state.busy;
@@ -189,28 +198,31 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
   const store = useMemo(() => new WorkStore(api.work, () => { void client.invalidateQueries({ queryKey }); }, (kind, id) => vault.bind(kind, id)), [api.work, client, queryKey, vault]);
   useEffect(() => () => store.dispose(), [store]);
   const caseKey = useMemo(() => [...queryKey, "cases", identity.profileId], [queryKey, identity.profileId]);
-  const visible = ["cases", "tasks", "account"].includes(tab);
+  const visible = operationViews.includes(view);
   return <>
-    {visible && <View style={{ paddingHorizontal: 20, paddingTop: 8 }}>
+    {visible && (!state.durable || state.saving || state.error) && <View style={{ paddingHorizontal: 16, paddingTop: 4 }}>
       {!state.durable && <Text style={styles.muted}>Koncepty v tomto náhľade ostávajú iba do zatvorenia aplikácie.</Text>}
       {state.saving && <Text style={styles.muted}>{state.durable ? "Ukladám koncepty v telefóne…" : "Zapamätávam koncepty…"}</Text>}
       {state.error && <ErrorNotice message={state.error} onRetry={() => { void vault.retry().catch(() => undefined); }} />}
     </View>}
-    {tab === "account" && <ScrollView contentContainerStyle={styles.content}><Account {...props} /><LocalDrafts vault={vault} onResume={props.onResume} onDiscarded={props.onDiscarded} needsReset={needsReset} deferReset={() => setNeedsReset(true)} /></ScrollView>}
-    {!state.ready && visible && tab !== "account" && <View style={styles.content}><Text style={styles.text}>Pred otvorením formulárov obnovte miestne koncepty v účte.</Text><Button label="Otvoriť účet" onPress={() => props.onTab("account")} secondary /></View>}
+    {view === "account" && <ScrollView contentContainerStyle={styles.content}><Account {...props} /><LocalDrafts vault={vault} onResume={props.onResume} onDiscarded={props.onDiscarded} needsReset={needsReset} deferReset={() => setNeedsReset(true)} /></ScrollView>}
+    {!state.ready && visible && view !== "account" && <View style={styles.content}><Text style={styles.text}>Pred otvorením formulárov obnovte miestne koncepty v účte.</Text><Button label="Otvoriť účet" onPress={() => props.onView("account")} secondary /></View>}
     {state.ready && <>
-      <View style={tab === "cases" ? { flex: 1 } : { display: "none" }}><Cases api={api} environment={props.config.environment} userId={props.userId} profileId={identity.profileId}
-        active={active && tab === "cases"} visible={tab === "cases"} workStore={store} vault={vault} queryKey={caseKey} openRequest={props.caseRequest} onLeaveCases={() => props.onTab("console")} onSelectNumber={props.onSelectNumber} /></View>
-      <View style={tab === "tasks" ? { flex: 1 } : { display: "none" }}><MyTasks store={store} queryKey={queryKey} profileId={identity.profileId}
-        active={active && tab === "tasks"} onLeave={() => props.onTab("console")} onOpenCase={props.onOpenCase} openTaskRequest={props.taskRequest} /></View>
+      <View style={view === "cases" ? { flex: 1 } : { display: "none" }}><Cases api={api} environment={props.config.environment} userId={props.userId} profileId={identity.profileId}
+        active={active && view === "cases"} visible={view === "cases"} workStore={store} vault={vault} queryKey={caseKey} openRequest={props.caseRequest} onLeaveCases={props.onLeaveModule} onSelectNumber={props.onSelectNumber} /></View>
+      <View style={view === "tasks" ? { flex: 1 } : { display: "none" }}><MyTasks store={store} queryKey={queryKey} profileId={identity.profileId}
+        active={active && view === "tasks"} onLeave={props.onLeaveModule} onOpenCase={props.onOpenCase} openTaskRequest={props.taskRequest} /></View>
     </>}
   </>;
 }
 
 function Account(props: Props) {
-  return <View style={{ gap: 18 }}><Text style={styles.heading}>Účet</Text><Card><Text style={styles.subheading}>{props.identity.profile.displayName}</Text><Text style={styles.text}>{props.identity.profile.email ?? ""}</Text>
-    <Text style={styles.muted}>{({ dispatcher: "Dispečer", senior_dispatcher: "Vedúci dispečer", manager: "Manažér", admin: "Administrátor" })[props.identity.profile.role]}</Text></Card>
+  return <View style={{ gap: 12 }}><Text accessibilityRole="header" style={styles.heading}>Účet</Text><Card><Text style={styles.subheading}>{props.identity.profile.displayName}</Text><Text style={styles.text}>{props.identity.profile.email ?? ""}</Text>
+    <Text style={styles.muted}>{roleNames[props.identity.profile.role]}</Text></Card>
     <Card><Text style={styles.label}>Prostredie</Text><Text style={styles.text}>{props.config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"}</Text><Text style={styles.muted}>Verzia 0.1.0</Text></Card>
+    <Card><Text style={styles.label}>Spodná lišta</Text><Text style={styles.muted}>Prehľad, tri vaše moduly a Moduly. Platí pre tento telefón.</Text>
+      <Button label="Upraviť lištu" onPress={props.bar.onEdit} secondary />
+      {props.bar.customized && <Button label="Obnoviť lištu podľa roly" onPress={props.bar.onReset} secondary />}</Card>
     {props.logoutState.message && <ErrorNotice message={props.logoutState.message} />}{props.logoutError && <ErrorNotice message={props.logoutError} />}
     {props.hasCall && <Text style={styles.muted}>Pred odhlásením ukončite hovor.</Text>}
     <Button label={props.logoutBusy || props.logoutState.busy ? "Odhlasujem…" : "Odhlásiť sa"} disabled={props.logoutBusy || props.logoutState.busy || props.hasCall} onPress={props.onLogout} secondary />

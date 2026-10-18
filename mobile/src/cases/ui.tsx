@@ -1,6 +1,7 @@
 import { usePhoneOverlay } from "../ui/phone-overlays";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Keyboard, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Search } from "lucide-react-native";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAndroidBack } from "../lib/use-android-back";
 import type { MobileCaseDetailData, MobileCaseFilter, MobileCaseNoteAdded, MobileCaseSummary } from "../../../src/lib/mobile-api";
@@ -24,7 +25,7 @@ import { CasePlacePicker } from "./case-place-picker";
 import { CaseMapFrame } from "./map-frame";
 import { CopyValue } from "./copy";
 import { directionsUrl } from "./maps";
-import { Choice, fields, jobTypes, priorities } from "./form";
+import { Choice, MenuChip, fields, jobTypes, priorities } from "./form";
 import { HandoffDraft } from "../handoff/draft";
 import { Handoffs } from "../handoff/ui";
 import { WorkStore } from "../work/store";
@@ -274,15 +275,16 @@ function CaseList({ api, queryKey, active, ownership, category, search, ownerId,
     {draftState.status === "uncertain" && <Card><Text style={styles.text}>Skontrolujte, či sa váš prípad už uložil. Nájdete ho podľa mena, EČV alebo času vytvorenia.</Text>
       {draftState.reviewedList && <Text style={styles.muted}>Ak ho nenájdete, v rozpracovanom formulári môžete vedome povoliť opakovanie.</Text>}</Card>}
     <CaseOverview api={api} queryKey={queryKey} active={active} pendingFilter={pendingSearch || query.isFetching} onSelect={onShortcut} />
-    <TextInput accessibilityLabel="Hľadať prípady" placeholder="Číslo prípadu, meno alebo EČV" placeholderTextColor={colors.muted} value={search}
-      onChangeText={onSearch} maxLength={120} style={styles.input} autoCorrect={false} />
+    <View style={s.search}><Search size={16} color={colors.muted} accessible={false} />
+      <TextInput accessibilityLabel="Hľadať prípady" placeholder="Číslo prípadu, meno alebo EČV" placeholderTextColor={colors.muted} value={search}
+        onChangeText={onSearch} maxLength={120} style={s.searchInput} autoCorrect={false} returnKeyType="search" /></View>
     <View style={s.choices}>
       <Choice label="Nepriradené" selected={ownership === "unassigned"} onPress={() => onOwnership("unassigned")} />
       <Choice label="Moje" selected={ownership === "mine"} onPress={() => onOwnership("mine")} />
       <Choice label="Všetkých" selected={ownership === "all" && ownerId === null} onPress={() => onOwnership("all")} />
+      <MenuChip label={ownerId ? "Dispečer: " + (selectedOwner ? selectedOwner.name + (selectedOwner.active ? "" : " (neaktívny)") : "vybraný") : "Dispečer"}
+        active={ownerId !== null} disabled={!ownerOverlay.canOpen} onPress={() => { Keyboard.dismiss(); ownerOverlay.open(true); }} />
     </View>
-    <Button label={ownerId ? "Dispečer: " + (selectedOwner ? selectedOwner.name + (selectedOwner.active ? "" : " (neaktívny)") : "Vybraný dispečer") : "Vybrať dispečera"}
-      secondary disabled={!ownerOverlay.canOpen} onPress={() => { Keyboard.dismiss(); ownerOverlay.open(true); }} />
     <Modal visible={active && selectingOwner} transparent animationType="fade" onRequestClose={ownerOverlay.close}>
       <View style={s.modalBackdrop}><View accessibilityViewIsModal style={s.modalCard}>
         <Text style={styles.subheading}>Vybrať dispečera</Text>
@@ -298,21 +300,34 @@ function CaseList({ api, queryKey, active, ownership, category, search, ownerId,
     <View style={s.choices}>
       <Choice label="Otvorené" selected={category === "open"} onPress={() => onCategory("open")} />
       <Choice label="Aj uzavreté" selected={category === "all"} onPress={() => onCategory("all")} />
+      <CaseFilterControls active={active} status={status} priority={priority} onStatus={onStatus} onPriority={onPriority} />
     </View>
-    <CaseFilterControls active={active} status={status} priority={priority} onStatus={onStatus} onPriority={onPriority} />
     {pendingSearch || query.isPending ? <Loading /> : !canShow ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} />
       : <>{cases.length === 0 && <Card><Text style={styles.text}>Žiadne prípady pre tento výber.</Text></Card>}
-        {cases.map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={"Otvoriť prípad " + item.caseNumber} onPress={() => onOpen(item.id)}>
-          <Card><CaseHeading item={item} /><Text style={styles.subheading}>{item.contact.name || "Kontakt bez mena"}</Text>
-            <Text style={styles.text}>{[item.vehicle.licensePlate, item.vehicle.description].filter(Boolean).join(" · ") || "Vozidlo nedoplnené"}</Text>
-            <Text style={styles.muted}>{item.pickupAddress || "Miesto vyzdvihnutia nedoplnené"}</Text>
-            {Boolean(item.summary) && <Text numberOfLines={2} style={styles.text}>{item.summary}</Text>}
-            <Text style={styles.muted}>{item.owner.mine ? "Môj prípad" : item.owner.name || "Bez vlastníka"} · {formatTime(item.createdAt)}</Text>
-          </Card></Pressable>)}
+        {cases.length > 0 && <View style={s.group}>{cases.map((item, index) => <CaseRow key={item.id} item={item} first={index === 0} onPress={() => onOpen(item.id)} />)}</View>}
         {query.isFetchNextPageError && <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.fetchNextPage(); }} />}
         {query.hasNextPage && !query.isFetchNextPageError && <Button label={query.isFetchingNextPage ? "Načítavam…" : "Ďalšie prípady"} secondary disabled={query.isFetchingNextPage} onPress={() => { void query.fetchNextPage(); }} />}
       </>}
   </ScrollView>;
+}
+const priorityBar: Partial<Record<MobileCaseSummary["priority"], string>> = { urgent: "#FF383C", high: "#FF8D28" };
+/** One case in up to three lines: who and which car, number and place, state. */
+function CaseRow({ item, first, onPress }: { item: MobileCaseSummary; first: boolean; onPress: () => void }) {
+  const title = [item.contact.name || "Kontakt bez mena", item.vehicle.licensePlate].filter(Boolean).join(" · ");
+  return <Pressable accessibilityRole="button" accessibilityLabel={"Otvoriť prípad " + item.caseNumber + ", " + title} onPress={onPress}
+    style={({ pressed }) => [s.caseRow, pressed && { backgroundColor: "#ECECF0" }]}>
+    {!first && <View style={s.separator} />}
+    {priorityBar[item.priority] && <View style={[s.bar, { backgroundColor: priorityBar[item.priority] }]} />}
+    <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+      <View style={s.titleLine}><Text numberOfLines={1} style={s.caseTitle}>{title}</Text><Text style={s.caseTime}>{formatTime(item.createdAt)}</Text></View>
+      <Text numberOfLines={1} style={styles.muted}>{[item.caseNumber, item.pickupAddress || item.summary || "Miesto nedoplnené"].filter(Boolean).join(" · ")}</Text>
+      <View style={s.tags}>
+        {(item.priority === "urgent" || item.priority === "high") && <Text style={[s.tag, item.priority === "urgent" ? s.tagRed : s.tagOrange]}>{item.priorityLabel}</Text>}
+        <Text style={[s.tag, s.tagGray]}>{item.statusLabel}</Text>
+        {item.owner.mine ? <Text style={[s.tag, s.tagYellow]}>Môj</Text> : <Text numberOfLines={1} style={s.owner}>{item.owner.name || "Bez vlastníka"}</Text>}
+      </View>
+    </View>
+  </Pressable>;
 }
 function CaseHeading({ item }: { item: MobileCaseSummary }) {
   return <View style={{ gap: 5 }}><Text style={styles.subheading}>{item.caseNumber}</Text>
@@ -415,4 +430,18 @@ const s = StyleSheet.create({
   modalBackdrop: { flex: 1, justifyContent: "center", padding: 20, backgroundColor: "rgba(0,0,0,0.5)" },
   modalCard: { maxHeight: "80%", backgroundColor: colors.white, borderRadius: 20, padding: 20, gap: 16 },
   choices: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  search: { minHeight: 38, borderRadius: 19, backgroundColor: "rgba(118,118,128,0.12)", flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 12 },
+  searchInput: { flex: 1, minHeight: 38, fontSize: 16, color: colors.ink, paddingVertical: 0 },
+  group: { backgroundColor: colors.white, borderRadius: 16, overflow: "hidden" },
+  caseRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingVertical: 8, minHeight: 64 },
+  separator: { position: "absolute", top: 0, left: 12, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: "rgba(60,60,67,0.16)" },
+  bar: { position: "absolute", left: 0, top: 9, bottom: 9, width: 3, borderTopRightRadius: 3, borderBottomRightRadius: 3 },
+  titleLine: { flexDirection: "row", alignItems: "baseline", gap: 8 },
+  caseTitle: { fontSize: 15, lineHeight: 20, fontWeight: "600", color: colors.ink, flex: 1 },
+  caseTime: { fontSize: 12, lineHeight: 16, fontWeight: "500", color: colors.muted, fontVariant: ["tabular-nums"] },
+  tags: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 2, overflow: "hidden" },
+  tag: { fontSize: 11, lineHeight: 14, fontWeight: "700", borderRadius: 5, paddingHorizontal: 5, paddingVertical: 1, overflow: "hidden" },
+  tagRed: { backgroundColor: "#FFE7E6", color: "#C4161B" }, tagOrange: { backgroundColor: "#FFF0E0", color: "#B35A00" },
+  tagGray: { backgroundColor: "rgba(118,118,128,0.12)", color: "#3A3A3C" }, tagYellow: { backgroundColor: "#FFF6BF", color: "#7D6300" },
+  owner: { fontSize: 12, lineHeight: 16, color: colors.muted, flexShrink: 1 },
 });

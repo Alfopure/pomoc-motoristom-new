@@ -3,7 +3,7 @@ import { Keyboard, Modal, ScrollView, StyleSheet, Text, View } from "react-nativ
 import type { MobileCaseFilter } from "../../../src/lib/mobile-api";
 import { MOBILE_CASE_STATUSES, MOBILE_CASE_PRIORITIES, caseStatusLabels, casePriorityLabels } from "../../../src/lib/mobile-case-filters";
 import { Button, colors, styles } from "../ui";
-import { Choice } from "./form";
+import { Choice, MenuChip } from "./form";
 
 export function CaseFilterControls({ active, status, priority, onStatus, onPriority }: {
   active: boolean; status: MobileCaseFilter["status"]; priority: MobileCaseFilter["priority"];
@@ -12,10 +12,8 @@ export function CaseFilterControls({ active, status, priority, onStatus, onPrior
   const overlay = usePhoneOverlay<"status" | "priority">(active);
   const picker = overlay.value;
   return <>
-    <View style={{ gap: 8 }}>
-      <Button secondary label={status ? "Stav: " + caseStatusLabels[status] : "Všetky stavy"} disabled={!overlay.canOpen} onPress={() => { Keyboard.dismiss(); overlay.open("status"); }} />
-      <Button secondary label={priority ? "Priorita: " + casePriorityLabels[priority] : "Všetky priority"} disabled={!overlay.canOpen} onPress={() => { Keyboard.dismiss(); overlay.open("priority"); }} />
-    </View>
+    <MenuChip label={status ? "Stav: " + caseStatusLabels[status] : "Stav"} active={Boolean(status)} disabled={!overlay.canOpen} onPress={() => { Keyboard.dismiss(); overlay.open("status"); }} />
+    <MenuChip label={priority ? "Priorita: " + casePriorityLabels[priority] : "Priorita"} active={Boolean(priority)} disabled={!overlay.canOpen} onPress={() => { Keyboard.dismiss(); overlay.open("priority"); }} />
     <Modal visible={active && picker !== null} transparent animationType="fade" onRequestClose={overlay.close}>
       <View style={s.backdrop}><View accessibilityViewIsModal style={s.modal}>
         <Text style={styles.subheading}>{picker === "status" ? "Vybrať stav" : "Vybrať prioritu"}</Text>

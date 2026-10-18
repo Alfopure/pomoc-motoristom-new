@@ -11,9 +11,15 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
 - Prihlásenie existujúcim e-mailom a heslom cez Supabase Auth; obnova session.
 - Na iOS/Androide session v Keychain/Keystore, vrátane väčších tokenov;
   v prehliadačovom náhľade iba pamäť. Heslo sa osobitne neukladá.
-- **Ústredňa:** skutočný serverový stav operátora, jeho aktívne hovory,
+- **Kostra appky:** horná lišta so stavom operátora, prostredím a účtom;
+  spodná lišta Prehľad · tri vlastné moduly · Moduly. Lištu si používateľ
+  upraví cez Moduly → Upraviť lištu alebo „☆ Do lišty“ v module; voľba sa
+  uloží v telefóne pre účet a profil. Podrobnosti sú v
+  [dizajnovom štandarde](../docs/mobile/design-standard.md).
+- **Prehľad:** hovory na účte, spätné volania, prípady, moje úlohy a stav telefónu.
+- **Hovory → Ústredňa:** skutočný serverový stav operátora, jeho aktívne hovory,
   obnova potiahnutím a každých 30 sekúnd v popredí, pole pre číslo.
-- **História:** existujúce autorizované serverové vyhľadávanie, filtre,
+- **Hovory → História:** existujúce autorizované serverové vyhľadávanie, filtre,
   stránkovanie a výber čísla do ústredne. Výber nevytvorí hovor.
 - **Prípady:** moje alebo všetky prípady organizácie, otvorené alebo všetky stavy,
   filter podľa dispečera aj nepridelené prípady, vyhľadávanie, stránkovanie, detail, založenie a úpravy prípadu,
@@ -37,7 +43,9 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   ([podrobnosti](../docs/mobile/call-wrap-up.md)).
 - **Moje úlohy:** všetky vlastné otvorené úlohy, výber úloh na kontrolu,
   aj dokončené, vyhľadávanie podľa názvu a prechod na prípad.
-- **Účet:** meno, e-mail, rola, prostredie, miestne koncepty a odhlásenie.
+- **Účet** (avatar vpravo hore alebo Moduly → Účet a koncepty): meno, e-mail,
+  rola, prostredie, úprava lišty, miestne koncepty a odhlásenie.
+- **Nástroje:** samostatný modul v Moduloch (vozidlo, trasa, mapa, flotila).
 - Rozpísané textové formuláre a pôvodné neisté príkazy sa na iPhone ukladajú
   do samostatného chráneného úložiska. Android potrebuje nový natívny build
   s kontrolou potvrdenia zápisu; starší Android/Expo Go a web používajú iba
@@ -57,15 +65,16 @@ Skutočné audio, APNs a systémové zvonenie na zamknutom zariadení zatiaľ
 nie sú prijaté ako funkčné. Android hlas/FCM nasleduje po iPhone pilote.
 
 Rozhranie používa žltú `#FCD703`, čierne tlačidlá a zinc/sivé plochy webu.
-Plávajúce spodné menu zachováva päť sekcií a používa natívny Liquid Glass
-na podporovanom iOS 26+. Dostupnosť modulu aj systémového API sa overí
-pred importom natívneho pohľadu. Starší iPhone s dostupným BlurView má
-rozmazaný povrch; Android, web a zostava bez týchto modulov čitateľný
-nepriehľadný povrch. Nastavenie **Znížiť priehľadnosť** má prednosť;
-**Znížiť pohyb** vypne interaktívny sklenený efekt. Voľby sa zohľadnia
-aj po návrate z nastavení. Zväčšené písmo zachová prístup ku všetkým
-záložkám posúvaním lišty; obsah rezervuje priestor aj pre spodný bezpečný
-okraj. Klávesnica dočasne skryje menu a po zatvorení ho obnoví.
+Plávajúca spodná lišta má päť položiek s popisom (Prehľad, tri vlastné
+moduly, žlté Moduly) a používa natívny Liquid Glass na podporovanom iOS 26+.
+Dostupnosť modulu aj systémového API sa overí pred importom natívneho pohľadu.
+Starší iPhone s dostupným BlurView má rozmazaný povrch; Android, web a zostava
+bez týchto modulov čitateľný nepriehľadný povrch. Nastavenie **Znížiť
+priehľadnosť** má prednosť; **Znížiť pohyb** vypne interaktívny sklenený efekt
+aj pohyb výberu v lište. Zväčšené písmo zväčší lištu najviac 1,3×; obsah
+rezervuje priestor aj pre spodný bezpečný okraj. Klávesnica dočasne skryje
+lištu a po zatvorení ju obnoví. Farby, písmo a rozostupy sú v
+`src/design/tokens.ts`.
 
 GlassEffect 57.0.4 a BlurView 57.0.3 sú súčasťou Expo Go SDK 57.
 Vlastná natívna zostava ich potrebuje zahrnúť pri novom buildovaní;
@@ -301,8 +310,9 @@ zaznamenáva samostatne od úspešného exportu.
 
 Androidové systémové tlačidlo Späť používa návrat z aktuálnej obrazovky.
 Počas ukladania sa návrat spotrebuje bez opustenia formulára; pri neistom
-výsledku ostáva pôvodný príkaz v pamäti. Z prehľadu prípadov, histórie
-a účtu sa používateľ vráti do ústredne. Fyzická skúška tlačidla aj gesta
+výsledku ostáva pôvodný príkaz v pamäti. Z prvej obrazovky modulu sa
+používateľ vráti do Prehľadu, z modulu otvoreného v Moduloch do Modulov;
+účet sa zatvorí. Z Prehľadu rozhoduje systém. Fyzická skúška tlačidla aj gesta
 na Androide zostáva samostatnou akceptáciou.
 
 Prvé jednoznačné odmietnutie editora pre neprihlásenie, prístup alebo chýbajúci
