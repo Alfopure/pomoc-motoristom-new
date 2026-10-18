@@ -60,9 +60,9 @@ export function CallContextPanel({ api, target, active, current, onBack, backLab
           {data.linkedCase && <Tag text={data.linkedCase.caseNumber} tone="yellow" />}
         </>} />
       {phone && <ActionBar actions={[
-        { icon: PhoneForwarded, label: "Vybrať číslo", accessibilityLabel: "Vybrať číslo na volanie", onPress: () => { if (allowed()) onSelectNumber(phone); } },
-        { icon: FilePlus2, label: "Nový prípad", accessibilityLabel: "Použiť číslo v novom prípade", onPress: () => { if (allowed()) onNewCase(phone); } },
-        ...(data.linkedCase ? [{ icon: FolderOpen, label: "Prípad", accessibilityLabel: "Otvoriť prípad hovoru", primary: true, onPress: () => { if (allowed() && data.linkedCase) onOpenCase(data.linkedCase.id); } }] : []),
+        { icon: PhoneForwarded, label: "Vybrať číslo", accessibilityLabel: "Vybrať číslo do ústredne", onPress: () => { if (allowed()) onSelectNumber(phone); } },
+        { icon: FilePlus2, label: "Nový prípad", accessibilityLabel: "Nový prípad s číslom hovoru", onPress: () => { if (allowed()) onNewCase(phone); } },
+        ...(data.linkedCase ? [{ icon: FolderOpen, label: "Prípad", accessibilityLabel: "Prípad hovoru, otvoriť", primary: true, onPress: () => { if (allowed() && data.linkedCase) onOpenCase(data.linkedCase.id); } }] : []),
       ]} />}
       {phone && <Text style={s.note}>Číslo pred uložením potvrdíte vo formulári. Vytvorenie prípadu samo nepriradí tento hovor{wrapUp && wrapUpCallId ? "; priradíte ho nižšie v časti Po hovore" : ""}.</Text>}
       <SectionHeader title="Hovor" />

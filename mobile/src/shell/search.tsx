@@ -15,6 +15,8 @@ import { ModuleTile } from "./parts";
 export type SearchScope = { cases: CasesApi; homeKey: readonly unknown[] };
 type Props = {
   active: boolean; api: MobileApi; profileId: string; queryKey: readonly unknown[]; available: ModuleId[];
+  /** Owned by the shell, so the text survives the screen moving once the scope is verified. */
+  input: string; onInput: (value: string) => void;
   scope: SearchScope | null; scopeNotice: string | null;
   onModule: (id: ModuleId) => void; onCase: (id: string) => void; onCall: (id: string) => void;
 };
@@ -28,9 +30,8 @@ export function searchTerm(raw: string): string | null {
 }
 
 /** One field for cases (number, name, EČV, phone), calls and modules. */
-export function SearchScreen({ active, api, profileId, queryKey, available, scope, scopeNotice, onModule, onCase, onCall }: Props) {
-  const [input, setInput] = useState("");
-  const [q, setQ] = useState<string | null>(null);
+export function SearchScreen({ active, api, profileId, queryKey, available, input, onInput, scope, scopeNotice, onModule, onCase, onCall }: Props) {
+  const [q, setQ] = useState<string | null>(() => searchTerm(input));
   const field = useRef<TextInput>(null);
   useEffect(() => { const timer = setTimeout(() => setQ(searchTerm(input)), 300); return () => clearTimeout(timer); }, [input]);
   useEffect(() => { if (active) { const timer = setTimeout(() => field.current?.focus(), 250); return () => clearTimeout(timer); } }, [active]);
@@ -43,8 +44,8 @@ export function SearchScreen({ active, api, profileId, queryKey, available, scop
     <View style={s.field}>
       <Search size={16} color={palette.secondaryLabel} accessible={false} />
       <TextInput ref={field} accessibilityLabel="Hľadať prípad, EČV, telefón alebo modul" placeholder="Prípad, meno, EČV, telefón, modul" placeholderTextColor={palette.secondaryLabel}
-        value={input} onChangeText={setInput} style={s.input} autoCorrect={false} autoCapitalize="none" returnKeyType="search" maxLength={120} />
-      {input.length > 0 && <Pressable accessibilityRole="button" accessibilityLabel="Vymazať hľadanie" hitSlop={10} onPress={() => setInput("")} style={s.clear}>
+        value={input} onChangeText={onInput} style={s.input} autoCorrect={false} autoCapitalize="none" returnKeyType="search" maxLength={120} />
+      {input.length > 0 && <Pressable accessibilityRole="button" accessibilityLabel="Vymazať hľadanie" hitSlop={13} onPress={() => onInput("")} style={s.clear}>
         <X size={13} strokeWidth={3} color="#FFFFFF" accessible={false} /></Pressable>}
     </View>
     {!q && !pending && <Text style={s.hint}>Zadajte aspoň 2 znaky. Hľadá sa v prípadoch celej organizácie (číslo, meno, EČV, telefón), v hovoroch a v moduloch.</Text>}
@@ -77,7 +78,8 @@ function CaseResults({ active, scope, q, onCase }: { active: boolean; scope: Sea
     {query.isPending ? <ActivityIndicator color={palette.secondaryLabel} /> : query.isError ? <Text style={[s.hint, { color: palette.redText }]}>{errorText(query.error)}</Text>
       : query.data.cases.length === 0 ? <Text style={s.hint}>Žiadne prípady.</Text>
         : <Group>{query.data.cases.slice(0, LIMIT).map((item, index) => <Row key={item.id} first={index === 0}
-          title={[item.contact.name || "Kontakt bez mena", item.vehicle.licensePlate].filter(Boolean).join(" · ")} accessibilityLabel={"Otvoriť prípad " + item.caseNumber}
+          title={[item.contact.name || "Kontakt bez mena", item.vehicle.licensePlate].filter(Boolean).join(" · ")}
+          accessibilityLabel={"Otvoriť prípad " + item.caseNumber + ", " + [item.contact.name || "Kontakt bez mena", item.vehicle.licensePlate].filter(Boolean).join(", ")}
           subtitle={[item.caseNumber, item.statusLabel, item.priority === "urgent" ? item.priorityLabel : null, formatTime(item.createdAt)].filter(Boolean).join(" · ")}
           leading={<ModuleTile id="pripady" />} onPress={() => onCase(item.id)} trailing={<Text style={s.chevron}>›</Text>} />)}</Group>}
   </>;

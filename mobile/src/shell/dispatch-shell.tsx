@@ -70,6 +70,7 @@ export function DispatchShell(props: Props) {
   const nav = reconcileShell(shell, pins, available);
   const view = dispatchView(nav);
   const [number, setNumber] = useState("");
+  const [searchInput, setSearchInput] = useState("");
   const [category, setCategory] = useState<HistoryCategory>("all");
   const [search, setSearch] = useState("");
   const [callSelection, setCallSelection] = useState<{ target: MobileCallContextTarget; view: DispatchView } | null>(null);
@@ -128,7 +129,7 @@ export function DispatchShell(props: Props) {
       : openedInModules ? { kind: "back" as const, label: "Moduly", onPress: back }
         : { kind: "status" as const, label: statusLabel, tone: presence ? presenceTone[presence] : "gray" as const, onPress: () => navigate("hovory", "console") };
   return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
-    <ShellTopBar test={config.environment === "test"} initials={initialsOf(identity.profile.displayName)} onAccount={() => go({ ...nav, account: true })}
+    <ShellTopBar test={config.environment === "test"} initials={initialsOf(identity.profile.displayName)} onAccount={() => go({ ...nav, account: true, search: false })}
       left={left} onPin={openedInModules && !moduleBack && nav.opened && !pins.includes(nav.opened) ? () => pin(nav.opened!) : null} />
     {Boolean(props.meError) && <View style={{ paddingHorizontal: space.l }}><ErrorNotice message={errorMessage(props.meError)} onRetry={props.onRetryMe} /></View>}
     {hovoryVisible && <HovoryHeader view={nav.hovory} onView={value => go({ ...nav, hovory: value })} waiting={callbackSummary.data ? waiting : null} />}
@@ -148,6 +149,7 @@ export function DispatchShell(props: Props) {
       onShowCalls={back} dialer={props.dialer}
       onSelectNumber={value => { setNumber(value); navigate("hovory", "console"); }}
       renderSearch={(scope, notice, openCase) => <SearchScreen active={active && view === "search"} api={api} profileId={identity.profileId} queryKey={queryKey}
+        input={searchInput} onInput={setSearchInput}
         available={available} scope={scope} scopeNotice={notice} onModule={id => navigate(id)} onCase={id => openCase?.(id)}
         onCall={id => { if (!draftId(id)) return; go(openModule(nav, pins, "hovory", "history")); setCallSelection({ target: { kind: "call", id: id.toLowerCase() }, view: "history" }); }} />}
       renderHome={(scope, notice) => <HomeScreen active={active && view === "home"} scope={scope} scopeNotice={notice} onSearch={() => go({ ...nav, search: true })}

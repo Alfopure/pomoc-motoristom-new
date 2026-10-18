@@ -34,7 +34,7 @@ export function ActionBar({ actions }: { actions: DetailAction[] }) {
     accessibilityState={{ disabled: Boolean(action.disabled) }} disabled={action.disabled} onPress={action.onPress}
     style={({ pressed }) => [s.action, action.primary && s.actionPrimary, action.disabled && { opacity: 0.4 }, pressed && { opacity: 0.7 }]}>
     <action.icon size={20} strokeWidth={2.2} color={action.primary ? palette.label : palette.brandInk} accessible={false} />
-    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={[s.actionLabel, action.primary && { color: palette.label }]}>{action.label}</Text>
+    <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8} maxFontSizeMultiplier={1.3} style={[s.actionLabel, action.primary && { color: palette.label }]}>{action.label}</Text>
   </Pressable>)}</View>;
 }
 
@@ -46,8 +46,10 @@ export function IconButton({ icon: Icon, label, onPress, disabled }: { icon: Luc
 }
 
 /** Label above value; empty values say so instead of disappearing. */
-export function InfoRow({ label, value, detail, actions, first, empty = "Nedoplnené" }: {
+export function InfoRow({ label, value, detail, actions, first, empty = "Nedoplnené", alwaysShowActions }: {
   label: string; value: string | null | undefined; detail?: string | null; actions?: ReactNode; first?: boolean; empty?: string;
+  /** Keep actions for an empty value, e.g. a map point without an address. */
+  alwaysShowActions?: boolean;
 }) {
   const shown = value?.trim() ? value : null;
   return <View style={s.info}>
@@ -57,7 +59,7 @@ export function InfoRow({ label, value, detail, actions, first, empty = "Nedopln
       <Text selectable style={[s.infoValue, !shown && { color: palette.tertiaryLabel }]}>{shown ?? empty}</Text>
       {detail ? <Text selectable style={s.infoDetail}>{detail}</Text> : null}
     </View>
-    {shown && actions ? <View style={s.infoActions}>{actions}</View> : null}
+    {(shown || alwaysShowActions) && actions ? <View style={s.infoActions}>{actions}</View> : null}
   </View>;
 }
 

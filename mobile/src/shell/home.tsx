@@ -35,7 +35,7 @@ export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scope
   const counts = callbacks.data?.counts;
   return <ScrollView contentContainerStyle={s.content} refreshControl={<RefreshControl refreshing={false} onRefresh={onRefresh} />}>
     <View style={s.titleRow}><Text accessibilityRole="header" style={s.title}>Prehľad</Text><Text style={s.date}>{todayLabel()}</Text></View>
-    <Pressable accessibilityRole="search" accessibilityLabel="Hľadať prípad, EČV, telefón alebo modul" onPress={onSearch} style={({ pressed }) => [s.search, pressed && { opacity: 0.7 }]}>
+    <Pressable accessibilityRole="search" accessibilityLabel="Hľadať prípad, EČV, telefón alebo modul" onPress={onSearch} hitSlop={{ top: 3, bottom: 3 }} style={({ pressed }) => [s.search, pressed && { opacity: 0.7 }]}>
       <Search size={16} color={palette.secondaryLabel} accessible={false} /><Text numberOfLines={1} style={s.searchText}>Hľadať prípad, EČV, telefón, modul…</Text>
     </Pressable>
     {activeCalls.length > 0 && <>

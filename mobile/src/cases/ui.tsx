@@ -340,14 +340,15 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
   const item = query.isError ? null : query.data?.case;
   const mapOverlay = usePhoneOverlay<"pickup" | "destination">(active);
   const mapTarget = mapOverlay.value;
-  const [navigation, setNavigation] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
+  const [navigation, setNavigation] = useState<{ busy: boolean; error: string | null; from: "actions" | "places" }>({ busy: false, error: null, from: "actions" });
   useShellBack(active, "Prípady", onBack);
-  function navigate(address: string | null) {
+  // The error appears next to the control that started navigation.
+  function navigate(address: string | null, from: "actions" | "places") {
     if (!address?.trim() || navigation.busy) return;
-    setNavigation({ busy: true, error: null });
+    setNavigation({ busy: true, error: null, from });
     void (async () => {
-      try { await Linking.openURL(directionsUrl(address)); setNavigation({ busy: false, error: null }); }
-      catch (error) { setNavigation({ busy: false, error: error instanceof Error && error.message.startsWith("Adresa") ? error.message : "Navigáciu sa nepodarilo otvoriť. Skúste znova." }); }
+      try { await Linking.openURL(directionsUrl(address)); setNavigation({ busy: false, error: null, from }); }
+      catch (error) { setNavigation({ busy: false, error: error instanceof Error && error.message.startsWith("Adresa") ? error.message : "Navigáciu sa nepodarilo otvoriť. Skúste znova.", from }); }
     })();
   }
   const copy = (label: string, value: string | null) => <CopyValue compact scopeKey={id} active={active} label={label} value={value} />;
@@ -364,17 +365,17 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
           meta={"Založený " + formatTime(item.createdAt) + " · overené " + formatTime(query.data!.checkedAt)}
           trailing={copy("Kopírovať číslo prípadu", item.caseNumber)}
           tags={<>
-            {(item.priority === "urgent" || item.priority === "high") && <Tag text={item.priorityLabel} tone={item.priority === "urgent" ? "red" : "orange"} />}
+            <Tag text={item.priorityLabel} tone={item.priority === "urgent" ? "red" : item.priority === "high" ? "orange" : "gray"} />
             <Tag text={item.statusLabel} tone="gray" />
             <Tag text={item.owner.mine ? "Môj prípad" : item.owner.name || "Bez dispečera"} tone={item.owner.mine ? "yellow" : "gray"} />
           </>} />
         <ActionBar actions={[
-          { icon: PhoneForwarded, label: "Volať", accessibilityLabel: "Vybrať číslo kontaktu v ústredni", disabled: !dialable(item.contact.phone), onPress: () => { if (item.contact.phone) onSelectNumber(item.contact.phone); } },
-          { icon: Navigation, label: "Navigovať", accessibilityLabel: "Navigovať na miesto vyzdvihnutia", disabled: !item.pickupAddress?.trim() || navigation.busy, onPress: () => navigate(item.pickupAddress) },
-          { icon: MessageSquarePlus, label: "Poznámka", accessibilityLabel: "Pridať poznámku", onPress: () => onNote(item.id) },
+          { icon: PhoneForwarded, label: "Vybrať číslo", accessibilityLabel: "Vybrať číslo kontaktu do ústredne", disabled: !dialable(item.contact.phone), onPress: () => { if (item.contact.phone) onSelectNumber(item.contact.phone); } },
+          { icon: Navigation, label: "Navigovať", accessibilityLabel: "Navigovať na miesto vyzdvihnutia", disabled: !item.pickupAddress?.trim() || navigation.busy, onPress: () => navigate(item.pickupAddress, "actions") },
+          { icon: MessageSquarePlus, label: "Poznámka", accessibilityLabel: "Poznámka, pridať do prípadu", onPress: () => onNote(item.id) },
           { icon: Pencil, label: "Upraviť", accessibilityLabel: "Upraviť prípad", primary: true, onPress: () => onEdit(item) },
         ]} />
-        {navigation.error && <View style={s.notices}><ErrorNotice message={navigation.error} /></View>}
+        {navigation.error && navigation.from === "actions" && <View style={s.notices}><ErrorNotice message={navigation.error} /></View>}
         <SectionHeader title="Kontakt" />
         <Group>
           <InfoRow first label="Meno" value={item.contact.name} />
@@ -394,11 +395,12 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
           {(["pickup", "destination"] as const).map((target, index) => {
             const address = target === "pickup" ? item.pickupAddress : item.destinationAddress, point = place(target);
             return <InfoRow key={target} first={index === 0} label={target === "pickup" ? "Vyzdvihnutie" : "Cieľ"} value={address}
+              empty={point ? "Bez adresy, len bod na mape" : "Nedoplnené"} alwaysShowActions={Boolean(point)}
               detail={point?.point ? `GPS ${point.point.lat}, ${point.point.lng} · ${placeSources[point.source] ?? "Neznámy zdroj"}` : null}
               actions={<>
                 {copy(target === "pickup" ? "Kopírovať vyzdvihnutie" : "Kopírovať cieľ", address)}
                 {point && <IconButton icon={MapPinned} label={target === "pickup" ? "Mapa vyzdvihnutia" : "Mapa cieľa"} disabled={!mapOverlay.canOpen} onPress={() => mapOverlay.open(target)} />}
-                <IconButton icon={Navigation} label={target === "pickup" ? "Navigovať na vyzdvihnutie" : "Navigovať do cieľa"} disabled={navigation.busy} onPress={() => navigate(address)} />
+                {address?.trim() ? <IconButton icon={Navigation} label={target === "pickup" ? "Navigovať na vyzdvihnutie" : "Navigovať do cieľa"} disabled={navigation.busy} onPress={() => navigate(address, "places")} /> : null}
               </>} />;
           })}
           {(["pickup", "destination"] as const).map(target => { const point = place(target)?.point; return point && <InfoRow key={"gps:" + target}
@@ -411,6 +413,7 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
               <IconButton icon={MapPinned} label="Mapa polohy klienta" disabled={!mapOverlay.canOpen} onPress={() => mapOverlay.open("pickup")} />
             </>} />}
         </Group>
+        {navigation.error && navigation.from === "places" && <View style={[s.notices, { paddingTop: 8 }]}><ErrorNotice message={navigation.error} /></View>}
         <SectionHeader title="Problém a poznámka" />
         <Group>
           <InfoRow first label="Problém" value={item.incidentDescription || item.summary} />
