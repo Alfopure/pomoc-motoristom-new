@@ -99,11 +99,25 @@ export function Sheet({ visible, title, onClose, left, right, children, large }:
   return <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
     <View style={s.backdropRoot}>
       <Pressable accessibilityRole="button" accessibilityLabel="Zavrieť" style={StyleSheet.absoluteFill} onPress={onClose} />
-      <View accessibilityViewIsModal style={[s.sheet, large && s.sheetLarge, { paddingBottom: insets.bottom + space.m }]}>
+      <SlideUp style={[s.sheet, large && s.sheetLarge, { paddingBottom: insets.bottom + space.m }]}>
         {head}<ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.sheetBody}>{children}</ScrollView>
-      </View>
+      </SlideUp>
     </View>
   </Modal>;
+}
+/** The sheet rises while the backdrop fades; Reduce Motion only fades. */
+function SlideUp({ style, children }: { style: StyleProp<ViewStyle>; children: ReactNode }) {
+  const [offset] = useState(() => new Animated.Value(320));
+  useEffect(() => {
+    let alive = true;
+    void AccessibilityInfo.isReduceMotionEnabled().then(reduce => {
+      if (!alive) return;
+      if (reduce) offset.setValue(0);
+      else Animated.spring(offset, { toValue: 0, useNativeDriver: true, speed: 16, bounciness: 2 }).start();
+    }).catch(() => offset.setValue(0));
+    return () => { alive = false; };
+  }, [offset]);
+  return <Animated.View accessibilityViewIsModal style={[style, { transform: [{ translateY: offset }] }]}>{children}</Animated.View>;
 }
 
 /** Grouped rows with inset separators, as in iOS Settings. */
