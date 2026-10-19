@@ -6,6 +6,8 @@ Web a jeho telefonovanie zostávajú v koreňovom Next.js projekte. Mobil má vl
 Z webu importuje TypeScript typy a čisté spoločné definície stavov a filtrov
 prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
 
+Čo chýba na nasadenie a čo vyžaduje Apple: [pripravenosť na nasadenie](../docs/mobile/release-readiness.md).
+
 ## Rozsah tejto verzie
 
 - Prihlásenie existujúcim e-mailom a heslom cez Supabase Auth; obnova session.
