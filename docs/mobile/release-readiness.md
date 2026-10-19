@@ -201,6 +201,65 @@ Slovensko.
 3. Žiadosť o nezaradenú distribúciu, odkaz pre dispečerov.
 4. Po prijatí hovorov na TEST ich povolenie pre produkciu ako samostatné vydanie.
 
+## 7. Plán dokončenia verzie 1 (zmrazenie pred licenciou)
+
+Rozhodnutia majiteľa z 19. 10. 2026: vydavateľ **MICT, s. r. o.** (IČO 53 167 422,
+Žilina), pracovný názov **Dispatching**, **nezaradená distribúcia** v App Store,
+text zásad ochrany súkromia pripraví vývoj, **push notifikácie schválené**.
+Cieľ: dokončiť hovory a dispečerský základ, potom aplikáciu zmraziť; po
+príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
+
+### Čo do verzie 1 patrí
+
+**F1 – Hovor v aplikácii** (dnes starý panel nad celou obrazovkou)
+- Obrazovka hovoru v štandarde: zbalený pás hore s menom, stavom a časom,
+  po ťuknutí celá obrazovka s veľkými tlačidlami (Stíšiť, Klávesnica,
+  Nahlas, Podržať, Ukončiť).
+- Kontext volajúceho priamo v hovore: linka, na ktorú zákazník volal,
+  známy kontakt a prípad; tlačidlá Nový prípad, Prípad, Detail hovoru.
+- Zavolať jedným ťuknutím z prípadu, histórie a hľadania, keď je telefón
+  pripravený (s potvrdením a overeným číslom); hovor z prípadu sa
+  k prípadu priradí.
+
+**F2 – Úkony v hovore, ktoré mobil nemá a web áno**
+- **Prepojiť hovor na kolegu** (výber z dostupných kolegov aj na mobile).
+- **Zastaviť nahrávanie** – zákazníkom sľubujeme, že na požiadanie ho
+  dispečer zastaví; bez toho mobil nemôže ostro prijímať zákaznícke hovory.
+
+**F3 – Push notifikácie**
+- Nová úloha pre mňa, vrátená alebo na kontrolu; termín úlohy.
+- Spätné volanie po termíne (moje prevzaté, nepridelené).
+- Prípad priradený mne.
+- Text bez údajov zákazníka; ťuk otvorí správnu obrazovku.
+- Zapínanie podľa druhu v Účte.
+
+**F4 – Pripravenosť na vydanie**
+- Názov Dispatching, ikona a spúšťacia obrazovka, verzia a build v Účte.
+- Zásady ochrany súkromia a Podpora (verejné stránky) a odkazy v Účte.
+- Privacy manifest, odpovede pre App Store Connect, texty do App Store.
+- Kontrola minimálnej verzie (vynútenie aktualizácie).
+- Hlásenie pádov (po súhlase majiteľa).
+- Produkčná cesta hlasu pripravená v kóde, ale vypnutá prepínačmi na
+  serveri, kým neprejde akceptácia na TEST.
+
+**F5 – Dokončenie**
+- Odovzdanie prípadu v novom vzhľade; posledná kontrola všetkých obrazoviek
+  na 390 a 320 b; zmrazenie.
+
+### Čo do verzie 1 nepatrí (neskôr)
+
+Konzultácia pred prepojením a konferencia, čakáreň, dozor vedúceho, SMS,
+režim bez pripojenia, zámok Face ID, tmavý režim a režim Rukavice, moduly
+vodiča a zákaziek odťahu, serverový zoznam modulov a synchronizácia lišty,
+Android vydanie.
+
+### Potom
+
+1. Upratanie vydania: súpis 51 PR, kontrola produkčnej databázy čítaním,
+   schválené migrácie, jedno pripravené vydanie na produkciu.
+2. V deň licencie: App ID, push, APNs, TEST build na iPhony, akceptácia hovorov.
+3. Ostrá prevádzka: demo účet, produkčný build, review, nezaradená distribúcia.
+
 ## Zdroje
 
 - [App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)
