@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { AppState, KeyboardAvoidingView, Platform, ScrollView, Share, Text, TextInput, View } from 'react-native';
+import { AppState, KeyboardAvoidingView, Platform, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useAndroidBack } from "../lib/use-android-back";
 import { useShellBack } from "../shell/back";
 import type { MobileHandoffInput } from '../../../src/lib/mobile-api';
 import { Button, Card, ErrorNotice, Loading, styles } from '../ui';
+import { DetailHeader, InfoRow, Tag, type TagTone } from '../design/detail';
+import { Field, FormSection, formLayout } from '../design/form';
+import { Group, Row, SectionHeader } from '../design/list';
+import { palette, space, type } from '../design/tokens';
+import { formatNumber } from '../lib/display';
 import { HandoffDraft, previewSnapshot } from './draft';
 import { HandoffSummary, handoffTime } from './summary';
 const statuses: Record<string, string> = {
@@ -86,206 +91,152 @@ export function Handoffs({ draft, active, onBack }: {
       scroll.current?.scrollTo({ y: 0, animated: true });
     }
   };
+  const busyOrBlocked = draft.busy || ['uncertain', 'conflict'].includes(state.status);
+  const live = (grant: { status: string; expiresAt: string }) => ['offered', 'accepted', 'en_route', 'arrived'].includes(grant.status) && Date.parse(grant.expiresAt) > state.now;
+  const canStart = state.context ? !state.context.handoffs.some(live) : false;
+  // A saved action is done: the receipt above says so, and its form would only block the next one.
+  const showForm = Boolean(selected) && state.status !== 'saved';
+  const preview0 = state.context?.preview;
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
     <ScrollView
       ref={scroll}
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="on-drag"
-      contentContainerStyle={styles.content}>
+      contentContainerStyle={formLayout.content}>
+      <DetailHeader title="Odovzdanie prípadu" subtitle={preview0 ? [preview0.caseNumber, preview0.action].filter(Boolean).join(' · ') : null}
+        meta={state.context ? 'Overené ' + handoffTime(state.context.checkedAt) : null} />
 
-      <Text accessibilityRole="header" style={styles.heading}>Odovzdanie prípadu</Text>
-
-      {state.receipt && <Card>
-        <Text accessibilityRole="alert" style={styles.subheading}>Odovzdanie uložené</Text>
-        <Text style={styles.text}>{actions[state.receipt.action]} · potvrdená revízia {state.receipt.committedRevision}</Text>
-        {state.receipt.link.status === 'unavailable' && <Text style={styles.text}>Uloženie je potvrdené, odkaz sa nepodarilo získať.</Text>}
-        {state.status === 'saved' && state.pending && ['issue', 'renew'].includes(state.pending.action) && !state.link && <Button
-          label="Znova získať pôvodný odkaz"
-          secondary
-          disabled={draft.busy}
-          onPress={() => {
+      <View style={formLayout.notices}>
+        {state.receipt && <Card>
+          <Text accessibilityRole="alert" style={styles.subheading}>Odovzdanie uložené</Text>
+          <Text style={styles.text}>{actions[state.receipt.action]} · potvrdená revízia {state.receipt.committedRevision}</Text>
+          {state.receipt.link.status === 'unavailable' && <Text style={styles.text}>Uloženie je potvrdené, odkaz sa nepodarilo získať.</Text>}
+          {state.status === 'saved' && state.pending && ['issue', 'renew'].includes(state.pending.action) && !state.link && <Button
+            label="Znova získať pôvodný odkaz"
+            secondary
+            disabled={draft.busy}
+            onPress={() => {
+              void draft.reconcile();
+            }} />}
+        </Card>}
+        {state.error && <ErrorNotice message={state.error} />}
+        {shareError && <ErrorNotice message={shareError} />}
+        {state.status === 'uncertain' && <Card>
+          <Text style={styles.text}>Pôvodná požiadavka a jej náhľad sú zachované. Novú požiadavku zatiaľ nevytvárajte.</Text>
+          <Button label="Overiť pôvodné odovzdanie" disabled={draft.busy} onPress={() => {
             void draft.reconcile();
-          }} />}
-      </Card>}
+          }} />
+        </Card>}
+        {state.status === 'conflict' && <Card>
+          <Text style={styles.text}>Po obnovení porovnajte aktuálny náhľad s pôvodným. Vaše pokyny zostanú zachované.</Text>
+          <Button label="Použiť aktuálny náhľad a znova skontrolovať" disabled={!state.canRebase || state.loading} onPress={() => {
+            draft.rebase();
+          }} />
+          <Button
+            label="Zavrieť zamietnutú akciu"
+            secondary
+            disabled={!state.canRebase || state.loading}
+            onPress={() => draft.cancel()} />
+        </Card>}
+        {state.loading && !state.context && <Loading label="Načítavam odovzdanie…" />}
+      </View>
+      {state.status === 'conflict' && state.canRebase && state.context && <>
+        <SectionHeader title="Aktuálne údaje na porovnanie" />
+        <HandoffSummary value={state.context.preview} />
+      </>}
 
-      {state.error && <ErrorNotice message={state.error} />}
-      {shareError && <ErrorNotice message={shareError} />}
+      {state.link && <>
+        <FormSection title="Odkaz pre kolegu" footer="Odkaz sa nikomu neposiela automaticky. Zdieľajte ho priamo kolegovi.">
+          <InfoRow first label="Platí do" value={handoffTime(state.link.expiresAt)} />
+        </FormSection>
+        <View style={formLayout.actions}><Button primary label="Zdieľať odkaz" disabled={sharing || draft.busy} onPress={share} /></View>
+      </>}
 
-      {state.status === 'uncertain' && <Card>
-        <Text style={styles.text}>Pôvodná požiadavka a jej náhľad sú zachované. Novú požiadavku zatiaľ nevytvárajte.</Text>
-        <Button label="Overiť pôvodné odovzdanie" disabled={draft.busy} onPress={() => {
-          void draft.reconcile();
-        }} />
-      </Card>}
-
-      {state.status === 'conflict' && <Card>
-        <Text style={styles.text}>Po obnovení porovnajte aktuálny náhľad s pôvodným. Vaše pokyny zostanú zachované.</Text>
-        {state.canRebase && state.context && <>
-          <Text style={styles.subheading}>Aktuálne údaje na porovnanie</Text>
-          <HandoffSummary value={state.context.preview} />
+      {showForm && selected && <>
+        <FormSection title={actions[selected.action]} footer={explanations[selected.action]}>
+          {selected.action === 'issue' && <Field key="name" label="Meno kolegu" value={state.input.recipientName} onChangeText={recipientName => draft.edit({ recipientName })}
+            editable={!locked} maxLength={160} autoCorrect={false} textContentType="name" placeholder="Meno a priezvisko" />}
+          {selected.action === 'issue' && <Field key="phone" label="Telefón kolegu" value={state.input.recipientPhone} onChangeText={recipientPhone => draft.edit({ recipientPhone })}
+            editable={!locked} maxLength={30} autoCorrect={false} keyboardType="phone-pad" textContentType="telephoneNumber" placeholder="+421 …" />}
+          {['issue', 'publish'].includes(selected.action) && <Field key="instructions" label="Pokyny pre kolegu" value={state.input.instructions} onChangeText={instructions => draft.edit({ instructions })}
+            editable={!locked} maxLength={2000} multiline autoCorrect={false} />}
+          {['issue', 'publish'].includes(selected.action) && <Field key="time" label="Dohodnutý čas" hint="RRRR-MM-DD HH:mm, čas zariadenia" value={state.input.scheduledAt}
+            onChangeText={scheduledAt => draft.edit({ scheduledAt })} editable={!locked} maxLength={16} autoCorrect={false} placeholder="napr. 2026-10-21 14:30" />}
+          {['issue', 'renew', 'extend'].includes(selected.action) && <Field key="hours" label="Platnosť v hodinách" hint="1 až 72 hodín" value={state.input.hours}
+            onChangeText={hours => draft.edit({ hours })} editable={!locked} maxLength={2} keyboardType="number-pad" />}
+          {selected.action === 'revoke' && <Field key="comment" label="Dôvod zrušenia" value={state.input.comment} onChangeText={comment => draft.edit({ comment })}
+            editable={!locked} maxLength={1000} multiline autoCorrect={false} />}
+        </FormSection>
+        {['issue', 'publish'].includes(selected.action) && preview && <>
+          <SectionHeader title="Údaje, ktoré kolega uvidí" />
+          <HandoffSummary value={preview} />
         </>}
-        <Button label="Použiť aktuálny náhľad a znova skontrolovať" disabled={!state.canRebase || state.loading} onPress={() => {
-          draft.rebase();
-        }} />
-        <Button
-          label="Zavrieť zamietnutú akciu"
-          secondary
-          disabled={!state.canRebase || state.loading}
-          onPress={() => draft.cancel()} />
-      </Card>}
-
-      <Button
-        label={state.loading ? 'Načítavam odovzdanie…' : 'Obnoviť stav odovzdania'}
-        secondary
-        disabled={state.loading || draft.busy}
-        onPress={() => {
-          void draft.refresh();
-        }} />
-
-      {state.link && <Card>
-        <Text style={styles.text}>Odkaz je pripravený. Platí do {handoffTime(state.link.expiresAt)}.</Text>
-        <Button label="Zdieľať odkaz" disabled={sharing || draft.busy} onPress={share} />
-      </Card>}
-
-      {state.loading && !state.context && <Loading />}
-
-      {selected && <>
-        <Text style={styles.subheading}>{actions[selected.action]}</Text>
-        <Text style={styles.text}>{explanations[selected.action]}</Text>
-
-        {selected.action === 'issue' && <>
-          <Field
-            label="Meno kolegu"
-            value={state.input.recipientName}
-            onChange={recipientName => draft.edit({ recipientName })}
-            disabled={locked}
-            maxLength={160} />
-          <Field
-            label="Telefón kolegu"
-            value={state.input.recipientPhone}
-            onChange={recipientPhone => draft.edit({ recipientPhone })}
-            disabled={locked}
-            maxLength={30} />
-        </>}
-
-        {['issue', 'publish'].includes(selected.action) && <>
-          <Field
-            label="Pokyny pre kolegu"
-            value={state.input.instructions}
-            onChange={instructions => draft.edit({ instructions })}
-            disabled={locked}
-            maxLength={2000}
-            multiline />
-          <Field
-            label="Dohodnutý čas (RRRR-MM-DD HH:mm, čas zariadenia)"
-            value={state.input.scheduledAt}
-            onChange={scheduledAt => draft.edit({ scheduledAt })}
-            disabled={locked}
-            maxLength={16} />
-          <Text style={styles.subheading}>Údaje, ktoré kolega uvidí</Text>
-          {preview && <HandoffSummary value={preview} />}
-        </>}
-
-        {['issue', 'renew', 'extend'].includes(selected.action) && <Field
-          label="Platnosť v hodinách (1–72)"
-          value={state.input.hours}
-          onChange={hours => draft.edit({ hours })}
-          disabled={locked}
-          maxLength={2} />}
-
-        {selected.action === 'revoke' && <Field
-          label="Dôvod zrušenia"
-          value={state.input.comment}
-          onChange={comment => draft.edit({ comment })}
-          disabled={locked}
-          maxLength={1000}
-          multiline />}
-
-        <Button label={state.status === 'saving' ? 'Ukladám odovzdanie…' : 'Potvrdiť: ' + actions[selected.action].toLowerCase()} disabled={locked} onPress={() => {
-          void draft.submit();
-        }} />
-
-        {state.status === 'editing' && <Button label="Zavrieť rozpracovanú akciu" secondary onPress={() => draft.cancel()} />}
+        <View style={formLayout.actions}>
+          <Button primary label={state.status === 'saving' ? 'Ukladám odovzdanie…' : 'Potvrdiť: ' + actions[selected.action].toLowerCase()} disabled={locked} onPress={() => {
+            void draft.submit();
+          }} />
+          {state.status === 'editing' && <Button label="Zavrieť rozpracovanú akciu" secondary onPress={() => draft.cancel()} />}
+        </View>
       </>}
 
       {state.context && <>
-        <Text style={styles.subheading}>Odovzdania</Text>
-        {!state.context.handoffs.some(h => ['offered', 'accepted', 'en_route', 'arrived'].includes(h.status) && Date.parse(h.expiresAt) > state.now) && <Button label="Nové odovzdanie" disabled={draft.busy || ['uncertain', 'conflict'].includes(state.status)} onPress={() => choose('issue')} />}
-
-        {state.context.handoffs.length === 0 && <Text style={styles.muted}>Prípad zatiaľ nebol odovzdaný.</Text>}
-        {state.context.handoffs.map(grant => <Card key={grant.id}>
-          <Text style={styles.subheading}>{grant.recipientName}</Text>
-          <Text style={styles.text}>{grant.recipientPhone} · {statuses[grant.status]}</Text>
-          <Text style={styles.muted}>Revízia {grant.revision} · zverejnená verzia {grant.publishedVersion}</Text>
-          <Text style={styles.text}>Platnosť: {handoffTime(grant.expiresAt)}</Text>
-          <Text style={styles.muted}>Vytvorené: {handoffTime(grant.createdAt)} · {grant.createdBy || 'Dispečing'}{'\n'}Otvorené: {handoffTime(grant.openedAt)}{'\n'}Príchod: {handoffTime(grant.eta)}{'\n'}Zverejnené: {handoffTime(grant.publishedAt)}</Text>
-
-          {grant.canRenew && <>
-            <Button
-              label="Zverejniť aktuálne údaje"
-              secondary
-              disabled={draft.busy || ['uncertain', 'conflict'].includes(state.status) || Date.parse(grant.expiresAt) <= state.now}
-              onPress={() => choose('publish', grant.id)} />
-            <Button
-              label="Obnoviť odkaz"
-              secondary
-              disabled={draft.busy || ['uncertain', 'conflict'].includes(state.status)}
-              onPress={() => choose('renew', grant.id)} />
-            {state.context?.enhanced && <Button
-              label="Predĺžiť platnosť"
-              secondary
-              disabled={draft.busy || ['uncertain', 'conflict'].includes(state.status)}
-              onPress={() => choose('extend', grant.id)} />}
-            <Button
-              label="Zrušiť odovzdanie"
-              secondary
-              disabled={draft.busy || ['uncertain', 'conflict'].includes(state.status)}
-              onPress={() => choose('revoke', grant.id)} />
-          </>}
-
-          {state.context?.enhanced && grant.recoverable && ['offered', 'accepted', 'en_route', 'arrived'].includes(grant.status) && Date.parse(grant.expiresAt) > state.now && <Button
-            label={state.recovering ? 'Získavam odkaz…' : 'Získať aktuálny odkaz'}
-            secondary
-            disabled={state.recovering || draft.busy || ['uncertain', 'conflict'].includes(state.status)}
-            onPress={() => {
-              void draft.recover(grant.id);
-            }} />}
-
-          <Button label={expanded === grant.id ? 'Skryť údaje a históriu' : 'Zverejnené údaje a história'} secondary onPress={() => setExpanded(expanded === grant.id ? null : grant.id)} />
+        <SectionHeader title="Odovzdania" detail={state.context.handoffs.length ? String(state.context.handoffs.length) : null} />
+        {canStart && !showForm && <View style={s.start}><Button primary label="Nové odovzdanie" disabled={busyOrBlocked} onPress={() => choose('issue')} /></View>}
+        {state.context.handoffs.length === 0 && <Text style={s.empty}>Prípad zatiaľ nebol odovzdaný.</Text>}
+        {state.context.handoffs.map(grant => <View key={grant.id} style={s.grant}>
+          <Group>
+            <Row first title={grant.recipientName} subtitle={grant.recipientPhone ? formatNumber(grant.recipientPhone) : null}
+              trailing={<Tag text={statuses[grant.status] ?? grant.status} tone={statusTones[grant.status] ?? 'gray'} />} />
+            <InfoRow label="Platnosť" value={handoffTime(grant.expiresAt)} />
+            <InfoRow label="Vytvorené" value={handoffTime(grant.createdAt)} detail={grant.createdBy || 'Dispečing'} />
+            <InfoRow label="Otvorené" value={grant.openedAt ? handoffTime(grant.openedAt) : null} empty="Zatiaľ neotvorené" />
+            <InfoRow label="Príchod" value={grant.eta ? handoffTime(grant.eta) : null} empty="Neuvedený" />
+            <InfoRow label="Zverejnené údaje" value={grant.publishedAt ? handoffTime(grant.publishedAt) : null} detail={'Verzia ' + grant.publishedVersion + ' · revízia ' + grant.revision} />
+            {grant.canRenew && <Row title="Zverejniť aktuálne údaje" tone="link" disabled={busyOrBlocked || Date.parse(grant.expiresAt) <= state.now} onPress={() => choose('publish', grant.id)} />}
+            {grant.canRenew && <Row title="Obnoviť odkaz" tone="link" disabled={busyOrBlocked} onPress={() => choose('renew', grant.id)} />}
+            {grant.canRenew && state.context?.enhanced && <Row title="Predĺžiť platnosť" tone="link" disabled={busyOrBlocked} onPress={() => choose('extend', grant.id)} />}
+            {state.context?.enhanced && grant.recoverable && live(grant) && <Row title={state.recovering ? 'Získavam odkaz…' : 'Získať aktuálny odkaz'} tone="link"
+              disabled={state.recovering || busyOrBlocked} onPress={() => {
+                void draft.recover(grant.id);
+              }} />}
+            {grant.canRenew && <Row title="Zrušiť odovzdanie" tone="danger" disabled={busyOrBlocked} onPress={() => choose('revoke', grant.id)} />}
+            <Row title={expanded === grant.id ? 'Skryť údaje a históriu' : 'Zverejnené údaje a história'} tone="link"
+              accessibilityLabel={(expanded === grant.id ? 'Skryť' : 'Zobraziť') + ' zverejnené údaje a históriu odovzdania pre ' + grant.recipientName}
+              onPress={() => setExpanded(expanded === grant.id ? null : grant.id)} trailing={<Text style={s.chevron}>{expanded === grant.id ? '⌃' : '›'}</Text>} />
+          </Group>
           {expanded === grant.id && <>
-            {grant.published && <HandoffSummary value={grant.published} />}
-            <Text style={styles.subheading}>História</Text>
-            {grant.events.length === 0 && <Text style={styles.muted}>Bez udalostí.</Text>}
-            {grant.events.map(event => <View key={event.id}>
-              <Text style={styles.text}>{events[event.action]} · {event.actor}</Text>
-              <Text style={styles.muted}>{handoffTime(event.createdAt)}</Text>
-              {!!event.comment && <Text style={styles.text}>{event.comment}</Text>}
-            </View>)}
+            {grant.published && <>
+              <SectionHeader title="Zverejnené údaje" />
+              <HandoffSummary value={grant.published} />
+            </>}
+            <SectionHeader title="História" />
+            <Group>
+              {grant.events.length === 0 ? <InfoRow first label="Udalosti" value={null} empty="Bez udalostí" />
+                : grant.events.map((event, index) => <InfoRow key={event.id} first={index === 0} label={handoffTime(event.createdAt)}
+                  value={(events[event.action] ?? event.action) + ' · ' + event.actor} detail={event.comment || null} />)}
+            </Group>
           </>}
-        </Card>)}
+        </View>)}
       </>}
 
+      <View style={formLayout.actions}>
+        <Button
+          label={state.loading ? 'Načítavam odovzdanie…' : 'Obnoviť stav odovzdania'}
+          secondary
+          disabled={state.loading || draft.busy}
+          onPress={() => {
+            void draft.refresh();
+          }} />
+      </View>
     </ScrollView>
   </KeyboardAvoidingView>;
 }
-function Field({ label, value, onChange, disabled, maxLength, multiline }: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  disabled: boolean;
-  maxLength: number;
-  multiline?: boolean;
-}) {
-  return <View>
-    <Text style={styles.label}>{label}</Text>
-    <TextInput
-      accessibilityLabel={label}
-      style={styles.input}
-      value={value}
-      onChangeText={onChange}
-      editable={!disabled}
-      maxLength={maxLength}
-      multiline={multiline}
-      autoCorrect={false} />
-  </View>;
-}
+const statusTones: Record<string, TagTone> = {
+  offered: 'orange', accepted: 'green', en_route: 'green', arrived: 'green', completed: 'gray', rejected: 'red', cancelled: 'gray', expired: 'gray'
+};
+const s = StyleSheet.create({
+  start: { paddingHorizontal: space.l, paddingBottom: space.s },
+  empty: { ...type.subhead, color: palette.secondaryLabel, paddingHorizontal: 20 },
+  grant: { marginBottom: space.m },
+  chevron: { fontSize: 20, color: palette.tertiaryLabel },
+});
