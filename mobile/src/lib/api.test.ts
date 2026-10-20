@@ -79,6 +79,15 @@ describe("native API transport", () => {
     await expect(api.history("profile", { category: "all", q: "" })).rejects.toMatchObject({ status: 502 });
     await expect(api.console("profile")).rejects.toMatchObject({ status: 502 });
   });
+  it("accepts a known contact name and refuses anything else in its place", async () => {
+    const call = { id: "call", direction: "inbound", number: "+421900000001", name: "Allianz", startedAt: scope.checkedAt, state: "talking", lineLabel: "Linka" };
+    const transport = vi.fn<MobileTransport>()
+      .mockResolvedValueOnce(Response.json({ ...scope, presence: { status: "available", since: null }, activeCalls: [{ ...call, contactName: "Ján" }], capabilities: me.capabilities }))
+      .mockResolvedValueOnce(Response.json({ ...scope, presence: { status: "available", since: null }, activeCalls: [{ ...call, contactName: { name: "Ján" } }], capabilities: me.capabilities }));
+    const api = createMobileApi(config, async () => "token", transport);
+    expect((await api.console("profile")).activeCalls[0].contactName).toBe("Ján");
+    await expect(api.console("profile")).rejects.toMatchObject({ status: 502 });
+  });
   it("preserves the exact next-page cursor and applies filters on the server", async () => {
     const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, calls: [], nextCursor: null }));
     const cursor = "%7B%22id%22%3A%22test%22%7D";

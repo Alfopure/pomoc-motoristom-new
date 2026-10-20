@@ -209,6 +209,30 @@ export function CallScreen(props: Common & {
   </View>;
 }
 
+/** The strip without call details, when they cannot be drawn: the controls stay one tap away. */
+export function CallStripFallback({ onExpand }: { onExpand: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel="Hovor prebieha. Otvoriť ovládanie hovoru" onPress={onExpand}
+    style={({ pressed }) => [s.strip, { backgroundColor: palette.secondaryLabel }, pressed && { opacity: 0.85 }]}>
+    <Phone size={15} strokeWidth={2.6} color="#FFFFFF" accessible={false} />
+    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.stripTitle}>Hovor prebieha</Text>
+    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.stripStatus}>Otvoriť</Text>
+  </Pressable>;
+}
+
+/** Shown when the call screen itself fails: the call still has its controls. */
+export function CallScreenFallback({ phone, onRetry, onMinimize }: { phone: DispatchPhone; onRetry: () => void; onMinimize: () => void }) {
+  const insets = useSafeAreaInsets();
+  return <View accessibilityViewIsModal style={[StyleSheet.absoluteFill, s.layer, s.screen, s.fallback, { paddingBottom: insets.bottom + space.l }]}>
+    <Text accessibilityRole="header" style={s.title}>Obrazovka hovoru sa nedala zobraziť</Text>
+    <Text style={s.noticeText}>Hovor beží ďalej. Ovládať ho môžete aj na systémovej obrazovke iPhonu.</Text>
+    <View style={s.fallbackActions}>
+      <Big label="Ukončiť" color={palette.red} icon={PhoneOff} onPress={() => { void phone.end(); }} />
+    </View>
+    <Pressable accessibilityRole="button" onPress={onRetry} style={({ pressed }) => [s.textButton, pressed && { opacity: 0.6 }]}><Text style={s.textButtonLabel}>Skúsiť znova</Text></Pressable>
+    <Pressable accessibilityRole="button" onPress={onMinimize} style={({ pressed }) => [s.textButton, pressed && { opacity: 0.6 }]}><Text style={s.textButtonLabel}>Skryť</Text></Pressable>
+  </View>;
+}
+
 function Pill({ icon, label, onPress, compact }: { icon: ReactNode; label: string; onPress: () => void; compact: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} hitSlop={{ top: 6, bottom: 6 }} style={({ pressed }) => [s.pill, compact && s.pillCompact, pressed && { opacity: 0.7 }]}>
     {icon}<Text maxFontSizeMultiplier={1.3} style={s.pillLabel}>{label}</Text>
@@ -235,6 +259,8 @@ const s = StyleSheet.create({
   stripTitle: { flex: 1, minWidth: 0, fontSize: 15, lineHeight: 20, fontWeight: "600", color: "#FFFFFF" },
   stripStatus: { flexShrink: 0, fontSize: 13, lineHeight: 18, fontWeight: "500", color: "#FFFFFF", fontVariant: ["tabular-nums"] },
   layer: { zIndex: 100, elevation: 100 },
+  fallback: { alignItems: "center", justifyContent: "center", gap: space.m, paddingHorizontal: space.xl },
+  fallbackActions: { paddingVertical: space.l },
   screen: { flex: 1, backgroundColor: palette.background },
   top: { flexDirection: "row", paddingHorizontal: space.l, minHeight: 44, alignItems: "center" },
   hide: { flexDirection: "row", alignItems: "center", gap: 4, minHeight: 44, paddingRight: space.m },

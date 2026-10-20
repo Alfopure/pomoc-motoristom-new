@@ -63,7 +63,23 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
 - **Moje úlohy:** všetky vlastné otvorené úlohy, výber úloh na kontrolu,
   aj dokončené, vyhľadávanie podľa názvu a prechod na prípad.
 - **Účet** (avatar vpravo hore alebo Moduly → Účet a koncepty): meno, e-mail,
-  rola, prostredie, úprava lišty, miestne koncepty a odhlásenie.
+  rola, prostredie, verzia a build aplikácie, odkazy Ochrana súkromia a Podpora
+  (verejné stránky `/aplikacia/sukromie` a `/aplikacia/podpora`), úprava lišty,
+  miestne koncepty a odhlásenie.
+- **Vydanie:** názov Dispatching, ikona a úvodná obrazovka (`assets/`, TEST a DEV
+  s pásom), manifest súkromia pre iOS. Pri štarte sa aplikácia bez prihlásenia
+  opýta `/api/mobile/v1/app-status` (najviac 2,5 s, potom pokračuje); ak je jej
+  verzia nižšia ako `MOBILE_MINIMUM_APP_VERSION` projektu, ukáže iba „Aktualizujte
+  aplikáciu“ (odkaz `MOBILE_UPDATE_URL`). Rozhodne sa raz pri štarte, takže brána
+  nikdy nezavrie bežiacu aplikáciu ani hovor. Zmena premenných platí až po novom
+  nasadení servera. Výpadok servera aplikáciu nezablokuje.
+- **Chyby:** obrazovka, ktorá sa nedá vykresliť, ukáže „Niečo sa pokazilo“ so
+  Skúsiť znova; spodná lišta, telefón aj hovor bežia ďalej a obrazovka hovoru má
+  vlastnú náhradu s Ukončiť. Chyba ide prihlásenému na
+  `/api/mobile/v1/diagnostics/errors`; čísla, e-maily, EČV a VIN maskuje telefón
+  aj server, server zapíše iba riadok do záznamov behu. Pád aplikácie sa uloží
+  v telefóne a odošle pri ďalšom spustení po prihlásení. Pády natívnej časti
+  zbiera Apple (TestFlight a App Store Connect).
 - **Nástroje:** samostatný modul v Moduloch (vozidlo, trasa, mapa, flotila).
 - Rozpísané textové formuláre a pôvodné neisté príkazy sa na iPhone ukladajú
   do samostatného chráneného úložiska. Android potrebuje nový natívny build

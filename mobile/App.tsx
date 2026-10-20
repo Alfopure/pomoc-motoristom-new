@@ -18,6 +18,11 @@ import { SessionLogout, type LogoutState } from "./src/lib/logout";
 import type { CallbackDialer } from "./src/callbacks/ui";
 import { dialBlockedReason } from "./src/voice/dial";
 import { DispatchShell } from "./src/shell/dispatch-shell";
+import { appVersion, olderThan } from "./src/lib/app-version";
+import { fetchAppStatus } from "./src/lib/app-status";
+import { createErrorReporter, installGlobalErrorReporting } from "./src/lib/error-reporting";
+import { AppErrorBoundary, ErrorReporterContext } from "./src/ui/error-boundary";
+import { UpdateRequired } from "./src/ui/update-required";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
 
@@ -29,7 +34,7 @@ export default function App() {
   return <SafeAreaProvider><StatusBar style="dark" /><View style={styles.page}>
     <SafeAreaView edges={["top", "left", "right"]} style={styles.page}>
     {setup.config ? <ConfiguredApp key={generation} config={setup.config} onReset={() => setGeneration(value => value + 1)} /> : <View style={styles.content}>
-      <Text style={styles.heading}>Linka pomoci</Text><ErrorNotice message="Aplikácia ešte nie je nastavená. Obráťte sa na správcu." />
+      <Text style={styles.heading}>Dispatching</Text><ErrorNotice message="Aplikácia ešte nie je nastavená. Obráťte sa na správcu." />
     </View>}
   </SafeAreaView></View></SafeAreaProvider>;
 }
@@ -97,26 +102,51 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
     if (!authScope.current(expected.userId, expected.epoch) || data.session?.user.id !== expected.userId) throw new MobileApiError("Prihláste sa do aplikácie.", 401);
     return data.session?.access_token ?? null;
   }), [config, client, authScope]);
+  // Errors are reported only for a signed-in operator; reporting never interrupts work.
+  const reporter = useMemo(() => createErrorReporter(config, async () => (await client.auth.getSession()).data.session?.access_token ?? null), [config, client]);
+  useEffect(() => installGlobalErrorReporting(reporter), [reporter]);
+  // A crash kept on the device goes out once somebody is signed in again.
+  const signedIn = Boolean(session);
+  useEffect(() => { if (signedIn) void reporter.flushKept(); }, [signedIn, reporter]);
+  // The release gate is decided once, before the workspace and its phone start; an answer
+  // after 2.5 s waits for the next launch, so the gate never closes a running call.
+  const [version] = useState(appVersion);
+  const [release, setRelease] = useState<{ decided: boolean; minimum: string | null; updateUrl: string | null; attempt: number }>({ decided: false, minimum: null, updateUrl: null, attempt: 0 });
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => { controller.abort(); setRelease(value => value.decided ? value : { ...value, decided: true }); }, 2500);
+    void fetchAppStatus(config, fetch, controller.signal).then(status => {
+      clearTimeout(timer);
+      setRelease(value => value.decided ? value : { ...value, decided: true, minimum: status?.minimumVersion ?? null, updateUrl: status?.updateUrl ?? null });
+    });
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [config, release.attempt]);
+  if (release.decided && release.minimum && olderThan(version.version, release.minimum)) return <QueryClientProvider client={queryClient}>
+    <BrandRow test={config.environment === "test"} />
+    <UpdateRequired version={version} minimum={release.minimum} updateUrl={release.updateUrl} onRetry={() => setRelease(value => ({ decided: false, minimum: null, updateUrl: null, attempt: value.attempt + 1 }))} />
+  </QueryClientProvider>;
 
   // Signed in, the top bar shows the environment; before that the brand row does.
   return <QueryClientProvider client={queryClient}>
     {!session && <BrandRow test={config.environment === "test"} />}
-    {booting ? <Loading label="Obnovujem prihlásenie…" /> : bootError ? <View style={styles.content}>
+    {booting || !release.decided ? <Loading label="Obnovujem prihlásenie…" /> : bootError ? <View style={styles.content}>
       <ErrorNotice message={resetError ? "Uložené prihlásenie sa nepodarilo odstrániť. Skúste znova." : "Uložené prihlásenie sa nepodarilo načítať. Môžete ho obnoviť a prihlásiť sa znova."} />
       <Button label="Obnoviť prihlásenie" disabled={resetting} onPress={() => {
         setResetting(true); setResetError(false);
         void supabase.clearStoredSession().then(onReset).catch(() => { setResetError(true); setResetting(false); });
       }} />
-    </View> : session ? <Workspace key={config.environment + ":" + session.user.id + ":" + sessionEpoch} config={config} client={client} api={api} active={active} userId={session.user.id}
+    </View> : session ? <ErrorReporterContext.Provider value={reporter}>
+      {/* Last resort only: screens have their own boundary inside the shell, below the phone. */}
+      <AppErrorBoundary reporter={reporter} onReset={() => queryClient.removeQueries({ predicate: query => query.queryKey.at(-1) !== "me" })}><Workspace key={config.environment + ":" + session.user.id + ":" + sessionEpoch} config={config} client={client} api={api} active={active} userId={session.user.id}
       liveUser={workspaceLiveUser}
-      logoutState={logoutState} onLogout={disconnect => logout.run(disconnect)} />
+      logoutState={logoutState} onLogout={disconnect => logout.run(disconnect)} /></AppErrorBoundary></ErrorReporterContext.Provider>
       : <SignIn client={client} config={config} logoutState={logoutState} />}
   </QueryClientProvider>;
 }
 
 function BrandRow({ test }: { test: boolean }) {
   return <View style={s.brand}><View style={s.brandMark}><PhoneCall size={18} strokeWidth={2.3} color={colors.ink} accessible={false} /></View>
-    <View style={s.brandText}><Text style={s.brandName}>Linka pomoci</Text><Text style={s.brandCaption}>Mobilný dispečing</Text></View>
+    <View style={s.brandText}><Text style={s.brandName}>Dispatching</Text><Text style={s.brandCaption}>Mobilný dispečing Linky pomoci</Text></View>
     {test && <Text style={s.testBadge}>TEST</Text>}
   </View>;
 }

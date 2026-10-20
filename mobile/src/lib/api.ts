@@ -130,7 +130,7 @@ export function createMobileApi(config: MobileConfig, getToken: TokenGetter, tra
         || !Array.isArray(body.activeCalls) || body.activeCalls.length > 100) throw contractError();
       for (const value of body.activeCalls) {
         const call = callFields(value);
-        if (!text(call.state) || !nullableText(call.lineLabel)) throw contractError();
+        if (!text(call.state) || !nullableText(call.lineLabel) || call.contactName !== undefined && !nullableText(call.contactName)) throw contractError();
       }
       capabilities(body.capabilities);
       return body as MobileConsole;

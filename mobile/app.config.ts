@@ -13,33 +13,50 @@ const voiceProof = process.env.EXPO_PUBLIC_VOICE_PROOF === "1";
 if ((expoGoPreview || voiceProof) && variant !== "test") throw new Error("Mobile previews require the TEST variant");
 if (expoGoPreview && voiceProof) throw new Error("Native voice proof cannot run in Expo Go");
 
+// Data the app sends to the dispatch service, all for running dispatch work and
+// linked to the signed-in operator; nothing is used for tracking or advertising.
+const collected = ["Name", "EmailAddress", "PhoneNumber", "PhysicalAddress", "PreciseLocation", "PhotosorVideos", "AudioData",
+  "OtherUserContent", "CrashData", "UserID", "DeviceID"].map(kind => ({
+  NSPrivacyCollectedDataType: "NSPrivacyCollectedDataType" + kind, NSPrivacyCollectedDataTypeLinked: true,
+  NSPrivacyCollectedDataTypeTracking: false, NSPrivacyCollectedDataTypePurposes: ["NSPrivacyCollectedDataTypePurposeAppFunctionality"],
+}));
+// Reasons React Native and Expo modules read these APIs (see Apple "required reason APIs").
+const accessed = [["UserDefaults", "CA92.1"], ["FileTimestamp", "C617.1"], ["SystemBootTime", "35F9.1"], ["DiskSpace", "E174.1"]].map(([kind, reason]) => ({
+  NSPrivacyAccessedAPIType: "NSPrivacyAccessedAPICategory" + kind, NSPrivacyAccessedAPITypeReasons: [reason],
+}));
+
 const config: ExpoConfig = {
-  name: "Linka pomoci" + (variant === "production" ? "" : variant === "test" ? " TEST" : " DEV"),
+  name: "Dispatching" + (variant === "production" ? "" : variant === "test" ? " TEST" : " DEV"),
   slug: "linka-pomoci-dispecing",
   owner: "linkapomoci",
   version: "0.1.0",
+  icon: variant === "production" ? "./assets/icon.png" : "./assets/icon-" + variant + ".png",
   orientation: "portrait",
   userInterfaceStyle: "light",
   scheme: "linkapomoci" + (suffix ? "-" + variant : ""),
   ios: {
     bundleIdentifier: "sk.linkapomoci.dispecing" + suffix, supportsTablet: false,
-    ...(voiceProof ? {
-      entitlements: { "aps-environment": "production" },
-      infoPlist: {
+    privacyManifests: { NSPrivacyTracking: false, NSPrivacyTrackingDomains: [], NSPrivacyCollectedDataTypes: collected, NSPrivacyAccessedAPITypes: accessed },
+    // Only HTTPS and standard WebRTC call encryption (DTLS-SRTP in the Telnyx library) are used.
+    infoPlist: {
+      ITSAppUsesNonExemptEncryption: false,
+      ...(voiceProof ? {
         LinkaNativeVoiceEnabled: true,
         UIBackgroundModes: ["audio", "voip"],
-        NSMicrophoneUsageDescription: "Linka pomoci potrebuje mikrofón na telefonovanie.",
-      },
-    } : {}),
+        NSMicrophoneUsageDescription: "Aplikácia potrebuje mikrofón na telefonovanie.",
+      } : {}),
+    },
+    ...(voiceProof ? { entitlements: { "aps-environment": "production" } } : {}),
   },
   android: { package: "sk.linkapomoci.dispecing" + suffix, blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
     "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.FOREGROUND_SERVICE_LOCATION", "android.permission.ACTIVITY_RECOGNITION", "com.google.android.gms.permission.ACTIVITY_RECOGNITION"] },
-  plugins: ["expo-secure-store", "./plugins/with-draft-secure-store.cjs", ...(voiceProof ? ["./plugins/with-telnyx-reconnect-guard.cjs"] : []), ["expo-image-picker", {
-    photosPermission: "Linka pomoci potrebuje prístup k vybranej fotografii na priloženie k prípadu.",
-    cameraPermission: "Linka pomoci potrebuje fotoaparát na odfotografovanie prílohy prípadu.",
-    microphonePermission: voiceProof ? "Linka pomoci potrebuje mikrofón na telefonovanie." : false,
+  plugins: ["expo-secure-store", ["expo-splash-screen", { image: "./assets/splash-icon.png", imageWidth: 180, resizeMode: "contain", backgroundColor: "#F2F2F7" }],
+    "./plugins/with-draft-secure-store.cjs", ...(voiceProof ? ["./plugins/with-telnyx-reconnect-guard.cjs"] : []), ["expo-image-picker", {
+    photosPermission: "Aplikácia potrebuje prístup k vybranej fotografii na priloženie k prípadu.",
+    cameraPermission: "Aplikácia potrebuje fotoaparát na odfotografovanie prílohy prípadu.",
+    microphonePermission: voiceProof ? "Aplikácia potrebuje mikrofón na telefonovanie." : false,
   }], ["expo-location", {
-    locationWhenInUsePermission: "Linka pomoci použije polohu telefónu iba na váš pokyn pri výbere miesta zásahu.",
+    locationWhenInUsePermission: "Aplikácia použije polohu telefónu iba na váš pokyn pri výbere miesta zásahu.",
     locationAlwaysPermission: false,
     locationAlwaysAndWhenInUsePermission: false,
     motionUsagePermission: false,
