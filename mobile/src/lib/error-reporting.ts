@@ -18,9 +18,11 @@ export type ErrorReporter = {
 };
 const KEPT = "pm-kept-error-v1", KEPT_DAYS = 7;
 type Kept = { userId: string | null; keptAt: number; report: Report };
+/** The signed-in user right now, for crashes kept before any reporter is around. */
+let currentUser: string | null = null;
 
 /** Synchronous, for the moment the app stops; usable before any reporter exists. */
-export function keepError(error: unknown, userId: string | null) {
+export function keepError(error: unknown, userId: string | null = currentUser) {
   try {
     const report = describe("fatal", error);
     // The keychain item stays small: the start of the stack is enough to find the place.
@@ -34,8 +36,9 @@ function describe(kind: ErrorKind, error: unknown, component?: string | null): R
   const version = appVersion();
   const message = error instanceof Error ? error.name + ": " + error.message : typeof error === "string" ? error : "Neznáma chyba";
   const stack = error instanceof Error && typeof error.stack === "string" ? error.stack : null;
-  return { kind, message: maskDiagnostic(message).slice(0, 1000), stack: stack ? maskDiagnostic(stack).slice(0, 8000) : null,
-    component: component ? maskDiagnostic(component).slice(0, 4000) : null, version: version.version, build: version.build,
+  // Cut first, then mask: the phone has no regex JIT.
+  return { kind, message: maskDiagnostic(message.slice(0, 1000)), stack: stack ? maskDiagnostic(stack.slice(0, 8000)) : null,
+    component: component ? maskDiagnostic(component.slice(0, 4000)) : null, version: version.version, build: version.build,
     platform: Platform.OS === "android" ? "android" : "ios", osVersion: String(Platform.Version).slice(0, 40), preview: version.preview };
 }
 
@@ -61,7 +64,7 @@ export function createErrorReporter(config: MobileConfig, getToken: () => Promis
       try { void send(describe(kind, error, component)); } catch { /* A report is best effort. */ }
     },
     keep: error => keepError(error, user),
-    setUser: userId => { user = userId; },
+    setUser: userId => { user = userId; currentUser = userId; },
     flushKept: async () => {
       if (!user) return;
       let raw: string | null = null;
@@ -70,8 +73,8 @@ export function createErrorReporter(config: MobileConfig, getToken: () => Promis
       let kept: Kept | null = null;
       try { kept = JSON.parse(raw) as Kept; } catch { kept = null; }
       const drop = () => SecureStore.deleteItemAsync(KEPT).catch(() => undefined);
-      // Another account's crash, an old one or an unreadable one is not sent.
-      if (!kept?.report || typeof kept.keptAt !== "number" || Date.now() - kept.keptAt > KEPT_DAYS * 86_400_000 || kept.userId && kept.userId !== user) { await drop(); return; }
+      // A crash of nobody or of another account, an old one or an unreadable one is not sent.
+      if (!kept?.report || typeof kept.keptAt !== "number" || Date.now() - kept.keptAt > KEPT_DAYS * 86_400_000 || kept.userId !== user) { await drop(); return; }
       const status = await send(kept.report);
       // Sent, or refused for good; a missing token, a limit or a server failure tries again later.
       if (status >= 200 && status < 300 || status >= 400 && status < 500 && status !== 401 && status !== 429) await drop();

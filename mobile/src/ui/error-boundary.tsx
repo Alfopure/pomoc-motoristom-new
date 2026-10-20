@@ -12,6 +12,8 @@ export const ErrorReporterContext = createContext<ErrorReporter | null>(null);
  * `fallback` replaces the default notice, e.g. for the call screen. */
 export class AppErrorBoundary extends Component<{
   reporter: ErrorReporter | null; onReset: () => void; fallback?: (retry: () => void) => ReactNode;
+  /** The default notice's text, e.g. at the root where there is no bottom bar. */
+  message?: string;
   /** A new value (another screen) clears the failure without forgetting data. */
   resetKey?: string;
   /** Extra handling, e.g. keeping a crash on the device where no reporter exists yet. */
@@ -33,16 +35,18 @@ export class AppErrorBoundary extends Component<{
     if (this.props.fallback) return this.props.fallback(this.retry);
     return <View style={styles.content}><Card>
       <Text accessibilityRole="header" style={styles.subheading}>Niečo sa pokazilo</Text>
-      <Text style={styles.text}>Táto obrazovka sa nedala zobraziť. Skúste to znova alebo prejdite inam v spodnej lište. Ak sa chyba opakuje, zatvorte aplikáciu a otvorte ju znova, prípadne napíšte podpore.</Text>
+      <Text style={styles.text}>{this.props.message ?? "Táto obrazovka sa nedala zobraziť. Skúste to znova alebo prejdite inam v spodnej lište. Ak sa chyba opakuje, zatvorte aplikáciu a otvorte ju znova, prípadne napíšte podpore."}</Text>
       <Button label="Skúsiť znova" onPress={this.retry} />
     </Card></View>;
   }
 }
 
 /** One module's own boundary. Modules that stay mounted on other tabs (Prípady, Úlohy,
- * Nástroje) fail alone, so the dispatcher can still use the others. */
-export function ModuleBoundary({ children }: { children: ReactNode }) {
+ * Nástroje) fail alone, so the dispatcher can still use the others. Trying again forgets
+ * the module's own data (`forget`) and the request that opened it (`onReset`), so it
+ * starts from its list instead of failing on the same record again. */
+export function ModuleBoundary({ children, forget, onReset }: { children: ReactNode; forget?: (key: readonly unknown[]) => boolean; onReset?: () => void }) {
   const reporter = useContext(ErrorReporterContext);
   const queryClient = useQueryClient();
-  return <AppErrorBoundary reporter={reporter} onReset={() => queryClient.removeQueries({ predicate: query => query.queryKey.at(-1) !== "me" })}>{children}</AppErrorBoundary>;
+  return <AppErrorBoundary reporter={reporter} onReset={() => { onReset?.(); if (forget) queryClient.removeQueries({ predicate: query => forget(query.queryKey) }); }}>{children}</AppErrorBoundary>;
 }

@@ -56,6 +56,14 @@ describe("app error reports", () => {
     m.store.set("pm-kept-error-v1", JSON.stringify({ userId: "user-b", keptAt: Date.now() - 8 * 86_400_000, report: { kind: "fatal" } }));
     await reporter.flushKept(); expect(m.store.has("pm-kept-error-v1")).toBe(false);
   });
+  it("never sends a crash kept before sign-in under the next dispatcher", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(new Response(null, { status: 200 }));
+    const reporter = createErrorReporter(config, async () => "token", transport);
+    reporter.setUser(null); reporter.keep(new Error("na prihlasovacej obrazovke"));
+    expect(JSON.parse(m.store.get("pm-kept-error-v1")!)).toMatchObject({ userId: null });
+    reporter.setUser("user-b"); await reporter.flushKept();
+    expect(transport).not.toHaveBeenCalled(); expect(m.store.has("pm-kept-error-v1")).toBe(false);
+  });
   it("keeps fatal errors, reports others and always hands them to React Native", () => {
     const previous = vi.fn(), handlers: ((error: unknown, fatal?: boolean) => void)[] = [previous];
     (globalThis as unknown as { ErrorUtils: unknown }).ErrorUtils = { getGlobalHandler: () => handlers.at(-1), setGlobalHandler: (handler: (error: unknown, fatal?: boolean) => void) => handlers.push(handler) };

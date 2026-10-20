@@ -245,9 +245,16 @@ podklady pre App Store v `docs/mobile/app-store.md`)
 - Produkčná cesta hlasu pripravená v kóde, ale vypnutá prepínačmi na
   serveri, kým neprejde akceptácia na TEST.
 
-**F5 – Dokončenie**
-- Odovzdanie prípadu v novom vzhľade (hotové v aplikácii); posledná kontrola
-  všetkých obrazoviek na 390 a 320 b; zmrazenie.
+**F5 – Dokončenie** (hotové na TEST: PR #478 a opravy po kontrole)
+- Odovzdanie prípadu v novom vzhľade; posledná kontrola všetkých obrazoviek
+  na 390 a 320 b (prehliadačový náhľad, 234 krokov na šírku); zmrazenie.
+- Známe obmedzenia v1:
+  - Brána minimálnej verzie sa rozhoduje pri štarte v popredí; aplikácia
+    spustená prichádzajúcim hovorom na pozadí ju uplatní až pri ďalšom štarte.
+  - Chyba v samotnom ráme aplikácie (mimo obrazoviek a hovoru) stále odpojí
+    telefón; obrazovky, moduly a obrazovka hovoru majú vlastné hranice.
+  - Telefonovanie z produkčnej aplikácie je vypnuté (natívny hlas funguje len
+    pod TEST identifikátorom aplikácie); zapnutie je samostatné rozhodnutie.
 
 ### Čo do verzie 1 nepatrí (neskôr)
 
