@@ -235,7 +235,8 @@ príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
 - Text bez údajov zákazníka; ťuk otvorí správnu obrazovku.
 - Zapínanie podľa druhu v Účte.
 
-**F4 – Pripravenosť na vydanie**
+**F4 – Pripravenosť na vydanie** (v aplikácii hotové okrem produkčnej cesty hlasu;
+podklady pre App Store v `docs/mobile/app-store.md`)
 - Názov Dispatching, ikona a spúšťacia obrazovka, verzia a build v Účte.
 - Zásady ochrany súkromia a Podpora (verejné stránky) a odkazy v Účte.
 - Privacy manifest, odpovede pre App Store Connect, texty do App Store.

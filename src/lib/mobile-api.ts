@@ -40,6 +40,13 @@ export type MobileVoiceTransferResult = MobileScope & { sessionId: string; state
 export type MobileVoiceRecordingState = "off" | "notice" | "starting" | "recording" | "stopping" | "stopped" | "failed" | "unknown";
 export type MobileVoiceRecording = { state: MobileVoiceRecordingState; suppressed: boolean };
 export type MobileVoiceRecordingResult = MobileScope & { sessionId: string; recording: MobileVoiceRecording };
+/** Public release gate; a null minimum means every version is supported. */
+export type MobileAppStatus = { ok: true; apiVersion: 1; environment: MobileEnvironment; minimumVersion: string | null; updateUrl: string | null };
+/** A masked report of an error in the app; no customer data. */
+export type MobileAppErrorReport = {
+  kind: "fatal" | "error" | "render"; message: string; stack: string | null; component: string | null;
+  version: string; build: string | null; platform: "ios" | "android"; osVersion: string; preview: boolean;
+};
 export type MobileVoiceAttemptEnded = MobileScope & {
   resolved: boolean; sessionId: string | null; terminationPending: boolean;
 };

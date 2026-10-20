@@ -1,0 +1,15 @@
+import { describe, expect, it } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import AppPrivacyPage from "./sukromie/page";
+import AppSupportPage from "./podpora/page";
+
+describe("public pages of the app", () => {
+  it("names the controller, the publisher and the contact", () => {
+    const html = renderToStaticMarkup(<AppPrivacyPage />);
+    for (const text of ["ALFOPURE s.r.o., IČO 11698055", "MICT, s. r. o., IČO 53 167 422", "mailto:info@alfopure.tech", "/ochrana-hovorov", "nikdy nie na pozadí"]) expect(html).toContain(text);
+  });
+  it("tells a dispatcher where to get help without customer data", () => {
+    const html = renderToStaticMarkup(<AppSupportPage />);
+    for (const text of ["/auth/forgot-password", "/aplikacia/sukromie", "mailto:info@alfopure.tech", "Údaje zákazníkov do správy nepíšte."]) expect(html).toContain(text);
+  });
+});

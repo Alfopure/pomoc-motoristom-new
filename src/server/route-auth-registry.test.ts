@@ -56,6 +56,8 @@ describe("route-auth-registry", () => {
       "towing/auth/forgot-password",
       "health/live",
       "health/ready",
+      // The native app asks before sign-in whether its version is still supported.
+      "mobile/v1/app-status",
       "public/location-links/[token]",
       "public/handoffs/commands",
       "public/handoffs/current",

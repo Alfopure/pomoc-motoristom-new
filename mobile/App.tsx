@@ -18,6 +18,11 @@ import { SessionLogout, type LogoutState } from "./src/lib/logout";
 import type { CallbackDialer } from "./src/callbacks/ui";
 import { dialBlockedReason } from "./src/voice/dial";
 import { DispatchShell } from "./src/shell/dispatch-shell";
+import { appVersion, olderThan } from "./src/lib/app-version";
+import { fetchAppStatus } from "./src/lib/app-status";
+import { createErrorReporter, installGlobalErrorReporting } from "./src/lib/error-reporting";
+import { AppErrorBoundary } from "./src/ui/error-boundary";
+import { UpdateRequired } from "./src/ui/update-required";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
 
@@ -29,7 +34,7 @@ export default function App() {
   return <SafeAreaProvider><StatusBar style="dark" /><View style={styles.page}>
     <SafeAreaView edges={["top", "left", "right"]} style={styles.page}>
     {setup.config ? <ConfiguredApp key={generation} config={setup.config} onReset={() => setGeneration(value => value + 1)} /> : <View style={styles.content}>
-      <Text style={styles.heading}>Linka pomoci</Text><ErrorNotice message="Aplikácia ešte nie je nastavená. Obráťte sa na správcu." />
+      <Text style={styles.heading}>Dispatching</Text><ErrorNotice message="Aplikácia ešte nie je nastavená. Obráťte sa na správcu." />
     </View>}
   </SafeAreaView></View></SafeAreaProvider>;
 }
@@ -97,6 +102,18 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
     if (!authScope.current(expected.userId, expected.epoch) || data.session?.user.id !== expected.userId) throw new MobileApiError("Prihláste sa do aplikácie.", 401);
     return data.session?.access_token ?? null;
   }), [config, client, authScope]);
+  // Errors are reported only for a signed-in operator; reporting never interrupts work.
+  const report = useMemo(() => createErrorReporter(config, async () => (await client.auth.getSession()).data.session?.access_token ?? null), [config, client]);
+  useEffect(() => installGlobalErrorReporting(report), [report]);
+  // Asked once per launch, so an update gate never closes a running call.
+  const [version] = useState(appVersion);
+  const release = useQuery({ queryKey: ["app-status", config.environment], queryFn: ({ signal }) => fetchAppStatus(config, fetch, signal),
+    staleTime: Infinity, gcTime: Infinity, refetchOnWindowFocus: false, refetchOnReconnect: false, retry: false }, queryClient);
+  const minimum = release.data?.minimumVersion ?? null;
+  if (minimum && olderThan(version.version, minimum)) return <QueryClientProvider client={queryClient}>
+    <BrandRow test={config.environment === "test"} />
+    <UpdateRequired version={version} minimum={minimum} updateUrl={release.data?.updateUrl ?? null} onRetry={() => { void release.refetch(); }} />
+  </QueryClientProvider>;
 
   // Signed in, the top bar shows the environment; before that the brand row does.
   return <QueryClientProvider client={queryClient}>
@@ -107,16 +124,16 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
         setResetting(true); setResetError(false);
         void supabase.clearStoredSession().then(onReset).catch(() => { setResetError(true); setResetting(false); });
       }} />
-    </View> : session ? <Workspace key={config.environment + ":" + session.user.id + ":" + sessionEpoch} config={config} client={client} api={api} active={active} userId={session.user.id}
+    </View> : session ? <AppErrorBoundary report={report} onReset={() => queryClient.removeQueries({ predicate: query => query.queryKey[0] !== "app-status" })}><Workspace key={config.environment + ":" + session.user.id + ":" + sessionEpoch} config={config} client={client} api={api} active={active} userId={session.user.id}
       liveUser={workspaceLiveUser}
-      logoutState={logoutState} onLogout={disconnect => logout.run(disconnect)} />
+      logoutState={logoutState} onLogout={disconnect => logout.run(disconnect)} /></AppErrorBoundary>
       : <SignIn client={client} config={config} logoutState={logoutState} />}
   </QueryClientProvider>;
 }
 
 function BrandRow({ test }: { test: boolean }) {
   return <View style={s.brand}><View style={s.brandMark}><PhoneCall size={18} strokeWidth={2.3} color={colors.ink} accessible={false} /></View>
-    <View style={s.brandText}><Text style={s.brandName}>Linka pomoci</Text><Text style={s.brandCaption}>Mobilný dispečing</Text></View>
+    <View style={s.brandText}><Text style={s.brandName}>Dispatching</Text><Text style={s.brandCaption}>Mobilný dispečing Linky pomoci</Text></View>
     {test && <Text style={s.testBadge}>TEST</Text>}
   </View>;
 }

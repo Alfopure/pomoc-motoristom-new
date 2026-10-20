@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -35,6 +35,7 @@ import type { ShellLayer, ShellOpeners, ShellScope } from "../shell/layers";
 import { roleNames } from "../shell/modules";
 import { initialsOf } from "../shell/top-bar";
 import { InfoRow } from "../design/detail";
+import { appVersion, versionLabel } from "../lib/app-version";
 import { formLayout } from "../design/form";
 import { Group, Row, SectionHeader } from "../design/list";
 import { palette, space, type } from "../design/tokens";
@@ -271,8 +272,16 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
   </>;
 }
 
+/** Public pages of the app, served by the dispatch server of this environment. */
+const ACCOUNT_LINKS = [
+  { title: "Ochrana súkromia", subtitle: "Aké údaje aplikácia spracúva a prečo", path: "/aplikacia/sukromie" },
+  { title: "Podpora", subtitle: "Pomoc s prihlásením, telefónom a upozorneniami", path: "/aplikacia/podpora" },
+] as const;
 function Account(props: Props) {
   const profile = props.identity.profile, busy = props.logoutBusy || props.logoutState.busy;
+  const [version] = useState(appVersion);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const open = (path: string) => { setLinkError(null); void Linking.openURL(props.config.apiOrigin + path).catch(() => setLinkError("Stránku sa nepodarilo otvoriť. Skúste to znova.")); };
   return <View>
     <View style={formLayout.head}><Text accessibilityRole="header" style={styles.heading}>Účet</Text></View>
     <Group style={{ marginTop: space.m }}><View style={account.profile}>
@@ -286,8 +295,14 @@ function Account(props: Props) {
     <SectionHeader title="Prostredie" />
     <Group>
       <InfoRow first label="Dispečing" value={props.config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"} />
-      <InfoRow label="Verzia appky" value="0.1.0" />
+      <InfoRow label="Verzia aplikácie" value={versionLabel(version)} />
     </Group>
+    <SectionHeader title="Informácie" />
+    <Group>
+      {ACCOUNT_LINKS.map((link, index) => <Row key={link.path} first={index === 0} title={link.title} subtitle={link.subtitle} tone="link"
+        accessibilityLabel={link.title + ", otvorí sa v prehliadači"} onPress={() => open(link.path)} trailing={<Text style={account.chevron}>›</Text>} />)}
+    </Group>
+    {linkError && <View style={formLayout.notices}><ErrorNotice message={linkError} /></View>}
     <SectionHeader title="Spodná lišta" />
     <Group>
       <Row first title="Upraviť lištu" subtitle="Prehľad, tri vaše moduly a Moduly. Platí pre tento telefón." tone="link" onPress={props.bar.onEdit} trailing={<Text style={account.chevron}>›</Text>} />
