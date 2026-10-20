@@ -437,8 +437,8 @@ describe("native phone lifecycle", () => {
     const f = await connected(); vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("timeout", 0));
     await f.phone.dial("+421900000002"); expect(f.phone.state.retryTarget).toEqual({ kind: "external", number: "+421900000002" });
     await f.phone.retryDial();
-    expect(f.api.start).toHaveBeenNthCalledWith(1, lease, id, "+421900000002", undefined);
-    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002", undefined);
+    expect(f.api.start).toHaveBeenNthCalledWith(1, lease, id, "+421900000002", undefined, undefined);
+    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002", undefined, undefined);
     expect(f.phone.state.retryTarget).toBeNull();
   });
   it("preserves the original uncertain command across an untrusted start response and safe reconnect", async () => {
@@ -452,7 +452,7 @@ describe("native phone lifecycle", () => {
     expect(f.native.disconnect).toHaveBeenCalled();
     await f.phone.connect(); await f.phone.retryDial();
     expect(f.uuid).toHaveBeenCalledTimes(1);
-    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002", undefined);
+    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421900000002", undefined, undefined);
     expect(transport.mock.calls.map(call => JSON.parse(String(call[1].body)).requestId)).toEqual([id, id]);
   });
   it("does not discard an uncertain outgoing command when another device owns reconnect", async () => {
@@ -837,7 +837,19 @@ describe("callback and confirmed-target dialing", () => {
     expect(f.phone.state.retryTarget).toEqual({ kind: "external", number: "+421232408700", verificationId: verification });
     await f.phone.dial("+421232408700"); expect(f.api.start).toHaveBeenCalledTimes(1);
     await f.phone.retryDial();
-    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421232408700", verification);
+    expect(f.api.start).toHaveBeenNthCalledWith(2, lease, id, "+421232408700", verification, undefined);
+  });
+  it("files a call from a case and keeps that case in its retry and cancel", async () => {
+    const caseId = "00000000-0000-4000-8000-0000000000AB";
+    const f = await connected(); vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("timeout", 0));
+    await f.phone.dial("+421232408700", undefined, caseId);
+    expect(f.api.start).toHaveBeenNthCalledWith(1, lease, id, "+421232408700", undefined, caseId.toLowerCase());
+    expect(f.phone.state.retryTarget).toEqual({ kind: "external", number: "+421232408700", caseId: caseId.toLowerCase() });
+    // The same number without the case is a different attempt.
+    await f.phone.dial("+421232408700"); expect(f.api.start).toHaveBeenCalledTimes(1);
+    expect(f.phone.state.error).toBe("Najprv zopakujte pôvodný pokus o volanie.");
+    await f.phone.cancelAttempt();
+    expect(f.api.cancelAttempt).toHaveBeenCalledWith(lease, id, { kind: "external", number: "+421232408700", caseId: caseId.toLowerCase() });
   });
   it("reports whether a callback command was actually sent", async () => {
     const f = await connected();
@@ -851,5 +863,31 @@ describe("callback and confirmed-target dialing", () => {
     const f = await connected(); vi.mocked(f.api.startCallback).mockRejectedValueOnce(new MobileApiError("Požiadavku má prevzatú Peter.", 409, "already_claimed"));
     await f.phone.dialCallback(callbackId, "+421900000003");
     expect(f.phone.state.retryTarget).toBeNull(); expect(f.phone.state.error).toContain("Peter");
+  });
+});
+describe("call errors on the phone's own call", () => {
+  const talking = { sessionId: sid, state: "talking", connected: true, ended: false, terminationPending: false, media: activeMedia };
+  it("clears a failed status read on the next good one, but keeps other errors", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.status).mockRejectedValueOnce(new MobileApiError("Nepodarilo sa spojiť s ústredňou. Skontrolujte pripojenie.", 0));
+    await f.phone.refreshHold();
+    expect(f.phone.state.error).toBe("Nepodarilo sa spojiť s ústredňou. Skontrolujte pripojenie.");
+    vi.mocked(f.api.status).mockResolvedValue(talking);
+    await f.phone.refreshHold();
+    expect(f.phone.state.error).toBeNull();
+    vi.mocked(f.native.requestHold).mockRejectedValueOnce(new Error("native"));
+    await f.phone.hold();
+    expect(f.phone.state.error).toBe("Podržanie hovoru sa nepodarilo pripraviť. Skúste znova.");
+    await f.phone.refreshHold();
+    expect(f.phone.state.error).toBe("Podržanie hovoru sa nepodarilo pripraviť. Skúste znova.");
+  });
+  it("starts a new incoming call without an earlier call's error", async () => {
+    const f = await connected();
+    vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("Číslo nie je povolené.", 403));
+    await f.phone.dial("+421900000002");
+    expect(f.phone.state.error).toBe("Číslo nie je povolené."); expect(f.phone.state.retryTarget).toBeNull();
+    f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick(); await tick();
+    expect(f.phone.state.call?.id).toBe(id);
+    expect(f.phone.state.error).toBeNull();
   });
 });

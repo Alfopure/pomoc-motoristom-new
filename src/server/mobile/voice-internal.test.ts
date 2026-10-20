@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
+import { CASE_ID, createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 import { createRateLimiter, hangupCall, startOutboundCall } from "@/server/telephony/call-actions";
 import type { TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { createTelnyxClient } from "@/server/telephony/telnyx/client";
-import { resolveNativeAttempt, startNativeInternalCall } from "./voice";
+import { requireNativeCallCase, resolveNativeAttempt, startNativeInternalCall } from "./voice";
+import { nativeOutboundInput } from "./voice-input";
 const actor = { userId: PROFILES.o1, profileId: PROFILES.o1, organizationId: ORG, displayName: "Caller", role: "dispatcher" as const };
 const lease = "00000000-0000-4000-8000-000000000071", requestId = "00000000-0000-4000-8000-000000000991";
 afterEach(() => vi.unstubAllEnvs());
@@ -102,6 +103,18 @@ describe("explicit cancellation of the original native command", () => {
     expect((await resolveNativeAttempt(deps, actor, cancel))?.id).toBe(started.sessionId);
     await expect(resolveNativeAttempt(deps, actor, { ...cancel, to: "+421905000000" })).rejects.toMatchObject({ status: 409, code: "request_id_conflict" });
     await expect(resolveNativeAttempt(deps, actor, { ...body, kind: "internal" })).rejects.toMatchObject({ status: 409, code: "request_id_conflict" });
+  });
+  it("files a call from a case and cleans it up only under the same case", async () => {
+    const { h, deps } = fixture();
+    const to = "+421905123456";
+    await requireNativeCallCase(deps, actor, CASE_ID);
+    await expect(requireNativeCallCase(deps, { ...actor, organizationId: "foreign" }, CASE_ID)).rejects.toMatchObject({ status: 404 });
+    const started = await startOutboundCall(deps, actor, nativeOutboundInput(requestId, to, undefined, CASE_ID.toUpperCase()));
+    expect(h.rows("motorist_call_sessions").find(row => row.id === started.sessionId)).toMatchObject({ case_id: CASE_ID });
+    const cancel = { deviceSessionId: lease, requestId, kind: "external", to, caseId: CASE_ID };
+    expect((await resolveNativeAttempt(deps, actor, cancel))?.id).toBe(started.sessionId);
+    await expect(resolveNativeAttempt(deps, actor, { ...cancel, caseId: undefined })).rejects.toMatchObject({ status: 409, code: "request_id_conflict" });
+    await expect(resolveNativeAttempt(deps, actor, { ...cancel, caseId: "case-7" })).rejects.toMatchObject({ status: 400 });
   });
   it("does not cancel a different colleague under the original UUID", async () => {
     const { deps, body, start } = fixture(); await start();

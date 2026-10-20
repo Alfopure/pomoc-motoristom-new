@@ -1,7 +1,7 @@
 import { usePhoneOverlay } from "../ui/phone-overlays";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Keyboard, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { MapPinned, MessageSquarePlus, Navigation, Pencil, PhoneForwarded, Search } from "lucide-react-native";
+import { MapPinned, MessageSquarePlus, Navigation, Pencil, Phone, PhoneForwarded, Search } from "lucide-react-native";
 import { ActionBar, DetailHeader, IconButton, InfoRow, Tag } from "../design/detail";
 import { Group, Row, SectionHeader } from "../design/list";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -38,6 +38,7 @@ import type { DraftVault } from "../drafts/vault";
 import { draftId } from "../drafts/port";
 import { customerCallNumber } from "../call-context/number";
 import { CallPhoneOffer } from "./call-phone-offer";
+import { useCallAction } from "../voice/dial";
 import { CaseFieldSections, CaseServiceSection } from "./fields-ui";
 import { formLayout } from "../design/form";
 
@@ -347,6 +348,7 @@ const placeSources: Record<string, string> = { google_places: "Google Places", c
 function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, onAttachments, onTasks, onSelectNumber, onEdit, onNote, savedNote, onNoteUpdated, onOwner }: {
   api: CasesApi; queryKey: string[]; active: boolean; id: string; created: DraftState["created"]; onBack: () => void; onOwner: () => void; onHandoffs: () => void; onAttachments: () => void; onTasks: () => void; onSelectNumber: (number: string) => void; onEdit: (item: MobileCaseDetailData) => void; onNote: (id: string) => void; savedNote?: CaseNoteDraft; onNoteUpdated: (receipt: MobileCaseNoteAdded) => void;
 }) {
+  const calling = useCallAction();
   const query = useQuery({ queryKey: [...queryKey, "detail", id], queryFn: ({ signal }) => api.detail(id, signal), enabled: active });
   const item = query.isError ? null : query.data?.case;
   const mapOverlay = usePhoneOverlay<"pickup" | "destination">(active);
@@ -381,7 +383,9 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
             <Tag text={item.owner.mine ? "Môj prípad" : item.owner.name || "Bez dispečera"} tone={item.owner.mine ? "yellow" : "gray"} />
           </>} />
         <ActionBar actions={[
-          { icon: PhoneForwarded, label: "Vybrať číslo", accessibilityLabel: "Vybrať číslo kontaktu do ústredne", disabled: !dialable(item.contact.phone), onPress: () => { if (item.contact.phone) onSelectNumber(item.contact.phone); } },
+          calling.ready
+            ? { icon: Phone, label: "Zavolať", accessibilityLabel: "Zavolať kontaktu cez ústredňu", disabled: !dialable(item.contact.phone), onPress: () => { if (item.contact.phone) calling.call(item.contact.phone, item.contact.name, { id: item.id, caseNumber: item.caseNumber }); } }
+            : { icon: PhoneForwarded, label: "Vybrať číslo", accessibilityLabel: "Vybrať číslo kontaktu do ústredne", disabled: !dialable(item.contact.phone), onPress: () => { if (item.contact.phone) onSelectNumber(item.contact.phone); } },
           { icon: Navigation, label: "Navigovať", accessibilityLabel: "Navigovať na miesto vyzdvihnutia", disabled: !item.pickupAddress?.trim() || navigation.busy, onPress: () => navigate(item.pickupAddress, "actions") },
           { icon: MessageSquarePlus, label: "Poznámka", accessibilityLabel: "Poznámka, pridať do prípadu", onPress: () => onNote(item.id) },
           { icon: Pencil, label: "Upraviť", accessibilityLabel: "Upraviť prípad", primary: true, onPress: () => onEdit(item) },
@@ -392,7 +396,9 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
           <InfoRow first label="Meno" value={item.contact.name} />
           <InfoRow label="Telefón" value={item.contact.phone ? formatNumber(item.contact.phone) : null} actions={<>
             {copy("Kopírovať telefón", item.contact.phone)}
-            {dialable(item.contact.phone) && <IconButton icon={PhoneForwarded} label="Vybrať číslo v ústredni" onPress={() => { if (item.contact.phone) onSelectNumber(item.contact.phone); }} />}
+            {dialable(item.contact.phone) && (calling.ready
+              ? <IconButton icon={Phone} label="Zavolať kontaktu" onPress={() => { if (item.contact.phone) calling.call(item.contact.phone, item.contact.name, { id: item.id, caseNumber: item.caseNumber }); }} />
+              : <IconButton icon={PhoneForwarded} label="Vybrať číslo v ústredni" onPress={() => { if (item.contact.phone) onSelectNumber(item.contact.phone); }} />)}
           </>} />
         </Group>
         <SectionHeader title="Vozidlo a služba" />

@@ -9,6 +9,7 @@ import { callStatus, dialable, formatNumber, formatTime } from "../lib/display";
 import { Button, Card, ErrorNotice, Loading, colors, styles } from "../ui";
 import { palette, type } from "../design/tokens";
 import { callbackStatusLabels } from "../callbacks/model";
+import { useCallAction } from "../voice/dial";
 
 export type HistoryCategory = "all" | "missed" | "received" | "outbound";
 const categories: { id: HistoryCategory; label: string }[] = [
@@ -22,6 +23,7 @@ export function History({ api, me, queryKey, active, category, onCategory, searc
   api: MobileApi; me: MobileMe; queryKey: string[]; active: boolean; category: HistoryCategory; onCategory: (value: HistoryCategory) => void;
   search: string; onSearch: (value: string) => void; onSelect: (number: string) => void; onCallContext: (target: MobileCallContextTarget) => void;
 }) {
+  const calling = useCallAction();
   const [debounced, setDebounced] = useState(search.trim());
   useEffect(() => { const timer = setTimeout(() => setDebounced(search.trim()), 300); return () => clearTimeout(timer); }, [search]);
   const query = useInfiniteQuery({
@@ -60,12 +62,16 @@ export function History({ api, me, queryKey, active, category, onCategory, searc
                 <Text numberOfLines={1} style={[s.callMeta, call.callback?.status === "open" && { color: colors.danger }]}>{[call.lineLabel, callback].filter(Boolean).join(" · ")}</Text>
               </View>
             </Pressable>
-            {call.direction !== "internal" && dialable(call.number) && <Pressable accessibilityRole="button" accessibilityLabel={"Vybrať číslo " + formatNumber(call.number) + " na volanie"} hitSlop={6}
-              onPress={() => { if (call.number) onSelect(call.number); }} style={({ pressed }) => [s.select, pressed && { opacity: 0.6 }]}>
-              <PhoneForwarded size={17} strokeWidth={2.2} color={colors.ink} accessible={false} /></Pressable>}
+            {call.direction !== "internal" && dialable(call.number) && (calling.ready
+              ? <Pressable accessibilityRole="button" accessibilityLabel={"Zavolať " + (call.name ? call.name + ", " : "") + formatNumber(call.number)} hitSlop={6}
+                onPress={() => { if (call.number) calling.call(call.number, call.name); }} style={({ pressed }) => [s.select, s.call, pressed && { opacity: 0.6 }]}>
+                <Phone size={17} strokeWidth={2.2} color={colors.success} accessible={false} /></Pressable>
+              : <Pressable accessibilityRole="button" accessibilityLabel={"Vybrať číslo " + formatNumber(call.number) + " na volanie"} hitSlop={6}
+                onPress={() => { if (call.number) onSelect(call.number); }} style={({ pressed }) => [s.select, pressed && { opacity: 0.6 }]}>
+                <PhoneForwarded size={17} strokeWidth={2.2} color={colors.ink} accessible={false} /></Pressable>)}
           </View>;
         })}</View>}
-        {calls.length > 0 && <Text style={styles.muted}>Ťuknutím otvoríte detail hovoru, ikonou vpravo vyberiete číslo na volanie.</Text>}
+        {calls.length > 0 && <Text style={styles.muted}>Ťuknutím otvoríte detail hovoru, ikonou vpravo {calling.ready ? "zavoláte cez ústredňu" : "vyberiete číslo na volanie"}.</Text>}
         {query.isFetchNextPageError && <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.fetchNextPage(); }} />}
         {query.hasNextPage && !query.isFetchNextPageError && <Button label={query.isFetchingNextPage ? "Načítavam…" : "Ďalšie hovory"} secondary disabled={query.isFetchingNextPage} onPress={() => { void query.fetchNextPage(); }} />}
       </>}
@@ -86,6 +92,7 @@ const s = StyleSheet.create({
   callSub: { ...type.subhead, color: colors.muted },
   callMeta: { ...type.caption, fontWeight: "400", color: colors.muted },
   select: { width: 40, height: 40, borderRadius: 20, backgroundColor: palette.fill, alignItems: "center", justifyContent: "center", marginLeft: 6 },
+  call: { backgroundColor: palette.greenSoft },
   filters: { flexDirection: "row", gap: 6, flexWrap: "wrap" },
   filter: { borderRadius: 16, minHeight: 32, backgroundColor: palette.card, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.separator, paddingHorizontal: 12, paddingVertical: 6, alignItems: "center", justifyContent: "center" },
   filterText: { fontSize: 13, lineHeight: 17, fontWeight: "600", color: colors.ink },

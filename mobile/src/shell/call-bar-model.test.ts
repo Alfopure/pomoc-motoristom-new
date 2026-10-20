@@ -4,7 +4,7 @@ import { callBarCall, elapsed } from "./call-bar-model";
 
 const start = Date.parse("2026-10-19T08:00:00Z");
 function active(id: string, patch: Partial<MobileActiveCall> = {}): MobileActiveCall {
-  return { id, direction: "inbound", state: "talking", number: "+421905123456", name: null, lineLabel: "Allianz", startedAt: new Date(start).toISOString(), ...patch };
+  return { id, direction: "inbound", state: "talking", number: "+421905123456", name: null, contactName: null, lineLabel: "Allianz", startedAt: new Date(start).toISOString(), ...patch };
 }
 
 describe("call bar", () => {
@@ -13,6 +13,7 @@ describe("call bar", () => {
   });
   it("shows one server call with its state", () => {
     expect(callBarCall([active("a", { name: "MOCK zákazník" })], [])).toEqual({ id: "a", title: "MOCK zákazník", status: "Prebieha", startedAt: new Date(start).toISOString(), count: 1 });
+    expect(callBarCall([active("a", { name: "Allianz", contactName: "Ján Kontakt" })], [])).toMatchObject({ title: "Ján Kontakt" });
     expect(callBarCall([active("a")], [])!.title).toBe("+421 905 123 456");
   });
   it("leaves out the phone's own and just-ended calls, case-insensitively", () => {

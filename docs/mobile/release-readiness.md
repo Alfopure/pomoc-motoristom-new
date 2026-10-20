@@ -213,15 +213,15 @@ príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
 
 ### Čo do verzie 1 patrí
 
-**F1 – Hovor v aplikácii** (dnes starý panel nad celou obrazovkou)
+**F1 – Hovor v aplikácii** (hotové na TEST po zlúčení PR #475)
 - Obrazovka hovoru v štandarde: zbalený pás hore s menom, stavom a časom,
   po ťuknutí celá obrazovka s veľkými tlačidlami (Stíšiť, Klávesnica,
   Nahlas, Podržať, Ukončiť).
-- Kontext volajúceho priamo v hovore: linka, na ktorú zákazník volal,
-  známy kontakt a prípad; tlačidlá Nový prípad, Prípad, Detail hovoru.
-- Zavolať jedným ťuknutím z prípadu, histórie a hľadania, keď je telefón
-  pripravený (s potvrdením a overeným číslom); hovor z prípadu sa
-  k prípadu priradí.
+- Kontext volajúceho priamo v hovore: linka a jej partner, známy kontakt;
+  tlačidlá Nový prípad a Detail hovoru (z detailu aj Prípad hovoru).
+- Zavolať jedným ťuknutím z prípadu, detailu hovoru a histórie (aj z detailu
+  otvoreného cez Hľadať), keď je telefón pripravený (s potvrdením a overeným
+  číslom); hovor z prípadu sa k prípadu priradí.
 
 **F2 – Úkony v hovore, ktoré mobil nemá a web áno**
 - **Prepojiť hovor na kolegu** (výber z dostupných kolegov aj na mobile).

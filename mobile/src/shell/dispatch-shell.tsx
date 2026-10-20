@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { AccessibilityInfo, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { AccessibilityInfo, Alert, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { ArrowRight, CircleMinus, Pencil, Star, X } from "lucide-react-native";
@@ -10,7 +10,7 @@ import type { MobileCallbackSummary } from "../../../src/lib/mobile-callbacks";
 import { MobileApiError, type MobileApi } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 import type { LogoutState } from "../lib/logout";
-import { presenceLabels } from "../lib/display";
+import { formatNumber, presenceLabels } from "../lib/display";
 import { useAndroidBack } from "../lib/use-android-back";
 import { ErrorNotice } from "../ui";
 import { palette, space } from "../design/tokens";
@@ -40,6 +40,11 @@ import { createShellPreferencesStorage } from "./preferences-storage";
 import { DockTabBar } from "./tab-bar";
 import { CALL_BAR_SPACE, CallBar, callBarCall, type CallBarCall } from "./call-bar";
 import { useKeyboardShown } from "./keyboard";
+import { CallScreen, CallStrip, type CallFacts } from "../calls/call-screen";
+import { callView } from "../calls/call-screen-model";
+import { CallActionContext, dialBlockedReason, type CallAction, type CallCase } from "../voice/dial";
+import { customerCallNumber } from "../call-context/number";
+import { dialDecision } from "../callbacks/model";
 import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
 
 type Props = {
@@ -91,6 +96,29 @@ export function DispatchShell(props: Props) {
   if (sessions.current !== phoneSession) setSessions({ current: phoneSession, ended: sessions.current ? [...sessions.ended, sessions.current].slice(-20) : sessions.ended });
   const refetchConsole = consoleQuery.refetch;
   useEffect(() => { if (sessions.ended.length) void refetchConsole(); }, [sessions.ended, refetchConsole]);
+  // The phone's own call: the screen opens for each new call and can be hidden to work in
+  // the app. An ending call keeps the choice, so a hidden screen does not pop up to close.
+  const ownCall = callView(phoneState);
+  const callId = phoneState.call?.id ?? null;
+  // `focusStrip`: Skryť hands VoiceOver to the strip; Detail and Nový prípad leave it on their screen.
+  const [callScreen, setCallScreen] = useState<{ id: string | null; open: boolean; connectedAt: number | null; focusStrip: boolean }>({ id: callId, open: true, connectedAt: null, focusStrip: false });
+  if (callScreen.id !== callId) setCallScreen({ id: callId, open: callId !== null || callScreen.open, connectedAt: null, focusStrip: false });
+  const callConnected = Boolean(phoneState.call?.connected);
+  // Talk time counts from the moment this phone saw the call connected.
+  useEffect(() => {
+    if (!callConnected) return;
+    const timer = setTimeout(() => setCallScreen(value => value.connectedAt === null && value.id === callId ? { ...value, connectedAt: Date.now() } : value), 0);
+    return () => clearTimeout(timer);
+  }, [callConnected, callId]);
+  const ownFacts = phoneState.call ? (consoleQuery.data?.activeCalls ?? []).find(call => call.id.toLowerCase() === phoneState.call!.sessionId.toLowerCase()) : undefined;
+  const callFacts: CallFacts | null = ownFacts ? { lineLabel: ownFacts.lineLabel, partner: ownFacts.name, contact: ownFacts.contactName ?? null } : null;
+  // "Nový prípad" from the call waits only on Prípady; leaving it drops the request.
+  const [callCase, setCallCase] = useState<{ number: string; nonce: number } | null>(null);
+  if (callCase && view !== "cases") setCallCase(null);
+  // Never reused: the workspace remembers the last nonce it handled.
+  const callCaseSeq = useRef(0);
+  const callCaseNumber = phoneState.call ? customerCallNumber(phoneState.call.outgoing ? "outbound" : "inbound", phoneState.call.number) : null;
+  const dialBlocked = dialBlockedReason(phone, phoneState);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 2400); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => { if (view === "modules" && preferences.loaded && !preferences.tipDismissed) prefs.dismissTip(); }, [view, preferences.loaded, preferences.tipDismissed, prefs]);
 
@@ -98,6 +126,62 @@ export function DispatchShell(props: Props) {
   const navigate = (id: ModuleId, hovory?: HovoryView) => go(openModule(nav, pins, id, hovory));
   const back = () => { const next = shellBack(nav); if (next) go(next); };
   const notify = (message: string) => setToast(current => ({ message, key: (current?.key ?? 0) + 1 }));
+  function openOwnCallDetail() {
+    const sessionId = phoneState.call?.sessionId;
+    if (!sessionId || !draftId(sessionId)) return;
+    setCallScreen(value => ({ ...value, open: false, focusStrip: false }));
+    go(openModule(nav, pins, "hovory", "console"));
+    setCallSelection({ target: { kind: "session", id: sessionId.toLowerCase() }, view: "console" });
+  }
+  function newCaseFromCall() {
+    if (!callCaseNumber) return;
+    setCallScreen(value => ({ ...value, open: false, focusStrip: false }));
+    navigate("pripady");
+    setCallCase({ number: callCaseNumber, nonce: ++callCaseSeq.current });
+  }
+  // One confirmation and one dial at a time; a second tap while either is open does nothing.
+  const placing = useRef(false);
+  // A dial result can arrive after the dispatcher moved on; its alert navigates from the current screen.
+  const latestNavigate = useRef(navigate);
+  useEffect(() => { latestNavigate.current = navigate; });
+  const release = () => { placing.current = false; };
+  // The same verified-number decision as Ústredňa; a blocked phone sends the number there instead.
+  // A refused or unconfirmed start is reported here, since the caller may not be on Ústredňa.
+  async function placeCall(number: string, fromCase?: CallCase) {
+    if (!phone) { release(); return; }
+    let confirming = false;
+    const start = async (verificationId?: string) => {
+      try {
+        const sent = await phone.dial(number, verificationId, fromCase?.id);
+        const after = phone.snapshot();
+        if (sent && !after.error) return;
+        const message = after.error ?? "Telefón práve nie je pripravený na nový hovor. Skúste to znova.";
+        if (after.retryTarget) Alert.alert("Hovor nie je potvrdený", message + "\n\nPokus dokončite alebo zrušte v Ústredni.", [
+          { text: "Zavrieť", style: "cancel" }, { text: "Otvoriť Ústredňu", onPress: () => latestNavigate.current("hovory", "console") }]);
+        else Alert.alert("Hovor sa nezačal", message);
+      } finally { release(); }
+    };
+    try {
+      const decision = dialDecision(await api.callTarget(identity.profileId, number));
+      if (decision.kind === "blocked") { Alert.alert("Volanie nie je možné", decision.message); return; }
+      if (decision.kind === "dial") { await start(); return; }
+      confirming = true;
+      Alert.alert(decision.title, decision.message, [{ text: "Zrušiť", style: "cancel", onPress: release }, { text: "Zavolať", onPress: () => { void start(decision.verificationId); } }],
+        { cancelable: true, onDismiss: release });
+    } catch (error) { Alert.alert("Hovor sa nezačal", errorMessage(error)); }
+    finally { if (!confirming && placing.current) release(); }
+  }
+  const callAction: CallAction = {
+    ready: dialBlocked === null,
+    call: (value, name, fromCase) => {
+      const number = value.trim();
+      if (!number || placing.current) return;
+      if (!phone || dialBlockedReason(phone, phone.snapshot()) !== null) { setNumber(number); navigate("hovory", "console"); return; }
+      placing.current = true;
+      Alert.alert("Zavolať?", [name, formatNumber(number)].filter(Boolean).join("\n") + "\n\nHovor pôjde cez ústredňu" + (fromCase ? " a zapíše sa k prípadu " + fromCase.caseNumber + "." : "."), [
+        { text: "Zrušiť", style: "cancel", onPress: release }, { text: "Zavolať", onPress: () => { void placeCall(number, fromCase); } }], { cancelable: true, onDismiss: release });
+    },
+  };
   useAndroidBack(active && !callTarget && !sheet.value && shellOwnedBack.includes(view), back);
   function openCallContext(target: MobileCallContextTarget) {
     if (!draftId(target.id)) return;
@@ -148,7 +232,9 @@ export function DispatchShell(props: Props) {
     : layerOpen ? { kind: "back" as const, label: nav.tab === "moduly" && nav.opened ? moduleById(nav.opened).short : tabLabel(nav.tab), onPress: back }
       : openedInModules ? { kind: "back" as const, label: "Moduly", onPress: back }
         : { kind: "status" as const, label: statusLabel, tone: presence ? presenceTone[presence] : "gray" as const, onPress: () => navigate("hovory", "console") };
-  return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
+  return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><CallActionContext.Provider value={callAction}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
+    {ownCall && phone && !callScreen.open && <CallStrip view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} attention={Boolean(phoneState.error) || ownCall.holdUncertain}
+      focus={callScreen.focusStrip} onExpand={() => setCallScreen(value => ({ ...value, open: true }))} />}
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(identity.profile.displayName)} onAccount={() => go({ ...nav, account: true, search: false, alerts: false })}
       left={left} onPin={openedInModules && !moduleBack && nav.opened && !pins.includes(nav.opened) ? () => pin(nav.opened!) : null} />
     {Boolean(props.meError) && <View style={{ paddingHorizontal: space.l }}><ErrorNotice message={errorMessage(props.meError)} onRetry={props.onRetryMe} /></View>}
@@ -167,7 +253,8 @@ export function DispatchShell(props: Props) {
       }}
       onLeaveModule={back} callTarget={callTarget} onCloseCallContext={() => setCallSelection(null)} callBackLabel={callSelection?.view === "home" ? "Prehľad" : "Hovory"}
       onShowCalls={back} dialer={props.dialer}
-      onSelectNumber={value => { setNumber(value); navigate("hovory", "console"); }}
+      onSelectNumber={value => { setNumber(value); navigate("hovory", "console"); }} callCase={callCase}
+      onCallCaseHandled={nonce => setCallCase(value => value?.nonce === nonce ? null : value)}
       renderLayer={(layer, scope, notice, open) => {
         const targets = open ? { ...open, openCallbacks: () => navigate("hovory", "callbacks") } : null;
         if (layer === "search") return <SearchScreen active={active && view === "search"} api={api} profileId={identity.profileId} queryKey={queryKey}
@@ -186,7 +273,7 @@ export function DispatchShell(props: Props) {
       bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} />
-    </View></ShellBackContext.Provider>
+    </View></CallActionContext.Provider></ShellBackContext.Provider>
     {callBar && <CallBar call={callBar} active={active} onPress={() => openBarCall(callBar)} />}
     <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting }} showAdd={pins.length < PIN_LIMIT}
       onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => sheet.open({ kind: "edit" })} />
@@ -217,6 +304,10 @@ export function DispatchShell(props: Props) {
       </Group>}
     </Sheet>
     <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 12 + (callBar ? CALL_BAR_SPACE : 0)} />
+    {ownCall && phone && <CallScreen visible={callScreen.open} view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} phone={phone} state={phoneState}
+      onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))}
+      onDetail={phoneState.call && draftId(phoneState.call.sessionId) ? openOwnCallDetail : null}
+      onNewCase={callCaseNumber && available.includes("pripady") ? newCaseFromCall : null} />}
   </View>;
 }
 const s = StyleSheet.create({

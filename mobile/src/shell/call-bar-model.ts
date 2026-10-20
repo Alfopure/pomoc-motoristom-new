@@ -17,7 +17,7 @@ export function callBarCall(active: readonly MobileActiveCall[], exclude: readon
   const first = shown[0];
   if (!first) return null;
   return shown.length > 1 ? { id: first.id, title: calls(shown.length) + " na vašom účte", status: "Ústredňa", startedAt: first.startedAt, count: shown.length }
-    : { id: first.id, title: first.name || formatNumber(first.number), status: callStatus(first.state), startedAt: first.startedAt, count: 1 };
+    : { id: first.id, title: first.contactName || first.name || formatNumber(first.number), status: callStatus(first.state), startedAt: first.startedAt, count: 1 };
 }
 
 /** "0:07", "12:31", "1:02:09"; empty when the start is unknown. */

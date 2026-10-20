@@ -92,19 +92,23 @@ describe("callback and confirmed-target voice transport", () => {
   it("adds a confirmed alternative only when present, and cancels with the same identity", async () => {
     const transport = vi.fn<MobileTransport>().mockImplementation(async () => Response.json({ ...scope, sessionId: id, operatorLegCallControlId: "leg", to: "+421905444555" }));
     const api = createVoiceApi(config, "operator", async () => "token", transport);
-    await api.start(id, id, "+421232408700", verification); await api.start(id, id, "+421905111222");
+    await api.start(id, id, "+421232408700", verification); await api.start(id, id, "+421905111222"); await api.start(id, id, "+421905111222", undefined, callback);
     expect(transport.mock.calls.map(call => JSON.parse(String(call[1].body)))).toEqual([
-      { deviceSessionId: id, requestId: id, to: "+421232408700", verificationId: verification }, { deviceSessionId: id, requestId: id, to: "+421905111222" }]);
+      { deviceSessionId: id, requestId: id, to: "+421232408700", verificationId: verification }, { deviceSessionId: id, requestId: id, to: "+421905111222" },
+      { deviceSessionId: id, requestId: id, to: "+421905111222", caseId: callback }]);
     transport.mockImplementation(async () => Response.json({ ...scope, resolved: false, sessionId: null, terminationPending: false }, { status: 202 }));
     await api.cancelAttempt(id, id, { kind: "external", number: "+421232408700", verificationId: verification });
     await api.cancelAttempt(id, id, { kind: "callback", callbackRequestId: callback, number: "+421905111222" });
-    expect(transport.mock.calls.slice(2).map(call => JSON.parse(String(call[1].body)))).toEqual([
+    await api.cancelAttempt(id, id, { kind: "external", number: "+421905111222", caseId: callback });
+    expect(transport.mock.calls.slice(3).map(call => JSON.parse(String(call[1].body)))).toEqual([
       { deviceSessionId: id, requestId: id, kind: "external", to: "+421232408700", verificationId: verification },
-      { deviceSessionId: id, requestId: id, kind: "callback", callbackRequestId: callback }]);
+      { deviceSessionId: id, requestId: id, kind: "callback", callbackRequestId: callback },
+      { deviceSessionId: id, requestId: id, kind: "external", to: "+421905111222", caseId: callback }]);
   });
   it("refuses malformed identities before transport", async () => {
     const transport = vi.fn<MobileTransport>(); const api = createVoiceApi(config, "operator", async () => "token", transport);
     await expect(api.start(id, id, "+421905111222", "v1")).rejects.toMatchObject({ status: 502 });
+    await expect(api.start(id, id, "+421905111222", undefined, "case-7")).rejects.toMatchObject({ status: 502 });
     await expect(api.startCallback(id, id, "../x")).rejects.toMatchObject({ status: 502 });
     expect(transport).not.toHaveBeenCalled();
   });

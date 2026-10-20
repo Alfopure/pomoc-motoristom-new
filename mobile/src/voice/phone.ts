@@ -34,7 +34,7 @@ export type PhoneState = {
 export function sameDialTarget(left: PhoneDialTarget, right: PhoneDialTarget): boolean {
   if (left.kind === "internal") return right.kind === "internal" && left.profileId === right.profileId;
   if (left.kind === "callback") return right.kind === "callback" && left.callbackRequestId === right.callbackRequestId && left.verificationId === right.verificationId;
-  return right.kind === "external" && left.number === right.number && left.verificationId === right.verificationId;
+  return right.kind === "external" && left.number === right.number && left.verificationId === right.verificationId && left.caseId === right.caseId;
 }
 
 /** CallKit owns audio/signaling. JS owns the authenticated mobile lease and
@@ -56,6 +56,8 @@ export class DispatchPhone {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
   private pendingDial: { requestId: string; target: PhoneDialTarget; uncertain: boolean } | null = null;
+  /** The message of a failed call status read; the next good read clears it. */
+  private monitorError: string | null = null;
   private outgoingIntent: (VoiceOutgoing & { kind: PhoneDialTarget["kind"] }) | null = null;
   private pendingHold: (NativeHold & { leaseId: string }) | null = null;
   private holdWork: NativeHold | null = null;
@@ -238,8 +240,10 @@ export class DispatchPhone {
       if (this.pendingHold) { await this.refreshHold(); return; }
       const status = await this.api.status(leaseId, sessionId);
       if (!this.current(generation)) return;
+      if (this.monitorError !== null && this.state.error === this.monitorError) this.update({ error: null });
+      this.monitorError = null;
       await this.applyCallStatus(status, generation, false, requestedCall);
-    } catch (error) { if (this.current(generation)) this.fail(error); }
+    } catch (error) { if (this.current(generation)) { this.fail(error); this.monitorError = this.state.error; } }
     finally { this.monitorBusy = false; }
   }
   private async applyCallStatus(status: VoiceStatus, generation: number, holdResult = false, requestedCall = this.state.call) {
@@ -421,7 +425,9 @@ export class DispatchPhone {
     await this.native?.resolveHold(command.callId, command.sessionId, command.callControlId, command.actionId, "uncertain",
       media?.state ?? "pending", media?.version ?? command.expectedVersion, false).catch(() => {});
   }
-  async dial(to: string, verificationId?: string) { return this.startCall({ kind: "external", number: to, ...(verificationId ? { verificationId } : {}) }); }
+  async dial(to: string, verificationId?: string, caseId?: string) {
+    return this.startCall({ kind: "external", number: to, ...(verificationId ? { verificationId } : {}), ...(caseId ? { caseId: caseId.toLowerCase() } : {}) });
+  }
   async dialColleague(profileId: string, name: string) { return this.startCall({ kind: "internal", profileId, name }); }
   /** The server derives the destination from the request; `number` is only the caller ID shown while dialing.
    * Resolves false when the phone was not ready and nothing was sent. */
@@ -450,7 +456,7 @@ export class DispatchPhone {
         ? await this.api.startInternal(leaseId, command.requestId, command.target.profileId)
         : command.target.kind === "callback"
           ? await this.api.startCallback(leaseId, command.requestId, command.target.callbackRequestId, command.target.verificationId)
-          : await this.api.start(leaseId, command.requestId, command.target.number, command.target.verificationId);
+          : await this.api.start(leaseId, command.requestId, command.target.number, command.target.verificationId, command.target.caseId);
       createdSession = outgoing.sessionId;
       if (!this.current(generation)) {
         if (!this.retainsOutgoingCommand(command.requestId, outgoing.sessionId)) await this.api.end(leaseId, outgoing.sessionId).catch(() => {});
@@ -560,8 +566,10 @@ export class DispatchPhone {
           if (activeCall && activeCall.id !== id) { await this.native.reject(id); return; }
           // Reserve the single call before crossing the async bridge. Native
           // may synchronously emit ACTIVE/ended while authorize is resolving.
+          // A new call starts without an earlier call's error.
           this.update({ call: { id, sessionId: offer.sessionId, number: offer.number, displayName: offer.displayName,
-            callControlId: offer.callControlId, state: intent ? "CONNECTING" : "RINGING", outgoing: Boolean(intent), connected: false }, holdPhase: "idle" });
+            callControlId: offer.callControlId, state: intent ? "CONNECTING" : "RINGING", outgoing: Boolean(intent), connected: false }, holdPhase: "idle",
+            ...(intent ? {} : { error: null }) });
           this.schedule();
           await this.native.authorize(id, offer.sessionId, offer.callControlId);
         } finally { this.authorizing.delete(id); this.scheduleRecovery(); }

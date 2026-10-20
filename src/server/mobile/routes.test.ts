@@ -26,11 +26,11 @@ describe("mobile read-only routes", () => {
     expect(response.headers.get("Vary")).toContain("Authorization");
   });
   it("reads TEST's development namespace and exposes only own calls once", async () => {
-    const call = { sessionId: "own", mine: true, direction: "inbound", state: "talking", callerNumber: "+421900000001", calledNumber: "company", partnerName: "Volajúci", lineLabel: "Linka", startedAt: "2026-10-11T12:00:00Z", legs: [{ callControlId: "private-provider-id" }], caseId: "private-case" };
+    const call = { sessionId: "own", mine: true, direction: "inbound", state: "talking", callerNumber: "+421900000001", calledNumber: "company", partnerName: "Volajúci", contactName: "Ján Kontakt", lineLabel: "Linka", startedAt: "2026-10-11T12:00:00Z", legs: [{ callControlId: "private-provider-id" }], caseId: "private-case" };
     mocks.active.mockResolvedValue({ checkedAt: "2026-10-11T12:01:00Z", calls: [call, { ...call, sessionId: "foreign", mine: false }], waiting: [call], ownPresence: { status: "on_call", statusSince: "2026-10-11T12:00:00Z" } });
     const response = await consoleSnapshot(request()); const body = await response.json();
     expect(mocks.active).toHaveBeenCalledWith(expect.objectContaining({ organizationId: actor.organizationId, environment: "development" }), { profileId: actor.profileId, canManageAssignments: false });
-    expect(body.activeCalls).toEqual([{ id: "own", direction: "inbound", state: "talking", number: "+421900000001", name: "Volajúci", lineLabel: "Linka", startedAt: "2026-10-11T12:00:00Z" }]);
+    expect(body.activeCalls).toEqual([{ id: "own", direction: "inbound", state: "talking", number: "+421900000001", name: "Volajúci", contactName: "Ján Kontakt", lineLabel: "Linka", startedAt: "2026-10-11T12:00:00Z" }]);
     expect(body.presence.status).toBe("on_call"); expect(JSON.stringify(body)).not.toMatch(/private-provider|private-case/);
   });
   it("uses authorized search and returns a minimal outgoing history DTO", async () => {

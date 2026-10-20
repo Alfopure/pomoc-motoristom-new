@@ -10,9 +10,9 @@ import { POST as status } from "@/app/api/mobile/v1/voice/calls/[id]/status/rout
 import { MutationError } from "@/server/mutation-error";
 
 const mocks = vi.hoisted(() => ({ actor: vi.fn(), deps: vi.fn(), lease: vi.fn(), session: vi.fn(), token: vi.fn(), touch: vi.fn(),
-  dial: vi.fn(), disconnect: vi.fn(), hangup: vi.fn(), continue: vi.fn(), after: vi.fn() }));
+  dial: vi.fn(), disconnect: vi.fn(), hangup: vi.fn(), continue: vi.fn(), after: vi.fn(), callCase: vi.fn() }));
 vi.mock("./auth", () => ({ requireMobileActor: mocks.actor, mobileEnvironment: () => "test" }));
-vi.mock("./voice", () => ({ nativeVoiceDeps: mocks.deps, requireNativeLease: mocks.lease, requireNativeSession: mocks.session,
+vi.mock("./voice", () => ({ nativeVoiceDeps: mocks.deps, requireNativeLease: mocks.lease, requireNativeSession: mocks.session, requireNativeCallCase: mocks.callCase,
   NativeLeaseError: class extends Error { status = 409; code = "native_lease_stale"; } }));
 vi.mock("@/server/telephony/operator-devices", () => ({ issueWebphoneToken: mocks.token, touchDevice: mocks.touch, disconnectDevice: mocks.disconnect }));
 vi.mock("@/server/telephony/call-actions", () => ({ startOutboundCall: mocks.dial, hangupCall: mocks.hangup, continueAcceptedHangup: mocks.continue }));
@@ -50,6 +50,17 @@ describe("mobile voice HTTP contract", () => {
     expect(response.status).toBe(200); expect(mocks.dial).toHaveBeenCalledWith(expect.objectContaining({ deviceKind: "mobile" }),
       { profileId: actor.profileId, displayName: actor.displayName, role: actor.role }, { requestId: id, to: "+421900000001" });
     expect(JSON.stringify(await response.json())).not.toContain("private-line");
+  });
+  it("files a call placed from a case with that verified case", async () => {
+    mocks.dial.mockResolvedValue({ sessionId: id, operatorLegCallControlId: "exact-leg", to: "+421900000001", from: "private-line" });
+    const caseId = "00000000-0000-4000-8000-0000000000AB";
+    expect((await calls(request({ deviceSessionId: id, requestId: id, to: "+421900000001", caseId }))).status).toBe(200);
+    expect(mocks.callCase).toHaveBeenCalledWith(expect.anything(), actor, caseId.toLowerCase());
+    expect(mocks.dial).toHaveBeenCalledWith(expect.anything(), expect.anything(), { requestId: id, to: "+421900000001", caseId: caseId.toLowerCase() });
+    mocks.dial.mockClear(); mocks.callCase.mockRejectedValue(new MutationError("Prípad hovoru sa nenašiel.", 404));
+    expect((await calls(request({ deviceSessionId: id, requestId: id, to: "+421900000001", caseId }))).status).toBe(404);
+    expect((await calls(request({ deviceSessionId: id, requestId: id, to: "+421900000001", caseId: "case-7" }))).status).toBe(400);
+    expect(mocks.dial).not.toHaveBeenCalled();
   });
   it("returns 202 for a durable pending hangup and retains its bounded continuation", async () => {
     mocks.hangup.mockResolvedValue({ sessionId: id, terminationPending: true }); const response = await end(request({ deviceSessionId: id }), context);

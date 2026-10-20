@@ -8,7 +8,7 @@ export function mobileActiveCall(call: ActiveCallView): MobileActiveCall {
   return {
     id: call.sessionId, direction: call.direction, state: call.state,
     number: call.direction === "outbound" ? call.calledNumber : call.callerNumber,
-    name: call.partnerName, lineLabel: call.lineLabel, startedAt: call.startedAt,
+    name: call.partnerName, contactName: call.contactName ?? null, lineLabel: call.lineLabel, startedAt: call.startedAt,
   };
 }
 /** Allowlist fields; never serialize provider IDs, recordings, case notes or events. */
