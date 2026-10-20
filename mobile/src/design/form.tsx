@@ -34,7 +34,7 @@ export function Field({ label, action, hint, multiline, editable = true, style, 
     <View style={s.labelLine}><Text style={s.label}>{label}</Text>{action}</View>
     <TextInput ref={ref} accessibilityLabel={accessibilityLabel ?? label} accessibilityHint={input.accessibilityHint ?? hint ?? undefined} placeholderTextColor={palette.tertiaryLabel} editable={editable} multiline={multiline}
       textAlignVertical={multiline ? "top" : "center"} style={[s.input, multiline && s.multiline, !editable && { color: palette.secondaryLabel }, style]} {...input} />
-    {hint ? <Text style={s.hint}>{hint}</Text> : null}
+    {hint ? <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={s.hint}>{hint}</Text> : null}
   </Pressable>;
 }
 

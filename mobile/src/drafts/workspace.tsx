@@ -114,7 +114,7 @@ export function DraftWorkspace(props: Props) {
   </ScrollView> : null;
   return <>
     {/* Hidden with its container, so a failed Nástroje stays on its own tab. */}
-    <View style={toolsVisible ? { flex: 1 } : { display: "none" }}><ModuleBoundary><ScopedTools key={"tools:" + verified.profileId + ":" + verified.organizationId} config={config} verified={verified} getToken={getToken} current={current}
+    <View key={"tools:" + verified.profileId + ":" + verified.organizationId} style={toolsVisible ? { flex: 1 } : { display: "none" }}><ModuleBoundary><ScopedTools config={config} verified={verified} getToken={getToken} current={current}
       active={active} visible={toolsVisible} mapBlocked={props.hasCall} onClose={props.onLeaveModule} /></ModuleBoundary></View>
     <AuthorizedDraftWorkspace key={"drafts:" + verified.profileId + ":" + verified.organizationId} {...props} verified={verified} getToken={getToken}
       current={current} revalidate={validate} />
@@ -234,6 +234,7 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
     <View style={formLayout.notices}>{error ? <ErrorNotice message={error} onRetry={() => { setError(null); setAttempt(value => value + 1); }} /> : <Loading label="Načítavam miestne koncepty…" />}</View>
   </ScrollView> : null}</>;
   return <>{callContext}{callbacks}{layerView}<VaultOperations key={epoch} {...props} api={api} vault={vault} queryKey={actorRoot} caseRequest={caseRequest} taskRequest={taskRequest}
+    onForgetCaseRequest={() => setCaseRequest(undefined)} onForgetTaskRequest={() => setTaskRequest(undefined)}
     onOpenCase={id => { setCaseRequest({ kind: "detail", id, nonce: ++request.current }); props.onView("cases"); }} onResume={resume} onDiscarded={() => { setCaseRequest(undefined); setTaskRequest(undefined); setEpoch(value => value + 1); }} /></>;
 }
 
@@ -246,7 +247,7 @@ function LayerSlot({ render, layer, scope, ...open }: { render: Props["renderLay
 }
 
 function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; queryKey: string[]; caseRequest?: CaseOpenRequest; taskRequest?: { taskId: string | null; nonce: number };
-  onOpenCase: (id: string) => void; onResume: (record: StoredDraft) => void; onDiscarded: () => void }) {
+  onOpenCase: (id: string) => void; onResume: (record: StoredDraft) => void; onDiscarded: () => void; onForgetCaseRequest: () => void; onForgetTaskRequest: () => void }) {
   const { api, vault, queryKey, view, active, identity, onDiscarded } = props;
   const client = useQueryClient(), state = useSyncExternalStore(vault.subscribe, vault.snapshot, vault.snapshot);
   const [needsReset, setNeedsReset] = useState(false);
@@ -266,9 +267,9 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
     {view === "account" && <ScrollView contentContainerStyle={formLayout.content}><Account {...props} /><LocalDrafts vault={vault} onResume={props.onResume} onDiscarded={props.onDiscarded} needsReset={needsReset} deferReset={() => setNeedsReset(true)} /></ScrollView>}
     {!state.ready && visible && view !== "account" && <View style={styles.content}><Text style={styles.text}>Pred otvorením formulárov obnovte miestne koncepty v účte.</Text><Button label="Otvoriť účet" onPress={() => props.onView("account")} secondary /></View>}
     {state.ready && <>
-      <View style={view === "cases" ? { flex: 1 } : { display: "none" }}><ModuleBoundary><Cases api={api} environment={props.config.environment} userId={props.userId} profileId={identity.profileId}
+      <View style={view === "cases" ? { flex: 1 } : { display: "none" }}><ModuleBoundary forget={key => key.includes("cases")} onReset={props.onForgetCaseRequest}><Cases api={api} environment={props.config.environment} userId={props.userId} profileId={identity.profileId}
         active={active && view === "cases"} visible={view === "cases"} workStore={store} vault={vault} queryKey={caseKey} openRequest={props.caseRequest} onLeaveCases={props.onLeaveModule} onSelectNumber={props.onSelectNumber} /></ModuleBoundary></View>
-      <View style={view === "tasks" ? { flex: 1 } : { display: "none" }}><ModuleBoundary><MyTasks store={store} queryKey={queryKey} profileId={identity.profileId}
+      <View style={view === "tasks" ? { flex: 1 } : { display: "none" }}><ModuleBoundary forget={key => key.includes("my-tasks")} onReset={props.onForgetTaskRequest}><MyTasks store={store} queryKey={queryKey} profileId={identity.profileId}
         active={active && view === "tasks"} onLeave={props.onLeaveModule} onOpenCase={props.onOpenCase} openTaskRequest={props.taskRequest} /></ModuleBoundary></View>
     </>}
   </>;

@@ -34,7 +34,8 @@ export default function App() {
   return <SafeAreaProvider><StatusBar style="dark" /><View style={styles.page}>
     <SafeAreaView edges={["top", "left", "right"]} style={styles.page}>
     {/* Last of all: a crash outside the signed-in workspace is kept on the device and the app restarts its frame. */}
-    <AppErrorBoundary reporter={null} onReset={() => setGeneration(value => value + 1)} onCatch={error => keepError(error, null)}>
+    <AppErrorBoundary reporter={null} onReset={() => setGeneration(value => value + 1)} onCatch={error => keepError(error)}
+      message="Aplikácia narazila na chybu. Skúste to znova; ak sa chyba opakuje, zatvorte aplikáciu a otvorte ju znova.">
     {setup.config ? <ConfiguredApp key={generation} config={setup.config} onReset={() => setGeneration(value => value + 1)} /> : <View style={styles.content}>
       <Text style={styles.heading}>Dispatching</Text><ErrorNotice message="Aplikácia ešte nie je nastavená. Obráťte sa na správcu." />
     </View>}
