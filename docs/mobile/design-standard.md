@@ -99,20 +99,27 @@ roly), Odhlásiť sa ako červený riadok a Koncepty v tomto zariadení – kaž
 s tlačidlami Pokračovať a Zahodiť. Počas hovoru je odhlásenie nedostupné.
 
 **Obrazovka hovoru** (`mobile/src/calls/call-screen.tsx`): hovor v tomto telefóne
-otvorí celú obrazovku s menom, číslom, stavom a dĺžkou, linkou, na ktorú
-zákazník volal, a tlačidlami Detail hovoru a Nový prípad. Pri zvonení Prijať
-a Odmietnuť, počas hovoru veľké tlačidlá Stíšiť, Klávesnica, Nahlas, Podržať
-a Ukončiť. **Skryť** ju zmenší na farebný pás nad aplikáciou (červený pri
-zvonení, zelený počas hovoru, oranžový pri podržaní); ťuk na pás ju vráti.
-**Zavolať** v prípade, detaile hovoru a Histórii po potvrdení vytočí číslo cez
-ústredňu s rovnakým overením čísla ako Ústredňa; keď telefón nie je
-pripravený, tlačidlo ostáva „Vybrať číslo“ a číslo pošle do Ústredne.
+otvorí celú obrazovku s menom známeho kontaktu alebo číslom, stavom a dĺžkou
+(od spojenia v tomto telefóne), linkou a partnerom linky a tlačidlami Detail
+hovoru a Nový prípad. Pri zvonení Prijať a Odmietnuť, počas hovoru veľké
+tlačidlá Stíšiť, Klávesnica, Nahlas, Podržať a Ukončiť. Je to vrstva v aplikácii,
+nie systémové okno: iOS druhé okno neukáže, kým sa iné ešte zatvára, a hovor by
+ostal bez ovládania. **Skryť** ju zmenší na farebný pás nad aplikáciou
+(červený pri zvonení, zelený počas hovoru, oranžový pri podržaní, sivý pri
+spájaní a overovaní); chyba alebo nepotvrdené podržanie zmení pás na červený
+„Skontrolujte hovor“. Ťuk na pás obrazovku vráti; po skončení hovoru sa skrytá
+obrazovka znova neotvára. **Zavolať** v prípade, detaile hovoru a Histórii po
+potvrdení vytočí číslo cez ústredňu s rovnakým overením čísla ako Ústredňa;
+hovor z prípadu sa zapíše k tomu prípadu. Naraz je otvorené jedno potvrdenie;
+keď sa hovor nezačne, aplikácia to povie hneď (nepotvrdený pokus dokončí
+Ústredňa). Keď telefón nie je pripravený, tlačidlo ostáva „Vybrať číslo“
+a číslo pošle do Ústredne.
 
 **Lišta hovoru** (`call-bar.tsx`): kým server eviduje hovor na účte dispečera mimo
 tohto telefónu (napr. na stolovom telefóne), nad spodnou lištou je zelený pás
 s menom alebo číslom, stavom a pri jednom hovore aj dĺžkou. Ťuk otvorí detail
-hovoru, pri viacerých hovoroch Ústredňu. Hovor v tomto telefóne ukazuje panel
-hovoru hore, preto ho lišta vynechá. Stav sa číta každých 30 s, hovor zo stolového
+hovoru, pri viacerých hovoroch Ústredňu. Hovor v tomto telefóne má vlastnú
+obrazovku a pás, preto ho lišta vynechá. Stav sa číta každých 30 s, hovor zo stolového
 telefónu sa teda ukáže a zmizne s oneskorením do 30 s. Zavesenie v tomto telefóne
 obnoví čítanie hneď a hovor ukončený v telefóne sa v lište už neukáže. Na Ústredni a v detaile toho istého hovoru sa nezobrazuje;
 pri písaní sa skryje a obsah končí nad ním.

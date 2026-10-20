@@ -45,6 +45,8 @@ export type MobileActiveCall = {
   state: string;
   number: string | null;
   name: string | null;
+  /** The directory contact for the customer's number, when one is known. */
+  contactName: string | null;
   lineLabel: string | null;
   startedAt: string;
 };

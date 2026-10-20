@@ -384,7 +384,7 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
           </>} />
         <ActionBar actions={[
           calling.ready
-            ? { icon: Phone, label: "Zavolať", accessibilityLabel: "Zavolať kontaktu cez ústredňu", disabled: !dialable(item.contact.phone), onPress: () => { if (item.contact.phone) calling.call(item.contact.phone, item.contact.name); } }
+            ? { icon: Phone, label: "Zavolať", accessibilityLabel: "Zavolať kontaktu cez ústredňu", disabled: !dialable(item.contact.phone), onPress: () => { if (item.contact.phone) calling.call(item.contact.phone, item.contact.name, { id: item.id, caseNumber: item.caseNumber }); } }
             : { icon: PhoneForwarded, label: "Vybrať číslo", accessibilityLabel: "Vybrať číslo kontaktu do ústredne", disabled: !dialable(item.contact.phone), onPress: () => { if (item.contact.phone) onSelectNumber(item.contact.phone); } },
           { icon: Navigation, label: "Navigovať", accessibilityLabel: "Navigovať na miesto vyzdvihnutia", disabled: !item.pickupAddress?.trim() || navigation.busy, onPress: () => navigate(item.pickupAddress, "actions") },
           { icon: MessageSquarePlus, label: "Poznámka", accessibilityLabel: "Poznámka, pridať do prípadu", onPress: () => onNote(item.id) },
@@ -397,7 +397,7 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
           <InfoRow label="Telefón" value={item.contact.phone ? formatNumber(item.contact.phone) : null} actions={<>
             {copy("Kopírovať telefón", item.contact.phone)}
             {dialable(item.contact.phone) && (calling.ready
-              ? <IconButton icon={Phone} label="Zavolať kontaktu" onPress={() => { if (item.contact.phone) calling.call(item.contact.phone, item.contact.name); }} />
+              ? <IconButton icon={Phone} label="Zavolať kontaktu" onPress={() => { if (item.contact.phone) calling.call(item.contact.phone, item.contact.name, { id: item.id, caseNumber: item.caseNumber }); }} />
               : <IconButton icon={PhoneForwarded} label="Vybrať číslo v ústredni" onPress={() => { if (item.contact.phone) onSelectNumber(item.contact.phone); }} />)}
           </>} />
         </Group>

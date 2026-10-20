@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ChevronDown, FilePlus2, Grid3x3, Info, Mic, MicOff, Pause, Phone, PhoneOff, Play, Volume2 } from "lucide-react-native";
+import { ChevronDown, FilePlus2, Grid3x3, Info, Mic, MicOff, Pause, Phone, PhoneOff, Play, TriangleAlert, Volume2 } from "lucide-react-native";
 import { palette, space, type } from "../design/tokens";
 import { ErrorNotice } from "../ui";
 import { formatNumber } from "../lib/display";
@@ -9,8 +9,9 @@ import { elapsed } from "../shell/call-bar-model";
 import type { DispatchPhone, PhoneState } from "../voice/phone";
 import type { CallView } from "./call-screen-model";
 
-/** Server facts about the phone's own call: the line the customer called and the start time. */
-export type CallFacts = { lineLabel: string | null; name: string | null; startedAt: string | null };
+/** Server facts about the phone's own call: the line the customer called, its
+ * partner and the directory contact for the customer's number. */
+export type CallFacts = { lineLabel: string | null; partner: string | null; contact: string | null };
 type Common = { view: CallView; facts: CallFacts | null; connectedAt: number | null };
 
 function useClock(running: boolean) {
@@ -22,27 +23,36 @@ function useClock(running: boolean) {
   }, [running]);
   return now;
 }
-function duration({ view, facts, connectedAt }: Common, now: number) {
-  if (!view.connected) return "";
-  const start = facts?.startedAt ? Date.parse(facts.startedAt) : connectedAt;
-  return start && Number.isFinite(start) ? elapsed(new Date(start).toISOString(), now) : "";
+/** Talk time on this phone: from the moment it saw the call connected. */
+function duration({ view, connectedAt }: Common, now: number) {
+  return view.connected && connectedAt !== null ? elapsed(new Date(connectedAt).toISOString(), now) : "";
 }
-const toneColor = { ringing: palette.redText, active: palette.greenText, held: palette.orangeText, working: "#3A3A3C" } as const;
+const toneColor = { ringing: palette.redText, active: palette.greenText, held: palette.orangeText, working: palette.secondaryLabel } as const;
+const titleOf = ({ view, facts }: Common) => facts?.contact || view.title;
+/** The line and, when the line's name does not already say it, its partner. */
+function lineOf(facts: CallFacts | null) {
+  const partner = facts?.partner && !(facts.lineLabel ?? "").toLowerCase().includes(facts.partner.toLowerCase()) ? "Partner: " + facts.partner : null;
+  return [facts?.lineLabel ? "Linka: " + facts.lineLabel : null, partner].filter(Boolean).join(" · ");
+}
 
-/** Above the app while the call screen is hidden; one tap brings the controls back. */
-export function CallStrip(props: Common & { onExpand: () => void }) {
+/** Above the app while the call screen is hidden; one tap brings the controls back.
+ * An error or an unconfirmed hold says so here instead of hiding behind the strip. */
+export function CallStrip(props: Common & { attention: boolean; onExpand: () => void }) {
   const now = useClock(props.view.connected);
   const time = duration(props, now);
-  const title = props.facts?.name || props.view.title;
-  return <Pressable accessibilityRole="button" accessibilityLabel={"Hovor: " + title + ", " + props.view.status + (time ? ", " + time : "") + ". Otvoriť ovládanie hovoru"}
-    onPress={props.onExpand} style={({ pressed }) => [s.strip, { backgroundColor: toneColor[props.view.tone] }, pressed && { opacity: 0.85 }]}>
-    <Phone size={15} strokeWidth={2.6} color="#FFFFFF" accessible={false} />
+  const title = titleOf(props);
+  const status = props.attention ? "Skontrolujte hovor" : time ? props.view.status + " · " + time : props.view.status;
+  return <Pressable accessibilityRole="button" accessibilityLabel={"Hovor: " + title + ", " + (props.attention ? "vyžaduje pozornosť" : props.view.status + (time ? ", " + time : "")) + ". Otvoriť ovládanie hovoru"}
+    onPress={props.onExpand} style={({ pressed }) => [s.strip, { backgroundColor: props.attention ? palette.redText : toneColor[props.view.tone] }, pressed && { opacity: 0.85 }]}>
+    {props.attention ? <TriangleAlert size={15} strokeWidth={2.6} color="#FFFFFF" accessible={false} /> : <Phone size={15} strokeWidth={2.6} color="#FFFFFF" accessible={false} />}
     <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.stripTitle}>{title}</Text>
-    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.stripStatus}>{time ? props.view.status + " · " + time : props.view.status}</Text>
+    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.stripStatus}>{status}</Text>
   </Pressable>;
 }
 
-/** Full-screen controls of the phone's own call. Every action keeps a visible label. */
+/** Full-screen controls of the phone's own call. Every action keeps a visible label.
+ * A layer inside the app, not a system modal: iOS refuses a second modal while
+ * another one is still closing, which would leave the call without controls. */
 export function CallScreen(props: Common & {
   visible: boolean; phone: DispatchPhone; state: PhoneState; onMinimize: () => void;
   onDetail: (() => void) | null; onNewCase: (() => void) | null;
@@ -52,11 +62,16 @@ export function CallScreen(props: Common & {
   const [keypad, setKeypad] = useState(false);
   const [digits, setDigits] = useState("");
   const now = useClock(props.visible && view.connected);
+  // A keyboard left open by a form would cover the answer and end buttons.
+  useEffect(() => { if (props.visible) Keyboard.dismiss(); }, [props.visible]);
+  if (!props.visible) return null;
   const time = duration(props, now);
   const showKeypad = keypad && view.canKeypad;
-  const title = props.facts?.name || view.title;
-  const number = props.facts?.name && state.call?.number ? formatNumber(state.call.number) : null;
-  return <Modal visible={props.visible} animationType="slide" presentationStyle="fullScreen" onRequestClose={props.onMinimize}>
+  const title = titleOf(props);
+  const formatted = state.call?.number ? formatNumber(state.call.number) : null;
+  const number = formatted && formatted !== title ? formatted : null;
+  const line = lineOf(props.facts);
+  return <View accessibilityViewIsModal style={[StyleSheet.absoluteFill, s.layer]}>
     <View style={[s.screen, { paddingTop: insets.top + space.s, paddingBottom: insets.bottom + space.l }]}>
       <View style={s.top}>
         <Pressable accessibilityRole="button" accessibilityLabel="Skryť obrazovku hovoru" hitSlop={8} onPress={props.onMinimize} style={({ pressed }) => [s.hide, pressed && { opacity: 0.6 }]}>
@@ -67,7 +82,7 @@ export function CallScreen(props: Common & {
         <Text accessibilityRole="header" style={s.title}>{title}</Text>
         {number ? <Text selectable style={s.subtitle}>{number}</Text> : null}
         <Text accessibilityLiveRegion="polite" style={[s.status, { color: toneColor[view.tone] }]}>{[view.status, time].filter(Boolean).join(" · ")}</Text>
-        {props.facts?.lineLabel ? <Text style={s.line}>Linka: {props.facts.lineLabel}</Text> : null}
+        {line ? <Text style={s.line}>{line}</Text> : null}
         {(props.onDetail || props.onNewCase) && <View style={s.context}>
           {props.onDetail && <Pill icon={<Info size={15} strokeWidth={2.3} color={palette.brandInk} accessible={false} />} label="Detail hovoru" onPress={props.onDetail} />}
           {props.onNewCase && <Pill icon={<FilePlus2 size={15} strokeWidth={2.3} color={palette.brandInk} accessible={false} />} label="Nový prípad" onPress={props.onNewCase} />}
@@ -99,7 +114,7 @@ export function CallScreen(props: Common & {
         <Big label={view.endLabel} color={palette.red} icon={PhoneOff} onPress={() => { void phone.end(); }} />
       </View>
     </View>
-  </Modal>;
+  </View>;
 }
 
 function Pill({ icon, label, onPress }: { icon: ReactNode; label: string; onPress: () => void }) {
@@ -127,6 +142,7 @@ const s = StyleSheet.create({
   strip: { minHeight: 44, flexDirection: "row", alignItems: "center", gap: space.s, paddingHorizontal: space.l, paddingVertical: 6 },
   stripTitle: { flex: 1, minWidth: 0, fontSize: 15, lineHeight: 20, fontWeight: "600", color: "#FFFFFF" },
   stripStatus: { flexShrink: 0, fontSize: 13, lineHeight: 18, fontWeight: "500", color: "#FFFFFF", fontVariant: ["tabular-nums"] },
+  layer: { zIndex: 100, elevation: 100 },
   screen: { flex: 1, backgroundColor: palette.background },
   top: { flexDirection: "row", paddingHorizontal: space.l, minHeight: 44, alignItems: "center" },
   hide: { flexDirection: "row", alignItems: "center", gap: 4, minHeight: 44, paddingRight: space.m },

@@ -95,16 +95,23 @@ export async function startNativeCallback(deps: TelephonyRuntimeDeps, actor: Mot
     callbackRequestId: result.request.id, linked: result.linked };
 }
 
+/** A call placed from a case is filed with it; the case must belong to the caller's organization. */
+export async function requireNativeCallCase(deps: TelephonyRuntimeDeps, actor: MotoristActor, caseId: string) {
+  const { data, error } = await deps.admin.from("motorist_cases").select("id").eq("organization_id", actor.organizationId).eq("id", caseId).maybeSingle();
+  if (error) throw new MutationError("Prípad hovoru sa nepodarilo overiť.", 503);
+  if (!data) throw new MutationError("Prípad hovoru sa nenašiel.", 404);
+}
+
 /** Resolve the immutable original attempt, never a new destination or an absence proof. */
 export async function resolveNativeAttempt(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new MutationError("Neplatný pokus o volanie.", 400);
   const body = value as Record<string, unknown>;
   await requireNativeLease(deps, actor, body.deviceSessionId, { cleanup: true });
-  const targetKeys = body.kind === "external" ? ["to", "verificationId"] : body.kind === "callback" ? ["callbackRequestId", "verificationId"] : ["targetProfileId"];
+  const targetKeys = body.kind === "external" ? ["to", "verificationId", "caseId"] : body.kind === "callback" ? ["callbackRequestId", "verificationId"] : ["targetProfileId"];
   if ((body.kind !== "external" && body.kind !== "internal" && body.kind !== "callback")
     || Object.keys(body).some(key => !["deviceSessionId", "requestId", "kind", ...targetKeys].includes(key))
     || typeof body.requestId !== "string" || !isUuid(body.requestId) || !optionalVerification(body.verificationId)
-    || body.kind === "external" && (typeof body.to !== "string" || !body.to || body.to.length > 200)
+    || body.kind === "external" && (typeof body.to !== "string" || !body.to || body.to.length > 200 || body.caseId !== undefined && (typeof body.caseId !== "string" || !isUuid(body.caseId)))
     || body.kind === "callback" && (typeof body.callbackRequestId !== "string" || !isUuid(body.callbackRequestId))
     || body.kind === "internal" && (typeof body.targetProfileId !== "string" || !isUuid(body.targetProfileId))) {
     throw new MutationError("Chýba pôvodná identita pokusu o volanie.", 400);
@@ -121,7 +128,7 @@ export async function resolveNativeAttempt(deps: TelephonyRuntimeDeps, actor: Mo
     return requireNativeSession(deps, actor, session.id);
   }
   const input = body.kind === "external"
-    ? nativeOutboundInput(body.requestId, body.to as string, body.verificationId as string | undefined)
+    ? nativeOutboundInput(body.requestId, body.to as string, body.verificationId as string | undefined, body.caseId as string | undefined)
     : { requestId: body.requestId, targetProfileId: body.targetProfileId as string };
   const identity = initialOperationIdentity(actor, body.kind === "external" ? "outbound" : "internal", input);
   const session = await findInitialCall(deps, identity);

@@ -33,9 +33,8 @@ export function CallContextPanel({ api, target, active, current, onBack, backLab
   const data = active && current() ? state.data : null;
   const allowed = () => visit.current() && current() && request.snapshot().data === data && data !== null;
   const phone = data ? customerCallNumber(data.call.direction, data.call.number) : null;
+  // During a call on this phone, or with the phone not ready, the number goes to Ústredňa instead.
   const calling = useCallAction();
-  // The detail of a running call offers no second call to the same number.
-  const hasCall = !calling.ready;
   // A history reference is the call-log ID itself; a console session keeps the
   // call-log ID it resolved, so the section survives the card's own reloads.
   const [resolvedCallId, setResolvedCallId] = useState<string | null>(null);
@@ -64,7 +63,7 @@ export function CallContextPanel({ api, target, active, current, onBack, backLab
           {data.linkedCase && <Tag text={data.linkedCase.caseNumber} tone="yellow" />}
         </>} />
       {phone && <ActionBar actions={[
-        calling.ready && !hasCall
+        calling.ready
           ? { icon: Phone, label: "Zavolať", accessibilityLabel: "Zavolať na číslo hovoru cez ústredňu", onPress: () => { if (allowed()) calling.call(phone, data.call.name); } }
           : { icon: PhoneForwarded, label: "Vybrať číslo", accessibilityLabel: "Vybrať číslo do ústredne", onPress: () => { if (allowed()) onSelectNumber(phone); } },
         { icon: FilePlus2, label: "Nový prípad", accessibilityLabel: "Nový prípad s číslom hovoru", onPress: () => { if (allowed()) onNewCase(phone); } },

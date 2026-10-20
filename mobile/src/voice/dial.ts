@@ -13,7 +13,9 @@ export function dialBlockedReason(phone: DispatchPhone | null, state: PhoneState
 }
 
 /** Calling a number from a case, a call or the history. When the phone is not
- * ready the number goes to Ústredňa instead, where the reason is shown. */
-export type CallAction = { ready: boolean; call: (number: string, name?: string | null) => void };
+ * ready the number goes to Ústredňa instead, where the reason is shown. A call
+ * placed from a case names it and is filed with that case. */
+export type CallCase = { id: string; caseNumber: string };
+export type CallAction = { ready: boolean; call: (number: string, name?: string | null, fromCase?: CallCase) => void };
 export const CallActionContext = createContext<CallAction>({ ready: false, call: () => undefined });
 export const useCallAction = () => useContext(CallActionContext);

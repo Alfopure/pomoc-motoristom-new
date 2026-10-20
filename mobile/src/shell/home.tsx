@@ -42,10 +42,10 @@ export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scope
     </Pressable>
     {activeCalls.length > 0 && <>
       <SectionHeader title="Hovory na vašom účte" detail={activeCalls.length > 1 ? String(activeCalls.length) : null} />
-      <Group>{activeCalls.map((call, index) => <Row key={call.id} first={index === 0} title={call.name || formatNumber(call.number)}
+      <Group>{activeCalls.map((call, index) => <Row key={call.id} first={index === 0} title={call.contactName || call.name || formatNumber(call.number)}
         subtitle={[callStatus(call.state), call.lineLabel].filter(Boolean).join(" · ")} onPress={() => onCall(call.id)}
         leading={<View style={[s.rowIcon, { backgroundColor: palette.greenSoft }]}><Phone size={16} color={palette.greenText} accessible={false} /></View>}
-        trailing={<Text style={s.chevron}>›</Text>} accessibilityLabel={"Detail hovoru " + (call.name || formatNumber(call.number))} />)}</Group>
+        trailing={<Text style={s.chevron}>›</Text>} accessibilityLabel={"Detail hovoru " + (call.contactName || call.name || formatNumber(call.number))} />)}</Group>
     </>}
     <View style={s.grid}>
       <Tile title="Spätné volania" icon={PhoneMissed} colors={counts?.overdue ? toneColors.red : toneColors.orange} onPress={() => onOpen("callbacks")}

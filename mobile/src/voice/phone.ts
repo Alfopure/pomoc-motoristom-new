@@ -34,7 +34,7 @@ export type PhoneState = {
 export function sameDialTarget(left: PhoneDialTarget, right: PhoneDialTarget): boolean {
   if (left.kind === "internal") return right.kind === "internal" && left.profileId === right.profileId;
   if (left.kind === "callback") return right.kind === "callback" && left.callbackRequestId === right.callbackRequestId && left.verificationId === right.verificationId;
-  return right.kind === "external" && left.number === right.number && left.verificationId === right.verificationId;
+  return right.kind === "external" && left.number === right.number && left.verificationId === right.verificationId && left.caseId === right.caseId;
 }
 
 /** CallKit owns audio/signaling. JS owns the authenticated mobile lease and
@@ -421,7 +421,9 @@ export class DispatchPhone {
     await this.native?.resolveHold(command.callId, command.sessionId, command.callControlId, command.actionId, "uncertain",
       media?.state ?? "pending", media?.version ?? command.expectedVersion, false).catch(() => {});
   }
-  async dial(to: string, verificationId?: string) { return this.startCall({ kind: "external", number: to, ...(verificationId ? { verificationId } : {}) }); }
+  async dial(to: string, verificationId?: string, caseId?: string) {
+    return this.startCall({ kind: "external", number: to, ...(verificationId ? { verificationId } : {}), ...(caseId ? { caseId: caseId.toLowerCase() } : {}) });
+  }
   async dialColleague(profileId: string, name: string) { return this.startCall({ kind: "internal", profileId, name }); }
   /** The server derives the destination from the request; `number` is only the caller ID shown while dialing.
    * Resolves false when the phone was not ready and nothing was sent. */
@@ -450,7 +452,7 @@ export class DispatchPhone {
         ? await this.api.startInternal(leaseId, command.requestId, command.target.profileId)
         : command.target.kind === "callback"
           ? await this.api.startCallback(leaseId, command.requestId, command.target.callbackRequestId, command.target.verificationId)
-          : await this.api.start(leaseId, command.requestId, command.target.number, command.target.verificationId);
+          : await this.api.start(leaseId, command.requestId, command.target.number, command.target.verificationId, command.target.caseId);
       createdSession = outgoing.sessionId;
       if (!this.current(generation)) {
         if (!this.retainsOutgoingCommand(command.requestId, outgoing.sessionId)) await this.api.end(leaseId, outgoing.sessionId).catch(() => {});

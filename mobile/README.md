@@ -25,9 +25,10 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   každá sekcia vedie na celý zoznam (Spätné, Moje úlohy, Prípady s filtrom Horí).
   Číta existujúce autorizované zoznamy, server ani push notifikácie nemení.
 - **Obrazovka hovoru:** prijatie, odmietnutie, stíšenie, klávesnica, reproduktor,
-  podržanie a ukončenie veľkými tlačidlami; linka a meno volajúceho, Detail hovoru
-  a Nový prípad priamo z hovoru; Skryť ju zmenší na pás nad aplikáciou. Zavolať
-  z prípadu, detailu hovoru a Histórie po potvrdení, keď je telefón pripojený.
+  podržanie a ukončenie veľkými tlačidlami; známy kontakt, linka a partner, Detail
+  hovoru a Nový prípad priamo z hovoru; Skryť ju zmenší na pás nad aplikáciou, ktorý
+  pri chybe ukáže „Skontrolujte hovor“. Zavolať z prípadu, detailu hovoru a Histórie
+  po potvrdení, keď je telefón pripojený; hovor z prípadu sa zapíše k prípadu.
 - **Lišta hovoru:** kým beží hovor na účte dispečera mimo tohto telefónu (napr.
   stolový telefón), nad spodnou lištou je zelený pás s menom, stavom a dĺžkou;
   ťuk otvorí detail hovoru, pri viacerých hovoroch Ústredňu. Stav sa číta každých 30 s.
