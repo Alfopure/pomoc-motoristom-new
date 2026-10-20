@@ -30,10 +30,13 @@ pracoviska.
 > výhradne pracovníkom dispečingu; účet zakladá organizácia.
 >
 > • Prehľad: hovory na vašom účte, spätné volania, prípady a úlohy na jednom mieste.
-> • Hovory: prijatie, volanie cez ústredňu, podržanie, prepojenie na kolegu
->   a zastavenie nahrávania na žiadosť volajúceho.
+> • Hovory: aktívne hovory, história a spätné volania.
 > • Prípady: hľadanie, detail, poznámky, prílohy, priradenie dispečera a odovzdanie.
 > • Úlohy a spätné volania: čo treba vybaviť a do kedy.
+
+Popis smie sľubovať iba to, čo odoslaný build vie (Guideline 2.3). Telefonovanie
+z aplikácie (prijatie, volanie, podržanie, prepojenie, zastavenie nahrávania) sa do
+popisu doplní až s buildom, ktorý ho má zapnuté v produkcii.
 >
 > Aplikácia neobsahuje reklamu ani sledovanie.
 
@@ -52,8 +55,10 @@ s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť apli
 
 ## Ďalšie odpovede
 
-- **Šifrovanie:** `ITSAppUsesNonExemptEncryption = false` – iba HTTPS a štandardné
-  šifrovanie hovorov systému; každá verzia sa potom nepýta znova.
+- **Šifrovanie:** `ITSAppUsesNonExemptEncryption = false` – HTTPS a pri hovoroch
+  štandardné šifrovanie WebRTC (DTLS-SRTP knižnice Telnyx), teda bežne dostupné
+  šifrovanie bez vlastného algoritmu. Odpovede na exportné otázky (vrátane
+  francúzskeho vyhlásenia) potvrdí majiteľ v App Store Connect.
 - **Prihlásenie pre kontrolu Apple (Guideline 2.1):** treba demo účet. Odporúčanie:
   samostatná demo organizácia v produkcii s vymyslenými údajmi, aby kontrolór
   nevidel skutočných zákazníkov. Vytvorenie vyžaduje výslovný súhlas majiteľa

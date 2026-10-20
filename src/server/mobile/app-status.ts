@@ -2,6 +2,7 @@ import "server-only";
 import type { MobileAppErrorReport, MobileAppStatus } from "@/lib/mobile-api";
 import type { MotoristActor } from "@/server/api-auth";
 import { MutationError } from "@/server/mutation-error";
+import { maskDiagnostic } from "@/lib/diagnostic-mask";
 import { mobileEnvironment } from "./auth";
 
 /** Release gate of the native app, configured per Vercel project. An unset or
@@ -17,17 +18,8 @@ export function readAppStatus(env: Record<string, string | undefined> = process.
 
 const KEYS = ["kind", "message", "stack", "component", "version", "build", "platform", "osVersion", "preview"] as const;
 const text = (value: unknown, max: number) => typeof value === "string" && value.length <= max ? value : null;
-/** Customer data never belongs in a diagnostic: phone-like numbers and e-mail
- * addresses are masked before anything is logged. */
-export function scrubDiagnostic(value: string): string {
-  // Record identifiers help to find the screen and are kept as they are.
-  const ids: string[] = [];
-  return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "")
-    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, id => "\u0000" + (ids.push(id) - 1) + "\u0000")
-    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "[e-mail]")
-    .replace(/\+?\d[\d\s/-]{6,}\d/g, "[číslo]")
-    .replace(/\u0000(\d+)\u0000/g, (_, index: string) => ids[Number(index)]);
-}
+/** The app masks before sending; the server masks again before logging. */
+export const scrubDiagnostic = maskDiagnostic;
 export function readAppErrorReport(value: unknown): MobileAppErrorReport {
   const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
   if (!body || Object.keys(body).some(key => !(KEYS as readonly string[]).includes(key))) throw new MutationError("Neplatné hlásenie chyby.", 400);

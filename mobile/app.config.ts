@@ -37,7 +37,7 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: "sk.linkapomoci.dispecing" + suffix, supportsTablet: false,
     privacyManifests: { NSPrivacyTracking: false, NSPrivacyTrackingDomains: [], NSPrivacyCollectedDataTypes: collected, NSPrivacyAccessedAPITypes: accessed },
-    // Only HTTPS and the standard encrypted call media of iOS are used.
+    // Only HTTPS and standard WebRTC call encryption (DTLS-SRTP in the Telnyx library) are used.
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,
       ...(voiceProof ? {

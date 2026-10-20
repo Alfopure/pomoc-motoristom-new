@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { AccessibilityInfo, Alert, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
@@ -46,6 +46,8 @@ import { CallActionContext, dialBlockedReason, type CallAction, type CallCase } 
 import { customerCallNumber } from "../call-context/number";
 import { dialDecision } from "../callbacks/model";
 import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
+import { AppErrorBoundary, ErrorReporterContext } from "../ui/error-boundary";
+import { CallScreenFallback, CallStripFallback } from "../calls/call-screen";
 
 type Props = {
   config: MobileConfig; client: SupabaseClient; api: MobileApi; active: boolean; userId: string; liveUser: () => string | null;
@@ -63,6 +65,9 @@ const errorMessage = (error: unknown) => error instanceof MobileApiError ? error
 export function DispatchShell(props: Props) {
   const { config, api, active, userId, identity, queryKey, phone, phoneState, callbackSummary } = props;
   const queryClient = useQueryClient();
+  // Screens fail on their own: the phone, the bars and the call screen stay.
+  const reporter = useContext(ErrorReporterContext);
+  const forgetScreenData = () => queryClient.removeQueries({ predicate: query => query.queryKey.at(-1) !== "me" });
   const insets = useSafeAreaInsets();
   const { fontScale } = useWindowDimensions();
   const available = useMemo(() => moduleAccess(identity.profile.role), [identity.profile.role]);
@@ -233,10 +238,13 @@ export function DispatchShell(props: Props) {
       : openedInModules ? { kind: "back" as const, label: "Moduly", onPress: back }
         : { kind: "status" as const, label: statusLabel, tone: presence ? presenceTone[presence] : "gray" as const, onPress: () => navigate("hovory", "console") };
   return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><CallActionContext.Provider value={callAction}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
-    {ownCall && phone && !callScreen.open && <CallStrip view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} attention={Boolean(phoneState.error) || ownCall.holdUncertain}
-      focus={callScreen.focusStrip} onExpand={() => setCallScreen(value => ({ ...value, open: true }))} />}
+    {ownCall && phone && !callScreen.open && <AppErrorBoundary key={"strip:" + (callScreen.id ?? "ending")} reporter={reporter} onReset={() => undefined}
+      fallback={() => <CallStripFallback onExpand={() => setCallScreen(value => ({ ...value, open: true }))} />}>
+      <CallStrip view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} attention={Boolean(phoneState.error) || ownCall.holdUncertain}
+        focus={callScreen.focusStrip} onExpand={() => setCallScreen(value => ({ ...value, open: true }))} /></AppErrorBoundary>}
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(identity.profile.displayName)} onAccount={() => go({ ...nav, account: true, search: false, alerts: false })}
       left={left} onPin={openedInModules && !moduleBack && nav.opened && !pins.includes(nav.opened) ? () => pin(nav.opened!) : null} />
+    <AppErrorBoundary reporter={reporter} onReset={forgetScreenData}>
     {Boolean(props.meError) && <View style={{ paddingHorizontal: space.l }}><ErrorNotice message={errorMessage(props.meError)} onRetry={props.onRetryMe} /></View>}
     {hovoryVisible && <HovoryHeader view={nav.hovory} onView={value => go({ ...nav, hovory: value })} waiting={callbackSummary.data ? waiting : null} />}
     {view === "console" && !callTarget && <Console api={api} me={identity} queryKey={queryKey} active={active} number={number} onNumber={setNumber}
@@ -273,8 +281,10 @@ export function DispatchShell(props: Props) {
       bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} />
+    </AppErrorBoundary>
     </View></CallActionContext.Provider></ShellBackContext.Provider>
-    {callBar && <CallBar call={callBar} active={active} onPress={() => openBarCall(callBar)} />}
+    {callBar && <AppErrorBoundary key={"bar:" + callBar.id} reporter={reporter} onReset={() => undefined} fallback={() => null}>
+      <CallBar call={callBar} active={active} onPress={() => openBarCall(callBar)} /></AppErrorBoundary>}
     <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting }} showAdd={pins.length < PIN_LIMIT}
       onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => sheet.open({ kind: "edit" })} />
     <Sheet visible={sheet.value !== null} large={sheet.value?.kind === "edit"} onClose={sheet.close}
@@ -304,10 +314,12 @@ export function DispatchShell(props: Props) {
       </Group>}
     </Sheet>
     <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 12 + (callBar ? CALL_BAR_SPACE : 0)} />
-    {ownCall && phone && <CallScreen key={callScreen.id ?? "ending"} visible={callScreen.open} view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} phone={phone} state={phoneState}
-      onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))}
-      onDetail={phoneState.call && draftId(phoneState.call.sessionId) ? openOwnCallDetail : null}
-      onNewCase={callCaseNumber && available.includes("pripady") ? newCaseFromCall : null} />}
+    {ownCall && phone && <AppErrorBoundary key={callScreen.id ?? "ending"} reporter={reporter} onReset={() => undefined}
+      fallback={retry => callScreen.open ? <CallScreenFallback phone={phone} onRetry={retry} onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))} /> : null}>
+      <CallScreen visible={callScreen.open} view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} phone={phone} state={phoneState}
+        onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))}
+        onDetail={phoneState.call && draftId(phoneState.call.sessionId) ? openOwnCallDetail : null}
+        onNewCase={callCaseNumber && available.includes("pripady") ? newCaseFromCall : null} /></AppErrorBoundary>}
   </View>;
 }
 const s = StyleSheet.create({

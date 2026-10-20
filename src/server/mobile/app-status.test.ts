@@ -23,7 +23,7 @@ describe("mobile release gate", () => {
 
 describe("mobile error reports", () => {
   it("masks phone numbers and e-mail addresses", () => {
-    expect(scrubDiagnostic("Volajúci +421 905 123 456 / jan.novak@example.sk")).toBe("Volajúci [číslo] / [e-mail]");
+    expect(scrubDiagnostic("Volajúci +421 905 123 456 / jan.novak@example.sk / BA123AB")).toBe("Volajúci [číslo] / [e-mail] / [EČV]");
     expect(scrubDiagnostic("case 00000000-0000-4000-8000-000000000001 failed")).toContain("00000000-0000-4000-8000-000000000001");
   });
   it("accepts a bounded report and trims long stacks", () => {

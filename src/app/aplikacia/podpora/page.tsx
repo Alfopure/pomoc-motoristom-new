@@ -15,20 +15,19 @@ export default function AppSupportPage() {
       lead="Dispatching je mobilná aplikácia pre dispečerov Linky pomoci motoristom: prípady, úlohy, hovory a spätné volania v telefóne.">
       <Section id="access" title="Prístup do aplikácie">
         <p>Aplikácia je len pre pracovníkov dispečingu. Účet vám založí organizácia; prihlasujete sa rovnakým e-mailom a heslom ako do webového dispečingu. Ak účet nemáte alebo vám prístup nefunguje, obráťte sa na svojho vedúceho.</p>
-        <p>Zabudnuté heslo obnovíte cez <Link className={linkClass} href="/auth/forgot-password">obnovu hesla</Link>.</p>
+        <p>Ak heslo zabudnete, nastavte si nové na stránke <Link className={linkClass} href="/auth/forgot-password">Zabudnuté heslo</Link>.</p>
       </Section>
       <Section id="phone" title="Telefón a hovory">
         <ul className="list-disc space-y-2 pl-5">
-          <li>Hovory idú cez ústredňu. V module Hovory → Ústredňa skontrolujte, že je telefón pripojený.</li>
-          <li>Na telefonovanie povoľte aplikácii mikrofón v nastaveniach iPhonu.</li>
-          <li>Prichádzajúci hovor ukáže aj systémová obrazovka iPhonu; v aplikácii ho ovládate na obrazovke hovoru alebo cez pás nad aplikáciou.</li>
+          <li>Hovory na vašom účte, ich históriu a spätné volania vidíte v module Hovory.</li>
+          <li>Telefonovanie priamo z aplikácie je dostupné, keď ho vaša organizácia zapne. Hovory potom idú cez ústredňu; stav telefónu vidíte v Hovory → Ústredňa a aplikácia si vypýta prístup k mikrofónu.</li>
         </ul>
       </Section>
       <Section id="problems" title="Keď niečo nefunguje">
         <ul className="list-disc space-y-2 pl-5">
           <li>Skontrolujte pripojenie na internet a verziu aplikácie v časti Účet. Ak aplikácia žiada aktualizáciu, nainštalujte novšiu verziu.</li>
           <li>Rozpísané koncepty ostávajú v telefóne; nájdete ich v časti Účet → Koncepty v tomto zariadení.</li>
-          <li>Pri chybe aplikácia odošle krátke technické hlásenie bez čísel a e-mailov zákazníkov.</li>
+          <li>Pri chybe aplikácia odošle krátke technické hlásenie; telefónne čísla, e-maily, EČV a VIN v ňom maskuje ešte v telefóne.</li>
         </ul>
       </Section>
       <Section id="contact" title="Kontakt">

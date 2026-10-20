@@ -275,7 +275,7 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
 /** Public pages of the app, served by the dispatch server of this environment. */
 const ACCOUNT_LINKS = [
   { title: "Ochrana súkromia", subtitle: "Aké údaje aplikácia spracúva a prečo", path: "/aplikacia/sukromie" },
-  { title: "Podpora", subtitle: "Pomoc s prihlásením, telefónom a upozorneniami", path: "/aplikacia/podpora" },
+  { title: "Podpora", subtitle: "Pomoc s prihlásením, telefónom a chybami", path: "/aplikacia/podpora" },
 ] as const;
 function Account(props: Props) {
   const profile = props.identity.profile, busy = props.logoutBusy || props.logoutState.busy;
