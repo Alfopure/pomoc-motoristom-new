@@ -206,6 +206,8 @@ Slovensko.
 Rozhodnutia majiteľa z 19. 10. 2026: vydavateľ **MICT, s. r. o.** (IČO 53 167 422,
 Žilina), pracovný názov **Dispatching**, **nezaradená distribúcia** v App Store,
 text zásad ochrany súkromia pripraví vývoj, **push notifikácie schválené**.
+Dňa 20. 10. 2026 doplnil: **hlásenie pádov áno**, z úkonov v hovore stačí
+**prepojenie**, zoznam push notifikácií v F3 platí.
 Cieľ: dokončiť hovory a dispečerský základ, potom aplikáciu zmraziť; po
 príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
 
@@ -238,7 +240,7 @@ príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
 - Zásady ochrany súkromia a Podpora (verejné stránky) a odkazy v Účte.
 - Privacy manifest, odpovede pre App Store Connect, texty do App Store.
 - Kontrola minimálnej verzie (vynútenie aktualizácie).
-- Hlásenie pádov (po súhlase majiteľa).
+- Hlásenie pádov (schválené).
 - Produkčná cesta hlasu pripravená v kóde, ale vypnutá prepínačmi na
   serveri, kým neprejde akceptácia na TEST.
 
