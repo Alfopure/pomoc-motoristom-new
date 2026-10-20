@@ -16,7 +16,9 @@ export type VoiceMedia = { version: number; state: VoiceMediaState; canHold: boo
 export type VoiceRecordingState = "off" | "notice" | "starting" | "recording" | "stopping" | "stopped" | "failed" | "unknown";
 /** Whether the call is recorded, as the server records it; absent from servers before transfer support. */
 export type VoiceRecording = { state: VoiceRecordingState; suppressed: boolean };
-export type VoiceStatus = { sessionId: string; state: string; connected: boolean; ended: boolean; terminationPending: boolean; media: VoiceMedia; recording?: VoiceRecording | null };
+export type VoiceStatus = { sessionId: string; state: string; connected: boolean; ended: boolean; terminationPending: boolean; media: VoiceMedia; recording?: VoiceRecording | null;
+  /** A call between colleagues; absent from servers before transfer support. */
+  internal?: boolean };
 export type VoiceHoldCommand = { callControlId: string; requestId: string; held: boolean; expectedVersion: number };
 export type VoiceHoldResult = VoiceStatus & { operation: { requestId: string; held: boolean; outcome: "accepted" | "pending" | "rejected" | "not_found" } };
 /** `label` is the web's availability badge, e.g. "Dostupný" or "Nepripojený · 20 min". */
@@ -57,7 +59,8 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
     return { state: body.state as VoiceRecordingState, suppressed: body.suppressed };
   }
   function status(body: Record<string, unknown>, sessionId: string): VoiceStatus {
-    if (body.sessionId !== sessionId || !nonempty(body.state) || [body.connected, body.ended, body.terminationPending].some(value => typeof value !== "boolean")) throw invalid();
+    if (body.sessionId !== sessionId || !nonempty(body.state) || [body.connected, body.ended, body.terminationPending].some(value => typeof value !== "boolean")
+      || body.internal !== undefined && typeof body.internal !== "boolean") throw invalid();
     // Only a connected call reports its recorder.
     if (body.recording !== undefined && body.recording !== null) {
       recording(body.recording);

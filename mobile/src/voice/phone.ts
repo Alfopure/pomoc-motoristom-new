@@ -32,6 +32,8 @@ export type PhoneState = {
   retryTarget: PhoneDialTarget | null;
   holdPhase: "idle" | "requesting" | "pending" | "uncertain";
   nativeSyncPending: boolean;
+  /** The own call whose transfer is under way; cleared when the call stays with this phone. */
+  transferPending: string | null;
 };
 
 /** A retry must repeat the exact original command, including its confirmed target. */
@@ -64,8 +66,11 @@ export class DispatchPhone {
   private monitorError: string | null = null;
   /** Changes when a recording stop starts and ends; an older status read cannot undo its answer. */
   private recordingEpoch = 0;
-  /** Sessions this phone transferred: the server closes their leg, so its native end is not a hang-up. */
-  private handedAway = new Set<string>();
+  /** Sessions this phone is transferring. The server closes their leg, so its native end is not a
+   * hang-up. The value is the transfer epoch from which a status read showing the call still here
+   * releases the guard; Infinity while the request is in flight. */
+  private handedAway = new Map<string, number>();
+  private transferEpoch = 0;
   private outgoingIntent: (VoiceOutgoing & { kind: PhoneDialTarget["kind"] }) | null = null;
   private pendingHold: (NativeHold & { leaseId: string }) | null = null;
   private holdWork: NativeHold | null = null;
@@ -80,7 +85,7 @@ export class DispatchPhone {
   constructor(private api: VoiceApi, private native: NativePhone | null, private uuid: () => string, private leases?: PhoneLeaseStore) {
     this.state = { supported: Boolean(native), registration: "unregistered", takeoverRequired: false, call: null, termination: null,
       dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false, error: null,
-      microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false };
+      microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false, transferPending: null };
   }
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   snapshot = () => this.state;
@@ -243,19 +248,19 @@ export class DispatchPhone {
     const sessionId = this.state.termination ?? this.state.call?.sessionId;
     const leaseId = this.token?.deviceSessionId ?? this.leaseId;
     if (!leaseId || !sessionId || this.monitorBusy || this.stopped) return;
-    const generation = this.generation, requestedCall = this.state.call, recordingEpoch = this.recordingEpoch; this.monitorBusy = true;
+    const generation = this.generation, requestedCall = this.state.call, recordingEpoch = this.recordingEpoch, transferEpoch = this.transferEpoch; this.monitorBusy = true;
     try {
       if (this.pendingHold) { await this.refreshHold(); return; }
       const status = await this.api.status(leaseId, sessionId);
       if (!this.current(generation)) return;
       if (this.monitorError !== null && this.state.error === this.monitorError) this.update({ error: null });
       this.monitorError = null;
-      await this.applyCallStatus(status, generation, false, requestedCall, recordingEpoch);
+      await this.applyCallStatus(status, generation, false, requestedCall, recordingEpoch, transferEpoch);
     } catch (error) { if (this.current(generation)) { this.fail(error); this.monitorError = this.state.error; } }
     finally { this.monitorBusy = false; }
   }
   /** `recordingEpoch` is the fence value read before the request; null leaves the recorder as it is. */
-  private async applyCallStatus(status: VoiceStatus, generation: number, holdResult = false, requestedCall = this.state.call, recordingEpoch: number | null = null) {
+  private async applyCallStatus(status: VoiceStatus, generation: number, holdResult = false, requestedCall = this.state.call, recordingEpoch: number | null = null, transferEpoch: number | null = null) {
     const sessionId = status.sessionId;
     const sameCall = () => this.current(generation) && this.state.call?.id === requestedCall?.id
       && this.state.call?.sessionId === requestedCall?.sessionId && this.state.call?.callControlId === requestedCall?.callControlId;
@@ -287,7 +292,15 @@ export class DispatchPhone {
       // action. Only its immutable operation receipt may release the barrier.
       const applyMedia = !older && (!this.pendingHold || holdResult);
       this.update({ call: { ...call, connected: status.connected, ...(applyMedia ? { media, callControlId: media.callControlId ?? call.callControlId } : {}),
-        ...(recordingEpoch !== null && recordingEpoch === this.recordingEpoch ? { recording: status.connected ? status.recording ?? null : null } : {}) } });
+        ...(recordingEpoch !== null && recordingEpoch === this.recordingEpoch ? { recording: status.connected ? status.recording ?? null : null } : {}),
+        ...(typeof status.internal === "boolean" ? { internal: status.internal } : {}) } });
+      // A read started after the transfer answer that still shows the call here: the transfer
+      // did not take it, so its hang-ups are real again.
+      const guard = this.handedAway.get(sessionId);
+      if (guard !== undefined && transferEpoch !== null && transferEpoch >= guard && status.connected && media.state !== "pending") {
+        this.handedAway.delete(sessionId);
+        if (this.state.transferPending === sessionId) this.update({ transferPending: null, error: "Prepojenie sa nepodarilo. Hovor ostáva u vás." });
+      }
       if (applyMedia && call.callControlId && !holdResult) {
         await this.native?.syncMedia(call.id, sessionId, call.callControlId, media.state, media.version, media.canHold);
         if (!sameCall()) return;
@@ -710,17 +723,34 @@ export class DispatchPhone {
     const { sessionId, leaseId, internal } = this.connectedCall(confirmed);
     if (internal) throw new MobileApiError("Hovor s kolegom nemožno prepojiť.", 409);
     if (this.pendingHold || this.state.holdPhase !== "idle" || this.state.nativeSyncPending) throw new MobileApiError("Počkajte, kým sa overí podržanie hovoru.", 409);
-    this.handedAway.add(sessionId);
-    for (const old of this.handedAway) { if (this.handedAway.size <= 20) break; this.handedAway.delete(old); }
+    this.handedAway.set(sessionId, Number.POSITIVE_INFINITY);
+    for (const old of this.handedAway.keys()) { if (this.handedAway.size <= 20) break; if (old !== sessionId) this.handedAway.delete(old); }
+    this.update({ transferPending: sessionId, error: null });
     try {
       const result = await this.api.transfer(leaseId, sessionId, profileId);
-      void this.checkCall();
+      this.settleTransfer(sessionId);
       return result;
     } catch (error) {
-      // A definite refusal leaves the call here; an unknown outcome keeps the guard.
-      if (error instanceof MobileApiError && error.status >= 400 && error.status < 500) this.handedAway.delete(sessionId);
+      // A definite refusal leaves the call here; an unknown outcome is settled by the next status read.
+      if (error instanceof MobileApiError && error.status >= 400 && error.status < 500) {
+        this.handedAway.delete(sessionId);
+        if (this.state.transferPending === sessionId) this.update({ transferPending: null });
+      } else this.settleTransfer(sessionId, true);
       throw error;
     }
+  }
+  /** From now on a status read can show that the call stayed here; read it at once. */
+  private settleTransfer(sessionId: string, failed = false) {
+    if (!this.handedAway.has(sessionId)) return;
+    this.transferEpoch += 1; this.handedAway.set(sessionId, this.transferEpoch);
+    // The failure is already on screen; do not add a second message when the call is found here.
+    if (failed && this.state.transferPending === sessionId) this.update({ transferPending: null });
+    void this.checkCall();
+  }
+  /** A confirmed hang-up of one call; a dialog left open never ends the next one. */
+  async endConfirmed(sessionId: string) {
+    if (this.state.call?.sessionId !== sessionId && this.state.termination !== sessionId) return;
+    await this.end();
   }
   /** Stops recording on the caller's request; `retry` repeats an unconfirmed stop. The answer is
    * the recorder as the server records it, so an unconfirmed stop stays visible as such. */

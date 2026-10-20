@@ -5,7 +5,7 @@ import type { MobileVoiceReadiness } from "../../../src/lib/mobile-api";
 
 const now = Date.parse("2026-10-15T13:00:00Z");
 const configuration: MobileVoiceReadiness = { ok: true, apiVersion: 1, environment: "test", profileId: "operator", checkedAt: new Date(now).toISOString(), nativeCallingEnabled: true, backgroundIncomingEnabled: true };
-const state: PhoneState = { nativeSyncPending: false, holdPhase: "idle", supported: true, registration: "registered", takeoverRequired: false, call: null, termination: null, dialing: false, cancelingAttempt: false,
+const state: PhoneState = { nativeSyncPending: false, transferPending: null, holdPhase: "idle", supported: true, registration: "registered", takeoverRequired: false, call: null, termination: null, dialing: false, cancelingAttempt: false,
   audioActive: false, muted: false, speaker: false, error: null, microphonePermission: "granted", pushRegistered: true,
   lastHeartbeatAt: new Date(now).toISOString(), heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null };
 const inspect = (changes: Partial<PhoneState> = {}, options: Partial<Parameters<typeof phoneReadiness>[0]> = {}) => phoneReadiness({ state: { ...state, ...changes }, configuration, presence: "available", now, ...options });

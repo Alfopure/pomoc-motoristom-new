@@ -158,5 +158,9 @@ describe("transfer and recording transport", () => {
     await expect(api.status(id, id)).rejects.toMatchObject({ status: 502 });
     transport.mockResolvedValueOnce(Response.json({ ...live, recording: { state: "on", suppressed: false } }));
     await expect(api.status(id, id)).rejects.toMatchObject({ status: 502 });
+    transport.mockResolvedValueOnce(Response.json({ ...live, internal: true }));
+    expect((await api.status(id, id)).internal).toBe(true);
+    transport.mockResolvedValueOnce(Response.json({ ...live, internal: "yes" }));
+    await expect(api.status(id, id)).rejects.toMatchObject({ status: 502 });
   });
 });

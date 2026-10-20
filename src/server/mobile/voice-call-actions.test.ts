@@ -3,7 +3,7 @@ import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from '@/test/telephony
 import type { TelephonyRuntimeDeps } from '@/server/telephony/runtime';
 import { completeCallAnnouncements } from '@/test/complete-call-announcements';
 import { listNativeTransferTargets, readNativeRecordingInput, readNativeTransferInput, stopNativeRecording, transferNativeCall } from './voice-call-actions';
-import { readNativeCallStatus } from './voice-hold';
+import { changeNativeHold, readNativeCallStatus } from './voice-hold';
 import { nativeHandedAway, requireNativeSession } from './voice';
 
 const actor = { userId: PROFILES.o1, profileId: PROFILES.o1, organizationId: ORG, displayName: 'Test', role: 'dispatcher' as const };
@@ -83,6 +83,15 @@ describe('native transfer', () => {
     await expect(requireNativeSession(f.deps, actor, f.id)).rejects.toMatchObject({ status: 403 });
     expect(await nativeHandedAway(f.deps, actor, f.id)).toBe(true);
     expect(await nativeHandedAway(f.deps, { ...actor, profileId: PROFILES.o3, userId: PROFILES.o3 }, f.id)).toBe(false);
+    // A late hold from this phone is a plain refusal, not lost ownership that would disconnect it.
+    await expect(changeNativeHold(f.deps, actor, f.id, { deviceSessionId: lease, callControlId: f.control, requestId: '00000000-0000-4000-8000-000000000073', held: true, expectedVersion: 1 }))
+      .rejects.toMatchObject({ status: 409, code: 'native_handed_away' });
+  });
+  it('tells the phone whether a call is between colleagues', async () => {
+    const f = await fixture();
+    expect((await readNativeCallStatus(f.deps, actor, f.id, lease)).internal).toBe(false);
+    f.h.db.update('motorist_call_sessions', { direction: 'internal' }, row => row.id === f.id);
+    expect((await readNativeCallStatus(f.deps, actor, f.id, lease)).internal).toBe(true);
   });
   it('never transfers a call between colleagues', async () => {
     const f = await fixture();

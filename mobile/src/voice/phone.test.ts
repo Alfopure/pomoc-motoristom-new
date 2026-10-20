@@ -951,11 +951,53 @@ describe("transfer and recording of the own call", () => {
   it("treats a refused end of a transferred call as done, not as a lost phone", async () => {
     const f = await activePhone();
     vi.mocked(f.api.transfer).mockRejectedValue(new MobileApiError("Prepojenie hovoru sa nepodarilo potvrdiť.", 0));
+    // The outcome stays unknown while no status read has answered yet.
+    vi.mocked(f.api.status).mockReturnValue(new Promise(() => {}));
     await expect(f.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 0 });
     vi.mocked(f.api.end).mockRejectedValue(new MobileApiError("Hovor nepatrí vášmu telefónu.", 403));
     await f.phone.end();
     expect(f.api.end).toHaveBeenCalledWith(lease, sid);
     expect(f.phone.state.registration).toBe("registered"); expect(f.phone.state.termination).toBeNull();
+  });
+  it("releases the guard when the call stays here after the transfer answer", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.transfer).mockResolvedValue({ state: "talking" });
+    vi.mocked(f.api.status).mockResolvedValue(talking);
+    await f.phone.transfer(colleague, sid);
+    for (let i = 0; i < 5 && f.phone.state.transferPending; i++) await tick();
+    expect(f.phone.state.transferPending).toBeNull();
+    expect(f.phone.state.error).toBe("Prepojenie sa nepodarilo. Hovor ostáva u vás.");
+    // A hang-up from the lock screen is a real hang-up again.
+    f.emit({ type: "ended", callId: id, sessionId: sid }); await tick(); await tick();
+    expect(f.api.end).toHaveBeenCalledWith(lease, sid);
+  });
+  it("keeps the guard while the transfer is announced and against reads from before its answer", async () => {
+    const f = await activePhone();
+    let release!: (value: VoiceStatus) => void;
+    vi.mocked(f.api.status).mockReturnValueOnce(new Promise(done => { release = done; }));
+    const before = f.phone.refreshHold();
+    vi.mocked(f.api.transfer).mockResolvedValue({ state: "talking" });
+    vi.mocked(f.api.status).mockResolvedValue({ ...talking, media: { ...activeMedia, version: 9, state: "pending" } });
+    await f.phone.transfer(colleague, sid);
+    release(talking); await before;
+    expect(f.phone.state.transferPending).toBe(sid);
+    await f.phone.refreshHold();
+    expect(f.phone.state.transferPending).toBe(sid);
+    f.emit({ type: "ended", callId: id, sessionId: sid }); await tick(); await tick();
+    expect(f.api.end).not.toHaveBeenCalled();
+  });
+  it("learns a colleague call from the server after a restart", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.status).mockResolvedValue({ ...talking, internal: true });
+    await f.phone.refreshHold();
+    expect(f.phone.state.call?.internal).toBe(true);
+  });
+  it("ends only the call a confirmation was about", async () => {
+    const f = await activePhone();
+    await f.phone.endConfirmed(lease);
+    expect(f.api.end).not.toHaveBeenCalled(); expect(f.native.end).not.toHaveBeenCalled();
+    await f.phone.endConfirmed(sid);
+    expect(f.api.end).toHaveBeenCalledWith(lease, sid);
   });
   it("forgets a refused transfer, so a later end still hangs up and a lost ownership still disconnects", async () => {
     const f = await activePhone();

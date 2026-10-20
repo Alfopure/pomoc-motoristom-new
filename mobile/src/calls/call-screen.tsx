@@ -89,12 +89,14 @@ export function CallScreen(props: Common & {
   if (!props.visible) return null;
   const time = duration(props, now);
   const showKeypad = panel === "keypad" && view.canKeypad;
-  const transferring = Boolean(transfer.busy || transfer.sent);
-  const showTransfer = panel === "transfer" && (view.canTransfer || transferring);
+  const sessionId = state.call?.sessionId ?? null;
+  // "Sent" lasts only while the phone still reports this transfer; a call that stayed here unlocks the list.
+  const transferSent = transfer.sent && sessionId !== null && state.transferPending === sessionId ? transfer.sent : null;
+  const transferring = Boolean(transfer.busy || transferSent);
+  const showTransfer = panel === "transfer" && (view.canTransfer || transferring || Boolean(transfer.error));
   const recording = recordingView(state, view);
   const recorderState = state.call?.recording?.state ?? null;
   const recordingErrorText = recordingError && recordingError.state === recorderState ? recordingError.message : null;
-  const sessionId = state.call?.sessionId ?? null;
   // A caller may object to recording at any time; the stop is confirmed once, a retry is not.
   function stopRecording() {
     if (!recording?.canStop || stopping || !sessionId) return;
@@ -122,22 +124,25 @@ export function CallScreen(props: Common & {
     setTransfer({ busy: target.displayName, sent: null, error: null });
     try {
       const result = await phone.transfer(target.profileId, confirmed);
-      setTransfer({ busy: null, sent: { name: target.displayName, queued: result.state === "talking" }, error: null });
+      // Any state but ringing means an announcement still precedes the transfer.
+      setTransfer({ busy: null, sent: { name: target.displayName, queued: result.state !== "ringing" }, error: null });
       AccessibilityInfo.announceForAccessibility?.("Hovor sa prepája na " + target.displayName);
     } catch (error) {
       setTransfer({ busy: null, sent: null, error: error instanceof MobileApiError ? error.message : "Prepojenie hovoru sa nepodarilo potvrdiť." });
     }
   }
   // Ending while the transfer is under way would drop the caller instead of handing them over.
+  // The confirmation names this call; a dialog left open never ends the next one.
   function endCall() {
-    if (transfer.sent && view.connected) {
-      Alert.alert("Hovor sa prepája", "Hovor práve prepájame na " + transfer.sent.name + ". Ak ho teraz ukončíte, volajúci sa odpojí.", [
-        { text: "Nechať prepojiť", style: "cancel" }, { text: "Ukončiť hovor", style: "destructive", onPress: () => { void phone.end(); } }]);
+    const name = transferSent?.name ?? transfer.busy;
+    if (name && view.connected && sessionId) {
+      Alert.alert("Hovor sa prepája", "Hovor práve prepájame na " + name + ". Ak ho teraz ukončíte, volajúci sa odpojí.", [
+        { text: "Nechať prepojiť", style: "cancel" }, { text: "Ukončiť hovor", style: "destructive", onPress: () => { void phone.endConfirmed(sessionId); } }]);
       return;
     }
     void phone.end();
   }
-  const status = transfer.sent && view.connected ? (transfer.sent.queued ? "Pripravujem prepojenie na " : "Prepájam na ") + transfer.sent.name + "…" : view.status;
+  const status = transferSent && view.connected ? (transferSent.queued ? "Pripravujem prepojenie na " : "Prepájam na ") + transferSent.name + "…" : view.status;
   const title = titleOf(props);
   const formatted = state.call?.number ? formatNumber(state.call.number) : null;
   const number = formatted && formatted !== title ? formatted : null;
@@ -178,7 +183,8 @@ export function CallScreen(props: Common & {
               style={({ pressed }) => [s.key, pressed && { backgroundColor: palette.fillStrong }]}><Text style={s.keyText}>{digit}</Text></Pressable>)}</View>)}
           <Pressable accessibilityRole="button" accessibilityLabel="Skryť klávesnicu" onPress={() => setPanel("controls")} style={({ pressed }) => [s.textButton, pressed && { opacity: 0.6 }]}>
             <Text style={s.textButtonLabel}>Skryť klávesnicu</Text></Pressable>
-        </View> : showTransfer ? <TransferPanel phone={phone} progress={transfer} onPick={confirmTransfer} onClose={() => { setPanel("controls"); setTransfer(value => value.sent ? value : { ...value, error: null }); }} />
+        </View> : showTransfer ? <TransferPanel phone={phone} progress={{ ...transfer, sent: transferSent }} onPick={confirmTransfer}
+          onClose={() => { setPanel("controls"); setTransfer(value => transferSent ? value : { ...value, sent: null, error: null }); }} />
           : view.showControls && <View style={s.grid}>
           <Round label={state.muted ? "Mikrofón vyp." : "Stíšiť"} accessibilityLabel={state.muted ? "Zapnúť mikrofón" : "Stíšiť"} active={state.muted}
             icon={state.muted ? MicOff : Mic} onPress={() => { void phone.mute(); }} />
