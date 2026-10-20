@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
-import { FilePlus2, FolderOpen, PhoneForwarded } from "lucide-react-native";
+import { FilePlus2, FolderOpen, Phone, PhoneForwarded } from "lucide-react-native";
 import { ActionBar, DetailHeader, InfoRow, Tag } from "../design/detail";
 import { Group, Row, SectionHeader } from "../design/list";
 import { palette, space, type } from "../design/tokens";
@@ -12,6 +12,7 @@ import { callStatus, formatNumber, formatTime } from "../lib/display";
 import { Button, Card, ErrorNotice, Loading, styles } from "../ui";
 import { CopyValue } from "../cases/copy";
 import { useToolRequest } from "../tools/use-request";
+import { useCallAction } from "../voice/dial";
 import type { CallContextApi } from "./api";
 import { customerCallNumber } from "./number";
 import { useForegroundVisit } from "../ui/foreground-visit";
@@ -32,6 +33,9 @@ export function CallContextPanel({ api, target, active, current, onBack, backLab
   const data = active && current() ? state.data : null;
   const allowed = () => visit.current() && current() && request.snapshot().data === data && data !== null;
   const phone = data ? customerCallNumber(data.call.direction, data.call.number) : null;
+  const calling = useCallAction();
+  // The detail of a running call offers no second call to the same number.
+  const hasCall = !calling.ready;
   // A history reference is the call-log ID itself; a console session keeps the
   // call-log ID it resolved, so the section survives the card's own reloads.
   const [resolvedCallId, setResolvedCallId] = useState<string | null>(null);
@@ -60,7 +64,9 @@ export function CallContextPanel({ api, target, active, current, onBack, backLab
           {data.linkedCase && <Tag text={data.linkedCase.caseNumber} tone="yellow" />}
         </>} />
       {phone && <ActionBar actions={[
-        { icon: PhoneForwarded, label: "Vybrať číslo", accessibilityLabel: "Vybrať číslo do ústredne", onPress: () => { if (allowed()) onSelectNumber(phone); } },
+        calling.ready && !hasCall
+          ? { icon: Phone, label: "Zavolať", accessibilityLabel: "Zavolať na číslo hovoru cez ústredňu", onPress: () => { if (allowed()) calling.call(phone, data.call.name); } }
+          : { icon: PhoneForwarded, label: "Vybrať číslo", accessibilityLabel: "Vybrať číslo do ústredne", onPress: () => { if (allowed()) onSelectNumber(phone); } },
         { icon: FilePlus2, label: "Nový prípad", accessibilityLabel: "Nový prípad s číslom hovoru", onPress: () => { if (allowed()) onNewCase(phone); } },
         ...(data.linkedCase ? [{ icon: FolderOpen, label: "Prípad", accessibilityLabel: "Prípad hovoru, otvoriť", primary: true, onPress: () => { if (allowed() && data.linkedCase) onOpenCase(data.linkedCase.id); } }] : []),
       ]} />}

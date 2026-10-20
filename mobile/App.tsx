@@ -14,9 +14,9 @@ import { useDispatchPhone } from "./src/voice/use-phone";
 import { flushAccountDrafts } from "./src/drafts/vault";
 import { AuthIncarnation } from "./src/lib/auth-incarnation";
 import { supportsDurableDrafts } from "./src/drafts/storage";
-import { CallPanel } from "./src/voice/ui";
 import { SessionLogout, type LogoutState } from "./src/lib/logout";
 import type { CallbackDialer } from "./src/callbacks/ui";
+import { dialBlockedReason } from "./src/voice/dial";
 import { DispatchShell } from "./src/shell/dispatch-shell";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
@@ -183,12 +183,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   const callbackSummary = useQuery({ queryKey: [...key, "callback-summary", identity?.profileId], enabled: active && Boolean(identity),
     queryFn: ({ signal }) => api.callbackSummary(identity!.profileId, signal), refetchInterval: active ? 30_000 : false });
-  const dialBlocked = !phone ? "Zavolať späť z mobilu bude možné v natívnej aplikácii s pripojeným telefónom. V tomto náhľade môžete požiadavky prevziať a uzavrieť."
-    : phoneState.registration !== "registered" ? "Telefón nie je pripojený k ústredni. Pripojte ho v Ústredni."
-      : phoneState.microphonePermission === "denied" ? "Na volanie povoľte prístup k mikrofónu."
-        : phoneState.call || phoneState.termination ? "Počas hovoru nemožno začať ďalší."
-          : phoneState.retryTarget ? "Najprv v Ústredni dokončite nepotvrdené volanie."
-            : phoneState.dialing || phoneState.cancelingAttempt ? "Telefón práve vytáča." : null;
+  const dialBlocked = dialBlockedReason(phone, phoneState, "Zavolať späť z mobilu bude možné v natívnej aplikácii s pripojeným telefónom. V tomto náhľade môžete požiadavky prevziať a uzavrieť.");
   const dialer: CallbackDialer = { available: dialBlocked === null, reason: dialBlocked, dial: async (id, value, verificationId) => {
     if (!phone) return "Telefón nie je dostupný.";
     if (!await phone.dialCallback(id, value, verificationId)) return phone.snapshot().error ?? "Telefón práve nie je pripravený na nový hovor. Skúste to znova.";
@@ -224,7 +219,6 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     {logoutError && <Button label="Odhlásiť bez neuložených zmien" onPress={logoutWithoutSaving} disabled={logoutBusy || logoutState.busy || Boolean(phoneState.call || phoneState.termination)} secondary />}
   </View></>;
   return <View style={{ flex: 1 }}>
-    <CallPanel phone={phone} state={phoneState} />
     <PhoneOverlayProvider blocked={Boolean(phoneState.call || phoneState.termination)} source={phone}>
       <DispatchShell key={identity.profileId} config={config} client={client} api={api} active={active} userId={userId} liveUser={liveUser}
         identity={identity} queryKey={key} meError={me.isError ? me.error : null} onRetryMe={() => { void me.refetch(); }}

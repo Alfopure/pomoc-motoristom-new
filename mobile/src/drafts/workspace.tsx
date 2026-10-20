@@ -45,6 +45,8 @@ type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe;
   onLeaveModule: () => void;
   callTarget: MobileCallContextTarget | null; onCloseCallContext: () => void; callBackLabel: string;
   onShowCalls: () => void; dialer: CallbackDialer;
+  /** "Nový prípad" from the call screen; each nonce opens the form once. */
+  callCase?: { number: string; nonce: number } | null;
   /** Prehľad, Hľadať and Upozornenia; scope and openers are null until the organization is verified. */
   renderLayer: (layer: ShellLayer, scope: ShellScope | null, notice: string | null, open: ShellOpeners | null) => ReactNode;
   bar: { customized: boolean; onEdit: () => void; onReset: () => void };
@@ -166,6 +168,16 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
   const alertsCallbacks = useMemo(() => createCallbacksApi(config, verified.profileId, verified.organizationId, getToken, current), [config, verified.profileId, verified.organizationId, getToken, current]);
   const [caseRequest, setCaseRequest] = useState<CaseOpenRequest>(), [taskRequest, setTaskRequest] = useState<{ taskId: string | null; nonce: number }>();
   const request = useRef(0);
+  const consumedCallCase = useRef<number | null>(null);
+  const { callCase, onView } = props;
+  useEffect(() => {
+    if (!callCase || consumedCallCase.current === callCase.nonce || !current()) return;
+    consumedCallCase.current = callCase.nonce;
+    const phone = customerCallNumber("inbound", callCase.number);
+    if (!phone) return;
+    // Consume an explicit command from the call screen once.
+    setCaseRequest({ kind: "case-call-create", id: null, number: phone, nonce: ++request.current }); onView("cases");
+  }, [callCase, current, onView]);
   function resume(record: StoredDraft) {
     if (record.kind === "task-state") {
       if (record.resourceId) { setTaskRequest({ taskId: record.resourceId, nonce: ++request.current }); props.onView("tasks"); }
