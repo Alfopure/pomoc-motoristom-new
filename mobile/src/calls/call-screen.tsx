@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Keyboard, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { AccessibilityInfo, Keyboard, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChevronDown, FilePlus2, Grid3x3, Info, Mic, MicOff, Pause, Phone, PhoneOff, Play, TriangleAlert, Volume2 } from "lucide-react-native";
 import { palette, space, type } from "../design/tokens";
@@ -14,6 +14,16 @@ import type { CallView } from "./call-screen-model";
 export type CallFacts = { lineLabel: string | null; partner: string | null; contact: string | null };
 type Common = { view: CallView; facts: CallFacts | null; connectedAt: number | null };
 
+/** Moves VoiceOver to an element that appears in place of another one. */
+function useAccessibilityFocus<T extends View | Text>(when: boolean) {
+  const ref = useRef<T>(null);
+  useEffect(() => {
+    if (!when) return;
+    const timer = setTimeout(() => { if (ref.current) AccessibilityInfo.sendAccessibilityEvent?.(ref.current, "focus"); }, 250);
+    return () => clearTimeout(timer);
+  }, [when]);
+  return ref;
+}
 function useClock(running: boolean) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -37,12 +47,13 @@ function lineOf(facts: CallFacts | null) {
 
 /** Above the app while the call screen is hidden; one tap brings the controls back.
  * An error or an unconfirmed hold says so here instead of hiding behind the strip. */
-export function CallStrip(props: Common & { attention: boolean; onExpand: () => void }) {
+export function CallStrip(props: Common & { attention: boolean; focus: boolean; onExpand: () => void }) {
   const now = useClock(props.view.connected);
+  const ref = useAccessibilityFocus<View>(props.focus);
   const time = duration(props, now);
   const title = titleOf(props);
   const status = props.attention ? "Skontrolujte hovor" : time ? props.view.status + " · " + time : props.view.status;
-  return <Pressable accessibilityRole="button" accessibilityLabel={"Hovor: " + title + ", " + (props.attention ? "vyžaduje pozornosť" : props.view.status + (time ? ", " + time : "")) + ". Otvoriť ovládanie hovoru"}
+  return <Pressable ref={ref} accessibilityRole="button" accessibilityLabel={"Hovor: " + title + ", " + (props.attention ? "vyžaduje pozornosť" : props.view.status + (time ? ", " + time : "")) + ". Otvoriť ovládanie hovoru"}
     onPress={props.onExpand} style={({ pressed }) => [s.strip, { backgroundColor: props.attention ? palette.redText : toneColor[props.view.tone] }, pressed && { opacity: 0.85 }]}>
     {props.attention ? <TriangleAlert size={15} strokeWidth={2.6} color="#FFFFFF" accessible={false} /> : <Phone size={15} strokeWidth={2.6} color="#FFFFFF" accessible={false} />}
     <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.stripTitle}>{title}</Text>
@@ -62,6 +73,7 @@ export function CallScreen(props: Common & {
   const [keypad, setKeypad] = useState(false);
   const [digits, setDigits] = useState("");
   const now = useClock(props.visible && view.connected);
+  const titleRef = useAccessibilityFocus<Text>(props.visible);
   // A keyboard left open by a form would cover the answer and end buttons.
   useEffect(() => { if (props.visible) Keyboard.dismiss(); }, [props.visible]);
   if (!props.visible) return null;
@@ -72,14 +84,15 @@ export function CallScreen(props: Common & {
   const number = formatted && formatted !== title ? formatted : null;
   const line = lineOf(props.facts);
   return <View accessibilityViewIsModal style={[StyleSheet.absoluteFill, s.layer]}>
-    <View style={[s.screen, { paddingTop: insets.top + space.s, paddingBottom: insets.bottom + space.l }]}>
+    {/* The app frame already keeps the top clear of the status bar, not the bottom. */}
+    <View style={[s.screen, { paddingTop: space.s, paddingBottom: insets.bottom + space.l }]}>
       <View style={s.top}>
         <Pressable accessibilityRole="button" accessibilityLabel="Skryť obrazovku hovoru" hitSlop={8} onPress={props.onMinimize} style={({ pressed }) => [s.hide, pressed && { opacity: 0.6 }]}>
           <ChevronDown size={20} strokeWidth={2.4} color={palette.label} accessible={false} /><Text style={s.hideText}>Skryť</Text>
         </Pressable>
       </View>
       <ScrollView contentContainerStyle={s.body} bounces={false}>
-        <Text accessibilityRole="header" style={s.title}>{title}</Text>
+        <Text ref={titleRef} accessibilityRole="header" style={s.title}>{title}</Text>
         {number ? <Text selectable style={s.subtitle}>{number}</Text> : null}
         <Text accessibilityLiveRegion="polite" style={[s.status, { color: toneColor[view.tone] }]}>{[view.status, time].filter(Boolean).join(" · ")}</Text>
         {line ? <Text style={s.line}>{line}</Text> : null}

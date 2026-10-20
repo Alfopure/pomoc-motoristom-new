@@ -865,3 +865,29 @@ describe("callback and confirmed-target dialing", () => {
     expect(f.phone.state.retryTarget).toBeNull(); expect(f.phone.state.error).toContain("Peter");
   });
 });
+describe("call errors on the phone's own call", () => {
+  const talking = { sessionId: sid, state: "talking", connected: true, ended: false, terminationPending: false, media: activeMedia };
+  it("clears a failed status read on the next good one, but keeps other errors", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.status).mockRejectedValueOnce(new MobileApiError("Nepodarilo sa spojiť s ústredňou. Skontrolujte pripojenie.", 0));
+    await f.phone.refreshHold();
+    expect(f.phone.state.error).toBe("Nepodarilo sa spojiť s ústredňou. Skontrolujte pripojenie.");
+    vi.mocked(f.api.status).mockResolvedValue(talking);
+    await f.phone.refreshHold();
+    expect(f.phone.state.error).toBeNull();
+    vi.mocked(f.native.requestHold).mockRejectedValueOnce(new Error("native"));
+    await f.phone.hold();
+    expect(f.phone.state.error).toBe("Podržanie hovoru sa nepodarilo pripraviť. Skúste znova.");
+    await f.phone.refreshHold();
+    expect(f.phone.state.error).toBe("Podržanie hovoru sa nepodarilo pripraviť. Skúste znova.");
+  });
+  it("starts a new incoming call without an earlier call's error", async () => {
+    const f = await connected();
+    vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("Číslo nie je povolené.", 403));
+    await f.phone.dial("+421900000002");
+    expect(f.phone.state.error).toBe("Číslo nie je povolené."); expect(f.phone.state.retryTarget).toBeNull();
+    f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick(); await tick();
+    expect(f.phone.state.call?.id).toBe(id);
+    expect(f.phone.state.error).toBeNull();
+  });
+});

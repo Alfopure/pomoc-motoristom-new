@@ -56,6 +56,8 @@ export class DispatchPhone {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
   private pendingDial: { requestId: string; target: PhoneDialTarget; uncertain: boolean } | null = null;
+  /** The message of a failed call status read; the next good read clears it. */
+  private monitorError: string | null = null;
   private outgoingIntent: (VoiceOutgoing & { kind: PhoneDialTarget["kind"] }) | null = null;
   private pendingHold: (NativeHold & { leaseId: string }) | null = null;
   private holdWork: NativeHold | null = null;
@@ -238,8 +240,10 @@ export class DispatchPhone {
       if (this.pendingHold) { await this.refreshHold(); return; }
       const status = await this.api.status(leaseId, sessionId);
       if (!this.current(generation)) return;
+      if (this.monitorError !== null && this.state.error === this.monitorError) this.update({ error: null });
+      this.monitorError = null;
       await this.applyCallStatus(status, generation, false, requestedCall);
-    } catch (error) { if (this.current(generation)) this.fail(error); }
+    } catch (error) { if (this.current(generation)) { this.fail(error); this.monitorError = this.state.error; } }
     finally { this.monitorBusy = false; }
   }
   private async applyCallStatus(status: VoiceStatus, generation: number, holdResult = false, requestedCall = this.state.call) {
@@ -562,8 +566,10 @@ export class DispatchPhone {
           if (activeCall && activeCall.id !== id) { await this.native.reject(id); return; }
           // Reserve the single call before crossing the async bridge. Native
           // may synchronously emit ACTIVE/ended while authorize is resolving.
+          // A new call starts without an earlier call's error.
           this.update({ call: { id, sessionId: offer.sessionId, number: offer.number, displayName: offer.displayName,
-            callControlId: offer.callControlId, state: intent ? "CONNECTING" : "RINGING", outgoing: Boolean(intent), connected: false }, holdPhase: "idle" });
+            callControlId: offer.callControlId, state: intent ? "CONNECTING" : "RINGING", outgoing: Boolean(intent), connected: false }, holdPhase: "idle",
+            ...(intent ? {} : { error: null }) });
           this.schedule();
           await this.native.authorize(id, offer.sessionId, offer.callControlId);
         } finally { this.authorizing.delete(id); this.scheduleRecovery(); }

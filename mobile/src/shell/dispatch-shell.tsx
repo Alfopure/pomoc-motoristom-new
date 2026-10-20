@@ -100,8 +100,9 @@ export function DispatchShell(props: Props) {
   // the app. An ending call keeps the choice, so a hidden screen does not pop up to close.
   const ownCall = callView(phoneState);
   const callId = phoneState.call?.id ?? null;
-  const [callScreen, setCallScreen] = useState<{ id: string | null; open: boolean; connectedAt: number | null }>({ id: callId, open: true, connectedAt: null });
-  if (callScreen.id !== callId) setCallScreen({ id: callId, open: callId !== null || callScreen.open, connectedAt: null });
+  // `focusStrip`: Skryť hands VoiceOver to the strip; Detail and Nový prípad leave it on their screen.
+  const [callScreen, setCallScreen] = useState<{ id: string | null; open: boolean; connectedAt: number | null; focusStrip: boolean }>({ id: callId, open: true, connectedAt: null, focusStrip: false });
+  if (callScreen.id !== callId) setCallScreen({ id: callId, open: callId !== null || callScreen.open, connectedAt: null, focusStrip: false });
   const callConnected = Boolean(phoneState.call?.connected);
   // Talk time counts from the moment this phone saw the call connected.
   useEffect(() => {
@@ -114,6 +115,8 @@ export function DispatchShell(props: Props) {
   // "Nový prípad" from the call waits only on Prípady; leaving it drops the request.
   const [callCase, setCallCase] = useState<{ number: string; nonce: number } | null>(null);
   if (callCase && view !== "cases") setCallCase(null);
+  // Never reused: the workspace remembers the last nonce it handled.
+  const callCaseSeq = useRef(0);
   const callCaseNumber = phoneState.call ? customerCallNumber(phoneState.call.outgoing ? "outbound" : "inbound", phoneState.call.number) : null;
   const dialBlocked = dialBlockedReason(phone, phoneState);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 2400); return () => clearTimeout(timer); }, [toast]);
@@ -126,18 +129,21 @@ export function DispatchShell(props: Props) {
   function openOwnCallDetail() {
     const sessionId = phoneState.call?.sessionId;
     if (!sessionId || !draftId(sessionId)) return;
-    setCallScreen(value => ({ ...value, open: false }));
+    setCallScreen(value => ({ ...value, open: false, focusStrip: false }));
     go(openModule(nav, pins, "hovory", "console"));
     setCallSelection({ target: { kind: "session", id: sessionId.toLowerCase() }, view: "console" });
   }
   function newCaseFromCall() {
     if (!callCaseNumber) return;
-    setCallScreen(value => ({ ...value, open: false }));
+    setCallScreen(value => ({ ...value, open: false, focusStrip: false }));
     navigate("pripady");
-    setCallCase(value => ({ number: callCaseNumber, nonce: (value?.nonce ?? 0) + 1 }));
+    setCallCase({ number: callCaseNumber, nonce: ++callCaseSeq.current });
   }
   // One confirmation and one dial at a time; a second tap while either is open does nothing.
   const placing = useRef(false);
+  // A dial result can arrive after the dispatcher moved on; its alert navigates from the current screen.
+  const latestNavigate = useRef(navigate);
+  useEffect(() => { latestNavigate.current = navigate; });
   const release = () => { placing.current = false; };
   // The same verified-number decision as Ústredňa; a blocked phone sends the number there instead.
   // A refused or unconfirmed start is reported here, since the caller may not be on Ústredňa.
@@ -151,7 +157,7 @@ export function DispatchShell(props: Props) {
         if (sent && !after.error) return;
         const message = after.error ?? "Telefón práve nie je pripravený na nový hovor. Skúste to znova.";
         if (after.retryTarget) Alert.alert("Hovor nie je potvrdený", message + "\n\nPokus dokončite alebo zrušte v Ústredni.", [
-          { text: "Zavrieť", style: "cancel" }, { text: "Otvoriť Ústredňu", onPress: () => navigate("hovory", "console") }]);
+          { text: "Zavrieť", style: "cancel" }, { text: "Otvoriť Ústredňu", onPress: () => latestNavigate.current("hovory", "console") }]);
         else Alert.alert("Hovor sa nezačal", message);
       } finally { release(); }
     };
@@ -228,7 +234,7 @@ export function DispatchShell(props: Props) {
         : { kind: "status" as const, label: statusLabel, tone: presence ? presenceTone[presence] : "gray" as const, onPress: () => navigate("hovory", "console") };
   return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><CallActionContext.Provider value={callAction}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
     {ownCall && phone && !callScreen.open && <CallStrip view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} attention={Boolean(phoneState.error) || ownCall.holdUncertain}
-      onExpand={() => setCallScreen(value => ({ ...value, open: true }))} />}
+      focus={callScreen.focusStrip} onExpand={() => setCallScreen(value => ({ ...value, open: true }))} />}
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(identity.profile.displayName)} onAccount={() => go({ ...nav, account: true, search: false, alerts: false })}
       left={left} onPin={openedInModules && !moduleBack && nav.opened && !pins.includes(nav.opened) ? () => pin(nav.opened!) : null} />
     {Boolean(props.meError) && <View style={{ paddingHorizontal: space.l }}><ErrorNotice message={errorMessage(props.meError)} onRetry={props.onRetryMe} /></View>}
@@ -299,7 +305,7 @@ export function DispatchShell(props: Props) {
     </Sheet>
     <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 12 + (callBar ? CALL_BAR_SPACE : 0)} />
     {ownCall && phone && <CallScreen visible={callScreen.open} view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} phone={phone} state={phoneState}
-      onMinimize={() => setCallScreen(value => ({ ...value, open: false }))}
+      onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))}
       onDetail={phoneState.call && draftId(phoneState.call.sessionId) ? openOwnCallDetail : null}
       onNewCase={callCaseNumber && available.includes("pripady") ? newCaseFromCall : null} />}
   </View>;
