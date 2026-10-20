@@ -10,7 +10,7 @@ import { DispatchPhone, type PhoneState } from "./phone";
 
 const idle: PhoneState = { supported: false, registration: "unregistered", takeoverRequired: false, call: null, termination: null,
   dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false, error: null,
-  microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false };
+  microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false, transferPending: null };
 const noSubscribe = () => () => {};
 const idleSnapshot = () => idle;
 

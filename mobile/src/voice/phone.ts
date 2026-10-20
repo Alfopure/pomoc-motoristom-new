@@ -1,5 +1,5 @@
 import { MobileApiError } from "../lib/api";
-import type { VoiceApi, VoiceCallTarget, VoiceHoldCommand, VoiceHoldResult, VoiceMedia, VoiceMediaState, VoiceOutgoing, VoiceStatus, VoiceToken } from "./api";
+import type { VoiceApi, VoiceCallTarget, VoiceHoldCommand, VoiceHoldResult, VoiceMedia, VoiceMediaState, VoiceOutgoing, VoiceRecording, VoiceStatus, VoiceToken } from "./api";
 
 export type VoiceEvent = { type: string; callId?: string; callControlId?: string; providerLegId?: string; sessionId?: string; number?: string; state?: string; active?: boolean; muted?: boolean; outgoing?: boolean;
   actionId?: string; held?: boolean; expectedVersion?: number; phase?: "unclaimed" | "dispatched" | "uncertain"; actionLive?: boolean; systemHeld?: boolean; privacyHold?: boolean; media?: Pick<VoiceMedia, "state" | "version" | "canHold"> };
@@ -21,13 +21,19 @@ export type PhoneLeaseStore = { load(): Promise<string | null>; save(id: string)
 export type PhoneDialTarget = VoiceCallTarget;
 export type PhoneState = {
   supported: boolean; registration: "unregistered" | "connecting" | "registered" | "error"; takeoverRequired: boolean;
-  call: { id: string; sessionId: string; number: string | null; displayName?: string | null; state: string; outgoing: boolean; connected: boolean; callControlId?: string; media?: VoiceMedia } | null;
+  call: { id: string; sessionId: string; number: string | null; displayName?: string | null; state: string; outgoing: boolean; connected: boolean; callControlId?: string; media?: VoiceMedia;
+    /** Whether the connected call is recorded; null until the server says. */
+    recording?: VoiceRecording | null;
+    /** A call between colleagues: there is no customer to transfer. */
+    internal?: boolean } | null;
   termination: string | null; dialing: boolean; cancelingAttempt: boolean; audioActive: boolean; muted: boolean; speaker: boolean; error: string | null;
   microphonePermission: MicrophonePermission; pushRegistered: boolean | null; lastHeartbeatAt: string | null;
   heartbeatError: string | null; diagnosticsError: string | null; checkingDiagnostics: boolean;
   retryTarget: PhoneDialTarget | null;
   holdPhase: "idle" | "requesting" | "pending" | "uncertain";
   nativeSyncPending: boolean;
+  /** The own call whose transfer is under way; cleared when the call stays with this phone. */
+  transferPending: string | null;
 };
 
 /** A retry must repeat the exact original command, including its confirmed target. */
@@ -58,6 +64,13 @@ export class DispatchPhone {
   private pendingDial: { requestId: string; target: PhoneDialTarget; uncertain: boolean } | null = null;
   /** The message of a failed call status read; the next good read clears it. */
   private monitorError: string | null = null;
+  /** Changes when a recording stop starts and ends; an older status read cannot undo its answer. */
+  private recordingEpoch = 0;
+  /** Sessions this phone is transferring. The server closes their leg, so its native end is not a
+   * hang-up. The value is the transfer epoch from which a status read showing the call still here
+   * releases the guard; Infinity while the request is in flight. */
+  private handedAway = new Map<string, number>();
+  private transferEpoch = 0;
   private outgoingIntent: (VoiceOutgoing & { kind: PhoneDialTarget["kind"] }) | null = null;
   private pendingHold: (NativeHold & { leaseId: string }) | null = null;
   private holdWork: NativeHold | null = null;
@@ -72,7 +85,7 @@ export class DispatchPhone {
   constructor(private api: VoiceApi, private native: NativePhone | null, private uuid: () => string, private leases?: PhoneLeaseStore) {
     this.state = { supported: Boolean(native), registration: "unregistered", takeoverRequired: false, call: null, termination: null,
       dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false, error: null,
-      microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false };
+      microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false, transferPending: null };
   }
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   snapshot = () => this.state;
@@ -235,18 +248,19 @@ export class DispatchPhone {
     const sessionId = this.state.termination ?? this.state.call?.sessionId;
     const leaseId = this.token?.deviceSessionId ?? this.leaseId;
     if (!leaseId || !sessionId || this.monitorBusy || this.stopped) return;
-    const generation = this.generation, requestedCall = this.state.call; this.monitorBusy = true;
+    const generation = this.generation, requestedCall = this.state.call, recordingEpoch = this.recordingEpoch, transferEpoch = this.transferEpoch; this.monitorBusy = true;
     try {
       if (this.pendingHold) { await this.refreshHold(); return; }
       const status = await this.api.status(leaseId, sessionId);
       if (!this.current(generation)) return;
       if (this.monitorError !== null && this.state.error === this.monitorError) this.update({ error: null });
       this.monitorError = null;
-      await this.applyCallStatus(status, generation, false, requestedCall);
+      await this.applyCallStatus(status, generation, false, requestedCall, recordingEpoch, transferEpoch);
     } catch (error) { if (this.current(generation)) { this.fail(error); this.monitorError = this.state.error; } }
     finally { this.monitorBusy = false; }
   }
-  private async applyCallStatus(status: VoiceStatus, generation: number, holdResult = false, requestedCall = this.state.call) {
+  /** `recordingEpoch` is the fence value read before the request; null leaves the recorder as it is. */
+  private async applyCallStatus(status: VoiceStatus, generation: number, holdResult = false, requestedCall = this.state.call, recordingEpoch: number | null = null, transferEpoch: number | null = null) {
     const sessionId = status.sessionId;
     const sameCall = () => this.current(generation) && this.state.call?.id === requestedCall?.id
       && this.state.call?.sessionId === requestedCall?.sessionId && this.state.call?.callControlId === requestedCall?.callControlId;
@@ -277,7 +291,16 @@ export class DispatchPhone {
       // A status read started before a claimed action cannot resolve that
       // action. Only its immutable operation receipt may release the barrier.
       const applyMedia = !older && (!this.pendingHold || holdResult);
-      this.update({ call: { ...call, connected: status.connected, ...(applyMedia ? { media, callControlId: media.callControlId ?? call.callControlId } : {}) } });
+      this.update({ call: { ...call, connected: status.connected, ...(applyMedia ? { media, callControlId: media.callControlId ?? call.callControlId } : {}),
+        ...(recordingEpoch !== null && recordingEpoch === this.recordingEpoch ? { recording: status.connected ? status.recording ?? null : null } : {}),
+        ...(typeof status.internal === "boolean" ? { internal: status.internal } : {}) } });
+      // A read started after the transfer answer that still shows the call here: the transfer
+      // did not take it, so its hang-ups are real again.
+      const guard = this.handedAway.get(sessionId);
+      if (guard !== undefined && transferEpoch !== null && transferEpoch >= guard && status.connected && media.state !== "pending") {
+        this.handedAway.delete(sessionId);
+        if (this.state.transferPending === sessionId) this.update({ transferPending: null, error: "Prepojenie sa nepodarilo. Hovor ostáva u vás." });
+      }
       if (applyMedia && call.callControlId && !holdResult) {
         await this.native?.syncMedia(call.id, sessionId, call.callControlId, media.state, media.version, media.canHold);
         if (!sameCall()) return;
@@ -381,8 +404,9 @@ export class DispatchPhone {
       if (!this.holdCurrent(command, generation)) return;
       if (!claimed) { this.pendingHold = null; this.update({ holdPhase: "idle" }); return; }
       command.phase = "dispatched";
+      const recordingEpoch = this.recordingEpoch;
       const result = await this.api.hold(command.leaseId, command.sessionId, this.holdPayload(command));
-      if (this.holdCurrent(command, generation)) await this.applyHoldResult(command, result, generation);
+      if (this.holdCurrent(command, generation)) await this.applyHoldResult(command, result, generation, recordingEpoch);
     } catch (error) { if (this.holdCurrent(command, generation)) await this.holdFailure(command, error); }
     finally { if (this.holdWork === command) this.holdWork = null; }
   }
@@ -394,13 +418,14 @@ export class DispatchPhone {
     if (!this.holdCurrent(command, generation)) return;
     this.holdWork = command;
     try {
+      const recordingEpoch = this.recordingEpoch;
       const result = await this.api.holdStatus(command.leaseId, command.sessionId, this.holdPayload(command));
-      if (this.holdCurrent(command, generation)) await this.applyHoldResult(command, result, generation);
+      if (this.holdCurrent(command, generation)) await this.applyHoldResult(command, result, generation, recordingEpoch);
     } catch (error) { if (this.holdCurrent(command, generation)) await this.holdFailure(command, error); }
     finally { if (this.holdWork === command) this.holdWork = null; }
   }
-  private async applyHoldResult(command: NativeHold & { leaseId: string }, result: VoiceHoldResult, generation: number) {
-    await this.applyCallStatus(result, generation, true);
+  private async applyHoldResult(command: NativeHold & { leaseId: string }, result: VoiceHoldResult, generation: number, recordingEpoch: number) {
+    await this.applyCallStatus(result, generation, true, this.state.call, recordingEpoch);
     if (!this.holdCurrent(command, generation)) return;
     const media = this.state.call!.media!;
     const outcome = result.operation.outcome === "accepted" ? "confirmed" : result.operation.outcome === "rejected" ? "rejected" : "uncertain";
@@ -568,7 +593,7 @@ export class DispatchPhone {
           // may synchronously emit ACTIVE/ended while authorize is resolving.
           // A new call starts without an earlier call's error.
           this.update({ call: { id, sessionId: offer.sessionId, number: offer.number, displayName: offer.displayName,
-            callControlId: offer.callControlId, state: intent ? "CONNECTING" : "RINGING", outgoing: Boolean(intent), connected: false }, holdPhase: "idle",
+            callControlId: offer.callControlId, state: intent ? "CONNECTING" : "RINGING", outgoing: Boolean(intent), connected: false, internal: offer.direction === "internal" }, holdPhase: "idle",
             ...(intent ? {} : { error: null }) });
           this.schedule();
           await this.native.authorize(id, offer.sessionId, offer.callControlId);
@@ -579,7 +604,7 @@ export class DispatchPhone {
         if (!previous) { this.pendingHold = null; this.nativeMediaSync = null; }
         this.update({ call: { ...previous, id: event.callId, sessionId: event.sessionId, number: event.number ?? previous?.number ?? null,
           callControlId: event.callControlId ?? previous?.callControlId, state: previous?.state ?? "CONNECTING", outgoing: true,
-          connected: previous?.connected ?? false }, holdPhase: previous ? this.state.holdPhase : "idle", nativeSyncPending: previous ? this.state.nativeSyncPending : false }); this.schedule();
+          connected: previous?.connected ?? false, internal: previous?.internal ?? this.outgoingIntent?.kind === "internal" }, holdPhase: previous ? this.state.holdPhase : "idle", nativeSyncPending: previous ? this.state.nativeSyncPending : false }); this.schedule();
       } else if (event.type === "callState" && event.callId && this.state.call?.id === event.callId) {
         this.update({ call: { ...this.state.call, state: event.state ?? "CONNECTING" } });
         if (event.state === "ACTIVE") await this.checkCall();
@@ -594,7 +619,7 @@ export class DispatchPhone {
           if (this.outgoingIntent?.sessionId === call.sessionId) this.outgoingIntent = null;
           this.pendingHold = null; this.nativeMediaSync = null;
           this.update({ call: null, holdPhase: "idle", nativeSyncPending: false, audioActive: false, muted: false, speaker: false });
-          if (call.outgoing || call.connected) await this.endSession(call.sessionId);
+          if ((call.outgoing || call.connected) && !this.handedAway.has(call.sessionId)) await this.endSession(call.sessionId);
           this.schedule();
         } else if (event.outgoing && event.sessionId) await this.endSession(event.sessionId);
         if ((this.refreshPushRegistration || (this.foreground && this.state.registration !== "registered")) && this.token && !this.connecting && !this.state.call && !this.outgoingIntent && !this.pendingDial) {
@@ -664,7 +689,11 @@ export class DispatchPhone {
     this.update({ termination: sessionId }); this.schedule();
     const work = this.api.end(leaseId, sessionId).then(result => {
       if (this.current(generation)) { this.update({ termination: result.terminationPending ? sessionId : null }); this.schedule(); }
-    }).catch(error => { if (this.current(generation)) this.fail(error); }).finally(() => this.ending.delete(sessionId));
+    }).catch(error => {
+      if (!this.current(generation)) return;
+      if (error instanceof MobileApiError && error.status === 403 && this.handedAway.has(sessionId)) { this.update({ termination: null }); this.schedule(); return; }
+      this.fail(error);
+    }).finally(() => this.ending.delete(sessionId));
     this.ending.set(sessionId, work); return work;
   }
   async answer() { if (this.state.call) try { await this.native?.answer(this.state.call.id); } catch (error) { this.fail(error); } }
@@ -676,6 +705,65 @@ export class DispatchPhone {
       else if (this.outgoingIntent) { const sessionId = this.outgoingIntent.sessionId; this.outgoingIntent = null; await this.native?.end(); await this.endSession(sessionId); }
       else if (this.state.termination) await this.endSession(this.state.termination);
     } catch (error) { this.fail(error); }
+  }
+  /** The connected call and its lease, or a refusal the call screen shows in place. A
+   * confirmation names its call, so a dialog left open never acts on the next one. */
+  private connectedCall(confirmed?: string) {
+    const call = this.state.call, token = this.token;
+    if (!call?.connected || !token || this.state.termination) throw new MobileApiError("Hovor nie je spojený.", 409);
+    if (confirmed !== undefined && confirmed !== call.sessionId) throw new MobileApiError("Hovor sa medzitým zmenil. Skúste to znova.", 409);
+    return { sessionId: call.sessionId, leaseId: token.deviceSessionId, internal: call.internal === true };
+  }
+  /** Colleagues for a transfer of the own call; the server rechecks everything on transfer. */
+  async transferTargets() { const { sessionId, leaseId } = this.connectedCall(); return this.api.transferTargets(leaseId, sessionId); }
+  /** Blind transfer of the confirmed call to a colleague. The server then hangs up this
+   * phone's leg, which must not read as a hang-up of the call; the end is read at once.
+   * Resolves the server state: "talking" while an announcement still precedes the transfer. */
+  async transfer(profileId: string, confirmed: string) {
+    const { sessionId, leaseId, internal } = this.connectedCall(confirmed);
+    if (internal) throw new MobileApiError("Hovor s kolegom nemožno prepojiť.", 409);
+    if (this.pendingHold || this.state.holdPhase !== "idle" || this.state.nativeSyncPending) throw new MobileApiError("Počkajte, kým sa overí podržanie hovoru.", 409);
+    this.handedAway.set(sessionId, Number.POSITIVE_INFINITY);
+    for (const old of this.handedAway.keys()) { if (this.handedAway.size <= 20) break; if (old !== sessionId) this.handedAway.delete(old); }
+    this.update({ transferPending: sessionId, error: null });
+    try {
+      const result = await this.api.transfer(leaseId, sessionId, profileId);
+      this.settleTransfer(sessionId);
+      return result;
+    } catch (error) {
+      // A definite refusal leaves the call here; an unknown outcome is settled by the next status read.
+      if (error instanceof MobileApiError && error.status >= 400 && error.status < 500) {
+        this.handedAway.delete(sessionId);
+        if (this.state.transferPending === sessionId) this.update({ transferPending: null });
+      } else this.settleTransfer(sessionId, true);
+      throw error;
+    }
+  }
+  /** From now on a status read can show that the call stayed here; read it at once. */
+  private settleTransfer(sessionId: string, failed = false) {
+    if (!this.handedAway.has(sessionId)) return;
+    this.transferEpoch += 1; this.handedAway.set(sessionId, this.transferEpoch);
+    // The failure is already on screen; do not add a second message when the call is found here.
+    if (failed && this.state.transferPending === sessionId) this.update({ transferPending: null });
+    void this.checkCall();
+  }
+  /** A confirmed hang-up of one call; a dialog left open never ends the next one. */
+  async endConfirmed(sessionId: string) {
+    if (this.state.call?.sessionId !== sessionId && this.state.termination !== sessionId) return;
+    await this.end();
+  }
+  /** Stops recording on the caller's request; `retry` repeats an unconfirmed stop. The answer is
+   * the recorder as the server records it, so an unconfirmed stop stays visible as such. */
+  async stopRecording(retry: boolean, confirmed: string) {
+    const { sessionId, leaseId } = this.connectedCall(confirmed);
+    const generation = this.generation;
+    this.recordingEpoch += 1;
+    try {
+      const recording = await this.api.stopRecording(leaseId, sessionId, retry);
+      const call = this.state.call;
+      if (this.current(generation) && call?.sessionId === sessionId) this.update({ call: { ...call, recording } });
+      return recording;
+    } finally { this.recordingEpoch += 1; }
   }
   async mute() { try { await this.native?.mute(!this.state.muted); } catch (error) { this.fail(error); } }
   async speaker() { try { const enabled = !this.state.speaker; await this.native?.speaker(enabled); this.update({ speaker: enabled }); } catch (error) { this.fail(error); } }

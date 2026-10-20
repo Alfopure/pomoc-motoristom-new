@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DispatchPhone, PhoneState } from "../voice/phone";
 import { dialBlockedReason } from "../voice/dial";
-import { callView } from "./call-screen-model";
+import { callView, recordingLabel, recordingView } from "./call-screen-model";
 
 type Call = NonNullable<PhoneState["call"]>;
 const base = { nativeSyncPending: false, holdPhase: "idle", supported: true, registration: "registered", takeoverRequired: false, call: null, termination: null,
@@ -41,5 +41,32 @@ describe("call screen", () => {
     expect(dialBlockedReason(phone, state({ call: call() }))).toMatch(/Počas hovoru/);
     expect(dialBlockedReason(phone, state({ dialing: true }))).toMatch(/vytáča/);
     expect(dialBlockedReason(phone, state())).toBeNull();
+  });
+});
+
+describe("transfer and recording on the call screen", () => {
+  it("offers transfer only for a settled connected call", () => {
+    expect(callView(state({ call: call() }))?.canTransfer).toBe(true);
+    expect(callView(state({ call: call({ state: "RINGING", connected: false }) }))?.canTransfer).toBe(false);
+    expect(callView(state({ call: call(), holdPhase: "pending" } as Partial<PhoneState>))?.canTransfer).toBe(false);
+    expect(callView(state({ call: call(), termination: "s" }))?.canTransfer).toBe(false);
+    expect(callView(state({ call: call({ internal: true }) }))?.canTransfer).toBe(false);
+  });
+  it("names the recorder for announcements", () => {
+    expect(recordingLabel({ state: "stopping", suppressed: true })).toBe("Zastavenie čaká na potvrdenie");
+    expect(recordingLabel({ state: "stopped", suppressed: true })).toBe("Nahrávanie zastavené, už sa neobnoví");
+    expect(recordingLabel({ state: "off", suppressed: false })).toBeNull(); expect(recordingLabel(null)).toBeNull();
+  });
+  it("shows the recorder and the stop only while recording can still be stopped", () => {
+    const view = (recording: Call["recording"], patch: Partial<Call> = {}) => { const value = state({ call: call({ recording, ...patch }) }); return recordingView(value, callView(value)); };
+    expect(view(null)).toBeNull();
+    expect(view({ state: "off", suppressed: false })).toBeNull();
+    expect(view({ state: "recording", suppressed: false })).toMatchObject({ label: "Nahráva sa", tone: "red", canStop: true, retry: false });
+    expect(view({ state: "notice", suppressed: false })).toMatchObject({ canStop: true });
+    expect(view({ state: "stopping", suppressed: true })).toMatchObject({ canStop: false, unconfirmed: true });
+    expect(view({ state: "stopped", suppressed: true })).toMatchObject({ label: "Nahrávanie zastavené, už sa neobnoví", tone: "gray", canStop: false });
+    expect(view({ state: "unknown", suppressed: false })).toMatchObject({ canStop: true, retry: true });
+    expect(view({ state: "recording", suppressed: false }, { connected: false })).toBeNull();
+    expect(view({ state: "recording", suppressed: false }, { state: "RECONNECTING" })).toMatchObject({ canStop: false });
   });
 });

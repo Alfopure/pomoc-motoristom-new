@@ -102,7 +102,14 @@ s tlačidlami Pokračovať a Zahodiť. Počas hovoru je odhlásenie nedostupné.
 otvorí celú obrazovku s menom známeho kontaktu alebo číslom, stavom a dĺžkou
 (od spojenia v tomto telefóne), linkou a partnerom linky a tlačidlami Detail
 hovoru a Nový prípad. Pri zvonení Prijať a Odmietnuť, počas hovoru veľké
-tlačidlá Stíšiť, Klávesnica, Nahlas, Podržať a Ukončiť. Je to vrstva v aplikácii,
+tlačidlá Stíšiť, Klávesnica, Nahlas, Podržať, Prepojiť a Ukončiť. **Prepojiť**
+nahradí tlačidlá zoznamom kolegov s rovnakým štítkom dostupnosti ako na webe;
+nedostupní ostanú v zozname vypnutí, prepojenie sa potvrdí a telefón sa potom
+odpojí. Kým sa hovor prepája, stav hovoru to hovorí („Prepájam na …“) a Ukončiť
+sa najprv opýta, lebo by odpojilo volajúceho. Hovor s kolegom sa neprepája. Nahrávaný hovor má pod linkou riadok s bodkou a stavom („Nahráva sa“)
+a tlačidlom **Zastaviť nahrávanie** (po potvrdení); nepotvrdené zastavenie ostane
+viditeľné ako „Zastavenie čaká na potvrdenie“ a neistý stav ponúkne „Znova
+overiť zastavenie“. Je to vrstva v aplikácii,
 nie systémové okno: iOS druhé okno neukáže, kým sa iné ešte zatvára, a hovor by
 ostal bez ovládania. **Skryť** ju zmenší na farebný pás nad aplikáciou
 (červený pri zvonení, zelený počas hovoru, oranžový pri podržaní, sivý pri

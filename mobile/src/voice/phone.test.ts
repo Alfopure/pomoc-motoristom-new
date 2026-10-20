@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DispatchPhone, sameDialTarget, type NativePhone, type VoiceEvent } from "./phone";
-import { createVoiceApi, type VoiceApi, type VoiceHoldCommand, type VoiceHoldResult } from "./api";
+import { createVoiceApi, type VoiceApi, type VoiceHoldCommand, type VoiceHoldResult, type VoiceStatus } from "./api";
 import { MobileApiError } from "../lib/api";
 
 const lease = "00000000-0000-4000-8000-000000000001", sid = "00000000-0000-4000-8000-000000000002", id = "00000000-0000-4000-8000-000000000003";
@@ -26,7 +26,7 @@ function fixture() {
     startCallback: vi.fn().mockResolvedValue({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "+421900000003", callbackRequestId: lease, linked: true }),
     cancelAttempt: vi.fn().mockResolvedValue({ resolved: true, sessionId: sid, terminationPending: false }),
     end: vi.fn().mockResolvedValue({ terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } }), status: vi.fn().mockResolvedValue({ sessionId: sid, state: "ringing", connected: false, ended: false, terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } }),
-    hold: vi.fn(), holdStatus: vi.fn(),
+    hold: vi.fn(), holdStatus: vi.fn(), transferTargets: vi.fn(), transfer: vi.fn(), stopRecording: vi.fn(),
     disconnect: vi.fn().mockResolvedValue(undefined), presence: vi.fn().mockResolvedValue(undefined),
   };
   const store = { load: vi.fn().mockResolvedValue(lease), save: vi.fn().mockResolvedValue(undefined), clear: vi.fn().mockResolvedValue(undefined) };
@@ -889,5 +889,132 @@ describe("call errors on the phone's own call", () => {
     f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick(); await tick();
     expect(f.phone.state.call?.id).toBe(id);
     expect(f.phone.state.error).toBeNull();
+  });
+});
+describe("transfer and recording of the own call", () => {
+  const colleague = "00000000-0000-4000-8000-000000000004";
+  const talking = { sessionId: sid, state: "talking", connected: true, ended: false, terminationPending: false, media: activeMedia };
+  it("shows the recorder from the status read and keeps a stop's answer over an older read", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.status).mockResolvedValue({ ...talking, recording: { state: "recording", suppressed: false } });
+    await f.phone.refreshHold();
+    expect(f.phone.state.call?.recording).toEqual({ state: "recording", suppressed: false });
+    let release!: (value: VoiceStatus) => void;
+    vi.mocked(f.api.status).mockReturnValueOnce(new Promise(done => { release = done; }));
+    const read = f.phone.refreshHold();
+    vi.mocked(f.api.stopRecording).mockResolvedValue({ state: "stopping", suppressed: true });
+    expect(await f.phone.stopRecording(false, sid)).toEqual({ state: "stopping", suppressed: true });
+    expect(f.api.stopRecording).toHaveBeenCalledWith(lease, sid, false);
+    release({ ...talking, recording: { state: "recording", suppressed: false } }); await read;
+    expect(f.phone.state.call?.recording).toEqual({ state: "stopping", suppressed: true });
+    vi.mocked(f.api.status).mockResolvedValue({ ...talking, recording: { state: "stopped", suppressed: true } });
+    await f.phone.refreshHold();
+    expect(f.phone.state.call?.recording).toEqual({ state: "stopped", suppressed: true });
+    await f.phone.stopRecording(true, sid); expect(f.api.stopRecording).toHaveBeenLastCalledWith(lease, sid, true);
+  });
+  it("transfers the connected call and reads its end at once", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.transfer).mockResolvedValue({ state: "ringing" });
+    vi.mocked(f.api.status).mockResolvedValue({ ...talking, state: "ringing", connected: false, ended: true, media: { version: 9, state: "unavailable", canHold: false, callControlId: null } });
+    expect(await f.phone.transfer(colleague, sid)).toEqual({ state: "ringing" });
+    expect(f.api.transfer).toHaveBeenCalledWith(lease, sid, colleague);
+    for (let i = 0; i < 5 && f.phone.state.call; i++) await tick();
+    expect(f.phone.state.call).toBeNull(); expect(f.native.reject).toHaveBeenCalledWith(id);
+  });
+  it("refuses transfer, colleagues and stop without a connected call, and transfer during a hold change", async () => {
+    const idle = await connected();
+    await expect(idle.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 409 });
+    await expect(idle.phone.transferTargets()).rejects.toMatchObject({ status: 409 });
+    await expect(idle.phone.stopRecording(false, sid)).rejects.toMatchObject({ status: 409 });
+    const f = await activePhone(); await f.phone.hold();
+    expect(f.phone.state.holdPhase).toBe("requesting");
+    await expect(f.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 409 });
+    expect(idle.api.transfer).not.toHaveBeenCalled(); expect(f.api.transfer).not.toHaveBeenCalled(); expect(idle.api.stopRecording).not.toHaveBeenCalled();
+  });
+  it("acts only on the call the dispatcher confirmed", async () => {
+    const f = await activePhone();
+    await expect(f.phone.transfer(colleague, lease)).rejects.toMatchObject({ status: 409, message: "Hovor sa medzitým zmenil. Skúste to znova." });
+    await expect(f.phone.stopRecording(false, lease)).rejects.toMatchObject({ status: 409 });
+    expect(f.api.transfer).not.toHaveBeenCalled(); expect(f.api.stopRecording).not.toHaveBeenCalled();
+  });
+  it("keeps the phone connected when the server closes a transferred leg", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.transfer).mockResolvedValue({ state: "ringing" });
+    // The provider's hang-up of this leg usually reaches the phone before any status read.
+    vi.mocked(f.api.status).mockReturnValue(new Promise(() => {}));
+    await f.phone.transfer(colleague, sid);
+    f.emit({ type: "ended", callId: id, sessionId: sid }); await tick(); await tick();
+    expect(f.api.end).not.toHaveBeenCalled();
+    expect(f.phone.state.call).toBeNull();
+    expect(f.phone.state.registration).toBe("registered"); expect(f.phone.state.error).toBeNull();
+  });
+  it("treats a refused end of a transferred call as done, not as a lost phone", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.transfer).mockRejectedValue(new MobileApiError("Prepojenie hovoru sa nepodarilo potvrdiť.", 0));
+    // The outcome stays unknown while no status read has answered yet.
+    vi.mocked(f.api.status).mockReturnValue(new Promise(() => {}));
+    await expect(f.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 0 });
+    vi.mocked(f.api.end).mockRejectedValue(new MobileApiError("Hovor nepatrí vášmu telefónu.", 403));
+    await f.phone.end();
+    expect(f.api.end).toHaveBeenCalledWith(lease, sid);
+    expect(f.phone.state.registration).toBe("registered"); expect(f.phone.state.termination).toBeNull();
+  });
+  it("releases the guard when the call stays here after the transfer answer", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.transfer).mockResolvedValue({ state: "talking" });
+    vi.mocked(f.api.status).mockResolvedValue(talking);
+    await f.phone.transfer(colleague, sid);
+    for (let i = 0; i < 5 && f.phone.state.transferPending; i++) await tick();
+    expect(f.phone.state.transferPending).toBeNull();
+    expect(f.phone.state.error).toBe("Prepojenie sa nepodarilo. Hovor ostáva u vás.");
+    // A hang-up from the lock screen is a real hang-up again.
+    f.emit({ type: "ended", callId: id, sessionId: sid }); await tick(); await tick();
+    expect(f.api.end).toHaveBeenCalledWith(lease, sid);
+  });
+  it("keeps the guard while the transfer is announced and against reads from before its answer", async () => {
+    const f = await activePhone();
+    let release!: (value: VoiceStatus) => void;
+    vi.mocked(f.api.status).mockReturnValueOnce(new Promise(done => { release = done; }));
+    const before = f.phone.refreshHold();
+    vi.mocked(f.api.transfer).mockResolvedValue({ state: "talking" });
+    vi.mocked(f.api.status).mockResolvedValue({ ...talking, media: { ...activeMedia, version: 9, state: "pending" } });
+    await f.phone.transfer(colleague, sid);
+    release(talking); await before;
+    expect(f.phone.state.transferPending).toBe(sid);
+    await f.phone.refreshHold();
+    expect(f.phone.state.transferPending).toBe(sid);
+    f.emit({ type: "ended", callId: id, sessionId: sid }); await tick(); await tick();
+    expect(f.api.end).not.toHaveBeenCalled();
+  });
+  it("learns a colleague call from the server after a restart", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.status).mockResolvedValue({ ...talking, internal: true });
+    await f.phone.refreshHold();
+    expect(f.phone.state.call?.internal).toBe(true);
+  });
+  it("ends only the call a confirmation was about", async () => {
+    const f = await activePhone();
+    await f.phone.endConfirmed(lease);
+    expect(f.api.end).not.toHaveBeenCalled(); expect(f.native.end).not.toHaveBeenCalled();
+    await f.phone.endConfirmed(sid);
+    expect(f.api.end).toHaveBeenCalledWith(lease, sid);
+  });
+  it("forgets a refused transfer, so a later end still hangs up and a lost ownership still disconnects", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.transfer).mockRejectedValue(new MobileApiError("Kolega nie je dostupný.", 409));
+    await expect(f.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 409 });
+    vi.mocked(f.api.end).mockRejectedValue(new MobileApiError("Hovor nepatrí vášmu telefónu.", 403));
+    await f.phone.end();
+    expect(f.phone.state.registration).toBe("error");
+  });
+  it("never transfers a call between colleagues", async () => {
+    const f = await connected();
+    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "internal", role: "callee", displayName: "Peter", number: null });
+    vi.mocked(f.api.status).mockResolvedValue(talking);
+    f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    expect(f.phone.state.call).toMatchObject({ internal: true });
+    await expect(f.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 409 });
+    expect(f.api.transfer).not.toHaveBeenCalled();
   });
 });

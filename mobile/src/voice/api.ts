@@ -13,9 +13,16 @@ export type VoiceCallbackOutgoing = VoiceOutgoing & { callbackRequestId: string;
 export type VoiceAttemptEnd = { resolved: false; sessionId: null; terminationPending: false } | { resolved: true; sessionId: string; terminationPending: boolean };
 export type VoiceMediaState = "active" | "held" | "pending" | "unavailable";
 export type VoiceMedia = { version: number; state: VoiceMediaState; canHold: boolean; callControlId: string | null };
-export type VoiceStatus = { sessionId: string; state: string; connected: boolean; ended: boolean; terminationPending: boolean; media: VoiceMedia };
+export type VoiceRecordingState = "off" | "notice" | "starting" | "recording" | "stopping" | "stopped" | "failed" | "unknown";
+/** Whether the call is recorded, as the server records it; absent from servers before transfer support. */
+export type VoiceRecording = { state: VoiceRecordingState; suppressed: boolean };
+export type VoiceStatus = { sessionId: string; state: string; connected: boolean; ended: boolean; terminationPending: boolean; media: VoiceMedia; recording?: VoiceRecording | null;
+  /** A call between colleagues; absent from servers before transfer support. */
+  internal?: boolean };
 export type VoiceHoldCommand = { callControlId: string; requestId: string; held: boolean; expectedVersion: number };
 export type VoiceHoldResult = VoiceStatus & { operation: { requestId: string; held: boolean; outcome: "accepted" | "pending" | "rejected" | "not_found" } };
+/** `label` is the web's availability badge, e.g. "Dostupný" or "Nepripojený · 20 min". */
+export type VoiceTransferTarget = { profileId: string; displayName: string; available: boolean; label: string };
 
 export function createVoiceApi(config: MobileConfig, profileId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch) {
   async function request(path: string, body: object): Promise<Record<string, unknown>> {
@@ -45,8 +52,20 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
   const nonempty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
   const name = (value: unknown): value is string => nonempty(value) && value.length <= 120 && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
   const uuid = (value: unknown): value is string => typeof value === "string" && /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(value);
+  function recording(value: unknown): VoiceRecording {
+    const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    if (typeof body.state !== "string" || !["off", "notice", "starting", "recording", "stopping", "stopped", "failed", "unknown"].includes(body.state)
+      || typeof body.suppressed !== "boolean") throw invalid();
+    return { state: body.state as VoiceRecordingState, suppressed: body.suppressed };
+  }
   function status(body: Record<string, unknown>, sessionId: string): VoiceStatus {
-    if (body.sessionId !== sessionId || !nonempty(body.state) || [body.connected, body.ended, body.terminationPending].some(value => typeof value !== "boolean")) throw invalid();
+    if (body.sessionId !== sessionId || !nonempty(body.state) || [body.connected, body.ended, body.terminationPending].some(value => typeof value !== "boolean")
+      || body.internal !== undefined && typeof body.internal !== "boolean") throw invalid();
+    // Only a connected call reports its recorder.
+    if (body.recording !== undefined && body.recording !== null) {
+      recording(body.recording);
+      if (body.connected !== true) throw invalid();
+    }
     const media = body.media;
     if (!media || typeof media !== "object" || Array.isArray(media)) throw invalid();
     const value = media as Record<string, unknown>;
@@ -135,6 +154,26 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
     },
     hold: (deviceSessionId: string, sessionId: string, command: VoiceHoldCommand) => hold("hold", deviceSessionId, sessionId, command),
     holdStatus: (deviceSessionId: string, sessionId: string, command: VoiceHoldCommand) => hold("hold/status", deviceSessionId, sessionId, command),
+    transferTargets: async (deviceSessionId: string, sessionId: string): Promise<VoiceTransferTarget[]> => {
+      const body = await request("calls/" + encodeURIComponent(sessionId) + "/transfer-targets", { deviceSessionId });
+      if (!Array.isArray(body.targets) || body.targets.length > 200) throw invalid();
+      return body.targets.map((value: unknown) => {
+        const target = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+        if (!uuid(target.profileId) || !name(target.displayName) || typeof target.available !== "boolean" || !name(target.label) || target.label.length > 60) throw invalid();
+        return { profileId: target.profileId.toLowerCase(), displayName: target.displayName, available: target.available, label: target.label };
+      });
+    },
+    transfer: async (deviceSessionId: string, sessionId: string, profileId: string): Promise<{ state: string }> => {
+      if (!uuid(profileId)) throw invalid();
+      const body = await request("calls/" + encodeURIComponent(sessionId) + "/transfer", { deviceSessionId, profileId: profileId.toLowerCase() });
+      if (typeof body.sessionId !== "string" || body.sessionId.toLowerCase() !== sessionId.toLowerCase() || !nonempty(body.state)) throw invalid();
+      return { state: body.state };
+    },
+    stopRecording: async (deviceSessionId: string, sessionId: string, retry: boolean): Promise<VoiceRecording> => {
+      const body = await request("calls/" + encodeURIComponent(sessionId) + "/recording", { deviceSessionId, ...(retry ? { retry: true } : {}) });
+      if (typeof body.sessionId !== "string" || body.sessionId.toLowerCase() !== sessionId.toLowerCase()) throw invalid();
+      return recording(body.recording);
+    },
     presence: async (deviceSessionId: string, status: "available" | "paused" | "offline") => { await request("presence", { deviceSessionId, status }); },
     disconnect: async (deviceSessionId: string) => { await request("disconnect", { deviceSessionId }); },
   };
