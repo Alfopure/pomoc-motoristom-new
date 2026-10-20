@@ -160,10 +160,11 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
         return { profileId: target.profileId.toLowerCase(), displayName: target.displayName, available: target.available, label: target.label };
       });
     },
-    transfer: async (deviceSessionId: string, sessionId: string, profileId: string) => {
+    transfer: async (deviceSessionId: string, sessionId: string, profileId: string): Promise<{ state: string }> => {
       if (!uuid(profileId)) throw invalid();
       const body = await request("calls/" + encodeURIComponent(sessionId) + "/transfer", { deviceSessionId, profileId: profileId.toLowerCase() });
       if (typeof body.sessionId !== "string" || body.sessionId.toLowerCase() !== sessionId.toLowerCase() || !nonempty(body.state)) throw invalid();
+      return { state: body.state };
     },
     stopRecording: async (deviceSessionId: string, sessionId: string, retry: boolean): Promise<VoiceRecording> => {
       const body = await request("calls/" + encodeURIComponent(sessionId) + "/recording", { deviceSessionId, ...(retry ? { retry: true } : {}) });

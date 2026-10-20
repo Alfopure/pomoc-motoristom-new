@@ -903,32 +903,76 @@ describe("transfer and recording of the own call", () => {
     vi.mocked(f.api.status).mockReturnValueOnce(new Promise(done => { release = done; }));
     const read = f.phone.refreshHold();
     vi.mocked(f.api.stopRecording).mockResolvedValue({ state: "stopping", suppressed: true });
-    expect(await f.phone.stopRecording()).toEqual({ state: "stopping", suppressed: true });
+    expect(await f.phone.stopRecording(false, sid)).toEqual({ state: "stopping", suppressed: true });
     expect(f.api.stopRecording).toHaveBeenCalledWith(lease, sid, false);
     release({ ...talking, recording: { state: "recording", suppressed: false } }); await read;
     expect(f.phone.state.call?.recording).toEqual({ state: "stopping", suppressed: true });
     vi.mocked(f.api.status).mockResolvedValue({ ...talking, recording: { state: "stopped", suppressed: true } });
     await f.phone.refreshHold();
     expect(f.phone.state.call?.recording).toEqual({ state: "stopped", suppressed: true });
-    await f.phone.stopRecording(true); expect(f.api.stopRecording).toHaveBeenLastCalledWith(lease, sid, true);
+    await f.phone.stopRecording(true, sid); expect(f.api.stopRecording).toHaveBeenLastCalledWith(lease, sid, true);
   });
   it("transfers the connected call and reads its end at once", async () => {
     const f = await activePhone();
-    vi.mocked(f.api.transfer).mockResolvedValue(undefined);
+    vi.mocked(f.api.transfer).mockResolvedValue({ state: "ringing" });
     vi.mocked(f.api.status).mockResolvedValue({ ...talking, state: "ringing", connected: false, ended: true, media: { version: 9, state: "unavailable", canHold: false, callControlId: null } });
-    await f.phone.transfer(colleague);
+    expect(await f.phone.transfer(colleague, sid)).toEqual({ state: "ringing" });
     expect(f.api.transfer).toHaveBeenCalledWith(lease, sid, colleague);
     for (let i = 0; i < 5 && f.phone.state.call; i++) await tick();
     expect(f.phone.state.call).toBeNull(); expect(f.native.reject).toHaveBeenCalledWith(id);
   });
   it("refuses transfer, colleagues and stop without a connected call, and transfer during a hold change", async () => {
     const idle = await connected();
-    await expect(idle.phone.transfer(colleague)).rejects.toMatchObject({ status: 409 });
+    await expect(idle.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 409 });
     await expect(idle.phone.transferTargets()).rejects.toMatchObject({ status: 409 });
-    await expect(idle.phone.stopRecording()).rejects.toMatchObject({ status: 409 });
+    await expect(idle.phone.stopRecording(false, sid)).rejects.toMatchObject({ status: 409 });
     const f = await activePhone(); await f.phone.hold();
     expect(f.phone.state.holdPhase).toBe("requesting");
-    await expect(f.phone.transfer(colleague)).rejects.toMatchObject({ status: 409 });
+    await expect(f.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 409 });
     expect(idle.api.transfer).not.toHaveBeenCalled(); expect(f.api.transfer).not.toHaveBeenCalled(); expect(idle.api.stopRecording).not.toHaveBeenCalled();
+  });
+  it("acts only on the call the dispatcher confirmed", async () => {
+    const f = await activePhone();
+    await expect(f.phone.transfer(colleague, lease)).rejects.toMatchObject({ status: 409, message: "Hovor sa medzitým zmenil. Skúste to znova." });
+    await expect(f.phone.stopRecording(false, lease)).rejects.toMatchObject({ status: 409 });
+    expect(f.api.transfer).not.toHaveBeenCalled(); expect(f.api.stopRecording).not.toHaveBeenCalled();
+  });
+  it("keeps the phone connected when the server closes a transferred leg", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.transfer).mockResolvedValue({ state: "ringing" });
+    // The provider's hang-up of this leg usually reaches the phone before any status read.
+    vi.mocked(f.api.status).mockReturnValue(new Promise(() => {}));
+    await f.phone.transfer(colleague, sid);
+    f.emit({ type: "ended", callId: id, sessionId: sid }); await tick(); await tick();
+    expect(f.api.end).not.toHaveBeenCalled();
+    expect(f.phone.state.call).toBeNull();
+    expect(f.phone.state.registration).toBe("registered"); expect(f.phone.state.error).toBeNull();
+  });
+  it("treats a refused end of a transferred call as done, not as a lost phone", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.transfer).mockRejectedValue(new MobileApiError("Prepojenie hovoru sa nepodarilo potvrdiť.", 0));
+    await expect(f.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 0 });
+    vi.mocked(f.api.end).mockRejectedValue(new MobileApiError("Hovor nepatrí vášmu telefónu.", 403));
+    await f.phone.end();
+    expect(f.api.end).toHaveBeenCalledWith(lease, sid);
+    expect(f.phone.state.registration).toBe("registered"); expect(f.phone.state.termination).toBeNull();
+  });
+  it("forgets a refused transfer, so a later end still hangs up and a lost ownership still disconnects", async () => {
+    const f = await activePhone();
+    vi.mocked(f.api.transfer).mockRejectedValue(new MobileApiError("Kolega nie je dostupný.", 409));
+    await expect(f.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 409 });
+    vi.mocked(f.api.end).mockRejectedValue(new MobileApiError("Hovor nepatrí vášmu telefónu.", 403));
+    await f.phone.end();
+    expect(f.phone.state.registration).toBe("error");
+  });
+  it("never transfers a call between colleagues", async () => {
+    const f = await connected();
+    vi.mocked(f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "internal", role: "callee", displayName: "Peter", number: null });
+    vi.mocked(f.api.status).mockResolvedValue(talking);
+    f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    expect(f.phone.state.call).toMatchObject({ internal: true });
+    await expect(f.phone.transfer(colleague, sid)).rejects.toMatchObject({ status: 409 });
+    expect(f.api.transfer).not.toHaveBeenCalled();
   });
 });

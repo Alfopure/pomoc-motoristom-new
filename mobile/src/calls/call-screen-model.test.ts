@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DispatchPhone, PhoneState } from "../voice/phone";
 import { dialBlockedReason } from "../voice/dial";
-import { callView, recordingView } from "./call-screen-model";
+import { callView, recordingLabel, recordingView } from "./call-screen-model";
 
 type Call = NonNullable<PhoneState["call"]>;
 const base = { nativeSyncPending: false, holdPhase: "idle", supported: true, registration: "registered", takeoverRequired: false, call: null, termination: null,
@@ -50,6 +50,12 @@ describe("transfer and recording on the call screen", () => {
     expect(callView(state({ call: call({ state: "RINGING", connected: false }) }))?.canTransfer).toBe(false);
     expect(callView(state({ call: call(), holdPhase: "pending" } as Partial<PhoneState>))?.canTransfer).toBe(false);
     expect(callView(state({ call: call(), termination: "s" }))?.canTransfer).toBe(false);
+    expect(callView(state({ call: call({ internal: true }) }))?.canTransfer).toBe(false);
+  });
+  it("names the recorder for announcements", () => {
+    expect(recordingLabel({ state: "stopping", suppressed: true })).toBe("Zastavenie čaká na potvrdenie");
+    expect(recordingLabel({ state: "stopped", suppressed: true })).toBe("Nahrávanie zastavené, už sa neobnoví");
+    expect(recordingLabel({ state: "off", suppressed: false })).toBeNull(); expect(recordingLabel(null)).toBeNull();
   });
   it("shows the recorder and the stop only while recording can still be stopped", () => {
     const view = (recording: Call["recording"], patch: Partial<Call> = {}) => { const value = state({ call: call({ recording, ...patch }) }); return recordingView(value, callView(value)); };

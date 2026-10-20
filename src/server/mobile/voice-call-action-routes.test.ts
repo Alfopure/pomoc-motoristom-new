@@ -39,6 +39,12 @@ describe('native transfer and recording routes', () => {
     await targets(post(JSON.stringify({ deviceSessionId: body.deviceSessionId })), context);
     expect(m.targets).toHaveBeenCalledWith({ mock: true }, actor, id, { deviceSessionId: body.deviceSessionId });
   });
+  it('lets a caller objection stop recording while mobile calling is being switched off', async () => {
+    await recording(post(JSON.stringify({ deviceSessionId: body.deviceSessionId })), context);
+    expect(m.deps).toHaveBeenLastCalledWith(actor, { cleanup: true });
+    await transfer(post(), context);
+    expect(m.deps).toHaveBeenLastCalledWith(actor);
+  });
   it('hide unexpected errors behind a plain message', async () => {
     m.transfer.mockRejectedValue(new Error('provider secret')); m.stop.mockRejectedValue(new Error('provider secret'));
     for (const response of [await transfer(post(), context), await recording(post(), context)]) {

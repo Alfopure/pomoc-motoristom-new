@@ -11,7 +11,8 @@ export const maxDuration = 30;
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const actor = await requireMobileActor(request);
-    const deps = await nativeVoiceDeps(actor);
+    // A caller's objection is honoured even if mobile calling is being switched off.
+    const deps = await nativeVoiceDeps(actor, { cleanup: true });
     const body = await readMobileJsonBody(request);
     const { id } = await context.params;
     return mobileJson({ ...mobileScope(actor), ...await stopNativeRecording(deps, actor, id, body) });

@@ -10,7 +10,7 @@ export type CallView = {
   /** Mute, speaker, hold and keypad. */
   showControls: boolean;
   canHold: boolean; holdPending: boolean; held: boolean; holdUncertain: boolean; canKeypad: boolean;
-  /** Blind transfer to a colleague; not while a hold change is being confirmed. */
+  /** Blind transfer to a colleague; not while a hold change is being confirmed, never between colleagues. */
   canTransfer: boolean;
   endLabel: "Odmietnuť" | "Ukončiť" | "Zopakovať ukončenie";
 };
@@ -34,7 +34,7 @@ export function callView(state: PhoneState): CallView | null {
     canHold: showControls && Boolean(call?.media?.canHold || holdPending), holdPending, held,
     holdUncertain: showControls && state.holdPhase === "uncertain",
     canKeypad: showControls && call?.media?.state !== "held" && !holdPending,
-    canTransfer: showControls && !holdPending,
+    canTransfer: showControls && !holdPending && !call?.internal,
     endLabel: terminating ? "Zopakovať ukončenie" : ringing ? "Odmietnuť" : "Ukončiť",
   };
 }
@@ -61,5 +61,11 @@ export function recordingView(state: PhoneState, view: CallView | null): Recordi
   const known = recording ? RECORDING[recording.state] : undefined;
   if (!view || !known) return null;
   const { stoppable, ...rest } = known;
-  return { ...rest, label: recording?.state === "stopped" && recording.suppressed ? "Nahrávanie zastavené, už sa neobnoví" : rest.label, canStop: stoppable && view.showControls };
+  return { ...rest, label: recordingLabel(recording) ?? rest.label, canStop: stoppable && view.showControls };
+}
+/** The recorder state in words, for announcements after a stop. */
+export function recordingLabel(recording: { state: string; suppressed: boolean } | null | undefined): string | null {
+  const known = recording ? RECORDING[recording.state] : undefined;
+  if (!recording || !known) return null;
+  return recording.state === "stopped" && recording.suppressed ? "Nahrávanie zastavené, už sa neobnoví" : known.label;
 }

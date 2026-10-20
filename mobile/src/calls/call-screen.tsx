@@ -8,8 +8,9 @@ import { MobileApiError } from "../lib/api";
 import { formatNumber } from "../lib/display";
 import { elapsed } from "../shell/call-bar-model";
 import type { DispatchPhone, PhoneState } from "../voice/phone";
-import { recordingView, type CallView } from "./call-screen-model";
-import { TransferPanel } from "./transfer-panel";
+import { recordingLabel, recordingView, type CallView } from "./call-screen-model";
+import { TransferPanel, type TransferProgress } from "./transfer-panel";
+import type { VoiceTransferTarget } from "../voice/api";
 
 /** Server facts about the phone's own call: the line the customer called, its
  * partner and the directory contact for the customer's number. */
@@ -77,7 +78,10 @@ export function CallScreen(props: Common & {
   const [panel, setPanel] = useState<"controls" | "keypad" | "transfer">("controls");
   const [digits, setDigits] = useState("");
   const [stopping, setStopping] = useState(false);
-  const [recordingError, setRecordingError] = useState<string | null>(null);
+  // An error belongs to the recorder state it was about; a new state replaces it.
+  const [recordingError, setRecordingError] = useState<{ message: string; state: string | null } | null>(null);
+  // The transfer outlives the colleague list: a queued transfer can hide the controls for a while.
+  const [transfer, setTransfer] = useState<TransferProgress>({ busy: null, sent: null, error: null });
   const now = useClock(props.visible && view.connected);
   const titleRef = useAccessibilityFocus<Text>(props.visible);
   // A keyboard left open by a form would cover the answer and end buttons.
@@ -85,22 +89,55 @@ export function CallScreen(props: Common & {
   if (!props.visible) return null;
   const time = duration(props, now);
   const showKeypad = panel === "keypad" && view.canKeypad;
-  const showTransfer = panel === "transfer" && view.canTransfer;
+  const transferring = Boolean(transfer.busy || transfer.sent);
+  const showTransfer = panel === "transfer" && (view.canTransfer || transferring);
   const recording = recordingView(state, view);
+  const recorderState = state.call?.recording?.state ?? null;
+  const recordingErrorText = recordingError && recordingError.state === recorderState ? recordingError.message : null;
+  const sessionId = state.call?.sessionId ?? null;
   // A caller may object to recording at any time; the stop is confirmed once, a retry is not.
   function stopRecording() {
-    if (!recording?.canStop || stopping) return;
+    if (!recording?.canStop || stopping || !sessionId) return;
     const retry = recording.retry;
     const run = async () => {
       setStopping(true); setRecordingError(null);
-      try { await phone.stopRecording(retry); }
-      catch (error) { setRecordingError(error instanceof MobileApiError ? error.message : "Zastavenie nahrávania nie je potvrdené."); }
-      finally { setStopping(false); }
+      try {
+        const result = await phone.stopRecording(retry, sessionId);
+        AccessibilityInfo.announceForAccessibility?.(recordingLabel(result) ?? "Nahrávanie zastavené");
+      } catch (error) {
+        setRecordingError({ message: error instanceof MobileApiError ? error.message : "Zastavenie nahrávania nie je potvrdené.", state: phone.snapshot().call?.recording?.state ?? null });
+      } finally { setStopping(false); }
     };
     if (retry) { void run(); return; }
     Alert.alert("Zastaviť nahrávanie?", "Nahrávanie tohto hovoru sa už automaticky neobnoví.", [
       { text: "Zrušiť", style: "cancel" }, { text: "Zastaviť", style: "destructive", onPress: () => { void run(); } }]);
   }
+  // The confirmation names this call; a dialog left open never transfers the next one.
+  function confirmTransfer(target: VoiceTransferTarget) {
+    if (!sessionId || transferring || !target.available) return;
+    Alert.alert("Prepojiť hovor?", "Hovor prepojíme na " + target.displayName + ". Váš telefón sa potom odpojí.", [
+      { text: "Zrušiť", style: "cancel" }, { text: "Prepojiť", onPress: () => { void runTransfer(target, sessionId); } }]);
+  }
+  async function runTransfer(target: VoiceTransferTarget, confirmed: string) {
+    setTransfer({ busy: target.displayName, sent: null, error: null });
+    try {
+      const result = await phone.transfer(target.profileId, confirmed);
+      setTransfer({ busy: null, sent: { name: target.displayName, queued: result.state === "talking" }, error: null });
+      AccessibilityInfo.announceForAccessibility?.("Hovor sa prepája na " + target.displayName);
+    } catch (error) {
+      setTransfer({ busy: null, sent: null, error: error instanceof MobileApiError ? error.message : "Prepojenie hovoru sa nepodarilo potvrdiť." });
+    }
+  }
+  // Ending while the transfer is under way would drop the caller instead of handing them over.
+  function endCall() {
+    if (transfer.sent && view.connected) {
+      Alert.alert("Hovor sa prepája", "Hovor práve prepájame na " + transfer.sent.name + ". Ak ho teraz ukončíte, volajúci sa odpojí.", [
+        { text: "Nechať prepojiť", style: "cancel" }, { text: "Ukončiť hovor", style: "destructive", onPress: () => { void phone.end(); } }]);
+      return;
+    }
+    void phone.end();
+  }
+  const status = transfer.sent && view.connected ? (transfer.sent.queued ? "Pripravujem prepojenie na " : "Prepájam na ") + transfer.sent.name + "…" : view.status;
   const title = titleOf(props);
   const formatted = state.call?.number ? formatNumber(state.call.number) : null;
   const number = formatted && formatted !== title ? formatted : null;
@@ -116,7 +153,7 @@ export function CallScreen(props: Common & {
       <ScrollView contentContainerStyle={[s.body, compact && s.bodyCompact]} bounces={false}>
         <Text ref={titleRef} accessibilityRole="header" style={s.title}>{title}</Text>
         {number ? <Text selectable style={s.subtitle}>{number}</Text> : null}
-        <Text accessibilityLiveRegion="polite" style={[s.status, { color: toneColor[view.tone] }]}>{[view.status, time].filter(Boolean).join(" · ")}</Text>
+        <Text accessibilityLiveRegion="polite" style={[s.status, { color: toneColor[view.tone] }]}>{[status, time].filter(Boolean).join(" · ")}</Text>
         {line ? <Text style={s.line}>{line}</Text> : null}
         {recording && <View style={s.recording}>
           <View style={s.recordingState}>
@@ -129,7 +166,7 @@ export function CallScreen(props: Common & {
           </Pressable>}
         </View>}
         {recording?.unconfirmed && <Text style={s.noticeText}>Zastavenie ešte nie je potvrdené. Volajúcemu zatiaľ nehovorte, že sa nenahráva.</Text>}
-        {recordingError && <View style={s.notice}><ErrorNotice message={recordingError} /></View>}
+        {recordingErrorText && <View style={s.notice}><ErrorNotice message={recordingErrorText} /></View>}
         {(props.onDetail || props.onNewCase) && <View style={s.context}>
           {props.onDetail && <Pill compact={compact} icon={<Info size={15} strokeWidth={2.3} color={palette.brandInk} accessible={false} />} label="Detail hovoru" onPress={props.onDetail} />}
           {props.onNewCase && <Pill compact={compact} icon={<FilePlus2 size={15} strokeWidth={2.3} color={palette.brandInk} accessible={false} />} label="Nový prípad" onPress={props.onNewCase} />}
@@ -141,7 +178,7 @@ export function CallScreen(props: Common & {
               style={({ pressed }) => [s.key, pressed && { backgroundColor: palette.fillStrong }]}><Text style={s.keyText}>{digit}</Text></Pressable>)}</View>)}
           <Pressable accessibilityRole="button" accessibilityLabel="Skryť klávesnicu" onPress={() => setPanel("controls")} style={({ pressed }) => [s.textButton, pressed && { opacity: 0.6 }]}>
             <Text style={s.textButtonLabel}>Skryť klávesnicu</Text></Pressable>
-        </View> : showTransfer ? <TransferPanel phone={phone} onClose={() => setPanel("controls")} />
+        </View> : showTransfer ? <TransferPanel phone={phone} progress={transfer} onPick={confirmTransfer} onClose={() => { setPanel("controls"); setTransfer(value => value.sent ? value : { ...value, error: null }); }} />
           : view.showControls && <View style={s.grid}>
           <Round label={state.muted ? "Mikrofón vyp." : "Stíšiť"} accessibilityLabel={state.muted ? "Zapnúť mikrofón" : "Stíšiť"} active={state.muted}
             icon={state.muted ? MicOff : Mic} onPress={() => { void phone.mute(); }} />
@@ -149,7 +186,7 @@ export function CallScreen(props: Common & {
           <Round label={state.speaker ? "Reproduktor" : "Nahlas"} accessibilityLabel={state.speaker ? "Slúchadlo" : "Nahlas"} active={state.speaker} icon={Volume2} onPress={() => { void phone.speaker(); }} />
           {view.canHold && <Round label={view.holdPending ? "Overujem…" : view.held ? "Obnoviť" : "Podržať"} accessibilityLabel={view.holdPending ? "Overujem podržanie…" : view.held ? "Obnoviť hovor" : "Podržať hovor"}
             active={view.held} disabled={view.holdPending} icon={view.held ? Play : Pause} onPress={() => { void phone.hold(); }} />}
-          <Round label="Prepojiť" accessibilityLabel="Prepojiť hovor na kolegu" icon={Forward} disabled={!view.canTransfer} onPress={() => setPanel("transfer")} />
+          {!state.call?.internal && <Round label="Prepojiť" accessibilityLabel="Prepojiť hovor na kolegu" icon={Forward} disabled={!view.canTransfer} onPress={() => setPanel("transfer")} />}
         </View>}
         {view.holdUncertain && <View style={s.notice}>
           <Text style={s.noticeText}>Výsledok zmeny ešte overujeme. Hovor môžete ukončiť.</Text>
@@ -160,7 +197,7 @@ export function CallScreen(props: Common & {
       </ScrollView>
       <View style={s.bottom}>
         {view.showAnswer && <Big label="Prijať" color={palette.green} icon={Phone} onPress={() => { void phone.answer(); }} />}
-        <Big label={view.endLabel} color={palette.red} icon={PhoneOff} onPress={() => { void phone.end(); }} />
+        <Big label={view.endLabel} color={palette.red} icon={PhoneOff} onPress={endCall} />
       </View>
     </View>
   </View>;

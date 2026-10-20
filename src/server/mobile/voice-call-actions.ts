@@ -5,6 +5,7 @@ import type { MobileVoiceRecording, MobileVoiceTransferTarget } from "@/lib/mobi
 import type { MotoristActor } from "@/server/api-auth";
 import { MutationError } from "@/server/mutation-error";
 import { blindTransfer, listTransferTargets, stopCallRecording } from "@/server/telephony/call-actions";
+import { CallActionError } from "@/server/telephony/service-errors";
 import { toCallActor, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { summarizeSessionRecording } from "@/server/telephony/state/recording-types";
 import { requireNativeLease, requireNativeSession } from "./voice";
@@ -37,12 +38,14 @@ export function readNativeRecordingInput(value: unknown): { deviceSessionId: str
   return { deviceSessionId: body.deviceSessionId, retry: body.retry === true };
 }
 
-/** A connected call of this exact mobile endpoint, otherwise a plain refusal. */
-async function connectedNativeCall(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessionId: string, deviceSessionId: string) {
-  await requireNativeLease(deps, actor, deviceSessionId);
+/** A connected call of this exact mobile endpoint, otherwise a plain refusal. A call
+ * between colleagues has no customer to hand over, so it is never transferred. */
+async function connectedNativeCall(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessionId: string, deviceSessionId: string, use: "transfer" | "recording") {
+  await requireNativeLease(deps, actor, deviceSessionId, { cleanup: use === "recording" });
   const session = await requireNativeSession(deps, actor, sessionId);
   if (session.nativeEnded) throw new MutationError("Hovor už skončil.", 409);
   if (!session.nativeConnected) throw new MutationError("Hovor ešte nie je spojený.", 409);
+  if (use === "transfer" && session.direction === "internal") throw new MutationError("Hovor s kolegom nemožno prepojiť.", 409, "internal_call");
   return session;
 }
 
@@ -56,7 +59,7 @@ export function readNativeLeaseInput(value: unknown): { deviceSessionId: string 
 
 /** Colleagues who can take this call now; unavailable ones stay listed with the web's badge. */
 export async function listNativeTransferTargets(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessionId: string, value: unknown): Promise<{ targets: MobileVoiceTransferTarget[] }> {
-  await connectedNativeCall(deps, actor, sessionId, readNativeLeaseInput(value).deviceSessionId);
+  await connectedNativeCall(deps, actor, sessionId, readNativeLeaseInput(value).deviceSessionId, "transfer");
   const targets = await listTransferTargets(deps, toCallActor(actor));
   const now = deps.now?.() ?? new Date();
   return { targets: targets.slice(0, 200).map(target => ({ profileId: target.profileId, displayName: mobileColleagueName(target.displayName),
@@ -66,14 +69,20 @@ export async function listNativeTransferTargets(deps: TelephonyRuntimeDeps, acto
 export async function transferNativeCall(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessionId: string, value: unknown) {
   const input = readNativeTransferInput(value);
   if (input.profileId === actor.profileId.toLowerCase()) throw new MutationError("Hovor nemožno prepojiť na seba.", 400);
-  await connectedNativeCall(deps, actor, sessionId, input.deviceSessionId);
-  const result = await blindTransfer(deps, toCallActor(actor), sessionId, { profileId: input.profileId });
-  return { sessionId: result.sessionId, state: result.state };
+  await connectedNativeCall(deps, actor, sessionId, input.deviceSessionId, "transfer");
+  try {
+    const result = await blindTransfer(deps, toCallActor(actor), sessionId, { profileId: input.profileId });
+    return { sessionId: result.sessionId, state: result.state };
+  } catch (error) {
+    // The web names a colleague's personal number here; the phone only says it cannot be reached.
+    if (error instanceof CallActionError && error.code === "destination_not_allowed") throw new MutationError("Kolegu sa teraz nedá zastihnúť. Vyberte iného kolegu.", 409, "target_unavailable");
+    throw error;
+  }
 }
 
 export async function stopNativeRecording(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessionId: string, value: unknown): Promise<{ sessionId: string; recording: MobileVoiceRecording }> {
   const input = readNativeRecordingInput(value);
-  await connectedNativeCall(deps, actor, sessionId, input.deviceSessionId);
+  await connectedNativeCall(deps, actor, sessionId, input.deviceSessionId, "recording");
   await stopCallRecording(deps, toCallActor(actor), sessionId, input.retry);
   // Report what the session now records, as the web does after a stop; "stopping" stays unconfirmed.
   const session = await requireNativeSession(deps, actor, sessionId, { readOffer: true });

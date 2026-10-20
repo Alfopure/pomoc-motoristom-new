@@ -4,6 +4,7 @@ import type { TelephonyRuntimeDeps } from '@/server/telephony/runtime';
 import { completeCallAnnouncements } from '@/test/complete-call-announcements';
 import { listNativeTransferTargets, readNativeRecordingInput, readNativeTransferInput, stopNativeRecording, transferNativeCall } from './voice-call-actions';
 import { readNativeCallStatus } from './voice-hold';
+import { nativeHandedAway, requireNativeSession } from './voice';
 
 const actor = { userId: PROFILES.o1, profileId: PROFILES.o1, organizationId: ORG, displayName: 'Test', role: 'dispatcher' as const };
 const lease = '00000000-0000-4000-8000-000000000071';
@@ -72,6 +73,22 @@ describe('native transfer', () => {
     const f = await fixture();
     await expect(transferNativeCall(f.deps, actor, f.id, { deviceSessionId: lease, profileId: actor.profileId })).rejects.toMatchObject({ status: 400 });
     await expect(transferNativeCall(f.deps, actor, f.id, { deviceSessionId: '00000000-0000-4000-8000-000000000072', profileId: PROFILES.o2 })).rejects.toMatchObject({ status: 409 });
+    expect(f.h.rows('motorist_audit_log').map(row => row.action)).not.toContain('telephony.call.blind_transfer');
+  });
+  it('leaves nothing for this phone to end once the call was handed away', async () => {
+    const f = await fixture();
+    expect(await nativeHandedAway(f.deps, actor, f.id)).toBe(false);
+    await transferNativeCall(f.deps, actor, f.id, { deviceSessionId: lease, profileId: PROFILES.o2 });
+    if (!f.h.legFor(f.id, actor.profileId)?.ended_at) await f.h.legEvent(f.control, 'call.hangup');
+    await expect(requireNativeSession(f.deps, actor, f.id)).rejects.toMatchObject({ status: 403 });
+    expect(await nativeHandedAway(f.deps, actor, f.id)).toBe(true);
+    expect(await nativeHandedAway(f.deps, { ...actor, profileId: PROFILES.o3, userId: PROFILES.o3 }, f.id)).toBe(false);
+  });
+  it('never transfers a call between colleagues', async () => {
+    const f = await fixture();
+    f.h.db.update('motorist_call_sessions', { direction: 'internal' }, row => row.id === f.id);
+    await expect(listNativeTransferTargets(f.deps, actor, f.id, { deviceSessionId: lease })).rejects.toMatchObject({ status: 409, code: 'internal_call' });
+    await expect(transferNativeCall(f.deps, actor, f.id, { deviceSessionId: lease, profileId: PROFILES.o2 })).rejects.toMatchObject({ status: 409, code: 'internal_call' });
     expect(f.h.rows('motorist_audit_log').map(row => row.action)).not.toContain('telephony.call.blind_transfer');
   });
   it('another operator or organization never transfers this call', async () => {

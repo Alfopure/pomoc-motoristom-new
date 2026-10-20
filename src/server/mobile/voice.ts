@@ -137,6 +137,16 @@ export async function resolveNativeAttempt(deps: TelephonyRuntimeDeps, actor: Mo
   return requireNativeSession(deps, actor, session.id);
 }
 
+/** A call that left this endpoint by an explicit hand-over (transfer, park, a
+ * conference hand-over): its own leg is closed and the call belongs to someone
+ * else, so a late end from this phone is a no-op, not an ownership error that
+ * would disconnect the phone. */
+export async function nativeHandedAway(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessionId: string): Promise<boolean> {
+  let session: Awaited<ReturnType<typeof requireNativeSession>>;
+  try { session = await requireNativeSession(deps, actor, sessionId, { readOffer: true }); } catch { return false; }
+  return session.nativeEnded && readMeta(session).previous_operator === actor.profileId && session.answered_by_profile_id !== actor.profileId;
+}
+
 /** Blind transfer keeps the original conversation's answer metadata. Only a
  * current, unaccepted transfer to this endpoint may outlive those closed legs. */
 async function isPendingNativeTransfer(
