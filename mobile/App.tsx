@@ -20,7 +20,7 @@ import { dialBlockedReason } from "./src/voice/dial";
 import { DispatchShell } from "./src/shell/dispatch-shell";
 import { appVersion, olderThan } from "./src/lib/app-version";
 import { fetchAppStatus } from "./src/lib/app-status";
-import { createErrorReporter, installGlobalErrorReporting } from "./src/lib/error-reporting";
+import { createErrorReporter, installGlobalErrorReporting, keepError } from "./src/lib/error-reporting";
 import { AppErrorBoundary, ErrorReporterContext } from "./src/ui/error-boundary";
 import { UpdateRequired } from "./src/ui/update-required";
 
@@ -33,9 +33,12 @@ export default function App() {
   });
   return <SafeAreaProvider><StatusBar style="dark" /><View style={styles.page}>
     <SafeAreaView edges={["top", "left", "right"]} style={styles.page}>
+    {/* Last of all: a crash outside the signed-in workspace is kept on the device and the app restarts its frame. */}
+    <AppErrorBoundary reporter={null} onReset={() => setGeneration(value => value + 1)} onCatch={error => keepError(error, null)}>
     {setup.config ? <ConfiguredApp key={generation} config={setup.config} onReset={() => setGeneration(value => value + 1)} /> : <View style={styles.content}>
       <Text style={styles.heading}>Dispatching</Text><ErrorNotice message="Aplikácia ešte nie je nastavená. Obráťte sa na správcu." />
     </View>}
+    </AppErrorBoundary>
   </SafeAreaView></View></SafeAreaProvider>;
 }
 
@@ -105,13 +108,15 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
   // Errors are reported only for a signed-in operator; reporting never interrupts work.
   const reporter = useMemo(() => createErrorReporter(config, async () => (await client.auth.getSession()).data.session?.access_token ?? null), [config, client]);
   useEffect(() => installGlobalErrorReporting(reporter), [reporter]);
-  // A crash kept on the device goes out once somebody is signed in again.
-  const signedIn = Boolean(session);
-  useEffect(() => { if (signedIn) void reporter.flushKept(); }, [signedIn, reporter]);
+  // A crash kept on the device goes out once its own user is signed in again.
+  const sessionUser = session?.user.id ?? null;
+  useEffect(() => { reporter.setUser(sessionUser); if (sessionUser) void reporter.flushKept(); }, [sessionUser, reporter]);
   // The release gate is decided once, before the workspace and its phone start; an answer
   // after 2.5 s waits for the next launch, so the gate never closes a running call.
   const [version] = useState(appVersion);
-  const [release, setRelease] = useState<{ decided: boolean; minimum: string | null; updateUrl: string | null; attempt: number }>({ decided: false, minimum: null, updateUrl: null, attempt: 0 });
+  // Launched in the background for an incoming call, the phone must not wait for it at all.
+  const [release, setRelease] = useState<{ decided: boolean; minimum: string | null; updateUrl: string | null; attempt: number }>(() =>
+    ({ decided: AppState.currentState === "background", minimum: null, updateUrl: null, attempt: 0 }));
   useEffect(() => {
     const controller = new AbortController();
     const timer = setTimeout(() => { controller.abort(); setRelease(value => value.decided ? value : { ...value, decided: true }); }, 2500);

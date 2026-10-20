@@ -129,6 +129,9 @@ export function Handoffs({ draft, active, onBack }: {
         </Card>}
         {state.status === 'conflict' && <Card>
           <Text style={styles.text}>Po obnovení porovnajte aktuálny náhľad s pôvodným. Vaše pokyny zostanú zachované.</Text>
+          {!state.canRebase && <Button label={state.loading ? 'Načítavam odovzdanie…' : 'Obnoviť stav odovzdania'} secondary disabled={state.loading || draft.busy} onPress={() => {
+            void draft.refresh();
+          }} />}
           <Button label="Použiť aktuálny náhľad a znova skontrolovať" disabled={!state.canRebase || state.loading} onPress={() => {
             draft.rebase();
           }} />

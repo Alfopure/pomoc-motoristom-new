@@ -31,22 +31,35 @@ describe("app error reports", () => {
     await flush();
     expect(transport).toHaveBeenCalledTimes(5);
   });
-  it("keeps a fatal error on the device and sends it after the next sign-in", async () => {
+  it("keeps a fatal error on the device and sends it after its user signs in again", async () => {
     const transport = vi.fn<MobileTransport>().mockResolvedValue(new Response(null, { status: 200 }));
-    let token: string | null = null;
-    const reporter = createErrorReporter(config, async () => token, transport);
+    const reporter = createErrorReporter(config, async () => "token", transport);
+    reporter.setUser("user-a");
     reporter.keep(new Error("pád pri jan@example.sk"));
-    expect(JSON.parse(m.store.get("pm-kept-error-v1")!)).toMatchObject({ kind: "fatal", message: "Error: pád pri [e-mail]" });
-    await reporter.flushKept();
+    expect(JSON.parse(m.store.get("pm-kept-error-v1")!)).toMatchObject({ userId: "user-a", report: { kind: "fatal", message: "Error: pád pri [e-mail]" } });
+    reporter.setUser(null); await reporter.flushKept();
     expect(transport).not.toHaveBeenCalled(); expect(m.store.has("pm-kept-error-v1")).toBe(true);
-    token = "token"; await reporter.flushKept();
+    reporter.setUser("user-a"); await reporter.flushKept();
     expect(JSON.parse(String(transport.mock.calls[0][1]?.body))).toMatchObject({ kind: "fatal" });
     expect(m.store.has("pm-kept-error-v1")).toBe(false);
+  });
+  it("drops a kept crash of another user, an old one or one refused for good, and retries a server failure", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(new Response(null, { status: 503 }));
+    const reporter = createErrorReporter(config, async () => "token", transport);
+    reporter.setUser("user-a"); reporter.keep(new Error("x"));
+    reporter.setUser("user-b"); await reporter.flushKept();
+    expect(transport).not.toHaveBeenCalled(); expect(m.store.has("pm-kept-error-v1")).toBe(false);
+    reporter.setUser("user-b"); reporter.keep(new Error("y")); await reporter.flushKept();
+    expect(m.store.has("pm-kept-error-v1")).toBe(true);
+    transport.mockResolvedValue(new Response(null, { status: 400 })); await reporter.flushKept();
+    expect(m.store.has("pm-kept-error-v1")).toBe(false);
+    m.store.set("pm-kept-error-v1", JSON.stringify({ userId: "user-b", keptAt: Date.now() - 8 * 86_400_000, report: { kind: "fatal" } }));
+    await reporter.flushKept(); expect(m.store.has("pm-kept-error-v1")).toBe(false);
   });
   it("keeps fatal errors, reports others and always hands them to React Native", () => {
     const previous = vi.fn(), handlers: ((error: unknown, fatal?: boolean) => void)[] = [previous];
     (globalThis as unknown as { ErrorUtils: unknown }).ErrorUtils = { getGlobalHandler: () => handlers.at(-1), setGlobalHandler: (handler: (error: unknown, fatal?: boolean) => void) => handlers.push(handler) };
-    const reporter = { report: vi.fn(), keep: vi.fn(() => { throw new Error("storage"); }), flushKept: vi.fn() };
+    const reporter = { report: vi.fn(), keep: vi.fn(() => { throw new Error("storage"); }), setUser: vi.fn(), flushKept: vi.fn() };
     const uninstall = installGlobalErrorReporting(reporter);
     const error = new Error("boom");
     handlers.at(-1)!(error, true);
