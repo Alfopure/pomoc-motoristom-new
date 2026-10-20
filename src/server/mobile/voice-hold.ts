@@ -10,6 +10,7 @@ import { payloadFingerprint } from "@/server/telephony/provider-journal";
 import type { TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { ownedSessionWork } from "@/server/telephony/session-runner";
 import { readPendingEffects } from "@/server/telephony/state/continuation";
+import { summarizeSessionRecording } from "@/server/telephony/state/recording-types";
 import { commandKey, readMeta, telnyxSipUri, toJson, type SessionRow } from "@/server/telephony/state/types";
 import { commandId, uuidV5 } from "@/server/telephony/telnyx/command-id";
 import { requireNativeLease, requireNativeSession } from "./voice";
@@ -197,9 +198,11 @@ async function response(deps: TelephonyRuntimeDeps, actor: MotoristActor, id: st
 /** One session snapshot supplies both legacy call fields and media version. */
 export async function readNativeCallStatus(deps: TelephonyRuntimeDeps, actor: MotoristActor, id: string, lease: string) {
     const session = await requireNativeSession(deps, actor, id, { readOffer: true });
-    return { sessionId: id, state: session.state,
-        connected: session.nativeConnected && Boolean(session.answered_at) && ["talking", "held"].includes(session.state) && !session.ended_at && !session.termination_requested_at,
+    const connected = session.nativeConnected && Boolean(session.answered_at) && ["talking", "held"].includes(session.state) && !session.ended_at && !session.termination_requested_at;
+    return { sessionId: id, state: session.state, connected,
         ended: session.nativeEnded, terminationPending: Boolean(session.termination_requested_at && !session.ended_at),
+        // Only the connected participant learns whether the call is recorded.
+        recording: connected ? summarizeSessionRecording(session.metadata) : null,
         media: await mediaFor(deps, actor, session, lease) };
 }
 function eventIdentity(actor: MotoristActor, sessionId: string, input: NativeHoldInput) {

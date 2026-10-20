@@ -32,6 +32,14 @@ export type MobileVoiceInternalStarted = MobileScope & {
 export type MobileVoiceCallbackStarted = MobileScope & {
   sessionId: string; operatorLegCallControlId: string; to: string; callbackRequestId: string; linked: boolean;
 };
+/** A colleague who can take the phone's own call by transfer; `label` is the web's availability badge. */
+export type MobileVoiceTransferTarget = { profileId: string; displayName: string; available: boolean; label: string };
+export type MobileVoiceTransferTargets = MobileScope & { targets: MobileVoiceTransferTarget[] };
+export type MobileVoiceTransferResult = MobileScope & { sessionId: string; state: string };
+/** The recorder of the phone's own call as the session records it; a stop is never assumed. */
+export type MobileVoiceRecordingState = "off" | "notice" | "starting" | "recording" | "stopping" | "stopped" | "failed" | "unknown";
+export type MobileVoiceRecording = { state: MobileVoiceRecordingState; suppressed: boolean };
+export type MobileVoiceRecordingResult = MobileScope & { sessionId: string; recording: MobileVoiceRecording };
 export type MobileVoiceAttemptEnded = MobileScope & {
   resolved: boolean; sessionId: string | null; terminationPending: boolean;
 };

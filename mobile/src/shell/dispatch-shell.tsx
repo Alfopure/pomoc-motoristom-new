@@ -304,7 +304,7 @@ export function DispatchShell(props: Props) {
       </Group>}
     </Sheet>
     <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 12 + (callBar ? CALL_BAR_SPACE : 0)} />
-    {ownCall && phone && <CallScreen visible={callScreen.open} view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} phone={phone} state={phoneState}
+    {ownCall && phone && <CallScreen key={callScreen.id ?? "ending"} visible={callScreen.open} view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} phone={phone} state={phoneState}
       onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))}
       onDetail={phoneState.call && draftId(phoneState.call.sessionId) ? openOwnCallDetail : null}
       onNewCase={callCaseNumber && available.includes("pripady") ? newCaseFromCall : null} />}

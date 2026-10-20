@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AccessibilityInfo, Keyboard, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, Alert, Keyboard, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ChevronDown, FilePlus2, Grid3x3, Info, Mic, MicOff, Pause, Phone, PhoneOff, Play, TriangleAlert, Volume2 } from "lucide-react-native";
+import { ChevronDown, FilePlus2, Forward, Grid3x3, Info, Mic, MicOff, Pause, Phone, PhoneOff, Play, TriangleAlert, Volume2 } from "lucide-react-native";
 import { palette, space, type } from "../design/tokens";
 import { ErrorNotice } from "../ui";
+import { MobileApiError } from "../lib/api";
 import { formatNumber } from "../lib/display";
 import { elapsed } from "../shell/call-bar-model";
 import type { DispatchPhone, PhoneState } from "../voice/phone";
-import type { CallView } from "./call-screen-model";
+import { recordingView, type CallView } from "./call-screen-model";
+import { TransferPanel } from "./transfer-panel";
 
 /** Server facts about the phone's own call: the line the customer called, its
  * partner and the directory contact for the customer's number. */
@@ -70,15 +72,35 @@ export function CallScreen(props: Common & {
 }) {
   const { view, phone, state } = props;
   const insets = useSafeAreaInsets();
-  const [keypad, setKeypad] = useState(false);
+  // A narrow phone keeps three controls in a row, so Prepojiť does not drop below the fold.
+  const compact = useWindowDimensions().width < 360;
+  const [panel, setPanel] = useState<"controls" | "keypad" | "transfer">("controls");
   const [digits, setDigits] = useState("");
+  const [stopping, setStopping] = useState(false);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
   const now = useClock(props.visible && view.connected);
   const titleRef = useAccessibilityFocus<Text>(props.visible);
   // A keyboard left open by a form would cover the answer and end buttons.
   useEffect(() => { if (props.visible) Keyboard.dismiss(); }, [props.visible]);
   if (!props.visible) return null;
   const time = duration(props, now);
-  const showKeypad = keypad && view.canKeypad;
+  const showKeypad = panel === "keypad" && view.canKeypad;
+  const showTransfer = panel === "transfer" && view.canTransfer;
+  const recording = recordingView(state, view);
+  // A caller may object to recording at any time; the stop is confirmed once, a retry is not.
+  function stopRecording() {
+    if (!recording?.canStop || stopping) return;
+    const retry = recording.retry;
+    const run = async () => {
+      setStopping(true); setRecordingError(null);
+      try { await phone.stopRecording(retry); }
+      catch (error) { setRecordingError(error instanceof MobileApiError ? error.message : "Zastavenie nahrávania nie je potvrdené."); }
+      finally { setStopping(false); }
+    };
+    if (retry) { void run(); return; }
+    Alert.alert("Zastaviť nahrávanie?", "Nahrávanie tohto hovoru sa už automaticky neobnoví.", [
+      { text: "Zrušiť", style: "cancel" }, { text: "Zastaviť", style: "destructive", onPress: () => { void run(); } }]);
+  }
   const title = titleOf(props);
   const formatted = state.call?.number ? formatNumber(state.call.number) : null;
   const number = formatted && formatted !== title ? formatted : null;
@@ -91,29 +113,43 @@ export function CallScreen(props: Common & {
           <ChevronDown size={20} strokeWidth={2.4} color={palette.label} accessible={false} /><Text style={s.hideText}>Skryť</Text>
         </Pressable>
       </View>
-      <ScrollView contentContainerStyle={s.body} bounces={false}>
+      <ScrollView contentContainerStyle={[s.body, compact && s.bodyCompact]} bounces={false}>
         <Text ref={titleRef} accessibilityRole="header" style={s.title}>{title}</Text>
         {number ? <Text selectable style={s.subtitle}>{number}</Text> : null}
         <Text accessibilityLiveRegion="polite" style={[s.status, { color: toneColor[view.tone] }]}>{[view.status, time].filter(Boolean).join(" · ")}</Text>
         {line ? <Text style={s.line}>{line}</Text> : null}
+        {recording && <View style={s.recording}>
+          <View style={s.recordingState}>
+            <View style={[s.recordingDot, { backgroundColor: recording.tone === "red" ? palette.red : recording.tone === "orange" ? palette.orange : palette.tertiaryLabel }]} />
+            <Text accessibilityLiveRegion="polite" style={s.recordingLabel}>{recording.label}</Text>
+          </View>
+          {recording.canStop && <Pressable accessibilityRole="button" accessibilityState={{ disabled: stopping }} disabled={stopping} onPress={stopRecording}
+            style={({ pressed }) => [s.recordingButton, stopping && { opacity: 0.5 }, pressed && { opacity: 0.7 }]}>
+            <Text style={s.recordingButtonLabel}>{stopping ? "Overujem zastavenie…" : recording.retry ? "Znova overiť zastavenie" : "Zastaviť nahrávanie"}</Text>
+          </Pressable>}
+        </View>}
+        {recording?.unconfirmed && <Text style={s.noticeText}>Zastavenie ešte nie je potvrdené. Volajúcemu zatiaľ nehovorte, že sa nenahráva.</Text>}
+        {recordingError && <View style={s.notice}><ErrorNotice message={recordingError} /></View>}
         {(props.onDetail || props.onNewCase) && <View style={s.context}>
-          {props.onDetail && <Pill icon={<Info size={15} strokeWidth={2.3} color={palette.brandInk} accessible={false} />} label="Detail hovoru" onPress={props.onDetail} />}
-          {props.onNewCase && <Pill icon={<FilePlus2 size={15} strokeWidth={2.3} color={palette.brandInk} accessible={false} />} label="Nový prípad" onPress={props.onNewCase} />}
+          {props.onDetail && <Pill compact={compact} icon={<Info size={15} strokeWidth={2.3} color={palette.brandInk} accessible={false} />} label="Detail hovoru" onPress={props.onDetail} />}
+          {props.onNewCase && <Pill compact={compact} icon={<FilePlus2 size={15} strokeWidth={2.3} color={palette.brandInk} accessible={false} />} label="Nový prípad" onPress={props.onNewCase} />}
         </View>}
         {showKeypad ? <View style={s.keypad}>
           <Text accessibilityLabel={"Odoslané číslice " + (digits || "žiadne")} style={s.digits}>{digits || " "}</Text>
           {["123", "456", "789", "*0#"].map(row => <View key={row} style={s.keyRow}>{Array.from(row).map(digit =>
             <Pressable key={digit} accessibilityRole="button" accessibilityLabel={"Číslica " + digit} onPress={() => { setDigits(value => (value + digit).slice(-24)); void phone.dtmf(digit); }}
               style={({ pressed }) => [s.key, pressed && { backgroundColor: palette.fillStrong }]}><Text style={s.keyText}>{digit}</Text></Pressable>)}</View>)}
-          <Pressable accessibilityRole="button" accessibilityLabel="Skryť klávesnicu" onPress={() => setKeypad(false)} style={({ pressed }) => [s.textButton, pressed && { opacity: 0.6 }]}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Skryť klávesnicu" onPress={() => setPanel("controls")} style={({ pressed }) => [s.textButton, pressed && { opacity: 0.6 }]}>
             <Text style={s.textButtonLabel}>Skryť klávesnicu</Text></Pressable>
-        </View> : view.showControls && <View style={s.grid}>
+        </View> : showTransfer ? <TransferPanel phone={phone} onClose={() => setPanel("controls")} />
+          : view.showControls && <View style={s.grid}>
           <Round label={state.muted ? "Mikrofón vyp." : "Stíšiť"} accessibilityLabel={state.muted ? "Zapnúť mikrofón" : "Stíšiť"} active={state.muted}
             icon={state.muted ? MicOff : Mic} onPress={() => { void phone.mute(); }} />
-          <Round label="Klávesnica" icon={Grid3x3} disabled={!view.canKeypad} onPress={() => setKeypad(true)} />
+          <Round label="Klávesnica" icon={Grid3x3} disabled={!view.canKeypad} onPress={() => setPanel("keypad")} />
           <Round label={state.speaker ? "Reproduktor" : "Nahlas"} accessibilityLabel={state.speaker ? "Slúchadlo" : "Nahlas"} active={state.speaker} icon={Volume2} onPress={() => { void phone.speaker(); }} />
           {view.canHold && <Round label={view.holdPending ? "Overujem…" : view.held ? "Obnoviť" : "Podržať"} accessibilityLabel={view.holdPending ? "Overujem podržanie…" : view.held ? "Obnoviť hovor" : "Podržať hovor"}
             active={view.held} disabled={view.holdPending} icon={view.held ? Play : Pause} onPress={() => { void phone.hold(); }} />}
+          <Round label="Prepojiť" accessibilityLabel="Prepojiť hovor na kolegu" icon={Forward} disabled={!view.canTransfer} onPress={() => setPanel("transfer")} />
         </View>}
         {view.holdUncertain && <View style={s.notice}>
           <Text style={s.noticeText}>Výsledok zmeny ešte overujeme. Hovor môžete ukončiť.</Text>
@@ -130,8 +166,8 @@ export function CallScreen(props: Common & {
   </View>;
 }
 
-function Pill({ icon, label, onPress }: { icon: ReactNode; label: string; onPress: () => void }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} hitSlop={{ top: 6, bottom: 6 }} style={({ pressed }) => [s.pill, pressed && { opacity: 0.7 }]}>
+function Pill({ icon, label, onPress, compact }: { icon: ReactNode; label: string; onPress: () => void; compact: boolean }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} hitSlop={{ top: 6, bottom: 6 }} style={({ pressed }) => [s.pill, compact && s.pillCompact, pressed && { opacity: 0.7 }]}>
     {icon}<Text maxFontSizeMultiplier={1.3} style={s.pillLabel}>{label}</Text>
   </Pressable>;
 }
@@ -161,12 +197,14 @@ const s = StyleSheet.create({
   hide: { flexDirection: "row", alignItems: "center", gap: 4, minHeight: 44, paddingRight: space.m },
   hideText: { ...type.body, fontWeight: "600", color: palette.label },
   body: { paddingHorizontal: space.xl, paddingTop: space.l, gap: space.s, alignItems: "center" },
+  bodyCompact: { paddingHorizontal: space.l },
   title: { ...type.title, color: palette.label, textAlign: "center" },
   subtitle: { ...type.body, color: palette.secondaryLabel, textAlign: "center" },
   status: { fontSize: 17, lineHeight: 22, fontWeight: "600", textAlign: "center", fontVariant: ["tabular-nums"] },
   line: { ...type.subhead, color: palette.secondaryLabel, textAlign: "center" },
   context: { flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: space.s, marginTop: space.m },
   pill: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 36, borderRadius: 18, paddingHorizontal: 14, backgroundColor: palette.brandSoft },
+  pillCompact: { gap: 4, paddingHorizontal: 10 },
   pillLabel: { fontSize: 14, lineHeight: 18, fontWeight: "600", color: palette.brandInk },
   grid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: space.l, marginTop: space.xl, maxWidth: 320 },
   round: { width: 84, alignItems: "center", gap: 6 },
@@ -180,6 +218,12 @@ const s = StyleSheet.create({
   textButton: { minHeight: 44, justifyContent: "center", paddingHorizontal: space.m },
   textButtonLabel: { ...type.body, fontWeight: "600", color: palette.brandInk, textAlign: "center" },
   notice: { alignSelf: "stretch", marginTop: space.m, gap: 4 },
+  recording: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: space.s, marginTop: space.xs },
+  recordingState: { flexDirection: "row", alignItems: "center", gap: 6 },
+  recordingDot: { width: 9, height: 9, borderRadius: 5 },
+  recordingLabel: { ...type.subhead, fontWeight: "600", color: palette.label },
+  recordingButton: { minHeight: 36, justifyContent: "center", borderRadius: 18, paddingHorizontal: 14, backgroundColor: palette.redSoft },
+  recordingButtonLabel: { fontSize: 14, lineHeight: 18, fontWeight: "600", color: palette.redText },
   noticeText: { ...type.subhead, color: palette.secondaryLabel, textAlign: "center" },
   bottom: { flexDirection: "row", justifyContent: "center", gap: 64, paddingTop: space.m },
   big: { alignItems: "center", gap: 6, minWidth: 84 },

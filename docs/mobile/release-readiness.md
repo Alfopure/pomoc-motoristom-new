@@ -223,7 +223,7 @@ príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
   otvoreného cez Hľadať), keď je telefón pripravený (s potvrdením a overeným
   číslom); hovor z prípadu sa k prípadu priradí.
 
-**F2 – Úkony v hovore, ktoré mobil nemá a web áno**
+**F2 – Úkony v hovore, ktoré mobil nemá a web áno** (hotové v aplikácii, čaká na TEST)
 - **Prepojiť hovor na kolegu** (výber z dostupných kolegov aj na mobile).
 - **Zastaviť nahrávanie** – zákazníkom sľubujeme, že na požiadanie ho
   dispečer zastaví; bez toho mobil nemôže ostro prijímať zákaznícke hovory.

@@ -113,3 +113,50 @@ describe("callback and confirmed-target voice transport", () => {
     expect(transport).not.toHaveBeenCalled();
   });
 });
+describe("transfer and recording transport", () => {
+  const media = { version: 1, state: "active", canHold: true, callControlId: "leg" };
+  const live = { ...scope, sessionId: id, state: "talking", connected: true, ended: false, terminationPending: false, media };
+  it("lists colleagues with the web's badge and refuses raw or malformed entries", async () => {
+    const target = { profileId: colleague.toUpperCase(), displayName: "Jana", available: true, label: "Dostupný" };
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, targets: [target] }));
+    const api = createVoiceApi(config, "operator", async () => "token", transport);
+    expect(await api.transferTargets(id, id)).toEqual([{ ...target, profileId: colleague }]);
+    expect(JSON.parse(String(transport.mock.calls[0][1].body))).toEqual({ deviceSessionId: id });
+    for (const bad of [{ ...target, label: "" }, { ...target, label: "x".repeat(61) }, { ...target, available: "yes" }, { ...target, profileId: "sip:jana" }, { ...target, displayName: "Jana\u0007" }]) {
+      transport.mockResolvedValueOnce(Response.json({ ...scope, targets: [bad] }));
+      await expect(api.transferTargets(id, id)).rejects.toMatchObject({ status: 502 });
+    }
+  });
+  it("transfers only to a colleague and checks the answer belongs to the call", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...scope, sessionId: id.toUpperCase(), state: "ringing" }));
+    const api = createVoiceApi(config, "operator", async () => "token", transport);
+    await api.transfer(id, id, colleague.toUpperCase());
+    expect(JSON.parse(String(transport.mock.calls[0][1].body))).toEqual({ deviceSessionId: id, profileId: colleague });
+    await expect(api.transfer(id, id, "+421900000001")).rejects.toMatchObject({ status: 502 });
+    transport.mockResolvedValueOnce(Response.json({ ...scope, sessionId: colleague, state: "ringing" }));
+    await expect(api.transfer(id, id, colleague)).rejects.toMatchObject({ status: 502 });
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+  it("reports the recorder after a stop and sends retry only when asked", async () => {
+    const transport = vi.fn<MobileTransport>().mockImplementation(async () => Response.json({ ...scope, sessionId: id, recording: { state: "stopping", suppressed: true } }));
+    const api = createVoiceApi(config, "operator", async () => "token", transport);
+    expect(await api.stopRecording(id, id, false)).toEqual({ state: "stopping", suppressed: true });
+    await api.stopRecording(id, id, true);
+    expect(transport.mock.calls.map(call => JSON.parse(String(call[1].body)))).toEqual([{ deviceSessionId: id }, { deviceSessionId: id, retry: true }]);
+    for (const recording of [undefined, { state: "paused", suppressed: false }, { state: "stopped" }]) {
+      transport.mockResolvedValueOnce(Response.json({ ...scope, sessionId: id, recording }));
+      await expect(api.stopRecording(id, id, false)).rejects.toMatchObject({ status: 502 });
+    }
+  });
+  it("accepts a status without a recorder and refuses one for a call that is not connected", async () => {
+    const transport = vi.fn<MobileTransport>().mockResolvedValue(Response.json(live));
+    const api = createVoiceApi(config, "operator", async () => "token", transport);
+    expect((await api.status(id, id)).recording).toBeUndefined();
+    transport.mockResolvedValueOnce(Response.json({ ...live, recording: { state: "recording", suppressed: false } }));
+    expect((await api.status(id, id)).recording).toEqual({ state: "recording", suppressed: false });
+    transport.mockResolvedValueOnce(Response.json({ ...live, connected: false, state: "ringing", media: { version: 1, state: "unavailable", canHold: false, callControlId: null }, recording: { state: "recording", suppressed: false } }));
+    await expect(api.status(id, id)).rejects.toMatchObject({ status: 502 });
+    transport.mockResolvedValueOnce(Response.json({ ...live, recording: { state: "on", suppressed: false } }));
+    await expect(api.status(id, id)).rejects.toMatchObject({ status: 502 });
+  });
+});
