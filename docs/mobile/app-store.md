@@ -33,12 +33,12 @@ pracoviska.
 > • Hovory: aktívne hovory, história a spätné volania.
 > • Prípady: hľadanie, detail, poznámky, prílohy, priradenie dispečera a odovzdanie.
 > • Úlohy a spätné volania: čo treba vybaviť a do kedy.
+>
+> Aplikácia neobsahuje reklamu ani sledovanie.
 
 Popis smie sľubovať iba to, čo odoslaný build vie (Guideline 2.3). Telefonovanie
 z aplikácie (prijatie, volanie, podržanie, prepojenie, zastavenie nahrávania) sa do
 popisu doplní až s buildom, ktorý ho má zapnuté v produkcii.
->
-> Aplikácia neobsahuje reklamu ani sledovanie.
 
 **Kľúčové slová** (do 100 znakov): dispečing,asistencia,odťah,prípady,úlohy,hovory,spätné volanie,ústredňa
 

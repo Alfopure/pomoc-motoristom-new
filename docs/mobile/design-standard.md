@@ -122,6 +122,14 @@ keď sa hovor nezačne, aplikácia to povie hneď (nepotvrdený pokus dokončí
 Ústredňa). Keď telefón nie je pripravený, tlačidlo ostáva „Vybrať číslo“
 a číslo pošle do Ústredne.
 
+**Odovzdanie prípadu** (`mobile/src/handoff/ui.tsx`): hlavička detailu s číslom
+prípadu, potvrdenia a chyby hore, aktívny odkaz so žltým Zdieľať odkaz, rozpísaná
+akcia ako formulár v skupinách s jedným žltým Potvrdiť a pod ním údaje, ktoré
+kolega uvidí. Odovzdania sú skupiny riadkov so štítkom stavu (oranžový čaká,
+zelený prijaté a na ceste, sivý ukončené, červený odmietnuté) a akciami
+v riadkoch; Zrušiť odovzdanie je červený riadok. Vybavená akcia sa po uložení
+zatvorí, ostane iba potvrdenie.
+
 **Lišta hovoru** (`call-bar.tsx`): kým server eviduje hovor na účte dispečera mimo
 tohto telefónu (napr. na stolovom telefóne), nad spodnou lištou je zelený pás
 s menom alebo číslom, stavom a pri jednom hovore aj dĺžkou. Ťuk otvorí detail

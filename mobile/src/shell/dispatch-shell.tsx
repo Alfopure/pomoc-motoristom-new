@@ -239,12 +239,12 @@ export function DispatchShell(props: Props) {
         : { kind: "status" as const, label: statusLabel, tone: presence ? presenceTone[presence] : "gray" as const, onPress: () => navigate("hovory", "console") };
   return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><CallActionContext.Provider value={callAction}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
     {ownCall && phone && !callScreen.open && <AppErrorBoundary key={"strip:" + (callScreen.id ?? "ending")} reporter={reporter} onReset={() => undefined}
-      fallback={() => <CallStripFallback onExpand={() => setCallScreen(value => ({ ...value, open: true }))} />}>
+      fallback={() => <CallStripFallback attention={Boolean(phoneState.error) || ownCall.holdUncertain} onExpand={() => setCallScreen(value => ({ ...value, open: true }))} />}>
       <CallStrip view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} attention={Boolean(phoneState.error) || ownCall.holdUncertain}
         focus={callScreen.focusStrip} onExpand={() => setCallScreen(value => ({ ...value, open: true }))} /></AppErrorBoundary>}
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(identity.profile.displayName)} onAccount={() => go({ ...nav, account: true, search: false, alerts: false })}
       left={left} onPin={openedInModules && !moduleBack && nav.opened && !pins.includes(nav.opened) ? () => pin(nav.opened!) : null} />
-    <AppErrorBoundary reporter={reporter} onReset={forgetScreenData}>
+    <AppErrorBoundary reporter={reporter} onReset={forgetScreenData} resetKey={view + ":" + (callTarget ? callTarget.kind + ":" + callTarget.id : "")}>
     {Boolean(props.meError) && <View style={{ paddingHorizontal: space.l }}><ErrorNotice message={errorMessage(props.meError)} onRetry={props.onRetryMe} /></View>}
     {hovoryVisible && <HovoryHeader view={nav.hovory} onView={value => go({ ...nav, hovory: value })} waiting={callbackSummary.data ? waiting : null} />}
     {view === "console" && !callTarget && <Console api={api} me={identity} queryKey={queryKey} active={active} number={number} onNumber={setNumber}
@@ -315,7 +315,7 @@ export function DispatchShell(props: Props) {
     </Sheet>
     <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 12 + (callBar ? CALL_BAR_SPACE : 0)} />
     {ownCall && phone && <AppErrorBoundary key={callScreen.id ?? "ending"} reporter={reporter} onReset={() => undefined}
-      fallback={retry => callScreen.open ? <CallScreenFallback phone={phone} onRetry={retry} onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))} /> : null}>
+      fallback={retry => callScreen.open ? <CallScreenFallback phone={phone} state={phoneState} onRetry={retry} onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))} /> : null}>
       <CallScreen visible={callScreen.open} view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} phone={phone} state={phoneState}
         onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))}
         onDetail={phoneState.call && draftId(phoneState.call.sessionId) ? openOwnCallDetail : null}

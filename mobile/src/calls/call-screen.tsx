@@ -210,9 +210,9 @@ export function CallScreen(props: Common & {
 }
 
 /** The strip without call details, when they cannot be drawn: the controls stay one tap away. */
-export function CallStripFallback({ onExpand }: { onExpand: () => void }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel="Hovor prebieha. Otvoriť ovládanie hovoru" onPress={onExpand}
-    style={({ pressed }) => [s.strip, { backgroundColor: palette.secondaryLabel }, pressed && { opacity: 0.85 }]}>
+export function CallStripFallback({ attention, onExpand }: { attention: boolean; onExpand: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={"Hovor prebieha" + (attention ? ", vyžaduje pozornosť" : "") + ". Otvoriť ovládanie hovoru"} onPress={onExpand}
+    style={({ pressed }) => [s.strip, { backgroundColor: attention ? palette.redText : palette.secondaryLabel }, pressed && { opacity: 0.85 }]}>
     <Phone size={15} strokeWidth={2.6} color="#FFFFFF" accessible={false} />
     <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.stripTitle}>Hovor prebieha</Text>
     <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.stripStatus}>Otvoriť</Text>
@@ -220,13 +220,24 @@ export function CallStripFallback({ onExpand }: { onExpand: () => void }) {
 }
 
 /** Shown when the call screen itself fails: the call still has its controls. */
-export function CallScreenFallback({ phone, onRetry, onMinimize }: { phone: DispatchPhone; onRetry: () => void; onMinimize: () => void }) {
+export function CallScreenFallback({ phone, state, onRetry, onMinimize }: { phone: DispatchPhone; state: PhoneState; onRetry: () => void; onMinimize: () => void }) {
   const insets = useSafeAreaInsets();
+  const call = state.call, ringing = call?.state === "RINGING" && !call.outgoing;
+  // The same guard as the full screen: ending during a transfer drops the caller.
+  const end = () => {
+    if (call && state.transferPending === call.sessionId) {
+      Alert.alert("Hovor sa prepája", "Ak ho teraz ukončíte, volajúci sa odpojí.", [
+        { text: "Nechať prepojiť", style: "cancel" }, { text: "Ukončiť hovor", style: "destructive", onPress: () => { void phone.endConfirmed(call.sessionId); } }]);
+      return;
+    }
+    void phone.end();
+  };
   return <View accessibilityViewIsModal style={[StyleSheet.absoluteFill, s.layer, s.screen, s.fallback, { paddingBottom: insets.bottom + space.l }]}>
     <Text accessibilityRole="header" style={s.title}>Obrazovka hovoru sa nedala zobraziť</Text>
     <Text style={s.noticeText}>Hovor beží ďalej. Ovládať ho môžete aj na systémovej obrazovke iPhonu.</Text>
-    <View style={s.fallbackActions}>
-      <Big label="Ukončiť" color={palette.red} icon={PhoneOff} onPress={() => { void phone.end(); }} />
+    <View style={[s.fallbackActions, s.bottom]}>
+      {ringing && <Big label="Prijať" color={palette.green} icon={Phone} onPress={() => { void phone.answer(); }} />}
+      <Big label={ringing ? "Odmietnuť" : "Ukončiť"} color={palette.red} icon={PhoneOff} onPress={end} />
     </View>
     <Pressable accessibilityRole="button" onPress={onRetry} style={({ pressed }) => [s.textButton, pressed && { opacity: 0.6 }]}><Text style={s.textButtonLabel}>Skúsiť znova</Text></Pressable>
     <Pressable accessibilityRole="button" onPress={onMinimize} style={({ pressed }) => [s.textButton, pressed && { opacity: 0.6 }]}><Text style={s.textButtonLabel}>Skryť</Text></Pressable>

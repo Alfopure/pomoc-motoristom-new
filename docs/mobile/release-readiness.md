@@ -246,8 +246,8 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   serveri, kým neprejde akceptácia na TEST.
 
 **F5 – Dokončenie**
-- Odovzdanie prípadu v novom vzhľade; posledná kontrola všetkých obrazoviek
-  na 390 a 320 b; zmrazenie.
+- Odovzdanie prípadu v novom vzhľade (hotové v aplikácii); posledná kontrola
+  všetkých obrazoviek na 390 a 320 b; zmrazenie.
 
 ### Čo do verzie 1 nepatrí (neskôr)
 
