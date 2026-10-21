@@ -440,6 +440,8 @@ async function createCallbackTaskIfNeeded(
         assigned_to: actorId,
         due_at: dueInMinutes(callbackMinutes),
         status: "open",
+        // The operator gave themselves this callback; their own phone need not announce it.
+        created_by: actorId,
       })
       .select("*")
       .single(),

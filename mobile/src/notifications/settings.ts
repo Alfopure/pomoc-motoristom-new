@@ -39,6 +39,8 @@ export const PUSH_FAILED = "Telefón sa nepodarilo prihlásiť na odber notifik�
 const REFRESH_MS = 6 * 3_600_000;
 /** iOS answers the token request itself; offline it may never answer. */
 const TOKEN_MS = 15_000;
+/** Logout waits this long at most for a registration already on its way. */
+const FORGET_WAIT_MS = 5_000;
 
 function within<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -92,7 +94,9 @@ export class PushSettings {
       }
       const wasOn = this.view.status === "on";
       if (wasOn && this.clock() - this.syncedAt < REFRESH_MS) return;
-      const permission = await this.device.permission().catch(() => "undetermined" as const);
+      const permission = await this.device.permission().catch(() => null);
+      // The phone could not answer now; the next return to the app asks again.
+      if (permission === null) return;
       // Reinstalled, or the system forgot the answer: notifications are simply off again.
       if (permission === "undetermined") { this.device.remember(false); this.update({ status: "off", preferences: null, message: null }); return; }
       if (permission !== "granted") { this.update({ status: "denied", preferences: null, message: PUSH_DENIED }); return; }
@@ -141,11 +145,14 @@ export class PushSettings {
       }
     });
   }
-  /** Logout: this phone stops receiving the account's notices; never blocks logout.
-   * A registration still on its way finishes first, so it cannot come back after. */
+  /** Logout: this phone stops receiving the account's notices; never blocks logout
+   * for long. A registration on its way gets a few seconds to finish first; one that
+   * lands later marks the phone again, and the next start removes it. */
   async forget() {
     this.forgotten = true;
-    await this.running;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([this.running, new Promise<void>(resolve => { timer = setTimeout(resolve, FORGET_WAIT_MS); })]);
+    clearTimeout(timer);
     if (this.view.status === "unsupported" || !this.device.registered()) return;
     // A failure leaves the phone marked, and the next start on it removes the registration.
     await this.unregister().catch(() => undefined);
@@ -171,6 +178,8 @@ export class PushSettings {
       this.device.markRegistered(true);
       // The phone keeps this account's switches, so a new login starts where it ended.
       const preferences = await this.api.register(this.registration(this.device.savedPreferences()));
+      // Again after the answer: a logout meanwhile may have cleared the mark.
+      this.device.markRegistered(true);
       this.device.remember(true);
       this.saved(preferences);
       this.update({ status: "on", preferences, message: null });

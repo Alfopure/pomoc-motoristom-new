@@ -58,6 +58,17 @@ describe("task and case events", () => {
     expect(JSON.stringify(sent)).not.toContain("Novák");
   });
 
+  it("stays quiet for a task its creator gave to themselves, but not when it comes back to them later", async () => {
+    fake.db.seed("motorist_case_tasks", [{ id: TASK, organization_id: ORG, case_id: null, title: "x", due_at: null, status: "open", assigned_to: ME, created_by: ME, assignment_generation: 0 }]);
+    pushTaskAssigned(fake.admin, { organizationId: ORG, notificationId: "n1", taskId: TASK, recipientProfileId: ME });
+    await drain();
+    expect(sent).toEqual([]);
+    fake.db.storage("motorist_case_tasks")[0].assignment_generation = 2;
+    pushTaskAssigned(fake.admin, { organizationId: ORG, notificationId: "n2", taskId: TASK, recipientProfileId: ME });
+    await drain();
+    expect(sent.map(item => item.title)).toEqual(["Nová úloha"]);
+  });
+
   it("stays quiet when the task was reassigned or finished in the meantime", async () => {
     fake.db.seed("motorist_case_tasks", [{ id: TASK, organization_id: ORG, case_id: null, title: "x", due_at: null, status: "open", assigned_to: COLLEAGUE }]);
     pushTaskAssigned(fake.admin, { organizationId: ORG, notificationId: "n1", taskId: TASK, recipientProfileId: ME });

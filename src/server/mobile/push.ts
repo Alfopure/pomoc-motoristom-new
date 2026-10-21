@@ -188,7 +188,8 @@ export async function deliverPushNotices(admin: Admin, notices: readonly PushNot
     let results: PushOutcome[] = batch.map(() => "failed");
     try {
       const response = await transport(EXPO_SEND, {
-        method: "POST", signal: AbortSignal.timeout(6_000),
+        // Long enough that an accepted batch is rarely counted as failed and sent again.
+        method: "POST", signal: AbortSignal.timeout(10_000),
         headers: { Accept: "application/json", "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
         body: JSON.stringify(batch.map(notice => ({ to: notice.device.token, title: notice.title.slice(0, 120), body: notice.body.slice(0, 240),
           data: { ...notice.data, profileId: notice.device.profileId } satisfies MobilePushPayload, sound: "default", priority: "high" }))),

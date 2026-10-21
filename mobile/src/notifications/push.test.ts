@@ -179,6 +179,37 @@ describe("push settings", () => {
     expect(api.unregister.mock.invocationCallOrder[0]).toBeGreaterThan(api.register.mock.invocationCallOrder[0]);
   });
 
+  it("does not hold logout for long and lets the next start clean up a late registration", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish: (value: MobilePushPreferences) => void = () => undefined;
+      const keychain = { remembered: false, registered: false, preferences: null as Partial<MobilePushPreferences> | null };
+      const api = server({ register: vi.fn(() => new Promise<MobilePushPreferences>(resolve => { finish = resolve; })) });
+      const settings = new PushSettings(device({ permission: vi.fn(async () => "granted" as const) }, keychain), api);
+      const enabling = settings.enable();
+      await vi.waitFor(() => expect(api.register).toHaveBeenCalled());
+      const leaving = settings.forget();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await leaving;
+      expect(api.unregister).toHaveBeenCalledOnce();
+      expect(keychain.registered).toBe(false);
+      finish(ALL);
+      await enabling;
+      expect(keychain.registered).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps notifications on when the phone cannot answer about the permission", async () => {
+    const phone = device({ permission: vi.fn(async () => { throw new Error("busy"); }) }), api = server();
+    phone.remember(true);
+    const settings = new PushSettings(phone, api);
+    await settings.resume();
+    expect(phone.remembered()).toBe(true);
+    expect(settings.snapshot().status).toBe("off");
+    expect(api.register).not.toHaveBeenCalled();
+    expect(api.unregister).not.toHaveBeenCalled();
+  });
+
   it("treats a permission the system forgot as off, not as refused", async () => {
     const phone = device({ permission: vi.fn(async () => "undetermined" as const) }), api = server();
     phone.remember(true);

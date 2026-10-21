@@ -21,10 +21,12 @@ const forCase = (caseNumber: string | null) => caseNumber ? " k prípadu " + cas
 /** A task assigned to someone else; sent once per assignment notification. */
 export function pushTaskAssigned(admin: Admin, job: { organizationId: string; notificationId: string; taskId: string; recipientProfileId: string }) {
   queueMobilePush(async () => {
-    const task = await admin.from("motorist_case_tasks").select("case_id,due_at,status,assigned_to").eq("organization_id", job.organizationId).eq("id", job.taskId)
+    const task = await admin.from("motorist_case_tasks").select("case_id,due_at,status,assigned_to,created_by,assignment_generation").eq("organization_id", job.organizationId).eq("id", job.taskId)
       .abortSignal(AbortSignal.timeout(READ_MS)).maybeSingle();
     // Reassigned or finished in the meantime: the old assignee is not disturbed.
     if (!task.data || task.data.status === "done" || task.data.assigned_to !== job.recipientProfileId) return;
+    // Created for oneself (also by a case action or a call, delivered later by the cron): no news.
+    if (task.data.assignment_generation === 0 && task.data.created_by === job.recipientProfileId) return;
     const caseNumber = await caseNumberOf(admin, job.organizationId, task.data.case_id);
     await sendMobilePush(admin, {
       organizationId: job.organizationId, profileIds: [job.recipientProfileId], type: "tasks", title: "Nová úloha",

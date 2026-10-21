@@ -241,7 +241,12 @@ príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
 - Zapnutie v prostredí: tabuľka `motorist_mobile_push_devices` (migrácia
   `20261020210000_mobile_push_devices.sql`, schválená iba pre TEST) a
   `MOBILE_PUSH_ENABLED=true` v projekte Vercel; bez nich server nič neposiela
-  a Účet to povie.
+  a Účet to povie. Na Preview vetiev ostávajú vypnuté vždy.
+- Známe obmedzenia: pri výpadku služby Expo dlhšom ako jedno zopakovanie sa
+  notifikácia o úlohe alebo prípade stratí (spätné volania skúsi cron znova);
+  telefón, ktorému vypršalo prihlásenie bez odhlásenia, dostáva notifikácie
+  účtu do ďalšieho prihlásenia na ňom, najviac 30 dní; pri neskorej odpovedi
+  Expo môže výnimočne prísť tá istá notifikácia dvakrát.
 
 **F4 – Pripravenosť na vydanie** (v aplikácii hotové okrem produkčnej cesty hlasu;
 podklady pre App Store v `docs/mobile/app-store.md`)
