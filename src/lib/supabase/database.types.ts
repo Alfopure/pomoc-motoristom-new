@@ -734,6 +734,20 @@ export type Database = {
         pause_ending_enabled: boolean;
         updated_at: Timestamp;
       }>;
+      motorist_mobile_push_devices: Table<{
+        id: string;
+        organization_id: string;
+        profile_id: string;
+        environment: "test" | "production";
+        installation_id: string;
+        expo_push_token: string;
+        platform: "ios" | "android";
+        preferences: Json;
+        app_version: string | null;
+        created_at: Timestamp;
+        updated_at: Timestamp;
+        last_seen_at: Timestamp;
+      }>;
       motorist_push_subscriptions: Table<{
         client_kind?: "unknown" | "web" | "mobile_app";
         id: string;

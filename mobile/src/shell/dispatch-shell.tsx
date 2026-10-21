@@ -48,12 +48,15 @@ import { dialDecision } from "../callbacks/model";
 import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
 import { AppErrorBoundary, ErrorReporterContext } from "../ui/error-boundary";
 import { CallScreenFallback, CallStripFallback } from "../calls/call-screen";
+import type { PushSettings } from "../notifications/settings";
 
 type Props = {
   config: MobileConfig; client: SupabaseClient; api: MobileApi; active: boolean; userId: string; liveUser: () => string | null;
   identity: MobileMe; queryKey: string[]; meError: unknown; onRetryMe: () => void;
   phone: DispatchPhone | null; phoneState: PhoneState; callbackSummary: UseQueryResult<MobileCallbackSummary>; dialer: CallbackDialer;
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void;
+  /** Notifications of this operator on this phone (Účet). */
+  push: PushSettings;
 };
 type ShellSheet = { kind: "edit" } | { kind: "pin"; id: ModuleId } | { kind: "menu"; id: ModuleId };
 const shellOwnedBack: readonly DispatchView[] = ["modules", "console", "history", "account", "search", "alerts"];
@@ -256,7 +259,7 @@ export function DispatchShell(props: Props) {
     <DraftWorkspace key={identity.profileId} config={config} client={props.client} identity={identity} userId={userId} liveUser={props.liveUser} active={active}
       view={view} onView={target => {
         if (target === "account") go({ ...nav, account: true });
-        else if (target === "console") navigate("hovory", "console");
+        else if (target === "console" || target === "callbacks") navigate("hovory", target);
         else navigate(target === "cases" ? "pripady" : "ulohy");
       }}
       onLeaveModule={back} callTarget={callTarget} onCloseCallContext={() => setCallSelection(null)} callBackLabel={callSelection?.view === "home" ? "Prehľad" : "Hovory"}
@@ -280,7 +283,7 @@ export function DispatchShell(props: Props) {
       }}
       bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
-      hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} />
+      hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} push={props.push} />
     </AppErrorBoundary>
     </View></CallActionContext.Provider></ShellBackContext.Provider>
     {callBar && <AppErrorBoundary key={"bar:" + callBar.id} reporter={reporter} onReset={() => undefined} fallback={() => null}>

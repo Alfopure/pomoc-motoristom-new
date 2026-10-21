@@ -55,7 +55,7 @@ async function workspaceRpc<T>(actor: TaskWorkspaceActor, action: string, id?: s
       const [{ createSupabaseAdminClient }, { deliverTaskAssignmentNotifications }] = await Promise.all([
         import("@/lib/supabase/admin"), import("./task-notifications"),
       ]);
-      await deliverTaskAssignmentNotifications(createSupabaseAdminClient(), actor.organizationId, data.id);
+      await deliverTaskAssignmentNotifications(createSupabaseAdminClient(), actor.organizationId, data.id, actor.profileId);
     } catch { /* Task and bell are committed; the existing cron retries the durable outbox. */ }
   }
   return data as T;

@@ -17,7 +17,8 @@ describe("task workspace service boundary", () => {
     mocks.rpc.mockResolvedValue({ data: { id }, error: null });
     mocks.deliver.mockRejectedValueOnce(new Error("temporary push outage"));
     await expect(createWorkspaceTask(actor, { title: "No deadline" })).resolves.toEqual({ id });
-    expect(mocks.deliver).toHaveBeenCalledWith({ kind: "admin" }, "org", id);
+    // The acting operator is passed on, so their own phone does not announce their own task.
+    expect(mocks.deliver).toHaveBeenCalledWith({ kind: "admin" }, "org", id, actor.profileId);
   });
 
   it("creates independent tasks through the authenticated actor-scoped transaction", async () => {

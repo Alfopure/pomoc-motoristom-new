@@ -1,8 +1,11 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { TASK_REVIEW_COMMENT_LIMIT, taskWorkflowActions, taskWorkflowStates, type TaskWorkflowCommand, type TaskWorkflowReceipt } from "@/domain/task-workflow";
+import { pushTaskReview } from "./mobile/push-events";
+import { mobilePushEnabled } from "./mobile/push";
 import { MutationError } from "./mutation-error";
 import { taskId, type TaskWorkspaceActor } from "./tasks";
 
@@ -49,5 +52,6 @@ export async function transitionWorkspaceTask(actor: TaskWorkspaceActor, id: str
   if (!receipt?.task || receipt.task.id !== task || receipt.task.workflowVersion !== 1 || !receipt.task.workflowState || !taskWorkflowStates.includes(receipt.task.workflowState)
     || !["open", "done", "overdue"].includes(receipt.task.status) || (receipt.task.status === "done") !== (receipt.task.workflowState === "done")
     || receipt.commandId !== command.commandId || !Number.isSafeInteger(receipt.committedRevision) || receipt.committedRevision < 1 || !Number.isSafeInteger(receipt.task.revision) || receipt.task.revision < receipt.committedRevision) throw new MutationError("Potvrdenie zmeny úlohy sa nepodarilo overiť. Skúste tú istú požiadavku znova.", 503);
+  if (mobilePushEnabled()) pushTaskReview(createSupabaseAdminClient(), { organizationId: actor.organizationId, taskId: task, action: command.action });
   return receipt;
 }

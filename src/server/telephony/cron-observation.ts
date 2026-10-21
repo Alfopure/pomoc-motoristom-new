@@ -1,7 +1,7 @@
 import type { TelephonyCronJobResult, TelephonyCronSummary } from "./cron-jobs";
 
 type ObservedHealth = "ok" | "warn" | "fail" | "skipped" | "unknown";
-const AUXILIARY_JOBS = new Set(["telephony.ledger.prune", "notifications.materialize", "notifications.pause-ending", "telephony.recordings.process", "diagnostics.maintenance"]);
+const AUXILIARY_JOBS = new Set(["telephony.ledger.prune", "notifications.materialize", "notifications.pause-ending", "notifications.mobile-push", "telephony.recordings.process", "diagnostics.maintenance"]);
 const CRITICAL_JOBS = ["telephony.ledger.replay", "telephony.ring.sweep", "telephony.effects.recovery", "telephony.telnyx.reconcile", "telephony.sessions.stuck", "telephony.ai-demo.cleanup", "telephony.alerts"];
 
 /** Completion of the scheduler is separate from the health it observed. */

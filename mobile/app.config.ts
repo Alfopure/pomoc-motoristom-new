@@ -50,7 +50,10 @@ const config: ExpoConfig = {
   },
   android: { package: "sk.linkapomoci.dispecing" + suffix, blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
     "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.FOREGROUND_SERVICE_LOCATION", "android.permission.ACTIVITY_RECOGNITION", "com.google.android.gms.permission.ACTIVITY_RECOGNITION"] },
+  // Work notices (tasks, cases, overdue callbacks) through the Expo push service; the
+  // voice build keeps its own production APNs entitlement, which the plugin respects.
   plugins: ["expo-secure-store", ["expo-splash-screen", { image: "./assets/splash-icon.png", imageWidth: 180, resizeMode: "contain", backgroundColor: "#F2F2F7" }],
+    ["expo-notifications", { defaultChannel: "default" }],
     "./plugins/with-draft-secure-store.cjs", ...(voiceProof ? ["./plugins/with-telnyx-reconnect-guard.cjs"] : []), ["expo-image-picker", {
     photosPermission: "Aplikácia potrebuje prístup k vybranej fotografii na priloženie k prípadu.",
     cameraPermission: "Aplikácia potrebuje fotoaparát na odfotografovanie prílohy prípadu.",

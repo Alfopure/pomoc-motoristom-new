@@ -28,7 +28,7 @@ describe("completed cron observation", () => {
   });
 
 
-  it.each(["telephony.ledger.prune", "telephony.recordings.process", "diagnostics.maintenance", "notifications.materialize", "notifications.pause-ending"])("keeps failed auxiliary %s visible without declaring the critical scheduler unavailable", job => {
+  it.each(["telephony.ledger.prune", "telephony.recordings.process", "diagnostics.maintenance", "notifications.materialize", "notifications.pause-ending", "notifications.mobile-push"])("keeps failed auxiliary %s visible without declaring the critical scheduler unavailable", job => {
     expect(completeCronSummary(summary("ok"), [{ job, status: "failed", detail: {} }], start, start)).toMatchObject({
       status: "degraded", executionStatus: "degraded", readinessStatus: "auxiliary_degraded", failedJobs: [job], auxiliaryFailedJobs: [job], criticalFailedJobs: [], missingCriticalJobs: [],
     });

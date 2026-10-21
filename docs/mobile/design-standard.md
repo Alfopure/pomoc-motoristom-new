@@ -202,6 +202,9 @@ a `mobile/src/shell/parts.tsx` (prvky kostry):
 - **Riadok (object cell)** – 1–3 riadky textu, voliteľný farebný pruh (priorita)
   alebo ikona 28 b, čas/suma vpravo, celý riadok je ťuková plocha; najviac jedna
   akcia vpravo (napr. „Vybrať číslo“ v Histórii).
+- **Prepínač** (`SwitchRow`) – riadok s názvom, popisom a prepínačom vpravo; celý
+  riadok je jeden prepínač (ťuková plocha aj VoiceOver), zapnutý je zelený.
+  Používa ho Účet → Notifikácie.
 - **Skupina** s odsadenými deliacimi čiarami, **hlavička sekcie**, **segment**
   (2–5 častí, s odznakom), **sklenené tlačidlo** hornej lišty, **okno zdola**,
   **potvrdenie** nad lištou (aj pre VoiceOver), **ikona modulu**, **náhľad lišty**.

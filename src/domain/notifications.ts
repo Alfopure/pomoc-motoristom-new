@@ -145,7 +145,7 @@ function normalizeIso(value: string) {
   return new Date(time).toISOString();
 }
 
-function formatDue(value: string) {
+export function formatDue(value: string) {
   const date = new Date(value);
 
   if (!Number.isFinite(date.getTime())) {

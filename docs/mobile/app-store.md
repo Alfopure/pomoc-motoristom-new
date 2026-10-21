@@ -33,12 +33,16 @@ pracoviska.
 > • Hovory: aktívne hovory, história a spätné volania.
 > • Prípady: hľadanie, detail, poznámky, prílohy, priradenie dispečera a odovzdanie.
 > • Úlohy a spätné volania: čo treba vybaviť a do kedy.
+> • Notifikácie: pridelená úloha alebo prípad, termín úlohy a spätné volanie po
+>   termíne, aj pri zamknutom telefóne.
 >
 > Aplikácia neobsahuje reklamu ani sledovanie.
 
 Popis smie sľubovať iba to, čo odoslaný build vie (Guideline 2.3). Telefonovanie
 z aplikácie (prijatie, volanie, podržanie, prepojenie, zastavenie nahrávania) sa do
-popisu doplní až s buildom, ktorý ho má zapnuté v produkcii.
+popisu doplní až s buildom, ktorý ho má zapnuté v produkcii. Riadok o notifikáciách
+platí, až keď má produkcia zapnuté `MOBILE_PUSH_ENABLED` a tabuľku zariadení;
+inak ho pred odoslaním vynechať.
 
 **Kľúčové slová** (do 100 znakov): dispečing,asistencia,odťah,prípady,úlohy,hovory,spätné volanie,ústredňa
 
@@ -50,7 +54,8 @@ s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť apli
 - Kontaktné údaje: meno, e-mail, telefónne číslo, adresa (miesto zásahu).
 - Poloha: presná (iba na pokyn pri výbere miesta).
 - Obsah používateľa: fotografie, zvuk (hovory), iný obsah (poznámky).
-- Identifikátory: ID používateľa, ID zariadenia (pripojenie k ústredni).
+- Identifikátory: ID používateľa, ID zariadenia (pripojenie k ústredni,
+  identifikátor pre notifikácie a inštalácie).
 - Diagnostika: údaje o pádoch (maskované hlásenia chýb).
 
 ## Ďalšie odpovede
@@ -59,15 +64,20 @@ s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť apli
   štandardné šifrovanie WebRTC (DTLS-SRTP knižnice Telnyx), teda bežne dostupné
   šifrovanie bez vlastného algoritmu. Odpovede na exportné otázky (vrátane
   francúzskeho vyhlásenia) potvrdí majiteľ v App Store Connect.
-- **Prihlásenie pre kontrolu Apple (Guideline 2.1):** treba demo účet. Odporúčanie:
-  samostatná demo organizácia v produkcii s vymyslenými údajmi, aby kontrolór
-  nevidel skutočných zákazníkov. Vytvorenie vyžaduje výslovný súhlas majiteľa
-  so zmenou produkčnej databázy.
+- **Prihlásenie pre kontrolu Apple (Guideline 2.1):** rozhodnutie majiteľa
+  z 20. 10. 2026: žiadna demo organizácia; kontrolór dostane účet v organizácii
+  majiteľa (jeho firma je organizátor, s firmou klienta). Pred odoslaním: samostatný
+  účet len pre kontrolu (nie osobný účet dispečera) s rolou Dispečer, ktorý sa po
+  schválení deaktivuje. Kontrolór uvidí to, čo dispečer tejto organizácie.
 - **Zrušenie účtu (5.1.1(v)):** aplikácia nedovoľuje registráciu; účty zakladá
   a ruší organizácia. Postup je na stránke Ochrana súkromia.
 - **Poznámka pre kontrolu:** „Interná aplikácia pre dispečerov asistenčnej
   služby Linka pomoci. Prístup len pre zamestnancov, distribúcia ako unlisted.
-  Demo účet: … Telefonovanie vyžaduje pripojenie k ústredni v module Hovory.“
+  Účet pre kontrolu: … Telefonovanie vyžaduje pripojenie k ústredni v module Hovory.“
+- **Notifikácie v produkčnom builde:** Push Notifications na App ID a APNs kľúč
+  (.p8) nahratý do Expo (`eas credentials`); plugin `expo-notifications` je
+  v `app.config.ts`. Ak má projekt Expo zapnuté zabezpečené posielanie, server
+  potrebuje `EXPO_ACCESS_TOKEN`.
 
 ## Obrázky
 

@@ -47,6 +47,13 @@ export type MobileAppErrorReport = {
   kind: "fatal" | "error" | "render"; message: string; stack: string | null; component: string | null;
   version: string; build: string | null; platform: "ios" | "android"; osVersion: string; preview: boolean;
 };
+/** Kinds of push notifications the dispatcher can switch on or off in Účet. */
+export type MobilePushType = "tasks" | "task_due" | "callbacks_mine" | "callbacks_unclaimed" | "cases";
+export type MobilePushPreferences = Record<MobilePushType, boolean>;
+export type MobilePushRegistration = MobileScope & { preferences: MobilePushPreferences };
+export type MobilePushData = { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" };
+/** What a delivered notification carries: where a tap leads and whose phone it was sent to. */
+export type MobilePushPayload = MobilePushData & { profileId: string };
 export type MobileVoiceAttemptEnded = MobileScope & {
   resolved: boolean; sessionId: string | null; terminationPending: boolean;
 };

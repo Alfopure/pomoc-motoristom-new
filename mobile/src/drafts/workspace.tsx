@@ -40,9 +40,12 @@ import { appVersion, versionLabel } from "../lib/app-version";
 import { formLayout } from "../design/form";
 import { Group, Row, SectionHeader } from "../design/list";
 import { palette, space, type } from "../design/tokens";
+import type { PushSettings } from "../notifications/settings";
+import { pushTaps } from "../notifications/taps";
+import { NotificationSettings } from "../notifications/ui";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
-  active: boolean; view: DispatchView; onView: (view: "cases" | "tasks" | "console" | "account") => void; onSelectNumber: (number: string) => void;
+  active: boolean; view: DispatchView; onView: (view: "cases" | "tasks" | "console" | "callbacks" | "account") => void; onSelectNumber: (number: string) => void;
   /** Android Back on a module's first screen; the shell decides where it leads. */
   onLeaveModule: () => void;
   callTarget: MobileCallContextTarget | null; onCloseCallContext: () => void; callBackLabel: string;
@@ -54,7 +57,8 @@ type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe;
   /** Prehľad, Hľadať and Upozornenia; scope and openers are null until the organization is verified. */
   renderLayer: (layer: ShellLayer, scope: ShellScope | null, notice: string | null, open: ShellOpeners | null) => ReactNode;
   bar: { customized: boolean; onEdit: () => void; onReset: () => void };
-  logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; hasCall: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void };
+  logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; hasCall: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void;
+  push: PushSettings };
 const operationViews: readonly DispatchView[] = ["cases", "tasks", "account"];
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Prístup ku konceptom sa nepodarilo overiť.";
 
@@ -175,6 +179,15 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
   const request = useRef(0);
   const consumedCallCase = useRef<number | null>(null);
   const { callCase, onView, onCallCaseHandled } = props;
+  // A tapped notification opens its task, case or the callbacks, once the organization is verified here.
+  const tap = useSyncExternalStore(pushTaps.subscribe, pushTaps.snapshot, pushTaps.snapshot);
+  useEffect(() => {
+    if (!tap || !current()) return;
+    const target = pushTaps.take(verified.profileId);
+    if (target?.kind === "task") { setTaskRequest({ taskId: target.id, nonce: ++request.current }); onView("tasks"); }
+    else if (target?.kind === "case") { setCaseRequest({ kind: "detail", id: target.id, nonce: ++request.current }); onView("cases"); }
+    else if (target?.kind === "callbacks") onView("callbacks");
+  }, [tap, current, verified.profileId, onView]);
   useEffect(() => {
     if (!callCase || consumedCallCase.current === callCase.nonce || !current()) return;
     consumedCallCase.current = callCase.nonce;
@@ -295,6 +308,7 @@ function Account(props: Props) {
         <Text style={account.detail}>{roleNames[profile.role]}</Text>
       </View>
     </View></Group>
+    <NotificationSettings settings={props.push} />
     <SectionHeader title="Prostredie" />
     <Group>
       <InfoRow first label="Dispečing" value={props.config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"} />

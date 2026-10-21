@@ -4,8 +4,9 @@ import { createFakeSupabase } from "@/test/fake-supabase";
 import type { Database } from "@/lib/supabase/database.types";
 import { createDefaultTaskReminder, createTaskAssignmentNotification, deliverTaskAssignmentNotifications, isCurrentTaskReminder, materializeDueTaskReminders } from "./task-notifications";
 
-const { sendTaskPush, sendEmail } = vi.hoisted(() => ({ sendTaskPush: vi.fn(), sendEmail: vi.fn() }));
+const { sendTaskPush, sendEmail, pushTaskAssigned, pushTaskDue } = vi.hoisted(() => ({ sendTaskPush: vi.fn(), sendEmail: vi.fn(), pushTaskAssigned: vi.fn(), pushTaskDue: vi.fn() }));
 vi.mock("./web-push", () => ({ sendTaskPush }));
+vi.mock("./mobile/push-events", () => ({ pushTaskAssigned, pushTaskDue }));
 vi.mock("./email-delivery", () => ({ buildAppUrl: (path: string) => path, escapeHtml: (s: string) => s, sendEmail }));
 
 function database(results: unknown[], writes: { table: string; payload: Record<string, unknown> }[] = []) {
@@ -54,6 +55,17 @@ describe("notification push handoff", () => {
     expect(await deliverTaskAssignmentNotifications(db, "org")).toEqual({ processed: 1, sent: 1, failed: 0 });
     expect(sendTaskPush).toHaveBeenCalledExactlyOnceWith(db, { organizationId: "org", recipientProfileId: "senior", notificationId: "notice", taskId: "task", title: job.title, body: "Call" });
     expect(rpc).toHaveBeenLastCalledWith("motorist_finish_task_assignment", { p_organization_id: "org", p_notification_id: "notice", p_lease_id: "lease", p_success: true });
+  });
+
+  it("announces an assignment on the assignee's phone, but not one's own", async () => {
+    const job = { notificationId: "notice", taskId: "task", recipientProfileId: "senior", leaseId: "lease", title: "Nová pridelená úloha", body: "Call" };
+    const rpc = vi.fn(async (name: string) => ({ data: name === "motorist_claim_task_assignments" ? [job] : true, error: null }));
+    const db = { rpc } as unknown as SupabaseClient<Database>;
+    pushTaskAssigned.mockClear();
+    await deliverTaskAssignmentNotifications(db, "org", "task", "manager");
+    expect(pushTaskAssigned).toHaveBeenCalledExactlyOnceWith(db, { organizationId: "org", notificationId: "notice", taskId: "task", recipientProfileId: "senior" });
+    await deliverTaskAssignmentNotifications(db, "org", "task", "senior");
+    expect(pushTaskAssigned).toHaveBeenCalledTimes(1);
   });
 
   it("keeps push failure retryable and does not insert another bell on retry", async () => {

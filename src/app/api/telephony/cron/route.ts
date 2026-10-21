@@ -32,8 +32,8 @@ export const maxDuration = 120;
  * is not configured the jobs that need a provider report `skipped` instead of
  * failing.
  *
- * It also materialises due task reminders and acts as a strict-window fallback
- * for pause-ending warnings. Those jobs are not telephony state transitions,
+ * It also materialises due task reminders, acts as a strict-window fallback
+ * for pause-ending warnings and alerts the phone app about overdue callbacks. Those jobs are not telephony state transitions,
  * but this deployment runs no worker and `vercel.json` allows exactly one cron.
  * The open console owns the precise pause timer; cron never sends that warning
  * before its final minute or after the planned end.
@@ -71,12 +71,13 @@ export async function GET(request: Request) {
       const { runRecordingProcessing } = await import("@/server/telephony/recording-processing");
       return runRecordingProcessing({ admin: deps.admin, organizationId: deps.organizationId, cronStartedAt });
     });
+    const mobilePush = await isolated("notifications.mobile-push", () => runMobilePushMaterialisation(deps.organizationId, cronStartedAt));
     const diagnostics = await isolated("diagnostics.maintenance", async () => {
       const { runDiagnosticsMaintenance } = await import("@/server/diagnostics/service");
       return runDiagnosticsMaintenance(deps.organizationId);
     });
 
-    const completed = completeCronSummary(summary, [reminders, pauseWarnings, recordings, diagnostics], cronStartedAt, Date.now());
+    const completed = completeCronSummary(summary, [reminders, pauseWarnings, recordings, mobilePush, diagnostics], cronStartedAt, Date.now());
     console.info(JSON.stringify(cronRuntimeObservation(completed)));
     await Promise.all([
       finishCronMonitor(monitor, completed.executionStatus),
@@ -143,4 +144,23 @@ async function runPauseEndingWarningMaterialisation(organizationId: string): Pro
     console.error("Pause ending notification materialization failed:", error);
     return { job, status: "failed", detail: {}, error: message };
   }
+}
+
+/** The overdue-callback push starts only this early in a run (120 s limit). */
+const MOBILE_PUSH_LATEST_START_MS = 75_000;
+
+/** Overdue callbacks to the dispatchers' phones. Off unless MOBILE_PUSH_ENABLED;
+ * each callback deadline is announced once, so a repeated tick sends nothing. */
+async function runMobilePushMaterialisation(organizationId: string, cronStartedAt: number): Promise<TelephonyCronJobResult> {
+  const job = "notifications.mobile-push";
+  const { mobilePushEnabled } = await import("@/server/mobile/push");
+  if (!mobilePushEnabled()) return { job, status: "disabled", detail: { reason: "push_disabled" } };
+  // Late in a slow run the next tick announces the same callbacks; the run must end in time.
+  if (Date.now() - cronStartedAt > MOBILE_PUSH_LATEST_START_MS) return { job, status: "skipped", detail: { reason: "cron_budget" } };
+  const { createSupabaseAdminClient } = await import("@/lib/supabase/admin");
+  const { runMobileCallbackPush, runMobilePushUpkeep } = await import("@/server/mobile/push-events");
+  const admin = createSupabaseAdminClient();
+  const result = await runMobileCallbackPush(admin, organizationId, new Date());
+  const upkeep = await runMobilePushUpkeep(admin, organizationId, new Date());
+  return { job, status: result.status, detail: { ...result.detail, ...(upkeep ? { upkeep } : {}) } };
 }

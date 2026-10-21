@@ -23,11 +23,17 @@ import { fetchAppStatus } from "./src/lib/app-status";
 import { createErrorReporter, installGlobalErrorReporting, keepError } from "./src/lib/error-reporting";
 import { AppErrorBoundary, ErrorReporterContext } from "./src/ui/error-boundary";
 import { UpdateRequired } from "./src/ui/update-required";
+import { createPushApi } from "./src/notifications/api";
+import { createPushDevice, installPushTaps } from "./src/notifications/device";
+import { PushSettings } from "./src/notifications/settings";
+import { pushTaps } from "./src/notifications/taps";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
 
 export default function App() {
   const [generation, setGeneration] = useState(0);
+  // Before any sign-in: a tap that started the app waits for its workspace.
+  useEffect(() => installPushTaps(pushTaps), []);
   const [setup] = useState(() => {
     try { return { config: readMobileConfig() }; } catch { return { config: null }; }
   });
@@ -217,6 +223,15 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), refetchInterval: active ? 30_000 : false });
   const identity = usableMobileIdentity(me.data, me.error);
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
+  const push = useMemo(() => new PushSettings(createPushDevice(config.environment, userId), createPushApi(config, async () => {
+    if (liveUser() !== userId) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
+    const { data } = await client.auth.getSession();
+    return liveUser() === userId && data.session?.user.id === userId ? data.session.access_token : null;
+  })), [config, client, userId, liveUser]);
+  useEffect(() => () => push.dispose(), [push]);
+  // A phone switched on earlier refreshes its registration quietly at start and on return.
+  const verifiedProfile = identity?.profileId ?? null;
+  useEffect(() => { if (active && verifiedProfile) void push.resume(); }, [active, verifiedProfile, push]);
   const callbackSummary = useQuery({ queryKey: [...key, "callback-summary", identity?.profileId], enabled: active && Boolean(identity),
     queryFn: ({ signal }) => api.callbackSummary(identity!.profileId, signal), refetchInterval: active ? 30_000 : false });
   const dialBlocked = dialBlockedReason(phone, phoneState, "Zavolať späť z mobilu bude možné v natívnej aplikácii s pripojeným telefónom. V tomto náhľade môžete požiadavky prevziať a uzavrieť.");
@@ -238,6 +253,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
         const beforeDisconnect = phone?.snapshot();
         if (beforeDisconnect?.call || beforeDisconnect?.termination) { setLogoutError("Pred odhlásením ukončite hovor. Koncepty zostali zachované."); throw new Error("Active call prevents logout"); }
         await phone?.disconnect();
+        // Notices for this account stop reaching the phone; the choice stays for the next sign-in.
+        await push.forget();
       });
     } finally { preparingLogout.current = false; setLogoutBusy(false); }
   }
@@ -259,7 +276,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
       <DispatchShell key={identity.profileId} config={config} client={client} api={api} active={active} userId={userId} liveUser={liveUser}
         identity={identity} queryKey={key} meError={me.isError ? me.error : null} onRetryMe={() => { void me.refetch(); }}
         phone={phone} phoneState={phoneState} callbackSummary={callbackSummary} dialer={dialer}
-        logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} />
+        logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} push={push} />
     </PhoneOverlayProvider>
   </View>;
 }
