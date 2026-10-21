@@ -63,9 +63,21 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
 - **Moje úlohy:** všetky vlastné otvorené úlohy, výber úloh na kontrolu,
   aj dokončené, vyhľadávanie podľa názvu a prechod na prípad.
 - **Účet** (avatar vpravo hore alebo Moduly → Účet a koncepty): meno, e-mail,
-  rola, prostredie, verzia a build aplikácie, odkazy Ochrana súkromia a Podpora
-  (verejné stránky `/aplikacia/sukromie` a `/aplikacia/podpora`), úprava lišty,
-  miestne koncepty a odhlásenie.
+  rola, notifikácie, prostredie, verzia a build aplikácie, odkazy Ochrana súkromia
+  a Podpora (verejné stránky `/aplikacia/sukromie` a `/aplikacia/podpora`), úprava
+  lišty, miestne koncepty a odhlásenie.
+- **Notifikácie:** Účet → Zapnúť notifikácie; systém sa opýta až po ťuknutí.
+  Potom prepínače Úlohy, Termíny úloh, Prípady, Moje spätné volania a Spätné
+  volania bez dispečera. Ťuk na notifikáciu otvorí úlohu, prípad alebo Spätné
+  volania (aj po štarte aplikácie, ale iba v účte, ktorému patrí). Server posiela
+  cez službu Expo (`/api/mobile/v1/push/register`, `/unregister`), iba keď má
+  projekt `MOBILE_PUSH_ENABLED=true` a databáza tabuľku
+  `motorist_mobile_push_devices`; inak Účet ukáže, že prostredie notifikácie ešte
+  nemá. Voliteľný `EXPO_ACCESS_TOKEN`, ak má projekt Expo zapnuté zabezpečené
+  posielanie. Spätné volania po termíne posiela existujúci cron raz na každý termín.
+  Text nikdy neobsahuje mená, čísla ani názov úlohy. Odhlásenie telefón odregistruje
+  a voľbu si pamätá pre ďalšie prihlásenie. V Expo Go funguje na iPhone, na
+  Androide nie.
 - **Vydanie:** názov Dispatching, ikona a úvodná obrazovka (`assets/`, TEST a DEV
   s pásom), manifest súkromia pre iOS. Pri štarte sa aplikácia bez prihlásenia
   opýta `/api/mobile/v1/app-status` (najviac 2,5 s, potom pokračuje); ak je jej

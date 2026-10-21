@@ -7,6 +7,7 @@ const materializeDueTaskReminders = vi.fn(async () => ({ materialized: 0, skippe
 const materializeDuePauseEndingNotifications = vi.fn(async () => ({ checked: 0, delivered: 0 }));
 const runRecordingProcessing = vi.fn();
 const runDiagnosticsMaintenance = vi.fn();
+const runMobileCallbackPush = vi.fn(async () => ({ status: "ok", detail: { overdue: 0, sent: 0, failed: 0 } }));
 const monitorRun = { marker: "existing-monitor" };
 const startCronMonitor = vi.fn(async () => monitorRun);
 const finishCronMonitor = vi.fn(async () => {});
@@ -16,6 +17,7 @@ let jobControl: { enabled: boolean } | null = { enabled: true };
 
 vi.mock("@/server/telephony/recording-processing", () => ({ runRecordingProcessing: (...args: unknown[]) => runRecordingProcessing(...args) }));
 vi.mock("@/server/diagnostics/service", () => ({ runDiagnosticsMaintenance: (...args: unknown[]) => runDiagnosticsMaintenance(...args) }));
+vi.mock("@/server/mobile/push-events", () => ({ runMobileCallbackPush: (...args: unknown[]) => runMobileCallbackPush(...(args as [])) }));
 vi.mock("@/server/diagnostics/cron-monitor", () => ({
   startCronMonitor: (...args: unknown[]) => startCronMonitor(...(args as [])),
   finishCronMonitor: (...args: unknown[]) => finishCronMonitor(...(args as [])),
@@ -91,6 +93,7 @@ describe("GET /api/telephony/cron", () => {
     materializeDuePauseEndingNotifications.mockClear().mockResolvedValue({ checked: 0, delivered: 0 });
     runRecordingProcessing.mockReset().mockResolvedValue({ job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } });
     runDiagnosticsMaintenance.mockReset().mockResolvedValue({ job: "diagnostics.maintenance", status: "disabled", detail: {} });
+    runMobileCallbackPush.mockClear();
     jobControl = { enabled: true };
   });
 
@@ -130,11 +133,12 @@ describe("GET /api/telephony/cron", () => {
     expect(body).toMatchObject({
       ...SUMMARY,
       checkedAt: expect.any(String), ms: expect.any(Number), executionStatus: "ok", telephonyHealth: "ok", failedJobs: [],
-      jobs: [...SUMMARY.jobs, { job: "notifications.materialize", status: "ok", detail: { materialized: 0, skipped: 0 } }, { job: "notifications.pause-ending", status: "ok", detail: { checked: 0, delivered: 0 } }, { job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } }, { job: "diagnostics.maintenance", status: "disabled", detail: {} }],
+      jobs: [...SUMMARY.jobs, { job: "notifications.materialize", status: "ok", detail: { materialized: 0, skipped: 0 } }, { job: "notifications.pause-ending", status: "ok", detail: { checked: 0, delivered: 0 } }, { job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } }, { job: "notifications.mobile-push", status: "disabled", detail: { reason: "push_disabled" } }, { job: "diagnostics.maintenance", status: "disabled", detail: {} }],
     });
-    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 4);
+    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 5);
+    expect(runMobileCallbackPush).not.toHaveBeenCalled();
     // The tail jobs are timed too, so the budget split is visible in the response.
-    for (const job of body.jobs.slice(-4)) expect(job).toMatchObject({ ms: expect.any(Number), startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
+    for (const job of body.jobs.slice(-5)) expect(job).toMatchObject({ ms: expect.any(Number), startedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
     expect(createTelephonyDeps).toHaveBeenCalledWith({ sweepAfterEvent: false });
     expect(runTelephonyCronJobs).toHaveBeenCalledWith({ marker: "deps", organizationId: "org-1", admin: heartbeatAdmin, onJobError: expect.any(Function) }, { cronStartedAt: expect.any(Number) });
     expect(materializeDueTaskReminders).toHaveBeenCalledTimes(1);
@@ -167,10 +171,24 @@ describe("GET /api/telephony/cron", () => {
     const body = await response.json();
     expect(body.status).toBe("degraded");
     expect(body.jobs.find((job: {job: string}) => job.job === "notifications.materialize")).toMatchObject({ job: "notifications.materialize", status: "failed", error: "reminders down" });
-    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 4);
+    expect(body.jobs).toHaveLength(SUMMARY.jobs.length + 5);
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "degraded");
     expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "auxiliary_degraded");
     consoleError.mockRestore();
+  });
+
+  it("alerts phones about overdue callbacks only where push is switched on, as an auxiliary job", async () => {
+    vi.stubEnv("MOBILE_PUSH_ENABLED", "true");
+    runMobileCallbackPush.mockResolvedValueOnce({ status: "ok", detail: { overdue: 2, sent: 3, failed: 0 } });
+    const ran = await (await GET(cronRequest(SECRET))).json();
+    expect(ran.jobs.find((job: {job: string}) => job.job === "notifications.mobile-push")).toMatchObject({ status: "ok", detail: { overdue: 2, sent: 3, failed: 0 } });
+    expect(runMobileCallbackPush).toHaveBeenCalledWith(expect.anything(), "org-1", expect.any(Date));
+
+    runMobileCallbackPush.mockRejectedValueOnce(new Error("push down"));
+    const failed = await (await GET(cronRequest(SECRET))).json();
+    expect(failed.jobs.find((job: {job: string}) => job.job === "notifications.mobile-push")).toMatchObject({ status: "failed", error: "push down" });
+    expect(failed.readinessStatus).toBe("auxiliary_degraded");
+    expect(failed.auxiliaryFailedJobs).toEqual(["notifications.mobile-push"]);
   });
 
   it("degrades the tick when pause warning materialization fails", async () => {

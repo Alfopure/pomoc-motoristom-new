@@ -42,6 +42,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "towing/reports": { class: "session", note: "Towing report capability; bounded UTC performance, invoice and receipt periods." },
   "towing/auth/forgot-password": { class: "public", note: "Same-origin, throttled non-enumerating recovery for existing towing accounts only." },
   "mobile/v1/me": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "mobile/v1/push/register": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "This installation's Expo push token and per-type switches for the signed-in operator; off unless MOBILE_PUSH_ENABLED." },
+  "mobile/v1/push/unregister": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Removes this installation of the signed-in operator from push delivery." },
   "mobile/v1/diagnostics/errors": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Masked app error report; one structured runtime log line, no database write." },
   "mobile/v1/drafts/scope": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Private verified organization scope for account-bound device drafts and expected-organization fencing." },
   "mobile/v1/tasks": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Bounded current-actor assigned or reviewer task overview; no arbitrary actor selection." },

@@ -10,6 +10,7 @@ import { compareCaseRevisions } from "@/data/case-detail";
 import type { MotoristActor } from "@/server/api-auth";
 import { MutationError } from "@/server/mutation-error";
 import { readMobileJsonBody } from "./body";
+import { pushCaseAssigned } from "./push-events";
 
 type Client = SupabaseClient<Database>;
 type Context = Omit<MobileCaseOwnerContext, "ok" | "apiVersion" | "environment" | "profileId" | "checkedAt">;
@@ -100,5 +101,6 @@ export async function assignMobileCaseOwner(actor: MotoristActor, caseId: string
     || data.organizationId !== actor.organizationId || data.actorId !== actor.profileId || data.caseId !== caseId
     || data.mutationId !== input.mutationId || data.ownerId !== input.ownerId || !isHistoryTimestamp(data.committedRevision)
     || compareCaseRevisions(data.committedRevision, input.expectedUpdatedAt) < 0) throw unconfirmed();
+  pushCaseAssigned(client, { organizationId: actor.organizationId, caseId, ownerId: input.ownerId, actorProfileId: actor.profileId, committedRevision: data.committedRevision });
   return { caseId, mutationId: input.mutationId, ownerId: input.ownerId, committedRevision: data.committedRevision, refreshRequired: true };
 }

@@ -5,6 +5,7 @@ import { buildNotificationDedupeKey, buildTaskNotificationText, notificationKind
 import type { CaseTask } from "@/domain/types";
 import type { Database } from "@/lib/supabase/database.types";
 import { buildAppUrl, escapeHtml, sendEmail } from "./email-delivery";
+import { pushTaskAssigned, pushTaskDue } from "./mobile/push-events";
 import { sendTaskPush } from "./web-push";
 import { humansOnly } from "@/server/profile-kind";
 
@@ -75,6 +76,8 @@ export async function deliverTaskAssignmentNotifications(supabase: AdminClient, 
         notificationId: job.notificationId, taskId: job.taskId, title: job.title, body: job.body });
       success = delivery.failed === 0;
     } catch { /* The durable lease is completed as retryable below. */ }
+    // The phone app gets its own notice once; a retried lease finds it claimed.
+    pushTaskAssigned(supabase, { organizationId, notificationId: job.notificationId, taskId: job.taskId, recipientProfileId: job.recipientProfileId });
     const finished = await supabase.rpc("motorist_finish_task_assignment", { p_organization_id: organizationId,
       p_notification_id: job.notificationId, p_lease_id: job.leaseId, p_success: success });
     throwOnSupabaseError(finished);
@@ -291,6 +294,10 @@ async function createNotificationForReminder(input: {
   await sendTaskPush(input.supabase, {
     organizationId: input.organizationId, recipientProfileId: input.recipientProfile!.id,
     notificationId: notificationResult.data.id, taskId: input.task.id, title: text.title, body: text.body,
+  });
+  pushTaskDue(input.supabase, {
+    organizationId: input.organizationId, notificationId: notificationResult.data.id, taskId: input.task.id,
+    recipientProfileId: input.recipientProfile!.id, caseNumber: input.caseRow?.case_number ?? null, dueAt: input.task.due_at, now: input.now,
   });
   return { ok: true };
 }

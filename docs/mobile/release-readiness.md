@@ -71,9 +71,9 @@ schválení Apple je osobitne v [iPhone TEST postupe](iphone-voice-test.md).
 ### Dôležité pre pohodlné používanie
 
 8. **Push notifikácie** (nová úloha, spätné volanie po termíne, priradený
-   prípad). Dnes sa upozornenia ukážu iba v otvorenej aplikácii. Treba
-   registráciu zariadení, odosielanie zo servera cez APNs a nastavenie v Účte;
-   ukladanie tokenov vyžaduje migráciu.
+   prípad) sú v kóde hotové (F3). Na TEST čakajú na tabuľku zariadení
+   (migrácia `20261020210000_mobile_push_devices.sql`) a prepínač
+   `MOBILE_PUSH_ENABLED`; produkcia ich zapne až so svojím vydaním.
 9. **Hlásenie pádov** (napr. Sentry pre React Native), aby sme o chybe
    vedeli skôr než od používateľa.
 10. **Aktualizácie:** natívny build dnes nepreberá OTA aktualizácie, každá
@@ -170,9 +170,9 @@ Slovensko.
 | Ikona a spúšťacia obrazovka (z existujúcej značky) | vývoj, schválenie majiteľ | chýba |
 | Vydanie servera s mobilným API na produkciu | vývoj, schválenie majiteľ | čaká |
 | Produkčné migrácie (zoznam v časti 3) | vývoj, schválenie majiteľ | čaká |
-| Demo organizácia s vymyslenými údajmi na produkcii | vývoj, schválenie majiteľ | chýba |
+| Účet pre kontrolu Apple v organizácii majiteľa (rozhodnutie 20. 10. 2026) | majiteľ | pred odoslaním |
 | Telnyx a APNs pre produkčný hlas | vývoj, schválenie majiteľ | po TEST akceptácii |
-| Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | chýba |
+| Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | hotové; push čaká na migráciu a prepínač na TEST |
 | Texty do App Store, poznámky pre review, snímky | vývoj, schválenie majiteľ | chýba |
 
 ## 6. Poradie
@@ -197,7 +197,7 @@ Slovensko.
 **Ostrá prevádzka**
 
 1. Vydanie servera a schválené migrácie na produkciu.
-2. Demo organizácia, produkčný build, snímky, metadáta, review.
+2. Účet pre kontrolu Apple, produkčný build, snímky, metadáta, review.
 3. Žiadosť o nezaradenú distribúciu, odkaz pre dispečerov.
 4. Po prijatí hovorov na TEST ich povolenie pre produkciu ako samostatné vydanie.
 
@@ -228,12 +228,20 @@ príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
 - **Zastaviť nahrávanie** – zákazníkom sľubujeme, že na požiadanie ho
   dispečer zastaví; bez toho mobil nemôže ostro prijímať zákaznícke hovory.
 
-**F3 – Push notifikácie**
+**F3 – Push notifikácie** (v kóde hotové 21. 10. 2026; na TEST čaká migrácia a prepínač)
 - Nová úloha pre mňa, vrátená alebo na kontrolu; termín úlohy.
 - Spätné volanie po termíne (moje prevzaté, nepridelené).
 - Prípad priradený mne.
 - Text bez údajov zákazníka; ťuk otvorí správnu obrazovku.
 - Zapínanie podľa druhu v Účte.
+- Doručenie cez službu Expo (pod ňou Apple APNs); každý príjemca dostane
+  udalosť raz (záznam v archivovaných upozorneniach), odinštalovaná aplikácia
+  sa vyradí, telefón nepoužitý 30 dní sa vynechá. Spätné volania po termíne
+  posiela existujúci päťminútový cron ako pomocnú úlohu (bez nového workera).
+- Zapnutie v prostredí: tabuľka `motorist_mobile_push_devices` (migrácia
+  `20261020210000_mobile_push_devices.sql`, schválená iba pre TEST) a
+  `MOBILE_PUSH_ENABLED=true` v projekte Vercel; bez nich server nič neposiela
+  a Účet to povie.
 
 **F4 – Pripravenosť na vydanie** (v aplikácii hotové okrem produkčnej cesty hlasu;
 podklady pre App Store v `docs/mobile/app-store.md`)
@@ -268,7 +276,7 @@ Android vydanie.
 1. Upratanie vydania: súpis 51 PR, kontrola produkčnej databázy čítaním,
    schválené migrácie, jedno pripravené vydanie na produkciu.
 2. V deň licencie: App ID, push, APNs, TEST build na iPhony, akceptácia hovorov.
-3. Ostrá prevádzka: demo účet, produkčný build, review, nezaradená distribúcia.
+3. Ostrá prevádzka: účet pre kontrolu Apple, produkčný build, review, nezaradená distribúcia.
 
 ## Zdroje
 
