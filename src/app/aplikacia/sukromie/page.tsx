@@ -28,7 +28,7 @@ export default function AppPrivacyPage() {
         </ul>
       </Section>
       <Section id="permissions" title="Oprávnenia telefónu">
-        <p><strong>Notifikácie</strong> aplikácia povolí až po ťuknutí na Zapnúť notifikácie v Účte. Vypnúť sa dajú v Účte alebo v nastaveniach telefónu; pri odhlásení sa telefón z notifikácií účtu odhlási.</p>
+        <p>O povolenie <strong>notifikácií</strong> aplikácia požiada až po ťuknutí na Zapnúť notifikácie v Účte. Vypnúť sa dajú v Účte alebo v nastaveniach telefónu; pri odhlásení sa telefón z notifikácií účtu odhlási.</p>
         <p><strong>Mikrofón</strong> aplikácia používa iba počas telefonovania. <strong>Fotoaparát a fotografie</strong> iba vtedy, keď dispečer pridáva prílohu k prípadu, a len vybraný súbor. <strong>Polohu</strong> iba na pokyn dispečera pri výbere miesta zásahu, nikdy nie na pozadí.</p>
         <p>Prihlásenie a rozpísané koncepty sú v zabezpečenom úložisku telefónu. Koncept tam ostane, kým ho dispečer neodošle alebo nezahodí.</p>
       </Section>

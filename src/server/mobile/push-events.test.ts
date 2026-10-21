@@ -132,7 +132,13 @@ describe("overdue callbacks", () => {
       callback("00000000-0000-4000-8000-0000000000e6", { due_at: "2026-10-20T20:00:00.000Z" }),
       callback("00000000-0000-4000-8000-0000000000e7", { due_at: "2026-10-21T09:40:00.000Z", status: "done" }),
     ]);
-    await expect(runMobileCallbackPush(fake.admin, ORG, NOW, transport)).resolves.toEqual({ status: "ok", detail: { overdue: 3, sent: 3, failed: 0 } });
+    await expect(runMobileCallbackPush(fake.admin, ORG, NOW, transport)).resolves.toEqual({ status: "ok", detail: { overdue: 3, announced: 3, sent: 3, failed: 0 } });
+    // One archived row per callback deadline, not per person.
+    expect(fake.db.storage("motorist_notifications").map(row => row.dedupe_key).sort()).toEqual([
+      "mobile-push:callback-overdue:00000000-0000-4000-8000-0000000000e1:" + Date.parse("2026-10-21T09:50:00.000Z"),
+      "mobile-push:callback-overdue:00000000-0000-4000-8000-0000000000e2:" + Date.parse("2026-10-21T09:50:00.000Z"),
+      "mobile-push:callback-overdue:00000000-0000-4000-8000-0000000000e3:" + Date.parse("2026-10-21T09:55:00.000Z"),
+    ].sort());
     expect(sent.map(item => [item.to, item.title, item.body]).sort()).toEqual([
       [token("mine"), "Spätné volania bez dispečera", "2 požiadavky na spätné volanie sú po termíne a nikto ich neprevzal."],
       [token("mine"), "Spätné volanie po termíne", "Vaše prevzaté spätné volanie čaká na zavolanie."],
@@ -157,10 +163,24 @@ describe("overdue callbacks", () => {
   it("respects the switches and does nothing where push is off", async () => {
     fake.db.seed("motorist_callback_requests", [callback("00000000-0000-4000-8000-0000000000e2", { created_at: "2026-10-21T09:20:00.000Z" })]);
     for (const row of fake.db.storage("motorist_mobile_push_devices")) row.preferences = { callbacks_unclaimed: false };
-    await expect(runMobileCallbackPush(fake.admin, ORG, NOW, transport)).resolves.toEqual({ status: "ok", detail: { overdue: 1, sent: 0, failed: 0 } });
+    await expect(runMobileCallbackPush(fake.admin, ORG, NOW, transport)).resolves.toEqual({ status: "ok", detail: { overdue: 1, announced: 0, sent: 0, failed: 0 } });
     expect(transport).not.toHaveBeenCalled();
+    // Switched on later within the window, the same callback is still announced.
+    for (const row of fake.db.storage("motorist_mobile_push_devices")) row.preferences = {};
+    await expect(runMobileCallbackPush(fake.admin, ORG, NOW, transport)).resolves.toMatchObject({ detail: { announced: 1, sent: 2 } });
     vi.stubEnv("MOBILE_PUSH_ENABLED", "");
     await expect(runMobileCallbackPush(fake.admin, ORG, NOW, transport)).resolves.toEqual({ status: "disabled", detail: { reason: "push_disabled" } });
+  });
+
+  it("tries again on the next pass when the push service reached nobody", async () => {
+    fake.db.seed("motorist_callback_requests", [callback("00000000-0000-4000-8000-0000000000e1", { claimed_by: ME, due_at: "2026-10-21T09:50:00.000Z" })]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const down = vi.fn(async () => new Response("down", { status: 502 }));
+    await expect(runMobileCallbackPush(fake.admin, ORG, NOW, down)).resolves.toMatchObject({ detail: { announced: 1, sent: 0, failed: 1 } });
+    expect(fake.db.storage("motorist_notifications")).toEqual([]);
+    await expect(runMobileCallbackPush(fake.admin, ORG, new Date(NOW.getTime() + 5 * 60_000), transport)).resolves.toMatchObject({ detail: { announced: 1, sent: 1 } });
+    expect(sent.map(item => item.title)).toEqual(["Spätné volanie po termíne"]);
+    warn.mockRestore();
   });
 
   it("fails the job when the callbacks cannot be read", async () => {

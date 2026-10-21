@@ -76,8 +76,9 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   nemá. Voliteľný `EXPO_ACCESS_TOKEN`, ak má projekt Expo zapnuté zabezpečené
   posielanie. Spätné volania po termíne posiela existujúci cron raz na každý termín.
   Text nikdy neobsahuje mená, čísla ani názov úlohy. Odhlásenie telefón odregistruje
-  a voľbu si pamätá pre ďalšie prihlásenie. V Expo Go funguje na iPhone, na
-  Androide nie.
+  a voľbu aj prepínače si telefón pamätá pre ďalšie prihlásenie toho istého účtu;
+  registráciu, ktorú odhlásenie nestihlo zrušiť, zruší ďalšie prihlásenie na tom
+  telefóne. V Expo Go funguje na iPhone, na Androide nie.
 - **Vydanie:** názov Dispatching, ikona a úvodná obrazovka (`assets/`, TEST a DEV
   s pásom), manifest súkromia pre iOS. Pri štarte sa aplikácia bez prihlásenia
   opýta `/api/mobile/v1/app-status` (najviac 2,5 s, potom pokračuje); ak je jej

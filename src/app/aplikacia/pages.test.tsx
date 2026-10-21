@@ -8,7 +8,7 @@ describe("public pages of the app", () => {
     const html = renderToStaticMarkup(<AppPrivacyPage />);
     for (const text of ["ALFOPURE s.r.o., IČO 11698055", "MICT, s. r. o., IČO 53 167 422", "mailto:info@alfopure.tech", "/ochrana-hovorov", "nikdy nie na pozadí",
       "Supabase Auth", "<strong>Google</strong>", "Registre vozidiel", "stkonline.sk", "skp.sk", "NHTSA", "EČV a VIN sa v ňom maskujú",
-      "Expo – 650 Industries, Inc., USA", "Apple Push Notification service", "neobsahuje mená, telefónne čísla, EČV ani názov úlohy", "až po ťuknutí na Zapnúť notifikácie"]) expect(html).toContain(text);
+      "Expo – 650 Industries, Inc., USA", "Apple Push Notification service", "neobsahuje mená, telefónne čísla, EČV ani názov úlohy", "požiada až po ťuknutí na Zapnúť notifikácie"]) expect(html).toContain(text);
   });
   it("tells a dispatcher where to get help without customer data", () => {
     const html = renderToStaticMarkup(<AppSupportPage />);

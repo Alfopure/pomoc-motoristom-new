@@ -4,7 +4,7 @@ import { formatDue } from "@/domain/notifications";
 import type { Database } from "@/lib/supabase/database.types";
 import { callbackDeadline, CALLBACK_OVERDUE_MINUTES } from "@/lib/telephony/callback-queue";
 import { isUuid } from "@/lib/telephony/uuid";
-import { claimPushes, deliverPushNotices, isClaimed, mobilePushEnabled, pushRecipients, queueMobilePush, sendMobilePush, type PushClaim, type PushDevice, type PushNotice, type PushTransport } from "./push";
+import { claimedEvents, claimPushes, deliverPushNotices, mobilePushEnabled, pruneMobilePush, pushRecipients, queueMobilePush, releaseClaims, sendMobilePush, type PushClaim, type PushDevice, type PushNotice, type PushTransport } from "./push";
 
 /** The events that reach a dispatcher's phone. Each text names at most a case
  * number and a time; titles of tasks, names and phone numbers stay in the app. */
@@ -91,13 +91,14 @@ export function callbackPushText(type: "callbacks_mine" | "callbacks_unclaimed",
     : { title: "Spätné volania bez dispečera", body: count + (few(count) ? " požiadavky na spätné volanie sú" : " požiadaviek na spätné volanie je") + " po termíne a nikto ich neprevzal." };
 }
 
-/** How far back a newly overdue callback is still announced; older ones are the
- * queue's business, not a fresh alert. */
-const CALLBACK_LOOKBACK_MS = 6 * 3_600_000;
+/** How far back a newly overdue callback is still announced, e.g. after an outage of
+ * the push service; older ones are the queue's business, not a fresh alert. */
+const CALLBACK_LOOKBACK_MS = 2 * 3_600_000;
 
 /** Cron step: an open callback past its deadline alerts whoever took it, or every
  * dispatcher with the app when nobody did. One message per person and kind per
- * pass; each callback deadline is announced once. */
+ * pass; each callback deadline is announced once (one archived row per callback),
+ * and again on the next pass only if the push service reached nobody. */
 export async function runMobileCallbackPush(admin: Admin, organizationId: string, now = new Date(), transport: PushTransport = fetch) {
   if (!mobilePushEnabled()) return { status: "disabled" as const, detail: { reason: "push_disabled" } };
   const since = now.getTime() - CALLBACK_LOOKBACK_MS, legacy = CALLBACK_OVERDUE_MINUTES * 60_000;
@@ -114,31 +115,45 @@ export async function runMobileCallbackPush(admin: Admin, organizationId: string
     const deadline = callbackDeadline({ dueAt: row.due_at, createdAt: row.created_at });
     return deadline === null || deadline > now.getTime() ? [] : [{ id: row.id, claimedBy: row.claimed_by, key: "callback-overdue:" + row.id + ":" + deadline }];
   });
-  const detail = { overdue: overdue.length, sent: 0, failed: 0 };
+  const detail = { overdue: overdue.length, announced: 0, sent: 0, failed: 0 };
   if (!overdue.length) return { status: "ok" as const, detail };
+  // Most passes find only callbacks announced earlier: one read, nothing written.
+  const known = await claimedEvents(admin, organizationId, overdue.map(item => item.key));
+  const pending = overdue.filter(item => !known.has(item.key));
+  if (!pending.length) return { status: "ok" as const, detail };
 
-  const mine = overdue.filter(item => item.claimedBy), unclaimed = overdue.filter(item => !item.claimedBy);
+  const mine = pending.filter(item => item.claimedBy), unclaimed = pending.filter(item => !item.claimedBy);
   const none = new Map<string, PushDevice[]>();
   const [owners, team] = await Promise.all([
     mine.length ? pushRecipients(admin, organizationId, "callbacks_mine", mine.map(item => item.claimedBy!), now) : none,
     unclaimed.length ? pushRecipients(admin, organizationId, "callbacks_unclaimed", "team", now) : none,
   ]);
-  const claims: PushClaim[] = [];
-  for (const item of mine) if (owners.has(item.claimedBy!)) claims.push({ profileId: item.claimedBy!, key: item.key, type: "callbacks_mine", ...callbackPushText("callbacks_mine", 1) });
-  for (const profileId of team.keys()) for (const item of unclaimed) claims.push({ profileId, key: item.key, type: "callbacks_unclaimed", ...callbackPushText("callbacks_unclaimed", 1) });
+  // Nobody to tell yet: the callback stays unannounced, so someone who switches on later still hears of it.
+  const firstOfTeam = [...team.keys()][0];
+  const claims: PushClaim[] = [
+    ...mine.filter(item => owners.has(item.claimedBy!)).map(item => ({ profileId: item.claimedBy!, key: item.key, type: "callbacks_mine" as const, ...callbackPushText("callbacks_mine", 1) })),
+    ...firstOfTeam ? unclaimed.map(item => ({ profileId: firstOfTeam, key: item.key, type: "callbacks_unclaimed" as const, ...callbackPushText("callbacks_unclaimed", 1) })) : [],
+  ];
   const fresh = await claimPushes(admin, organizationId, claims, now);
-
-  const counts = new Map<string, number>();
-  for (const claim of claims) if (isClaimed(fresh, claim)) counts.set(claim.type + "|" + claim.profileId, (counts.get(claim.type + "|" + claim.profileId) ?? 0) + 1);
+  const announced = claims.filter(claim => fresh.has(claim.key));
+  detail.announced = announced.length;
+  const mineCount = new Map<string, number>();
+  for (const claim of announced) if (claim.type === "callbacks_mine") mineCount.set(claim.profileId, (mineCount.get(claim.profileId) ?? 0) + 1);
+  const teamCount = announced.filter(claim => claim.type === "callbacks_unclaimed").length;
   const notices: PushNotice[] = [];
-  for (const [group, count] of counts) {
-    const [type, profileId] = group.split("|") as ["callbacks_mine" | "callbacks_unclaimed", string];
-    const devices = (type === "callbacks_mine" ? owners : team).get(profileId) ?? [];
-    notices.push(...devices.map(device => ({ device, ...callbackPushText(type, count), data: { kind: "callbacks" as const } })));
-  }
-  const delivered = await deliverPushNotices(admin, notices, transport);
-  detail.sent = delivered.sent;
-  detail.failed = delivered.failed;
-  if (delivered.failed) console.warn(JSON.stringify({ event: "mobile.push", type: "callbacks", sent: delivered.sent, failed: delivered.failed }));
+  for (const [profileId, count] of mineCount) notices.push(...(owners.get(profileId) ?? []).map(device => ({ device, ...callbackPushText("callbacks_mine", count), data: { kind: "callbacks" as const } })));
+  if (teamCount) for (const devices of team.values()) notices.push(...devices.map(device => ({ device, ...callbackPushText("callbacks_unclaimed", teamCount), data: { kind: "callbacks" as const } })));
+  const outcomes = await deliverPushNotices(admin, notices, transport);
+  detail.sent = outcomes.filter(outcome => outcome === "sent").length;
+  detail.failed = outcomes.filter(outcome => outcome === "failed").length;
+  // The push service reached nobody: the next pass tries the same callbacks again.
+  if (detail.failed && !detail.sent) await releaseClaims(admin, organizationId, announced.map(claim => claim.key));
+  if (detail.failed) console.warn(JSON.stringify({ event: "mobile.push", type: "callbacks", sent: detail.sent, failed: detail.failed }));
   return { status: "ok" as const, detail };
+}
+
+/** Cron step, once an hour: forgets silent phones and old announcements. */
+export async function runMobilePushUpkeep(admin: Admin, organizationId: string, now = new Date()) {
+  if (now.getUTCMinutes() >= 5) return null;
+  return pruneMobilePush(admin, organizationId, now);
 }

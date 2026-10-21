@@ -3,8 +3,9 @@ import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import Constants, { ExecutionEnvironment } from "expo-constants";
 import { randomUUID } from "expo-crypto";
-import type { MobileEnvironment } from "../../../src/lib/mobile-api";
+import type { MobileEnvironment, MobilePushPreferences } from "../../../src/lib/mobile-api";
 import { appVersion } from "../lib/app-version";
+import { PUSH_TYPES } from "./api";
 import type { PushDevice, PushPermission } from "./settings";
 import type { PushTapInbox } from "./taps";
 
@@ -15,7 +16,13 @@ const status = (value: { status?: string }): PushPermission => value.status === 
 /** This phone: system permission, the Expo push token, a stable installation
  * identifier and the operator's choice, kept in the keychain per account. */
 export function createPushDevice(environment: MobileEnvironment, userId: string): PushDevice {
-  const choice = "pm-push-v1." + environment + "." + userId;
+  const choice = "pm-push-v1." + environment + "." + userId, switches = "pm-push-prefs-v1." + environment + "." + userId;
+  const registeredKey = "pm-push-registered-v1." + environment;
+  const read = (key: string) => { try { return SecureStore.getItem(key); } catch { return null; } };
+  const write = (key: string, value: string | null) => {
+    try { if (value === null) void SecureStore.deleteItemAsync(key).catch(() => undefined); else SecureStore.setItem(key, value, stored); }
+    catch { /* Asked again or cleaned up next time. */ }
+  };
   return {
     platform: Platform.OS === "android" ? "android" : "ios",
     appVersion: appVersion().version,
@@ -38,11 +45,20 @@ export function createPushDevice(environment: MobileEnvironment, userId: string)
       SecureStore.setItem(INSTALLATION, created, stored);
       return created;
     },
-    remembered: () => { try { return SecureStore.getItem(choice) === "1"; } catch { return false; } },
-    remember: on => {
-      try { if (on) SecureStore.setItem(choice, "1", stored); else void SecureStore.deleteItemAsync(choice).catch(() => undefined); }
-      catch { /* The choice is asked again next time. */ }
+    remembered: () => read(choice) === "1",
+    remember: on => write(choice, on ? "1" : null),
+    savedPreferences: () => {
+      try {
+        const value = JSON.parse(read(switches) ?? "null") as Record<string, unknown> | null;
+        if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+        // Only the kinds this app knows, each on or off.
+        const known = PUSH_TYPES.filter(type => typeof value[type] === "boolean");
+        return known.length ? Object.fromEntries(known.map(type => [type, value[type]])) as Partial<MobilePushPreferences> : null;
+      } catch { return null; }
     },
+    savePreferences: value => write(switches, JSON.stringify(value)),
+    registered: () => read(registeredKey) === "1",
+    markRegistered: on => write(registeredKey, on ? "1" : null),
   };
 }
 

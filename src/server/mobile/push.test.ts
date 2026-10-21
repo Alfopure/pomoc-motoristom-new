@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeSupabase, type FakeSupabase } from "@/test/fake-supabase";
 import type { MotoristActor } from "@/server/api-auth";
-import { claimPushes, defaultPushPreferences, mobilePushEnabled, pushRecipients, queueMobilePush, readPushRegistration, registerMobilePush, sendMobilePush, unregisterMobilePush } from "./push";
+import { claimPushes, defaultPushPreferences, mobilePushEnabled, pruneMobilePush, pushRecipients, queueMobilePush, readPushRegistration, registerMobilePush, sendMobilePush, unregisterMobilePush } from "./push";
 
 const queued: (() => Promise<unknown>)[] = [];
 vi.mock("next/server", () => ({ after: (work: () => Promise<unknown>) => { queued.push(work); } }));
@@ -43,19 +43,27 @@ function device(profileId: string, installation: string, pushToken: string, pref
 }
 
 describe("push registration", () => {
-  it("is off unless the project switches it on", () => {
+  it("is off unless the project switches it on, and never on a working-branch Preview", () => {
     expect(mobilePushEnabled({})).toBe(false);
     expect(mobilePushEnabled({ MOBILE_PUSH_ENABLED: "1" })).toBe(false);
     expect(mobilePushEnabled({ MOBILE_PUSH_ENABLED: "true" })).toBe(true);
+    const stableTest = { MOBILE_PUSH_ENABLED: "true", MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev", VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",
+      APP_BASE_URL: "https://test.dispecing.linkapomoci.sk", SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co" };
+    expect(mobilePushEnabled(stableTest)).toBe(true);
+    expect(mobilePushEnabled({ ...stableTest, VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: "feature" })).toBe(false);
+    expect(mobilePushEnabled({ ...stableTest, VERCEL_PROJECT_ID: "prj_other" })).toBe(false);
+    expect(mobilePushEnabled({ MOBILE_PUSH_ENABLED: "true", MOTORIST_APP_ENV: "production", VERCEL_ENV: "production", SUPABASE_URL: "https://ifpaeegaesdmljfkdvcn.supabase.co" })).toBe(true);
   });
 
   it("accepts only an installation, an Expo token and known switches", () => {
     const valid = { installationId: PHONE.toUpperCase(), token: token("abc"), platform: "ios", appVersion: "1.0.0", preferences: { cases: false } };
     expect(readPushRegistration(valid)).toEqual({ installationId: PHONE, token: token("abc"), platform: "ios", appVersion: "1.0.0", preferences: { cases: false } });
     for (const value of [null, [], { ...valid, extra: 1 }, { ...valid, installationId: "phone" }, { ...valid, token: "abc" }, { ...valid, token: "ExpoPushToken[a b]" },
-      { ...valid, platform: "web" }, { ...valid, appVersion: "x".repeat(41) }, { ...valid, preferences: { sms: true } }, { ...valid, preferences: { cases: "no" } }, { ...valid, preferences: [] }]) {
+      { ...valid, platform: "web" }, { ...valid, appVersion: "x".repeat(41) }, { ...valid, preferences: { cases: "no" } }, { ...valid, preferences: [] }]) {
       expect(() => readPushRegistration(value)).toThrow();
     }
+    // A switch of a newer app does not break an older server.
+    expect(readPushRegistration({ ...valid, preferences: { cases: false, sms: true } }).preferences).toEqual({ cases: false });
   });
 
   it("refuses to register where push is not switched on or the table is missing", async () => {
@@ -90,11 +98,11 @@ describe("push registration", () => {
     expect(devices().map(row => row.installation_id)).toEqual([PHONE]);
   });
 
-  it("forgets only the operator's own phone at logout", async () => {
-    fake.db.seed("motorist_mobile_push_devices", [device(ME, PHONE, token("mine")), device(COLLEAGUE, "00000000-0000-4000-8000-0000000000f2", token("theirs"))]);
-    await expect(unregisterMobilePush(fake.admin, actor, { installationId: "00000000-0000-4000-8000-0000000000f2" })).resolves.toEqual({ removed: false });
+  it("forgets this phone at logout, also when an earlier account left it registered", async () => {
+    fake.db.seed("motorist_mobile_push_devices", [device(COLLEAGUE, PHONE, token("earlier")), device(COLLEAGUE, "00000000-0000-4000-8000-0000000000f2", token("theirs"))]);
     await expect(unregisterMobilePush(fake.admin, actor, { installationId: PHONE })).resolves.toEqual({ removed: true });
-    expect(devices().map(row => row.profile_id)).toEqual([COLLEAGUE]);
+    await expect(unregisterMobilePush(fake.admin, actor, { installationId: PHONE })).resolves.toEqual({ removed: false });
+    expect(devices().map(row => row.installation_id)).toEqual(["00000000-0000-4000-8000-0000000000f2"]);
     await expect(unregisterMobilePush(fake.admin, actor, { installationId: PHONE, token: "x" })).rejects.toMatchObject({ status: 400 });
     fake.db.failNext("motorist_mobile_push_devices", "delete", { message: "missing", code: "42P01", details: null, hint: null });
     await expect(unregisterMobilePush(fake.admin, actor, { installationId: PHONE })).resolves.toEqual({ removed: false });
@@ -132,11 +140,25 @@ describe("push delivery", () => {
     vi.stubEnv("MOBILE_PUSH_ENABLED", "true");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const broken = vi.fn(async () => { throw new Error("network down"); });
-    await expect(sendMobilePush(fake.admin, { ...message, profileIds: [ME] }, broken)).resolves.toEqual({ sent: 0, skipped: 0, failed: 1 });
+    await expect(sendMobilePush(fake.admin, { ...message, profileIds: [ME] }, broken, 0)).resolves.toEqual({ sent: 0, skipped: 0, failed: 1 });
+    expect(broken).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledOnce();
     expect(String(warn.mock.calls[0][0])).not.toContain(token("mine"));
     warn.mockRestore();
     expect(transport).not.toHaveBeenCalled();
+    // Nobody was reached, so the same event may be sent again later.
+    expect(fake.db.storage("motorist_notifications")).toEqual([]);
+    const later = expoOk(1);
+    await expect(sendMobilePush(fake.admin, { ...message, profileIds: [ME] }, later, 0)).resolves.toEqual({ sent: 1, skipped: 0, failed: 0 });
+  });
+
+  it("retries a passing failure of the push service once", async () => {
+    fake.db.seed("motorist_mobile_push_devices", [device(ME, PHONE, token("mine"))]);
+    const ok = expoOk(1);
+    const flaky = vi.fn(async (url: string, init: RequestInit) => flaky.mock.calls.length === 1 ? new Response("busy", { status: 503 }) : ok(url, init));
+    await expect(sendMobilePush(fake.admin, { ...message, profileIds: [ME] }, flaky, 0)).resolves.toEqual({ sent: 1, skipped: 0, failed: 0 });
+    expect(flaky).toHaveBeenCalledTimes(2);
+    expect(fake.db.storage("motorist_notifications")).toHaveLength(1);
   });
 
   it("forgets a phone whose app was removed and uses the access token when configured", async () => {
@@ -144,7 +166,7 @@ describe("push delivery", () => {
     fake.db.seed("motorist_mobile_push_devices", [device(ME, PHONE, token("gone")), device(ME, "00000000-0000-4000-8000-0000000000f2", token("kept"))]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const transport = expoOk(2, { 0: "DeviceNotRegistered" });
-    await expect(sendMobilePush(fake.admin, { ...message, profileIds: [ME] }, transport)).resolves.toEqual({ sent: 1, skipped: 0, failed: 1 });
+    await expect(sendMobilePush(fake.admin, { ...message, profileIds: [ME] }, transport, 0)).resolves.toEqual({ sent: 1, skipped: 0, failed: 0 });
     expect(new Headers(transport.mock.calls[0][1].headers).get("authorization")).toBe("Bearer expo-secret");
     expect(devices().map(row => row.expo_push_token)).toEqual([token("kept")]);
     warn.mockRestore();
@@ -155,6 +177,18 @@ describe("push delivery", () => {
     await expect(pushRecipients(fake.admin, ORG, "tasks", [ME], NOW)).resolves.toEqual(new Map());
     fake.db.failNext("motorist_mobile_push_devices", "select", { message: "missing", code: "42P01", details: null, hint: null });
     await expect(pushRecipients(fake.admin, ORG, "tasks", "team", NOW)).resolves.toEqual(new Map());
+  });
+
+  it("forgets phones silent for 90 days and announcements older than 30 days", async () => {
+    fake.db.seed("motorist_mobile_push_devices", [device(ME, PHONE, token("recent"), {}, "2026-08-01T10:00:00.000Z"), device(COLLEAGUE, "00000000-0000-4000-8000-0000000000f2", token("silent"), {}, "2026-07-01T10:00:00.000Z")]);
+    fake.db.seed("motorist_notifications", [
+      { organization_id: ORG, recipient_profile_id: ME, kind: "system", status: "archived", dedupe_key: "mobile-push:old", created_at: "2026-09-01T10:00:00.000Z" },
+      { organization_id: ORG, recipient_profile_id: ME, kind: "system", status: "archived", dedupe_key: "mobile-push:new", created_at: "2026-10-20T10:00:00.000Z" },
+      { organization_id: ORG, recipient_profile_id: ME, kind: "system", status: "archived", dedupe_key: "call-push:old", created_at: "2026-09-01T10:00:00.000Z" },
+    ]);
+    await expect(pruneMobilePush(fake.admin, ORG, NOW)).resolves.toEqual({ devices: 1, claims: 1 });
+    expect(devices().map(row => row.expo_push_token)).toEqual([token("recent")]);
+    expect(fake.db.storage("motorist_notifications").map(row => row.dedupe_key)).toEqual(["mobile-push:new", "call-push:old"]);
   });
 
   it("finds the whole team for a team notice", async () => {

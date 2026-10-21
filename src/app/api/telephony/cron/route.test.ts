@@ -17,7 +17,7 @@ let jobControl: { enabled: boolean } | null = { enabled: true };
 
 vi.mock("@/server/telephony/recording-processing", () => ({ runRecordingProcessing: (...args: unknown[]) => runRecordingProcessing(...args) }));
 vi.mock("@/server/diagnostics/service", () => ({ runDiagnosticsMaintenance: (...args: unknown[]) => runDiagnosticsMaintenance(...args) }));
-vi.mock("@/server/mobile/push-events", () => ({ runMobileCallbackPush: (...args: unknown[]) => runMobileCallbackPush(...(args as [])) }));
+vi.mock("@/server/mobile/push-events", () => ({ runMobileCallbackPush: (...args: unknown[]) => runMobileCallbackPush(...(args as [])), runMobilePushUpkeep: async () => null }));
 vi.mock("@/server/diagnostics/cron-monitor", () => ({
   startCronMonitor: (...args: unknown[]) => startCronMonitor(...(args as [])),
   finishCronMonitor: (...args: unknown[]) => finishCronMonitor(...(args as [])),

@@ -49,6 +49,8 @@ export async function createTaskAssignmentNotification(
     organizationId: string;
     caseId: string | null;
     task: Pick<CaseTaskRow, "id" | "assigned_to" | "created_at" | "due_at" | "kind" | "priority" | "status" | "title" | "updated_at">;
+    /** Who assigned it; nobody's phone announces their own assignment. */
+    actorProfileId?: string | null;
   },
 ) {
   if (!input.task.assigned_to || input.task.status === "done") return null;
@@ -56,14 +58,14 @@ export async function createTaskAssignmentNotification(
   // adapter repairs/reuses that event, never inserts a timestamp-keyed duplicate.
   const result = await supabase.rpc("motorist_ensure_task_assignment", { p_organization_id: input.organizationId, p_task_id: input.task.id });
   throwOnSupabaseError(result);
-  await deliverTaskAssignmentNotifications(supabase, input.organizationId, input.task.id);
+  await deliverTaskAssignmentNotifications(supabase, input.organizationId, input.task.id, input.actorProfileId ?? null);
   return result.data;
 }
 
 /** Durable assignment outbox; also drained by the existing reminder cron/poll.
  * External delivery is at least once after an ambiguous crash, with the stable
  * notification ID used as the browser tag. Bell insertion itself is exactly once. */
-export async function deliverTaskAssignmentNotifications(supabase: AdminClient, organizationId: string, taskId?: string) {
+export async function deliverTaskAssignmentNotifications(supabase: AdminClient, organizationId: string, taskId?: string, actorProfileId: string | null = null) {
   const claimed = await supabase.rpc("motorist_claim_task_assignments", { p_organization_id: organizationId, p_task_id: taskId ?? null, p_limit: 50 });
   throwOnSupabaseError(claimed);
   const jobs = claimed.data as unknown as Array<{ notificationId: string; taskId: string; recipientProfileId: string; leaseId: string; title: string; body: string }>;
@@ -77,7 +79,10 @@ export async function deliverTaskAssignmentNotifications(supabase: AdminClient, 
       success = delivery.failed === 0;
     } catch { /* The durable lease is completed as retryable below. */ }
     // The phone app gets its own notice once; a retried lease finds it claimed.
-    pushTaskAssigned(supabase, { organizationId, notificationId: job.notificationId, taskId: job.taskId, recipientProfileId: job.recipientProfileId });
+    // Taking a task for oneself is no news to one's own phone.
+    if (job.recipientProfileId !== actorProfileId) {
+      pushTaskAssigned(supabase, { organizationId, notificationId: job.notificationId, taskId: job.taskId, recipientProfileId: job.recipientProfileId });
+    }
     const finished = await supabase.rpc("motorist_finish_task_assignment", { p_organization_id: organizationId,
       p_notification_id: job.notificationId, p_lease_id: job.leaseId, p_success: success });
     throwOnSupabaseError(finished);

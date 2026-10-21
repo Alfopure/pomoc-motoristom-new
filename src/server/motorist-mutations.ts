@@ -377,7 +377,7 @@ export async function runCaseAction(caseId: string, input: CaseActionInput, acto
       createdBy: actorId,
       channels: normalizeTaskReminderChannels(input.taskReminderChannels),
     });
-    await createTaskAssignmentNotification(supabase, { organizationId, caseId, task });
+    await createTaskAssignmentNotification(supabase, { organizationId, caseId, task, actorProfileId: actorId });
     await insertSingle<CaseEventRow>(
       supabase
         .from("motorist_case_events")
@@ -491,7 +491,7 @@ export async function runCaseAction(caseId: string, input: CaseActionInput, acto
         channels: normalizeTaskReminderChannels(previousChannels ?? undefined),
       });
       if (assignedToChanged && updatedTask.assigned_to) {
-        await createTaskAssignmentNotification(supabase, { organizationId, caseId, task: updatedTask });
+        await createTaskAssignmentNotification(supabase, { organizationId, caseId, task: updatedTask, actorProfileId: actorId });
       }
     }
 

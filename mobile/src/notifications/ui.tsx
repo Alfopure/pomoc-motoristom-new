@@ -25,18 +25,18 @@ export function NotificationSettings({ settings }: { settings: PushSettings }) {
     <SectionHeader title="Notifikácie" />
     {view.status === "on" && view.preferences ? <Group>
       {SWITCHES.map((item, index) => <SwitchRow key={item.type} first={index === 0} title={item.title} subtitle={item.subtitle}
-        value={view.preferences![item.type]} disabled={view.saving !== null} onChange={on => { void settings.set(item.type, on); }} />)}
-      <Row title="Vypnúť na tomto telefóne" tone="link" disabled={view.saving !== null} onPress={() => { void settings.disable(); }} />
+        value={view.preferences![item.type]} disabled={view.busy} onChange={on => { void settings.set(item.type, on); }} />)}
+      <Row title="Vypnúť na tomto telefóne" tone="link" disabled={view.busy} onPress={() => { void settings.disable(); }} />
     </Group> : view.status !== "unsupported" && <Group>
       {view.status === "working" ? <Row first title="Nastavujem notifikácie…" disabled />
         : view.status === "denied" ? <>
           <Row first title="Otvoriť nastavenia telefónu" tone="link" onPress={openSettings} />
-          <Row title="Skúsiť znova" subtitle="Po povolení v nastaveniach" tone="link" onPress={() => { void settings.enable(); }} />
+          <Row title="Skúsiť znova" subtitle="Po povolení v nastaveniach" tone="link" disabled={view.busy} onPress={() => { void settings.enable(); }} />
         </> : <Row first title={view.status === "off" ? "Zapnúť notifikácie" : "Skúsiť znova"} subtitle={view.status === "off" ? "Úlohy, prípady a spätné volania aj pri zamknutom telefóne" : null}
-          tone="link" onPress={() => { void settings.enable(); }} />}
+          tone="link" disabled={view.busy} onPress={() => { void settings.enable(); }} />}
     </Group>}
     {informational && view.message ? <Text style={s.note}>{view.message}</Text>
-      : <Text style={s.note}>Notifikácie neobsahujú mená ani telefónne čísla, nanajvýš číslo prípadu.</Text>}
+      : <Text style={s.note}>Nastavenie platí pre tento telefón. Notifikácie neobsahujú mená ani telefónne čísla, nanajvýš číslo prípadu.</Text>}
     {(view.message && !informational || settingsError) && <View style={formLayout.notices}>
       {view.message && !informational && <ErrorNotice message={view.message} />}
       {settingsError && <ErrorNotice message="Nastavenia telefónu sa nepodarilo otvoriť." />}

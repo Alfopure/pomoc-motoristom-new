@@ -45,8 +45,9 @@ export function createPushApi(config: MobileConfig, getToken: () => Promise<stri
       const preferences = (await post("register", body, 12_000)).preferences;
       if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) throw contractError();
       const switches = preferences as Record<string, unknown>;
-      if (Object.keys(switches).length !== PUSH_TYPES.length || PUSH_TYPES.some(type => typeof switches[type] !== "boolean")) throw contractError();
-      return switches as MobilePushPreferences;
+      // A newer server may add kinds; this app shows the ones it knows.
+      if (PUSH_TYPES.some(type => typeof switches[type] !== "boolean")) throw contractError();
+      return Object.fromEntries(PUSH_TYPES.map(type => [type, switches[type]])) as MobilePushPreferences;
     },
     // At logout the phone must not wait long for a server that is away.
     unregister: async installationId => { await post("unregister", { installationId }, 4_000); },
