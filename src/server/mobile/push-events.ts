@@ -36,13 +36,18 @@ export function pushTaskAssigned(admin: Admin, job: { organizationId: string; no
   });
 }
 
+/** A reminder sent this long after the deadline says the deadline has passed. The
+ * default reminder fires at the deadline and the cron runs every five minutes, so a
+ * few minutes late is still "má termín". */
+const LATE_REMINDER_MS = 60 * 60_000;
+
 /** A saved due-date reminder of a task. */
 export function pushTaskDue(admin: Admin, reminder: { organizationId: string; notificationId: string; taskId: string; recipientProfileId: string; caseNumber: string | null; dueAt: string | null; now: Date }) {
-  const overdue = reminder.dueAt !== null && Date.parse(reminder.dueAt) <= reminder.now.getTime();
+  const late = reminder.dueAt !== null && reminder.now.getTime() - Date.parse(reminder.dueAt) > LATE_REMINDER_MS;
   queueMobilePush(() => sendMobilePush(admin, {
     organizationId: reminder.organizationId, profileIds: [reminder.recipientProfileId], type: "task_due",
-    title: overdue ? "Úloha po termíne" : "Pripomienka úlohy",
-    body: "Úloha" + forCase(reminder.caseNumber) + (reminder.dueAt ? overdue ? " je po termíne." : " má termín " + formatDue(reminder.dueAt) + "." : " čaká na vybavenie."),
+    title: !reminder.dueAt ? "Pripomienka úlohy" : late ? "Úloha po termíne" : "Termín úlohy",
+    body: "Úloha" + forCase(reminder.caseNumber) + (reminder.dueAt ? (late ? " mala termín " : " má termín ") + formatDue(reminder.dueAt) + "." : " čaká na vybavenie."),
     data: { kind: "task", id: reminder.taskId }, dedupeKey: "task-due:" + reminder.notificationId,
   }));
 }

@@ -76,13 +76,17 @@ describe("task and case events", () => {
     expect(sent).toEqual([]);
   });
 
-  it("reminds of a due or overdue task", async () => {
+  it("reminds of a task's deadline, also when the cron comes a few minutes after it", async () => {
     pushTaskDue(fake.admin, { organizationId: ORG, notificationId: "r1", taskId: TASK, recipientProfileId: ME, caseNumber: "PM-2026-0042", dueAt: "2026-10-21T12:30:00.000Z", now: NOW });
-    pushTaskDue(fake.admin, { organizationId: ORG, notificationId: "r2", taskId: TASK, recipientProfileId: ME, caseNumber: null, dueAt: "2026-10-21T09:00:00.000Z", now: NOW });
+    pushTaskDue(fake.admin, { organizationId: ORG, notificationId: "r2", taskId: TASK, recipientProfileId: ME, caseNumber: null, dueAt: "2026-10-21T09:56:00.000Z", now: NOW });
+    pushTaskDue(fake.admin, { organizationId: ORG, notificationId: "r3", taskId: TASK, recipientProfileId: ME, caseNumber: null, dueAt: "2026-10-21T08:00:00.000Z", now: NOW });
+    pushTaskDue(fake.admin, { organizationId: ORG, notificationId: "r4", taskId: TASK, recipientProfileId: ME, caseNumber: "PM-2026-0042", dueAt: null, now: NOW });
     await drain();
     expect(sent.map(item => [item.title, item.body])).toEqual([
-      ["Pripomienka úlohy", "Úloha k prípadu PM-2026-0042 má termín 21. 10. 14:30."],
-      ["Úloha po termíne", "Úloha je po termíne."],
+      ["Termín úlohy", "Úloha k prípadu PM-2026-0042 má termín 21. 10. 14:30."],
+      ["Termín úlohy", "Úloha má termín 21. 10. 11:56."],
+      ["Úloha po termíne", "Úloha mala termín 21. 10. 10:00."],
+      ["Pripomienka úlohy", "Úloha k prípadu PM-2026-0042 čaká na vybavenie."],
     ]);
   });
 
