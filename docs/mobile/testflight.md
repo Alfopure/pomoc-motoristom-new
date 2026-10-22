@@ -14,11 +14,13 @@ Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 | Distribučný certifikát a App Store profil (push v režime production, platné do 22. 10. 2027) | pripravené mimo Gitu |
 | Tímový App Store Connect API kľúč | pripravený mimo Gitu |
 | EAS build a submit profil `testflight` | `mobile/eas.json` |
-| APNs kľúč pre bežné notifikácie cez Expo | chýba |
-| VoIP Services certifikát a TEST Telnyx push credential | chýba |
+| APNs kľúč pre bežné notifikácie cez Expo (`QHWZM8VN44`, production, iba téma TEST aplikácie) | nahratý v Expo |
+| VoIP Services certifikát `35S4MJY4Z3` (do 21. 11. 2027) a TEST Telnyx iOS push credential | pripojené na TEST credential connection |
+| Prepínače `MOTORIST_NATIVE_VOICE_TEST_ENABLED` a `MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED` | zapnuté iba v dedikovanom TEST projekte (cieľ Production) |
+| Prvý TestFlight build | 0.1.0 (17) z `dev` `03389c58` |
 
-Build ani nahratie od APNs kľúča a VoIP certifikátu nezávisia; oba sa dajú
-doplniť neskôr bez nového buildu.
+APNs kľúč, Telnyx push credential a prepínače sú mimo buildu; menia sa bez
+nového buildu. Fyzicky na iPhone zatiaľ nič overené nie je (pozri Akceptácia).
 
 ## Build
 
@@ -61,12 +63,13 @@ EXPO_ASC_API_KEY_PATH=… EXPO_ASC_KEY_ID=… EXPO_ASC_ISSUER_ID=… EXPO_APPLE_
 
 ## Po inštalácii
 
-- **Notifikácie:** APNs kľúč (.p8 a Key ID) nahrať do Expo pre
-  `sk.linkapomoci.dispecing.test`. TEST server ich posiela už teraz
-  (`MOBILE_PUSH_ENABLED`), ale bez kľúča ich Expo do iPhonu nedoručí.
-- **Telefonovanie:** VoIP Services certifikát, TEST Telnyx iOS push credential
-  a prepínače v dedikovanom TEST projekte podľa
-  [iPhone TEST postupu](iphone-voice-test.md#zapojenie-po-schválení-apple).
+- **Notifikácie:** TEST server ich posiela (`MOBILE_PUSH_ENABLED`) cez Expo,
+  ktoré má APNs kľúč TEST aplikácie. Po prvom spustení aplikácia požiada
+  o povolenie notifikácií; druhy sa zapínajú v Účte.
+- **Telefonovanie:** v module Hovory pripojiť telefón (povolenie mikrofónu).
+  Zvonenie pri zamknutom telefóne ide cez Telnyx VoIP push (certifikát
+  `35S4MJY4Z3`, push credential na TEST spojení). Vypnutie a rollback sú
+  v [iPhone TEST postupe](iphone-voice-test.md#rollback-a-hranice).
 - **Akceptácia:** [hovory](iphone-voice-test.md#akceptácia-na-fyzickom-iphone)
   a pristavovač: prijatie, povolenie polohy „Vždy“, poloha na pozadí a pri
   zamknutom telefóne (modrý ukazovateľ), u dispečera „pred X min“, zastavenie

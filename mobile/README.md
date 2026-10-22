@@ -302,8 +302,9 @@ bundle ID a explicitný voice profil. Produkčný variant ho nemôže aktivovať
 Server vyžaduje presnú identitu dedikovaného TEST deploymentu a
 `MOTORIST_NATIVE_VOICE_TEST_ENABLED=true`; Preview ani produkcia mobilný
 pilot nespustia. APNs routing má ďalší samostatný prepínač
-`MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED=true`. **Oba zostávajú vypnuté**, kým
-sa neoverí podpis a provider konfigurácia. JWT auth platí aj pri vypnutej
+`MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED=true`. Oba sú od 22. 10. 2026 zapnuté
+iba v dedikovanom TEST projekte pre TestFlight pilot (podpis a Telnyx push
+credential sú nastavené, fyzické overenie ostáva). JWT auth platí aj pri vypnutej
 funkcii. Cleanup aktuálnej vlastnej TEST relácie ostáva možný po jej vypnutí;
 produkčné alebo cudzie zdroje sa neovládajú.
 
