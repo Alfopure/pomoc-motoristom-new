@@ -198,11 +198,11 @@ API `/api/mobile/v1/*` musí byť nasadené na kanonickom TEST.
 | Variant / EAS profil | Aplikácia | API | Supabase |
 | --- | --- | --- | --- |
 | development | `sk.linkapomoci.dispecing.dev` | `https://test.dispecing.linkapomoci.sk` | `nzpnqdstvkfncflgqlny` |
-| test / test-simulator | `sk.linkapomoci.dispecing.test` | rovnaký TEST | rovnaký TEST |
+| test / test-simulator / voice-test / testflight | `sk.linkapomoci.dispecing.test` | rovnaký TEST | rovnaký TEST |
 | production | `sk.linkapomoci.dispecing` | `https://dispecing.linkapomoci.sk` | `ifpaeegaesdmljfkdvcn` |
 
-Bundle/package IDs sú návrh pre túto aplikáciu; nie sú registrované u Apple
-ani v Google Play. Variant bez konfigurácie používa development. Produkcia
+TEST bundle ID je od 22. 10. 2026 registrované u Apple (MICT s. r. o., tím
+`792TJPXTL3`); produkčné bundle ID ani Google Play zatiaľ nie. Variant bez konfigurácie používa development. Produkcia
 vyžaduje výslovne production variant aj kompletnú production konfiguráciu.
 URL, projekt a prostredie musia zodpovedať tabuľke; nemajú fallback ani prepínač.
 Mobil posiela `X-PM-App-Environment` a overuje prostredie, verziu aj profil
@@ -271,6 +271,8 @@ Profil `voice-proof-simulator` kompiluje Swift TelnyxRTC 4.2.2 a jeho WebRTC
 hovor. Cloudová kompilácia nepreukazuje štart, audio, CallKit UI ani push.
 Profil `voice-test` je pre podpísaný fyzický iPhone po schválení Apple,
 registrácii TEST App ID/zariadenia a nastavení príslušného APNs VoIP certifikátu.
+Profil `testflight` je ten istý TEST build pre interný TestFlight (App Store
+podpis, bez registrácie zariadení); postup je v [TestFlight](../docs/mobile/testflight.md).
 
 ```sh
 npx eas-cli@24.12.1 build --platform ios --profile voice-proof-simulator
@@ -278,6 +280,7 @@ npx eas-cli@24.12.1 build --platform ios --profile voice-proof-simulator
 npx eas-cli@24.12.1 build --platform ios --profile voice-smoke-simulator --non-interactive
 # Až s Apple podpisom:
 npx eas-cli@24.12.1 build --platform ios --profile voice-test
+npx eas-cli@24.12.1 build --platform ios --profile testflight --non-interactive
 ```
 
 Natívny `ExpoAppDelegateSubscriber` spustí CallKit/PushKit pred JS. Každý

@@ -35,6 +35,13 @@ __pycache__/
 # misc
 .DS_Store
 *.pem
+# Apple signing (EAS local credentials, App Store Connect and APNs keys) stays outside Git.
+credentials.json
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+*.certSigningRequest
 .context/
 .omc/
 supabase/.temp/
