@@ -311,8 +311,9 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   30 dňoch (pomocná úloha existujúceho cronu, aj pri vypnutom prepínači).
 - Po skončení, zrušení alebo vypršaní pristavenia telefón nedostane údaje
   klienta ani polohu auta; po dni pristavenie zo zoznamu zmizne a nedá sa otvoriť.
-- V časti Komu sú iba pristavovači, ktorí sa môžu prihlásiť do aplikácie
-  pristavovača (bez dispečerského profilu a so zapnutým prístupom).
+- V časti Komu sú iba pristavovači, ktorí sa môžu prihlásiť do aplikácie:
+  zapnutý prístup s rolou Pristavovač v aktívnej organizácii; kto má aj
+  dispečerský profil, musí ho mať aktívny (vidí potom oba moduly).
 - Staršia verzia servera s touto migráciou funguje ďalej (údaje odovzdania sa
   pre ňu nemenia), nová verzia bez migrácie výber pristavovača neukáže.
 - Zapnutie v prostredí: migrácie `20261022100000_mobile_delivery_handoffs.sql`
