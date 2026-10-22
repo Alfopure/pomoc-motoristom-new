@@ -195,7 +195,7 @@ export async function authorizeNativeOffer(deps: TelephonyRuntimeDeps, actor: Mo
   query = controlId ? query.eq("telnyx_call_control_id", controlId) : query.eq("telnyx_call_leg_id", legId!);
   const { data: found, error } = await query.maybeSingle();
   if (error) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
-  const leg = found ?? (legId ? await deviceSideLeg(deps, actor, device.sip_username, legId) : null);
+  const leg = found ?? (legId ? await deliveredLeg(deps, actor, device.sip_username) : null);
   // The SDK invite can arrive before the provider dial response is persisted.
   // A bounded client retry still has to pass every ownership check below.
   if (!leg) throw new NativeOfferPendingError("Ponuka hovoru sa ešte overuje.", 409);
@@ -244,32 +244,35 @@ export async function authorizeNativeOffer(deps: TelephonyRuntimeDeps, actor: Mo
 }
 
 /**
- * The SDK INVITE names the device side of the provider call. Telnyx bridges the dialed operator
- * leg into the credential connection as a second leg of the same call session, so the SDK never
- * sees the dialed leg's ID. Its signed `call.initiated` (same organization, this deployment's
- * credential connection, addressed to this SIP user) leads to the one open operator leg of that
- * provider session for this phone; anything else stays unresolved.
+ * The iOS SDK reports Telnyx's internal WebRTC leg, which no webhook names. On TEST
+ * (22. 10. 2026) one call had the dialed leg 24ff4664…, the credential-connection leg 2530a204…
+ * and the SDK leg 2530ad30…. An offer with an unknown leg therefore resolves to the one fresh,
+ * unanswered operator leg dialed to this phone, whose provider call Telnyx delivered to this SIP
+ * user on this deployment's credential connection (signed `call.initiated`). None or two
+ * candidates stay unresolved, and the app still pairs an outgoing offer with its own dial.
  */
-async function deviceSideLeg(deps: TelephonyRuntimeDeps, actor: MotoristActor, sipUsername: string | null, legId: string): Promise<LegRow | null> {
+const DELIVERED_OFFER_WINDOW_MS = 60_000;
+async function deliveredLeg(deps: TelephonyRuntimeDeps, actor: MotoristActor, sipUsername: string | null): Promise<LegRow | null> {
   const connection = deps.config?.configured ? deps.config.credentialConnectionId : null;
   if (!sipUsername || !connection) return null;
-  const { data: events, error } = await deps.admin.from("motorist_telnyx_webhook_events").select("call_session_id, connection_id, payload")
-    .eq("organization_id", actor.organizationId).eq("call_leg_id", legId).eq("event_type", "call.initiated").limit(5);
+  const since = new Date((deps.now ?? (() => new Date()))().getTime() - DELIVERED_OFFER_WINDOW_MS).toISOString();
+  const { data: legs, error } = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", actor.organizationId)
+    .eq("profile_id", actor.profileId).eq("role", "operator").eq("to_number", telnyxSipUri(sipUsername))
+    .is("ended_at", null).is("answered_at", null).gte("created_at", since).limit(2);
   if (error) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
-  const providerSessions = new Set((events ?? []).filter(event => {
-    const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};
-    return event.call_session_id && event.connection_id === connection && payload.direction === "incoming" && payload.to === sipUsername;
-  }).map(event => event.call_session_id as string));
-  if (providerSessions.size !== 1) return null;
-  const { data: sessions, error: sessionError } = await deps.admin.from("motorist_call_sessions").select("id")
-    .eq("organization_id", actor.organizationId).eq("telnyx_session_id", [...providerSessions][0]).limit(5);
+  if (legs?.length !== 1) return null;
+  const { data: session, error: sessionError } = await deps.admin.from("motorist_call_sessions").select("telnyx_session_id")
+    .eq("organization_id", actor.organizationId).eq("id", legs[0].session_id).maybeSingle();
   if (sessionError) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
-  if (!sessions?.length) return null;
-  const { data: legs, error: legError } = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", actor.organizationId)
-    .in("session_id", sessions.map(row => row.id)).eq("profile_id", actor.profileId).eq("role", "operator")
-    .eq("to_number", telnyxSipUri(sipUsername)).is("ended_at", null).limit(2);
-  if (legError) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
-  return legs?.length === 1 ? legs[0] : null;
+  if (!session?.telnyx_session_id) return null;
+  const { data: events, error: eventError } = await deps.admin.from("motorist_telnyx_webhook_events").select("connection_id, payload")
+    .eq("organization_id", actor.organizationId).eq("call_session_id", session.telnyx_session_id).eq("event_type", "call.initiated").limit(10);
+  if (eventError) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
+  const delivered = (events ?? []).some(event => {
+    const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};
+    return event.connection_id === connection && payload.direction === "incoming" && payload.to === sipUsername;
+  });
+  return delivered ? legs[0] : null;
 }
 
 /** Native hangup controls only the operator's own connected/started session. */
