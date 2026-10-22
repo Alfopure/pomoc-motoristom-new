@@ -173,7 +173,7 @@ Slovensko.
 | Účet pre kontrolu Apple v organizácii majiteľa (rozhodnutie 20. 10. 2026) | majiteľ | pred odoslaním |
 | Telnyx a APNs pre produkčný hlas | vývoj, schválenie majiteľ | po TEST akceptácii |
 | Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | hotové; push čaká na migráciu a prepínač na TEST |
-| Pristavovač v aplikácii (F6) | vývoj, schválenie majiteľa | hotové; čaká na migráciu a prepínač na TEST |
+| Pristavovač v aplikácii (F6) | vývoj, schválenie majiteľa | na TEST; čaká na migráciu na TEST |
 | Texty do App Store, poznámky pre review, snímky | vývoj, schválenie majiteľ | chýba |
 
 ## 6. Poradie
@@ -270,7 +270,7 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   - Telefonovanie z produkčnej aplikácie je vypnuté (natívny hlas funguje len
     pod TEST identifikátorom aplikácie); zapnutie je samostatné rozhodnutie.
 
-**F6 – Pristavovač v aplikácii** (v kóde hotové 22. 10. 2026; na TEST čaká migrácia a prepínač)
+**F6 – Pristavovač v aplikácii** (na TEST od 22. 10. 2026: PR #482; čaká migrácia na TEST)
 - Požiadavka majiteľa z 22. 10. 2026: dispečer odovzdá prípad pristavovačovi
   aj priamo v aplikácii (nielen odkazom v SMS), pristavovač v nej vidí prípad,
   kam ísť a ktoré auto zobrať – popis hore, mapa dole – a dispečer vidí, kde je.
@@ -303,7 +303,8 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   pre ňu nemenia), nová verzia bez migrácie výber pristavovača neukáže.
 - Zapnutie v prostredí: migrácia `20261022100000_mobile_delivery_handoffs.sql`
   (až po migrácii push tabuľky; na TEST čaká na schválenie majiteľa) a
-  `MOBILE_DELIVERY_ENABLED=true` v projekte Vercel; na Preview vetiev vypnuté vždy.
+  `MOBILE_DELIVERY_ENABLED=true` v projekte Vercel (dedikovaný TEST projekt ho má
+  od 22. 10. 2026, iba cieľ Production); na Preview vetiev vypnuté vždy.
 - Známe obmedzenia: pri zamknutom telefóne alebo aplikácii na pozadí sa poloha
   neposiela; mapa ukáže iba miesta so súradnicami; odťahy dostanú obdobnú,
   samostatnú časť neskôr.
