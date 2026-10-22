@@ -416,4 +416,21 @@ describe('quiet re-reading of the handoff screen', () => {
     await sending;
     expect(draft.snapshot().delivered).toEqual({ handoffId: grantId, memberId: '77777777-7777-4777-8777-777777777777' });
   });
+  it('never discards a send to the app or a link started during a quiet read', async () => {
+    const member = '77777777-7777-4777-8777-777777777777';
+    const { api, draft } = setup({ ...withGrant(), delivery: { members: [{ id: member, displayName: 'MOCK', lastPhone: null }] } });
+    await draft.refresh();
+    const reading = deferred<ReturnType<typeof withGrant>>(), answer = deferred<Awaited<ReturnType<HandoffApi['command']>>>();
+    api.context.mockImplementationOnce(() => reading.promise);
+    api.command.mockImplementationOnce(() => answer.promise);
+    const quiet = draft.refresh(true);
+    const sending = draft.deliver(grantId, member);
+    // The quiet read ends while the send is still on its way.
+    reading.resolve({ ...withGrant(), delivery: { members: [{ id: member, displayName: 'MOCK', lastPhone: null }] } });
+    await quiet;
+    answer.resolve({ ...receipt(), kind: 'delivery', memberId: member, sent: true } as unknown as Awaited<ReturnType<HandoffApi['command']>>);
+    await sending;
+    expect(draft.snapshot().delivered).toEqual({ handoffId: grantId, memberId: member });
+    expect(draft.snapshot().error).toBeNull();
+  });
 });

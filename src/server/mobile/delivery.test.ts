@@ -190,9 +190,13 @@ describe("dispatcher sends to the app", () => {
       .resolves.toEqual({ kind: "delivery", caseId: CASE, handoffId: GRANT, commandId: COMMAND, memberId: MEMBER, sent: true, currentRevision: 1 });
     expect(repeated.rpc).toHaveBeenCalledWith("motorist_case_handoff_app", expect.objectContaining({ p_input: expect.objectContaining({ expectedRevision: 1 }) }));
     expect(mocks.queue).not.toHaveBeenCalled();
-    const taken = session(() => ({ data: null, error: { code: "PT409" } }));
+    const taken = session(() => ({ data: null, error: { code: "PT409", message: "Already sent" } }));
     await expect(commandMobileCaseHandoff(taken.session, new Request("https://x"), CASE, { action: "deliver", commandId: COMMAND, handoffId: GRANT, expectedRevision: 1, recipientMemberId: MEMBER }))
       .rejects.toMatchObject({ status: 409, code: "delivery_taken" });
+    // A colleague changed the handoff meanwhile: not "another pristavovač".
+    const changed = session(() => ({ data: null, error: { code: "PT409", message: "Handoff changed" } }));
+    await expect(commandMobileCaseHandoff(changed.session, new Request("https://x"), CASE, { action: "deliver", commandId: COMMAND, handoffId: GRANT, expectedRevision: 1, recipientMemberId: MEMBER }))
+      .rejects.toMatchObject({ status: 409, code: "handoff_changed" });
   });
 
   it("refuses to send where deliveries are off", async () => {

@@ -339,6 +339,16 @@ class DeliveryHandoffContract(unittest.TestCase):
         self.assertNotIn(handoff["id"], ids)
         self.assertNotIn(other["id"], ids)
 
+    def test_16_an_old_expired_delivery_does_not_come_back(self):
+        case, handoff = self.sent("pavol")
+        self.db.execute("update motorist_case_handoffs set expires_at=now()-interval '3 days' where id=%s", (handoff["id"],))
+        # A new handoff on the same case marks the old one expired now; its day still counts from the expiry.
+        self.issue(case)
+        status = self.db.execute("select status,updated_at>now()-interval '1 minute' from motorist_case_handoffs where id=%s", (handoff["id"],)).fetchone()
+        self.assertEqual(status, ("expired", True))
+        self.assertNotIn(handoff["id"], [h["id"] for h in self.member("pavol", "list")["handoffs"]])
+        self.rejected("P0002", lambda: self.member("pavol", "read", {"handoffId": handoff["id"]}))
+
     def test_14_position_only_from_the_pristavovac_who_took_a_step(self):
         case, handoff = self.sent("pavol")
         token = self.db.execute("select token_hash from motorist_case_handoffs where id=%s", (handoff["id"],)).fetchone()[0]

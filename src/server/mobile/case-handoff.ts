@@ -178,8 +178,9 @@ async function deliveryContext(session: HandoffSession, caseId: string): Promise
     return { members: parsed, app };
   } catch { return null; }
 }
-function deliveryError(error: { code?: string }): MutationError {
+function deliveryError(error: { code?: string; message?: string }): MutationError {
   if (missingSchema(error.code)) return deliveryUnavailable();
+  if (error.code === "PT409" && error.message === "Handoff changed") return new MutationError("Odovzdanie sa medzitým zmenilo. Obnovte údaje a skúste to znova.", 409, "handoff_changed");
   if (error.code === "PT409") return new MutationError("Odovzdanie už dostal iný pristavovač.", 409, "delivery_taken");
   if (error.code === "22023") return new MutationError("Vybraný pristavovač nemá aktívny prístup do aplikácie.", 400, "delivery_member_unavailable");
   if (error.code === "P0002") return new MutationError("Odovzdanie už nečaká na prijatie. Obnovte údaje.", 404);

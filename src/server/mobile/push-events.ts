@@ -166,12 +166,14 @@ export async function runMobileCallbackPush(admin: Admin, organizationId: string
  * off, as the privacy policy promises; a database without them is fine. */
 export async function runMobilePushUpkeep(admin: Admin, organizationId: string, now = new Date()) {
   if (now.getUTCMinutes() >= 5) return null;
-  const pushed = mobilePushEnabled() ? await pruneMobilePush(admin, organizationId, now) : null;
-  let positions = 0;
+  // Independent steps: a failing push table must not keep positions past 30 days.
+  let positions = 0, failure: Error | null = null;
   if (canOperateTelephony()) {
     const pruned = await admin.rpc("motorist_handoff_positions_prune");
-    if (pruned.error && !missingSchema(pruned.error.code)) throw new Error("position upkeep unavailable");
-    positions = typeof pruned.data === "number" ? pruned.data : 0;
+    if (pruned.error && !missingSchema(pruned.error.code)) failure = new Error("position upkeep unavailable");
+    else positions = typeof pruned.data === "number" ? pruned.data : 0;
   }
+  const pushed = mobilePushEnabled() ? await pruneMobilePush(admin, organizationId, now) : null;
+  if (failure) throw failure;
   return { ...(pushed ?? { devices: 0, claims: 0 }), positions };
 }

@@ -227,9 +227,10 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   const me = useQuery({ queryKey: [...key, "me"], queryFn: async ({ signal }) => {
     try { return await api.me(signal); }
     catch (error) { if (error instanceof MobileApiError && error.code === "mobile_no_dispatch_profile") return FIELD_ONLY; throw error; }
-  }, refetchInterval: query => !active ? false : query.state.data === FIELD_ONLY ? 300_000 : 30_000 });
+  }, refetchInterval: query => !active ? false : query.state.data && "fieldOnly" in query.state.data ? 300_000 : 30_000 });
   // Signed in without a dispatch profile: a pristavovač, who gets the deliveries instead.
-  const fieldOnly = me.data === FIELD_ONLY;
+  // The query may hold a copy of the marker, so its shape is what counts.
+  const fieldOnly = Boolean(me.data && "fieldOnly" in me.data);
   const identity = usableMobileIdentity(me.data && !("fieldOnly" in me.data) ? me.data : undefined, me.error);
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   const push = useMemo(() => new PushSettings(createPushDevice(config.environment, userId), createPushApi(config, async () => {

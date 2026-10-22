@@ -162,7 +162,11 @@ async function runMobilePushMaterialisation(organizationId: string, cronStartedA
   const { createSupabaseAdminClient } = await import("@/lib/supabase/admin");
   const { runMobileCallbackPush, runMobilePushUpkeep } = await import("@/server/mobile/push-events");
   const admin = createSupabaseAdminClient();
+  // Upkeep and the callback push run independently: neither failure stops the other,
+  // so old positions are deleted even while push fails, and the job still reports it.
+  let upkeep: Awaited<ReturnType<typeof runMobilePushUpkeep>> = null, upkeepError: unknown = null;
+  try { upkeep = await runMobilePushUpkeep(admin, organizationId, new Date()); } catch (error) { upkeepError = error; }
   const result = mobilePushEnabled() ? await runMobileCallbackPush(admin, organizationId, new Date()) : { status: "disabled" as const, detail: { reason: "push_disabled" } };
-  const upkeep = await runMobilePushUpkeep(admin, organizationId, new Date());
+  if (upkeepError) throw upkeepError;
   return { job, status: result.status, detail: { ...result.detail, ...(upkeep ? { upkeep } : {}) } };
 }

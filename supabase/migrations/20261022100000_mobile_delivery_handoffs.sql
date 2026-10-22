@@ -120,7 +120,9 @@ $$;
 revoke all on function app_private.motorist_member_handoff_view(uuid,uuid) from public,anon,authenticated,service_role;
 
 -- 6. The pristavovač's own work: list, read, the same steps as the link, position.
--- A closed delivery stays listed and readable for a day, without customer data.
+-- A closed delivery stays listed and readable for a day, without customer data;
+-- the day counts from expiry for an expired one (marking it expired later, when
+-- the case gets a new handoff, does not bring it back).
 create function public.motorist_member_handoff(p_user_id uuid,p_organization_id uuid,p_membership_version bigint,p_action text,p_input jsonb default '{}')
 returns jsonb language plpgsql security definer set search_path='' as $$
 declare m public.motorist_towing_memberships; h public.motorist_case_handoffs; receipt public.motorist_handoff_receipts;
@@ -134,12 +136,12 @@ begin
   return jsonb_build_object('handoffs',coalesce((select jsonb_agg(app_private.motorist_member_handoff_view(t.id,m.id) order by t.live desc,t.created_at desc)
    from (select x.id,x.created_at,x.status in ('offered','accepted','en_route','arrived') and x.expires_at>clock_timestamp() as live
     from public.motorist_case_handoffs x where x.organization_id=m.organization_id and x.recipient_member_id=m.id
-     and coalesce(case when x.status in ('offered','accepted','en_route','arrived') then x.expires_at end,x.updated_at)>clock_timestamp()-interval '24 hours'
+     and (case when x.status in ('offered','accepted','en_route','arrived','expired') then x.expires_at else x.updated_at end)>clock_timestamp()-interval '24 hours'
     order by live desc,x.created_at desc limit 100) t),'[]'::jsonb));
  end if;
  select * into h from public.motorist_case_handoffs where id=(p_input->>'handoffId')::uuid and organization_id=m.organization_id and recipient_member_id=m.id for update;
  if h.id is null or not exists(select 1 from public.motorist_cases where id=h.case_id and organization_id=h.organization_id)
-  or coalesce(case when h.status in ('offered','accepted','en_route','arrived') then h.expires_at end,h.updated_at)<=clock_timestamp()-interval '24 hours' then
+  or (case when h.status in ('offered','accepted','en_route','arrived','expired') then h.expires_at else h.updated_at end)<=clock_timestamp()-interval '24 hours' then
   raise exception 'Grant unavailable' using errcode='P0002';
  end if;
  if p_action='read' then

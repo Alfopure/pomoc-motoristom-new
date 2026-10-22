@@ -139,7 +139,9 @@ export class HandoffDraft {
       const context = await this.api.context(this.caseId, controller.signal);
       if (this.disposed || read !== this.read)
         return;
-      this.epoch++;
+      // A quiet read must not discard a link or a send to the app started meanwhile.
+      if (!quiet)
+        this.epoch++;
       const cached = this.state.link, grant = context.handoffs.find(h => h.id === cached?.handoffId);
       const link = cached && grant && active(grant) && grant.revision === cached.currentRevision && Date.parse(cached.expiresAt) > Date.now() ? cached : null;
       this.set({
