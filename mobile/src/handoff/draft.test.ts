@@ -304,3 +304,133 @@ describe('schedule input feedback', () => {
     expect(draft.snapshot().error).toContain('RRRR-MM-DD HH:mm');
   });
 });
+
+describe('handoff to a pristavovač in the app', () => {
+  const member = { id: '77777777-7777-4777-8777-777777777777', displayName: 'MOCK Pristavovač', lastPhone: '+421900000002' };
+  const withMembers = (value = context()) => ({ ...value, delivery: { members: [member] } });
+  it('issues to the chosen pristavovač with their phone', async () => {
+    const { api, draft } = setup(withMembers());
+    await draft.refresh();
+    draft.select('issue');
+    draft.edit({ recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: member.lastPhone });
+    api.command.mockResolvedValueOnce({ ...receipt(), delivery: { status: 'sent', memberId: member.id } });
+    await draft.submit();
+    expect(api.command.mock.calls[0][1]).toMatchObject({ action: 'issue', recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: member.lastPhone });
+    expect(draft.snapshot().receipt?.delivery).toEqual({ status: 'sent', memberId: member.id });
+  });
+  it('leaves the member out of a link-only handoff', async () => {
+    const { api, draft } = setup(withMembers());
+    await issue(draft);
+    await draft.submit();
+    expect(api.command.mock.calls[0][1]).not.toHaveProperty('recipientMemberId');
+  });
+  it('refuses a pristavovač the server no longer offers', async () => {
+    const { api, draft } = setup(withMembers());
+    await draft.refresh();
+    draft.select('issue');
+    draft.edit({ recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: member.lastPhone });
+    api.context.mockResolvedValueOnce(context());
+    await draft.refresh();
+    await draft.submit();
+    expect(api.command).not.toHaveBeenCalled();
+    expect(draft.snapshot().error).toBe('Vybraný pristavovač už nie je dostupný. Vyberte ho znova.');
+  });
+  it('asks for the pristavovač phone when none is known', async () => {
+    const { api, draft } = setup(withMembers());
+    await draft.refresh();
+    draft.select('issue');
+    draft.edit({ recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: '' });
+    await draft.submit();
+    expect(api.command).not.toHaveBeenCalled();
+    expect(draft.snapshot().error).toBe('Doplňte platné telefónne číslo pristavovača.');
+  });
+  it('sends a waiting link-only handoff to the app once and refreshes', async () => {
+    const { api, draft } = setup(withMembers(withGrant()));
+    await draft.refresh();
+    const answer = deferred<Awaited<ReturnType<HandoffApi['command']>>>();
+    api.command.mockImplementationOnce(() => answer.promise);
+    const sending = draft.deliver(grantId, member.id);
+    await draft.deliver(grantId, member.id);
+    expect(draft.snapshot().delivering).toBe(grantId);
+    answer.resolve({ ...receipt(), kind: 'delivery', memberId: member.id, sent: true } as unknown as Awaited<ReturnType<HandoffApi['command']>>);
+    await sending;
+    expect(api.command).toHaveBeenCalledOnce();
+    expect(api.command.mock.calls[0][1]).toEqual({ action: 'deliver', commandId, handoffId: grantId, expectedRevision: 1, recipientMemberId: member.id });
+    expect(draft.snapshot()).toMatchObject({ delivering: null, delivered: { handoffId: grantId, memberId: member.id }, error: null });
+    expect(api.context).toHaveBeenCalledTimes(2);
+  });
+  it('does not send a closed handoff or to an unknown pristavovač', async () => {
+    const accepted = withGrant();
+    accepted.handoffs[0] = { ...accepted.handoffs[0], status: 'accepted' };
+    const { api, draft } = setup(withMembers(accepted));
+    await draft.refresh();
+    await draft.deliver(grantId, member.id);
+    await draft.deliver(grantId, '88888888-8888-4888-8888-888888888888');
+    expect(api.command).not.toHaveBeenCalled();
+  });
+  it('shows a failed send and allows another try', async () => {
+    const { api, draft } = setup(withMembers(withGrant()));
+    await draft.refresh();
+    api.command.mockRejectedValueOnce(new MobileApiError('Pristavovač už nie je dostupný.', 409));
+    await draft.deliver(grantId, member.id);
+    expect(draft.snapshot()).toMatchObject({ delivering: null, delivered: null, error: 'Pristavovač už nie je dostupný.' });
+    expect(draft.snapshot().status).toBe('editing');
+  });
+});
+
+describe('quiet re-reading of the handoff screen', () => {
+  it('updates the handoffs without a loading state and keeps a shown error', async () => {
+    const members = { members: [{ id: '77777777-7777-4777-8777-777777777777', displayName: 'MOCK', lastPhone: null }] };
+    const { api, draft } = setup({ ...withGrant(), delivery: members });
+    await draft.refresh();
+    api.command.mockRejectedValueOnce(new MobileApiError('Pristavovač už nie je dostupný.', 409));
+    await draft.deliver(grantId, '77777777-7777-4777-8777-777777777777');
+    expect(draft.snapshot().error).toBe('Pristavovač už nie je dostupný.');
+    const accepted = { ...withGrant(), delivery: members };
+    accepted.handoffs[0] = { ...accepted.handoffs[0], status: 'accepted' };
+    api.context.mockResolvedValueOnce(accepted);
+    const states: boolean[] = [];
+    draft.subscribe(() => states.push(draft.snapshot().loading));
+    await draft.refresh(true);
+    expect(draft.snapshot().context?.handoffs[0].status).toBe('accepted');
+    expect(draft.snapshot().error).toBe('Pristavovač už nie je dostupný.');
+    expect(states).not.toContain(true);
+  });
+  it('keeps what it showed when a quiet read fails', async () => {
+    const { api, draft } = setup(withGrant());
+    await draft.refresh();
+    api.context.mockRejectedValueOnce(new MobileApiError('offline', 0));
+    await draft.refresh(true);
+    expect(draft.snapshot()).toMatchObject({ error: null, loading: false });
+    expect(draft.snapshot().context?.handoffs).toHaveLength(1);
+  });
+  it('waits while a read or a send to the app runs', async () => {
+    const { api, draft } = setup({ ...withGrant(), delivery: { members: [{ id: '77777777-7777-4777-8777-777777777777', displayName: 'MOCK', lastPhone: null }] } });
+    await draft.refresh();
+    const answer = deferred<Awaited<ReturnType<HandoffApi['command']>>>();
+    api.command.mockImplementationOnce(() => answer.promise);
+    const sending = draft.deliver(grantId, '77777777-7777-4777-8777-777777777777');
+    await draft.refresh(true);
+    expect(api.context).toHaveBeenCalledTimes(1);
+    answer.resolve({ ...receipt(), kind: 'delivery', memberId: '77777777-7777-4777-8777-777777777777', sent: true } as unknown as Awaited<ReturnType<HandoffApi['command']>>);
+    await sending;
+    expect(draft.snapshot().delivered).toEqual({ handoffId: grantId, memberId: '77777777-7777-4777-8777-777777777777' });
+  });
+  it('never discards a send to the app or a link started during a quiet read', async () => {
+    const member = '77777777-7777-4777-8777-777777777777';
+    const { api, draft } = setup({ ...withGrant(), delivery: { members: [{ id: member, displayName: 'MOCK', lastPhone: null }] } });
+    await draft.refresh();
+    const reading = deferred<ReturnType<typeof withGrant>>(), answer = deferred<Awaited<ReturnType<HandoffApi['command']>>>();
+    api.context.mockImplementationOnce(() => reading.promise);
+    api.command.mockImplementationOnce(() => answer.promise);
+    const quiet = draft.refresh(true);
+    const sending = draft.deliver(grantId, member);
+    // The quiet read ends while the send is still on its way.
+    reading.resolve({ ...withGrant(), delivery: { members: [{ id: member, displayName: 'MOCK', lastPhone: null }] } });
+    await quiet;
+    answer.resolve({ ...receipt(), kind: 'delivery', memberId: member, sent: true } as unknown as Awaited<ReturnType<HandoffApi['command']>>);
+    await sending;
+    expect(draft.snapshot().delivered).toEqual({ handoffId: grantId, memberId: member });
+    expect(draft.snapshot().error).toBeNull();
+  });
+});

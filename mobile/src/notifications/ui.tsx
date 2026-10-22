@@ -13,10 +13,13 @@ const SWITCHES: readonly { type: MobilePushType; title: string; subtitle: string
   { type: "cases", title: "Prípady", subtitle: "Kolega vám pridelil prípad" },
   { type: "callbacks_mine", title: "Moje spätné volania", subtitle: "Prevzaté spätné volanie po termíne" },
   { type: "callbacks_unclaimed", title: "Spätné volania bez dispečera", subtitle: "Požiadavka po termíne, ktorú nikto neprevzal" },
+  { type: "handoffs", title: "Pristavenia", subtitle: "Nové pristavenie od dispečera" },
 ];
+/** A dispatcher's kinds; a pristavovač has only deliveries. */
+const DISPATCH: readonly MobilePushType[] = ["tasks", "task_due", "cases", "callbacks_mine", "callbacks_unclaimed"];
 
 /** Účet → Notifikácie: switched on by the operator, then one switch per kind. */
-export function NotificationSettings({ settings }: { settings: PushSettings }) {
+export function NotificationSettings({ settings, kinds = DISPATCH }: { settings: PushSettings; kinds?: readonly MobilePushType[] }) {
   const view = useSyncExternalStore(settings.subscribe, settings.snapshot, settings.snapshot);
   const [settingsError, setSettingsError] = useState(false);
   const openSettings = () => { setSettingsError(false); void Linking.openSettings().catch(() => setSettingsError(true)); };
@@ -24,7 +27,7 @@ export function NotificationSettings({ settings }: { settings: PushSettings }) {
   return <View>
     <SectionHeader title="Notifikácie" />
     {view.status === "on" && view.preferences ? <Group>
-      {SWITCHES.map((item, index) => <SwitchRow key={item.type} first={index === 0} title={item.title} subtitle={item.subtitle}
+      {SWITCHES.filter(item => kinds.includes(item.type)).map((item, index) => <SwitchRow key={item.type} first={index === 0} title={item.title} subtitle={item.subtitle}
         value={view.preferences![item.type]} disabled={view.busy} onChange={on => { void settings.set(item.type, on); }} />)}
       <Row title="Vypnúť na tomto telefóne" tone="link" disabled={view.busy} onPress={() => { void settings.disable(); }} />
     </Group> : view.status !== "unsupported" && <Group>
@@ -32,7 +35,7 @@ export function NotificationSettings({ settings }: { settings: PushSettings }) {
         : view.status === "denied" ? <>
           <Row first title="Otvoriť nastavenia telefónu" tone="link" onPress={openSettings} />
           <Row title="Skúsiť znova" subtitle="Po povolení v nastaveniach" tone="link" disabled={view.busy} onPress={() => { void settings.enable(); }} />
-        </> : <Row first title={view.status === "off" ? "Zapnúť notifikácie" : "Skúsiť znova"} subtitle={view.status === "off" ? "Úlohy, prípady a spätné volania aj pri zamknutom telefóne" : null}
+        </> : <Row first title={view.status === "off" ? "Zapnúť notifikácie" : "Skúsiť znova"} subtitle={view.status === "off" ? (kinds.includes("handoffs") ? "Nové pristavenia aj pri zamknutom telefóne" : "Úlohy, prípady a spätné volania aj pri zamknutom telefóne") : null}
           tone="link" disabled={view.busy} onPress={() => { void settings.enable(); }} />}
     </Group>}
     {informational && view.message ? <Text style={s.note}>{view.message}</Text>

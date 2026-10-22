@@ -28,7 +28,12 @@ export async function getTowingAuthState(): Promise<TowingAuthState> {
   try { return { authorized: true, actor: await requireTowingActor() }; }
   catch (error) { return { authorized: false, reason: error instanceof TowingError ? error.code : 'unavailable', message: error instanceof TowingError ? error.message : 'Zákazky momentálne nie sú dostupné.' }; }
 }
-export function towingLoginDestination(actor: TowingMember): "/zakazky" | "/vodic" { return actor.capabilities.some(c => c !== 'drive') ? '/zakazky' : '/vodic'; }
+/** Office first, then the driver's orders; a pristavovač alone works in the phone app only. */
+export function towingLoginDestination(actor: TowingMember): "/zakazky" | "/vodic" | null {
+  const web = actor.capabilities.filter(c => c !== 'deliver');
+  if (!web.length) return null;
+  return web.some(c => c !== 'drive') ? '/zakazky' : '/vodic';
+}
 export async function markTowingPasswordCompleted() {
   const actor = await requireTowingActor();
   const result = await towingAdmin().rpc('motorist_towing_password_completed', { p_user_id: actor.userId });

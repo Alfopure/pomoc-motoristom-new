@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { AppState, KeyboardAvoidingView, Platform, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+import { AppState, KeyboardAvoidingView, Linking, Platform, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import { useAndroidBack } from "../lib/use-android-back";
 import { useShellBack } from "../shell/back";
 import type { MobileHandoffInput } from '../../../src/lib/mobile-api';
 import { Button, Card, ErrorNotice, Loading, styles } from '../ui';
 import { DetailHeader, InfoRow, Tag, type TagTone } from '../design/detail';
-import { Field, FormSection, formLayout } from '../design/form';
+import { Field, FormSection, SelectRow, formLayout } from '../design/form';
 import { Group, Row, SectionHeader } from '../design/list';
 import { palette, space, type } from '../design/tokens';
 import { formatNumber } from '../lib/display';
+import { agoLabel, positionUrl } from '../delivery/model';
 import { HandoffDraft, previewSnapshot } from './draft';
 import { HandoffSummary, handoffTime } from './summary';
 const statuses: Record<string, string> = {
@@ -17,7 +18,7 @@ const statuses: Record<string, string> = {
 const events: Record<string, string> = {
   issue: 'Vytvorený odkaz', publish: 'Zverejnené údaje', renew: 'Obnovený odkaz', extend: 'Predĺžená platnosť', recover: 'Získaný odkaz', accept: 'Prijaté', reject: 'Odmietnuté', en_route: 'Na ceste', arrived: 'Na mieste', complete: 'Dokončené', update: 'Aktualizácia', blocked: 'Prístup zablokovaný', revoke: 'Zrušené'
 };
-const actions: Record<Exclude<MobileHandoffInput['action'], 'recover'>, string> = {
+const actions: Record<Exclude<MobileHandoffInput['action'], 'recover' | 'deliver'>, string> = {
   issue: 'Vytvoriť odovzdanie', publish: 'Zverejniť aktuálne údaje', renew: 'Obnoviť odkaz', extend: 'Predĺžiť platnosť', revoke: 'Zrušiť odovzdanie'
 };
 const explanations = {
@@ -33,6 +34,8 @@ export function Handoffs({ draft, active, onBack }: {
   useAndroidBack(active, back, draft.busy);
   useShellBack(active, 'Prípad', back, draft.busy);
   const [shareError, setShareError] = useState<string | null>(null), [expanded, setExpanded] = useState<string | null>(null), [sharing, setSharing] = useState(false);
+  // The existing handoff whose pristavovač is being chosen.
+  const [choosing, setChoosing] = useState<string | null>(null);
   useEffect(() => {
     if (active) {
       draft.expire();
@@ -85,7 +88,7 @@ export function Handoffs({ draft, active, onBack }: {
   }
   const locked = state.status !== 'editing' || draft.busy, selected = state.selected;
   const preview = previewSnapshot(state);
-  const choose = (action: Exclude<MobileHandoffInput['action'], 'recover'>, id?: string) => {
+  const choose = (action: Exclude<MobileHandoffInput['action'], 'recover' | 'deliver'>, id?: string) => {
     if (draft.select(action, id)) {
       setShareError(null);
       scroll.current?.scrollTo({ y: 0, animated: true });
@@ -97,6 +100,25 @@ export function Handoffs({ draft, active, onBack }: {
   // A saved action is done: the receipt above says so, and its form would only block the next one.
   const showForm = Boolean(selected) && state.status !== 'saved';
   const preview0 = state.context?.preview;
+  const members = state.context?.delivery?.members ?? [], memberId = state.input.recipientMemberId;
+  const memberName = (id: string) => members.find(member => member.id === id)?.displayName ?? null;
+  // Acceptance, steps and where the pristavovač is: re-read quietly every 30 s while a
+  // handoff is open and this screen is shown; a failed read waits for the next one.
+  const following = active && !showForm && Boolean(state.context?.handoffs.some(live));
+  useEffect(() => {
+    if (!following)
+      return;
+    const timer = setInterval(() => {
+      if (!draft.busy)
+        void draft.refresh(true);
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [following, draft]);
+  const openPosition = (position: { lat: number; lng: number }) => {
+    setShareError(null);
+    void Linking.openURL(positionUrl(position)).catch(() => setShareError('Mapu sa nepodarilo otvoriť.'));
+  };
+  const delivered = state.delivered && state.context?.handoffs.find(grant => grant.id === state.delivered!.handoffId && grant.app?.memberId === state.delivered!.memberId && grant.status === 'offered');
   return <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
     <ScrollView
       ref={scroll}
@@ -110,6 +132,8 @@ export function Handoffs({ draft, active, onBack }: {
         {state.receipt && <Card>
           <Text accessibilityRole="alert" style={styles.subheading}>Odovzdanie uložené</Text>
           <Text style={styles.text}>{actions[state.receipt.action]} · potvrdená revízia {state.receipt.committedRevision}</Text>
+          {state.receipt.delivery?.status === 'sent' && <Text style={styles.text}>{'Pristavovač ' + (memberName(state.receipt.delivery.memberId) ?? '') + ' ho má v aplikácii. Ak má zapnuté notifikácie, príde mu aj upozornenie.'}</Text>}
+          {state.receipt.delivery?.status === 'failed' && <Text style={styles.text}>Do aplikácie pristavovača sa ho nepodarilo poslať. Odkaz funguje; pošlite ho znova nižšie alebo odkaz zdieľajte.</Text>}
           {state.receipt.link.status === 'unavailable' && <Text style={styles.text}>Uloženie je potvrdené, odkaz sa nepodarilo získať.</Text>}
           {state.status === 'saved' && state.pending && ['issue', 'renew'].includes(state.pending.action) && !state.link && <Button
             label="Znova získať pôvodný odkaz"
@@ -121,6 +145,7 @@ export function Handoffs({ draft, active, onBack }: {
         </Card>}
         {state.error && <ErrorNotice message={state.error} />}
         {shareError && <ErrorNotice message={shareError} />}
+        {delivered && <Card><Text accessibilityRole="alert" style={styles.text}>{'Odovzdanie pre ' + delivered.recipientName + ' je v aplikácii pristavovača ' + (memberName(state.delivered!.memberId) ?? '') + '. Ak má zapnuté notifikácie, príde mu aj upozornenie.'}</Text></Card>}
         {state.status === 'uncertain' && <Card>
           <Text style={styles.text}>Pôvodná požiadavka a jej náhľad sú zachované. Novú požiadavku zatiaľ nevytvárajte.</Text>
           <Button label="Overiť pôvodné odovzdanie" disabled={draft.busy} onPress={() => {
@@ -149,17 +174,24 @@ export function Handoffs({ draft, active, onBack }: {
       </>}
 
       {state.link && <>
-        <FormSection title="Odkaz pre kolegu" footer="Odkaz sa nikomu neposiela automaticky. Zdieľajte ho priamo kolegovi.">
+        <FormSection title="Odkaz pre kolegu" footer={state.receipt?.delivery?.status === 'sent' ? 'Pristavovač ho už má v aplikácii. Odkaz zdieľajte, iba ak ho potrebuje aj mimo nej.' : 'Odkaz sa nikomu neposiela automaticky. Zdieľajte ho priamo kolegovi.'}>
           <InfoRow first label="Platí do" value={handoffTime(state.link.expiresAt)} />
         </FormSection>
         <View style={formLayout.actions}><Button primary label="Zdieľať odkaz" disabled={sharing || draft.busy} onPress={share} /></View>
       </>}
 
       {showForm && selected && <>
-        <FormSection title={actions[selected.action]} footer={explanations[selected.action]}>
-          {selected.action === 'issue' && <Field key="name" label="Meno kolegu" value={state.input.recipientName} onChangeText={recipientName => draft.edit({ recipientName })}
-            editable={!locked} maxLength={160} autoCorrect={false} textContentType="name" placeholder="Meno a priezvisko" />}
-          {selected.action === 'issue' && <Field key="phone" label="Telefón kolegu" value={state.input.recipientPhone} onChangeText={recipientPhone => draft.edit({ recipientPhone })}
+        {selected.action === 'issue' && (members.length > 0 || memberId) && <FormSection title="Komu"
+          footer={memberId ? 'Pristavovač ho uvidí vo svojej aplikácii, s notifikáciou, ak ju má zapnutú. Odkaz môžete okrem toho zdieľať.' : 'Kolega bez aplikácie dostane iba odkaz, ktorý mu pošlete sami.'}>
+          {members.map(member => <SelectRow key={member.id} label={member.displayName} detail="Pristavovač · v aplikácii" selected={memberId === member.id} disabled={locked}
+            onPress={() => draft.edit(memberId === member.id ? {} : { recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: member.lastPhone ?? '' })} />)}
+          <SelectRow key="link" label="Iný príjemca" detail="Iba odkaz" selected={!memberId} disabled={locked}
+            onPress={() => { if (memberId) draft.edit({ recipientMemberId: '', recipientName: '', recipientPhone: '' }); }} />
+        </FormSection>}
+        <FormSection title={actions[selected.action]} footer={selected.action === 'issue' && memberId ? 'Vytvoríte prístup k nižšie uvedeným údajom pre vybraného pristavovača.' : explanations[selected.action]}>
+          {selected.action === 'issue' && <Field key="name" label={memberId ? 'Pristavovač' : 'Meno kolegu'} value={state.input.recipientName} onChangeText={recipientName => draft.edit({ recipientName })}
+            editable={!locked && !memberId} maxLength={160} autoCorrect={false} textContentType="name" placeholder="Meno a priezvisko" />}
+          {selected.action === 'issue' && <Field key="phone" label={memberId ? 'Telefón pristavovača' : 'Telefón kolegu'} value={state.input.recipientPhone} onChangeText={recipientPhone => draft.edit({ recipientPhone })}
             editable={!locked} maxLength={30} autoCorrect={false} keyboardType="phone-pad" textContentType="telephoneNumber" placeholder="+421 …" />}
           {['issue', 'publish'].includes(selected.action) && <Field key="instructions" label="Pokyny pre kolegu" value={state.input.instructions} onChangeText={instructions => draft.edit({ instructions })}
             editable={!locked} maxLength={2000} multiline autoCorrect={false} />}
@@ -189,7 +221,18 @@ export function Handoffs({ draft, active, onBack }: {
         {state.context.handoffs.map(grant => <View key={grant.id} style={s.grant}>
           <Group>
             <Row first title={grant.recipientName} subtitle={grant.recipientPhone ? formatNumber(grant.recipientPhone) : null}
-              trailing={<Tag text={statuses[grant.status] ?? grant.status} tone={statusTones[grant.status] ?? 'gray'} />} />
+              trailing={<View style={s.tags}>{grant.app && <Tag text="V aplikácii" tone="blue" />}<Tag text={statuses[grant.status] ?? grant.status} tone={statusTones[grant.status] ?? 'gray'} /></View>} />
+            {grant.app && grant.status !== 'offered' && live(grant) && <InfoRow label="Poloha pristavovača" value={grant.app.lastPosition ? agoLabel(grant.app.lastPosition.recordedAt, state.now) : null}
+              empty="Zatiaľ neprišla" detail={grant.app.lastPosition?.accuracy != null ? 'Presnosť ±' + Math.round(grant.app.lastPosition.accuracy) + ' m' : null} />}
+            {grant.app?.lastPosition && grant.status !== 'offered' && live(grant) && <Row title="Ukázať pristavovača na mape" tone="link" onPress={() => openPosition(grant.app!.lastPosition!)} />}
+            {!grant.app && grant.status === 'offered' && live(grant) && members.length > 0 && <Row title={choosing === grant.id ? 'Skryť výber pristavovača' : 'Poslať do aplikácie pristavovača'} tone="link"
+              disabled={busyOrBlocked || state.delivering !== null} onPress={() => setChoosing(choosing === grant.id ? null : grant.id)} />}
+            {choosing === grant.id && !grant.app && members.map(member => <Row key={member.id} title={state.delivering === grant.id ? 'Posielam…' : member.displayName} subtitle="Pristavovač · v aplikácii"
+              accessibilityLabel={'Poslať pristavovačovi ' + member.displayName} disabled={busyOrBlocked || state.delivering !== null}
+              onPress={() => {
+                setChoosing(null);
+                void draft.deliver(grant.id, member.id);
+              }} />)}
             <InfoRow label="Platnosť" value={handoffTime(grant.expiresAt)} />
             <InfoRow label="Vytvorené" value={handoffTime(grant.createdAt)} detail={grant.createdBy || 'Dispečing'} />
             <InfoRow label="Otvorené" value={grant.openedAt ? handoffTime(grant.openedAt) : null} empty="Zatiaľ neotvorené" />
@@ -242,4 +285,5 @@ const s = StyleSheet.create({
   empty: { ...type.subhead, color: palette.secondaryLabel, paddingHorizontal: 20 },
   grant: { marginBottom: space.m },
   chevron: { fontSize: 20, color: palette.tertiaryLabel },
+  tags: { flexDirection: 'row', gap: 4, flexShrink: 0 },
 });

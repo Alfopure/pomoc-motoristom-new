@@ -27,8 +27,12 @@ import { createPushApi } from "./src/notifications/api";
 import { createPushDevice, installPushTaps } from "./src/notifications/device";
 import { PushSettings } from "./src/notifications/settings";
 import { pushTaps } from "./src/notifications/taps";
+import { FieldWorkspace } from "./src/delivery/ui";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
+/** The server's answer "signed in, but not a dispatcher": a pristavovač. Kept as the
+ * query's data, so a later failed check on a weak signal does not drop their screen. */
+const FIELD_ONLY = { fieldOnly: true } as const;
 
 export default function App() {
   const [generation, setGeneration] = useState(0);
@@ -220,8 +224,14 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   const key = useMemo(() => ["mobile", config.environment, userId], [config.environment, userId]);
   // First authenticated snapshot must also load during a PushKit cold launch.
   // Periodic reads still stop when iOS suspends the app.
-  const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), refetchInterval: active ? 30_000 : false });
-  const identity = usableMobileIdentity(me.data, me.error);
+  const me = useQuery({ queryKey: [...key, "me"], queryFn: async ({ signal }) => {
+    try { return await api.me(signal); }
+    catch (error) { if (error instanceof MobileApiError && error.code === "mobile_no_dispatch_profile") return FIELD_ONLY; throw error; }
+  }, refetchInterval: query => !active ? false : query.state.data && "fieldOnly" in query.state.data ? 300_000 : 30_000 });
+  // Signed in without a dispatch profile: a pristavovač, who gets the deliveries instead.
+  // The query may hold a copy of the marker, so its shape is what counts.
+  const fieldOnly = Boolean(me.data && "fieldOnly" in me.data);
+  const identity = usableMobileIdentity(me.data && !("fieldOnly" in me.data) ? me.data : undefined, me.error);
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   const push = useMemo(() => new PushSettings(createPushDevice(config.environment, userId), createPushApi(config, async () => {
     if (liveUser() !== userId) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
@@ -264,6 +274,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     ]);
   }
   if (me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do dispečingu…" /></>;
+  if (fieldOnly) return <FieldWorkspace config={config} client={client} userId={userId} liveUser={liveUser} active={active} push={push}
+    logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} />;
   if (!identity) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
     <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />
     {logoutState.message && <ErrorNotice message={logoutState.message} />}

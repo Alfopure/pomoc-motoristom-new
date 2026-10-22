@@ -47,12 +47,12 @@ describe('handoff API trust boundary', () => {
     value.link = { ...value.link as Extract<typeof value.link, {
         status: 'available';
       }>, url: url + 'a'.repeat(43) };
-    expect((await api(value).api.command(caseId, command)).link.status).toBe('unavailable');
+    expect((await api(value).api.command(caseId, command) as { link: Record<string, unknown> }).link.status).toBe('unavailable');
   });
   it('retains commit on malformed link metadata but rejects malformed receipt', async () => {
     expect((await api({ ...receipt(), link: {
         status: 'available', url: origin + '/handoff#token=' + 'a'.repeat(43), expiresAt: 'bad', currentRevision: 1
-      } }).api.command(caseId, command)).link.status).toBe('unavailable');
+      } }).api.command(caseId, command) as { link: Record<string, unknown> }).link.status).toBe('unavailable');
     await expect(api({ ...receipt(), committedRevision: 2 }).api.command(caseId, command)).rejects.toThrow();
   });
   it('recovery is distinct and must validate its link', async () => {
@@ -75,9 +75,9 @@ describe('handoff timestamp and receipt metadata', () => {
     value.link = { ...value.link as Extract<typeof value.link, {
         status: 'available';
       }>, currentRevision: 3 };
-    expect((await api(value).api.command(caseId, command)).link).toMatchObject({ currentRevision: 3 });
+    expect((await api(value).api.command(caseId, command) as { link: Record<string, unknown> }).link).toMatchObject({ currentRevision: 3 });
     value.link = { ...value.link, expiresAt: '2000-01-01T00:00:00Z' };
-    expect((await api(value).api.command(caseId, command)).link.status).toBe('unavailable');
+    expect((await api(value).api.command(caseId, command) as { link: Record<string, unknown> }).link.status).toBe('unavailable');
   });
 });
 describe('action-specific link availability', () => {
@@ -88,10 +88,11 @@ describe('action-specific link availability', () => {
     const result = await api(value).api.command(caseId, {
       action: 'revoke', commandId, handoffId: receipt().handoffId, expectedRevision: 1, comment: 'Dôvod'
     });
-    expect(result.link).toEqual({ status: 'not_requested' });
+    expect('link' in result && result.link).toEqual({ status: 'not_requested' });
   });
   it('an issue without expected link metadata remains saved with unavailable warning', async () => {
-    expect((await api({ ...receipt(), link: { status: 'not_requested' } }).api.command(caseId, command)).link).toEqual({ status: 'unavailable', warning: 'link_unavailable' });
+    const result = await api({ ...receipt(), link: { status: 'not_requested' } }).api.command(caseId, command);
+    expect('link' in result && result.link).toEqual({ status: 'unavailable', warning: 'link_unavailable' });
   });
 });
 
@@ -102,5 +103,44 @@ describe('draft organization request fence', () => {
     await expect(client.context(caseId)).rejects.toMatchObject({ status: 409 });
     await expect(client.command(caseId, command)).rejects.toMatchObject({ status: 409 });
     for (const [, init] of transport.mock.calls as unknown as [string, RequestInit][]) expect(init.headers).toMatchObject({ 'X-PM-Expected-Organization': caseId });
+  });
+});
+
+describe('pristavovač in the app', () => {
+  const member = { id: '77777777-7777-4777-8777-777777777777', displayName: 'MOCK Pristavovač', lastPhone: '+421900000002' };
+  const position = { lat: 49.2, lng: 18.7, accuracy: 12, recordedAt: '2026-10-22T10:00:00Z' };
+  it('reads who can receive in the app and where an assigned one is', async () => {
+    const value = withGrant();
+    const raw = { ...value, delivery: { members: [{ ...member, id: member.id.toUpperCase() }] }, handoffs: [{ ...value.handoffs[0], app: { memberId: member.id, lastPosition: position } }] };
+    const result = await api(raw).api.context(caseId);
+    expect(result.delivery).toEqual({ members: [member] });
+    expect(result.handoffs[0].app).toEqual({ memberId: member.id, lastPosition: position });
+    expect((await api(withGrant()).api.context(caseId)).handoffs[0].app).toBeNull();
+  });
+  it('hides a malformed member list instead of failing the handoff', async () => {
+    for (const delivery of [{ members: [{ ...member, id: 'x' }] }, { members: 'all' }, []]) {
+      const result = await api({ ...context(), delivery }).api.context(caseId);
+      expect(result.delivery).toBeUndefined();
+    }
+  });
+  it('rejects a malformed position of a pristavovač', async () => {
+    const value = withGrant();
+    for (const lastPosition of [{ ...position, lat: 95 }, { ...position, accuracy: -1 }, { ...position, recordedAt: 'now' }]) {
+      await expect(api({ ...value, handoffs: [{ ...value.handoffs[0], app: { memberId: member.id, lastPosition } }] }).api.context(caseId)).rejects.toThrow();
+    }
+  });
+  it('confirms sending an existing handoff to the chosen pristavovač', async () => {
+    const input = { action: 'deliver' as const, commandId, handoffId: receipt().handoffId, expectedRevision: 1, recipientMemberId: member.id };
+    const answer = { ...scope, kind: 'delivery', caseId, handoffId: input.handoffId, commandId, memberId: member.id, sent: true, currentRevision: 1 };
+    expect(await api(answer).api.command(caseId, input)).toMatchObject({ kind: 'delivery', memberId: member.id, sent: true });
+    await expect(api({ ...answer, memberId: '88888888-8888-4888-8888-888888888888' }).api.command(caseId, input)).rejects.toThrow();
+    await expect(api({ ...answer, kind: 'mutation' }).api.command(caseId, input)).rejects.toThrow();
+  });
+  it('reports a failed send beside the confirmed handoff, never instead of it', async () => {
+    const issue = { ...command, recipientMemberId: member.id };
+    expect(await api({ ...receipt(), delivery: { status: 'sent', memberId: member.id } }).api.command(caseId, issue)).toMatchObject({ kind: 'mutation', delivery: { status: 'sent', memberId: member.id } });
+    expect(await api({ ...receipt(), delivery: { status: 'sent', memberId: 'other' } }).api.command(caseId, issue)).toMatchObject({ kind: 'mutation', delivery: { status: 'failed', memberId: member.id } });
+    expect(await api(receipt()).api.command(caseId, issue)).toMatchObject({ kind: 'mutation', delivery: { status: 'failed' } });
+    expect(await api({ ...receipt(), delivery: { status: 'sent', memberId: member.id } }).api.command(caseId, command)).not.toHaveProperty('delivery');
   });
 });

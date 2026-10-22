@@ -173,6 +173,7 @@ Slovensko.
 | Účet pre kontrolu Apple v organizácii majiteľa (rozhodnutie 20. 10. 2026) | majiteľ | pred odoslaním |
 | Telnyx a APNs pre produkčný hlas | vývoj, schválenie majiteľ | po TEST akceptácii |
 | Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | hotové; push čaká na migráciu a prepínač na TEST |
+| Pristavovač v aplikácii (F6) | vývoj, schválenie majiteľa | hotové; čaká na migráciu a prepínač na TEST |
 | Texty do App Store, poznámky pre review, snímky | vývoj, schválenie majiteľ | chýba |
 
 ## 6. Poradie
@@ -268,6 +269,44 @@ podklady pre App Store v `docs/mobile/app-store.md`)
     telefón; obrazovky, moduly a obrazovka hovoru majú vlastné hranice.
   - Telefonovanie z produkčnej aplikácie je vypnuté (natívny hlas funguje len
     pod TEST identifikátorom aplikácie); zapnutie je samostatné rozhodnutie.
+
+**F6 – Pristavovač v aplikácii** (v kóde hotové 22. 10. 2026; na TEST čaká migrácia a prepínač)
+- Požiadavka majiteľa z 22. 10. 2026: dispečer odovzdá prípad pristavovačovi
+  aj priamo v aplikácii (nielen odkazom v SMS), pristavovač v nej vidí prípad,
+  kam ísť a ktoré auto zobrať – popis hore, mapa dole – a dispečer vidí, kde je.
+- Dispečer: pri novom odovzdaní vyberie v časti Komu pristavovača alebo iného
+  príjemcu iba s odkazom; odovzdanie, ktoré čaká na prijatie, vie poslať do
+  aplikácie aj dodatočne. Odkaz cez SMS alebo zdieľanie funguje ďalej. Pri
+  odovzdaní vidí značku V aplikácii, stav, polohu pristavovača („pred 3 min“,
+  presnosť) a Ukázať pristavovača na mape; kým je pristavovač na ceste,
+  obrazovka sa obnovuje každých 30 s.
+- Pristavovač: člen odťahovej služby s rolou **Pristavovač** (web, Zákazky →
+  Prístupy a vodiči), bez dispečerského profilu, takže na dispečerské údaje
+  nemá prístup. Prihlási sa do tej istej aplikácie a vidí iba Pristavenia:
+  zoznam (na vybavenie, dokončené za deň), detail s náhradným autom (EČV, GPS),
+  miestom, časom, pokynmi a klientom hore a mapou (Apple Maps) dole; kroky
+  Prijať → Vyrážam → Som na mieste → Auto odovzdané, čas príchodu, Odmietnuť
+  alebo Problém s dôvodom; Zavolať, navigácia k autu a na miesto. Po skončení
+  telefón údaje klienta nezobrazuje. Notifikácia Nové pristavenie (vypínač
+  Pristavenia v Účte).
+- Poloha: o povolenie aplikácia požiada až po prijatí (alebo inom vlastnom
+  kroku pristavovača v aplikácii; neskôr aj tlačidlom Zdieľať polohu
+  s dispečerom); posiela ju najviac raz za 20 s, iba s otvorenou aplikáciou.
+  Server ju prijme iba od pristavovača, ktorý v aplikácii urobil krok, a iba
+  počas otvoreného pristavenia; potom telefónu povie, aby prestal. Maže ju po
+  30 dňoch (pomocná úloha existujúceho cronu, aj pri vypnutom prepínači).
+- Po skončení, zrušení alebo vypršaní pristavenia telefón nedostane údaje
+  klienta ani polohu auta; po dni pristavenie zo zoznamu zmizne a nedá sa otvoriť.
+- V časti Komu sú iba pristavovači, ktorí sa môžu prihlásiť do aplikácie
+  pristavovača (bez dispečerského profilu a so zapnutým prístupom).
+- Staršia verzia servera s touto migráciou funguje ďalej (údaje odovzdania sa
+  pre ňu nemenia), nová verzia bez migrácie výber pristavovača neukáže.
+- Zapnutie v prostredí: migrácia `20261022100000_mobile_delivery_handoffs.sql`
+  (až po migrácii push tabuľky; na TEST čaká na schválenie majiteľa) a
+  `MOBILE_DELIVERY_ENABLED=true` v projekte Vercel; na Preview vetiev vypnuté vždy.
+- Známe obmedzenia: pri zamknutom telefóne alebo aplikácii na pozadí sa poloha
+  neposiela; mapa ukáže iba miesta so súradnicami; odťahy dostanú obdobnú,
+  samostatnú časť neskôr.
 
 ### Čo do verzie 1 nepatrí (neskôr)
 

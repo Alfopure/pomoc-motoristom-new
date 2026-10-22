@@ -11,6 +11,8 @@
  *  - `dual`    — bearer (cron/stroj) ALEBO session; anon bez oboch → 401.
  *  - `session` — Supabase session guard (`requireDefaultMotorist*` / `motoristAccessGuard`); anon → 401/403.
  *  - `user-bearer` — verified Supabase user JWT + active organization profile; no cookies or machine secrets.
+ *  - `field-bearer` — verified Supabase user JWT + active field membership with the needed capability;
+ *    no dispatch profile, cookies or machine secrets (pristavovač in the mobile app).
  *
  * `role` je vyplnené LEN tam, kde route reálne používa role-gate (inak member-level prístup).
  *
@@ -18,7 +20,7 @@
  * musí byť importovateľný z testov (route-auth-registry.test.ts, route-auth.test.ts).
  */
 
-export type RouteAuthClass = "public" | "bearer" | "dual" | "session" | "user-bearer";
+export type RouteAuthClass = "public" | "bearer" | "dual" | "session" | "user-bearer" | "field-bearer";
 
 export type MotoristRole = "dispatcher" | "senior_dispatcher" | "manager" | "admin";
 
@@ -42,8 +44,13 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "towing/reports": { class: "session", note: "Towing report capability; bounded UTC performance, invoice and receipt periods." },
   "towing/auth/forgot-password": { class: "public", note: "Same-origin, throttled non-enumerating recovery for existing towing accounts only." },
   "mobile/v1/me": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
-  "mobile/v1/push/register": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "This installation's Expo push token and per-type switches for the signed-in operator; off unless MOBILE_PUSH_ENABLED." },
-  "mobile/v1/push/unregister": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Removes this installation of the signed-in operator from push delivery." },
+  "mobile/v1/push/register": { class: "user-bearer", note: "This installation's Expo push token and per-type switches for a dispatcher profile or a pristavovač field member; off unless MOBILE_PUSH_ENABLED." },
+  "mobile/v1/push/unregister": { class: "user-bearer", note: "Removes this installation from push delivery, for a dispatcher or a pristavovač." },
+  "mobile/v1/field/me": { class: "field-bearer", note: "Pristavovač identity: active field membership with the deliver capability; off unless MOBILE_DELIVERY_ENABLED." },
+  "mobile/v1/field/deliveries": { class: "field-bearer", note: "Only handoffs sent to this pristavovač in the app; service-role RPC re-checks membership and version." },
+  "mobile/v1/field/deliveries/[id]": { class: "field-bearer", note: "One own delivery; opening marks it seen." },
+  "mobile/v1/field/deliveries/[id]/commands": { class: "field-bearer", note: "Own delivery steps with revision, receipts and dispatcher notice, as the public link." },
+  "mobile/v1/field/deliveries/[id]/position": { class: "field-bearer", note: "Position only during an accepted own delivery; throttled, kept 30 days." },
   "mobile/v1/diagnostics/errors": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Masked app error report; one structured runtime log line, no database write." },
   "mobile/v1/drafts/scope": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Private verified organization scope for account-bound device drafts and expected-organization fencing." },
   "mobile/v1/tasks": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Bounded current-actor assigned or reviewer task overview; no arbitrary actor selection." },

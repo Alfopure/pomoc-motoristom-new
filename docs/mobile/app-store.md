@@ -52,7 +52,8 @@ Zhodné s `ios.privacyManifests` v `mobile/app.config.ts`. Všetko je **spojené
 s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť aplikácie**:
 
 - Kontaktné údaje: meno, e-mail, telefónne číslo, adresa (miesto zásahu).
-- Poloha: presná (iba na pokyn pri výbere miesta).
+- Poloha: presná (dispečer na pokyn pri výbere miesta; pristavovač počas
+  prijatého pristavenia, iba s otvorenou aplikáciou).
 - Obsah používateľa: fotografie, zvuk (hovory), iný obsah (poznámky).
 - Identifikátory: ID používateľa, ID zariadenia (pripojenie k ústredni,
   identifikátor pre notifikácie a inštalácie).

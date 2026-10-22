@@ -16,7 +16,7 @@ import { mobileEnvironment } from "./auth";
  * until its own approval, and a database without the table simply sends nothing. */
 type Admin = SupabaseClient<Database>;
 export type PushTransport = (input: string, init: RequestInit) => Promise<Response>;
-export const MOBILE_PUSH_TYPES: readonly MobilePushType[] = ["tasks", "task_due", "callbacks_mine", "callbacks_unclaimed", "cases"];
+export const MOBILE_PUSH_TYPES: readonly MobilePushType[] = ["tasks", "task_due", "callbacks_mine", "callbacks_unclaimed", "cases", "handoffs"];
 const TABLE = "motorist_mobile_push_devices";
 const TOKEN = /^Expo(?:nent)?PushToken\[[A-Za-z0-9_-]{8,200}\]$/;
 const EXPO_SEND = "https://exp.host/--/api/v2/push/send";
@@ -33,7 +33,7 @@ export function mobilePushEnabled(env: Record<string, string | undefined> = proc
   return env.MOBILE_PUSH_ENABLED === "true" && canOperateTelephony(env);
 }
 export function defaultPushPreferences(): MobilePushPreferences {
-  return { tasks: true, task_due: true, callbacks_mine: true, callbacks_unclaimed: true, cases: true };
+  return { tasks: true, task_due: true, callbacks_mine: true, callbacks_unclaimed: true, cases: true, handoffs: true };
 }
 /** Known switches only; anything else in stored or sent preferences is ignored. */
 function storedPreferences(value: unknown): MobilePushPreferences {
@@ -69,22 +69,35 @@ export function readPushRegistration(value: unknown): MobilePushRegistrationInpu
   return { installationId: body.installationId.toLowerCase(), token: body.token, platform: body.platform, appVersion: typeof body.appVersion === "string" ? body.appVersion : null, preferences };
 }
 
-/** Registers this installation for the signed-in operator, or updates its switches.
+/** Whose phone it is: a dispatcher (profile) or a pristavovač (field member). */
+export type PushOwner = Pick<MotoristActor, "organizationId" | "profileId"> | { organizationId: string; memberId: string };
+
+/** Registers this installation for the signed-in person, or updates its switches.
  * The same phone under another account starts from the defaults, never from the
- * previous user's choices. */
-export async function registerMobilePush(admin: Admin, actor: MotoristActor, value: unknown, now = new Date()): Promise<{ preferences: MobilePushPreferences }> {
+ * previous user's choices. A dispatcher's registration touches only the columns of
+ * the first push migration, so it works before deliveries are installed. */
+export async function registerMobilePush(admin: Admin, owner: PushOwner, value: unknown, now = new Date()): Promise<{ preferences: MobilePushPreferences }> {
   if (!mobilePushEnabled()) throw unavailable();
   const input = readPushRegistration(value), environment = mobileEnvironment();
-  const existing = await admin.from(TABLE).select("profile_id,organization_id,preferences").eq("environment", environment).eq("installation_id", input.installationId).maybeSingle();
-  if (missingTable(existing.error)) throw unavailable();
+  const member = "memberId" in owner;
+  const existing = await admin.from(TABLE).select(member ? "profile_id,member_id,organization_id,preferences" : "profile_id,organization_id,preferences")
+    .eq("environment", environment).eq("installation_id", input.installationId).maybeSingle();
+  if (missingTable(existing.error) || member && existing.error?.code === "42703") throw unavailable();
   if (existing.error) throw new MutationError("Upozornenia sa nepodarilo uložiť.", 503);
-  const own = existing.data && existing.data.profile_id === actor.profileId && existing.data.organization_id === actor.organizationId;
-  const preferences = { ...storedPreferences(own ? existing.data!.preferences : null), ...(input.preferences ?? {}) };
+  const row = existing.data as { profile_id: string | null; member_id?: string | null; organization_id: string; preferences: Json } | null;
+  const own = row && row.organization_id === owner.organizationId && (member ? row.member_id === owner.memberId : row.profile_id === owner.profileId);
+  const preferences = { ...storedPreferences(own ? row!.preferences : null), ...(input.preferences ?? {}) };
+  // Another account's row of this phone goes first: a row names exactly one person.
+  if (row && !own) {
+    const previous = await admin.from(TABLE).delete().eq("environment", environment).eq("installation_id", input.installationId);
+    if (previous.error) throw new MutationError("Upozornenia sa nepodarilo uložiť.", 503);
+  }
   // A token belongs to one installation only.
   const stale = await admin.from(TABLE).delete().eq("expo_push_token", input.token).neq("installation_id", input.installationId);
   if (stale.error) throw new MutationError("Upozornenia sa nepodarilo uložiť.", 503);
   const saved = await admin.from(TABLE).upsert({
-    organization_id: actor.organizationId, profile_id: actor.profileId, environment, installation_id: input.installationId,
+    organization_id: owner.organizationId, ...(member ? { profile_id: null, member_id: owner.memberId } : { profile_id: owner.profileId }),
+    environment, installation_id: input.installationId,
     expo_push_token: input.token, platform: input.platform, preferences: preferences as unknown as Json, app_version: input.appVersion,
     updated_at: now.toISOString(), last_seen_at: now.toISOString(),
   }, { onConflict: "environment,installation_id" }).select("preferences").single();
@@ -95,7 +108,7 @@ export async function registerMobilePush(admin: Admin, actor: MotoristActor, val
 /** Removes this installation, e.g. at logout. Whoever is signed in on the phone may
  * do it, also for a previous account whose logout never reached the server: only
  * the phone itself knows its random installation identifier. */
-export async function unregisterMobilePush(admin: Admin, _actor: MotoristActor, value: unknown): Promise<{ removed: boolean }> {
+export async function unregisterMobilePush(admin: Admin, value: unknown): Promise<{ removed: boolean }> {
   const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
   if (!body || Object.keys(body).some(key => key !== "installationId") || typeof body.installationId !== "string" || !isUuid(body.installationId)) {
     throw new MutationError("Neplatná požiadavka.", 400);
@@ -121,7 +134,8 @@ export async function pushRecipients(admin: Admin, organizationId: string, type:
   const devices = await query.limit(500).abortSignal(AbortSignal.timeout(READ_MS));
   if (missingTable(devices.error)) return recipients;
   if (devices.error) throw new Error("push devices unavailable");
-  const candidates = (devices.data ?? []).map(row => ({ id: row.id, profileId: row.profile_id, token: row.expo_push_token, preferences: storedPreferences(row.preferences) }))
+  // A pristavovač's phone has no profile and never receives dispatch notices.
+  const candidates = (devices.data ?? []).flatMap(row => row.profile_id === null ? [] : [{ id: row.id, profileId: row.profile_id, token: row.expo_push_token, preferences: storedPreferences(row.preferences) }])
     .filter(device => device.preferences[type]);
   if (!candidates.length) return recipients;
   // Deactivated or disabled people never keep receiving work notices on an old phone.
@@ -134,6 +148,55 @@ export async function pushRecipients(admin: Admin, organizationId: string, type:
     if (allowed.has(device.profileId)) recipients.set(device.profileId, [...recipients.get(device.profileId) ?? [], device]);
   }
   return recipients;
+}
+
+/** Phones of active pristavovači who want delivery notices. The owner id travels in
+ * the notice as `profileId`, so the app opens it only in the account it was sent to. */
+export async function pushMemberRecipients(admin: Admin, organizationId: string, memberIds: readonly string[], now = new Date()): Promise<Map<string, PushDevice[]>> {
+  const recipients = new Map<string, PushDevice[]>();
+  const wanted = [...new Set(memberIds.filter(isUuid))];
+  if (!wanted.length) return recipients;
+  const devices = await (admin as unknown as SupabaseClient).from(TABLE).select("id,member_id,expo_push_token,preferences").eq("organization_id", organizationId)
+    .eq("environment", mobileEnvironment()).in("member_id", wanted).gte("last_seen_at", new Date(now.getTime() - STALE_DEVICE_DAYS * 86_400_000).toISOString())
+    .limit(100).abortSignal(AbortSignal.timeout(READ_MS));
+  if (missingTable(devices.error) || devices.error?.code === "42703") return recipients;
+  if (devices.error) throw new Error("push devices unavailable");
+  const rows = (devices.data ?? []) as { id: string; member_id: string; expo_push_token: string; preferences: Json }[];
+  const candidates = rows.map(row => ({ id: row.id, profileId: row.member_id, token: row.expo_push_token, preferences: storedPreferences(row.preferences) }))
+    .filter(device => device.preferences.handoffs);
+  if (!candidates.length) return recipients;
+  const members = await (admin as unknown as SupabaseClient).from("motorist_towing_memberships").select("id").eq("organization_id", organizationId)
+    .in("id", [...new Set(candidates.map(device => device.profileId))]).eq("active", true).contains("capabilities", ["deliver"]).abortSignal(AbortSignal.timeout(READ_MS));
+  if (members.error) throw new Error("push recipients unavailable");
+  const allowed = new Set(((members.data ?? []) as { id: string }[]).map(row => row.id));
+  for (const device of candidates) if (allowed.has(device.profileId)) recipients.set(device.profileId, [...recipients.get(device.profileId) ?? [], device]);
+  return recipients;
+}
+
+/** A delivery notice to pristavovači. It follows a change that happens once (sending
+ * the delivery to them), so no claim is kept; one quick retry, never throws. */
+export async function sendMemberPush(admin: Admin, message: { organizationId: string; memberIds: readonly string[]; title: string; body: string; data: MobilePushData },
+  transport: PushTransport = fetch, retryAfterMs = 1_500): Promise<PushTotals> {
+  const totals: PushTotals = { sent: 0, skipped: 0, failed: 0 };
+  if (!mobilePushEnabled() || !message.memberIds.length) return totals;
+  try {
+    const recipients = await pushMemberRecipients(admin, message.organizationId, message.memberIds);
+    const notices = [...recipients.values()].flat().map(device => ({ device, title: message.title, body: message.body, data: message.data }));
+    const outcomes = await deliverPushNotices(admin, notices, transport);
+    const retry = notices.filter((_, index) => outcomes[index] === "failed");
+    if (retry.length) {
+      await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+      const again = await deliverPushNotices(admin, retry, transport);
+      let position = 0;
+      outcomes.forEach((outcome, index) => { if (outcome === "failed") outcomes[index] = again[position++]; });
+    }
+    totals.sent = outcomes.filter(outcome => outcome === "sent").length;
+    totals.failed = outcomes.filter(outcome => outcome === "failed").length;
+  } catch {
+    totals.failed += 1;
+  }
+  if (totals.failed) console.warn(JSON.stringify({ event: "mobile.push", type: "handoffs", sent: totals.sent, failed: totals.failed }));
+  return totals;
 }
 
 /** An event announced once: `key` identifies it (per person or per team), `profileId`

@@ -14,7 +14,8 @@ export function handoffCommand(value: unknown): Exclude<MobileHandoffInput, { ac
   const target = action === 'issue' ? [] : ['handoffId', 'expectedRevision'];
   const fields = action === 'issue' ? ['recipientName', 'recipientPhone', 'previewVersion', 'instructions', 'scheduledAt', 'hours']
     : action === 'publish' ? ['previewVersion', 'instructions', 'scheduledAt'] : action === 'revoke' ? ['comment'] : ['hours'];
-  draftKeys(v, ['action', 'commandId', ...target, ...fields]);
+  draftKeys(v, ['action', 'commandId', ...target, ...fields], action === 'issue' ? ['recipientMemberId'] : []);
+  if (v.recipientMemberId !== undefined) requireDraft(draftId(v.recipientMemberId));
   if (action !== 'issue') requireDraft(draftId(v.handoffId) && revision(v.expectedRevision));
   if (action === 'issue' || action === 'publish') requireDraft(version(v.previewVersion) && validText(v.instructions, 2000) && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(v.instructions) && (v.scheduledAt === null || utc(v.scheduledAt)));
   if (action === 'issue') requireDraft(validText(v.recipientName, 160) && !!v.recipientName.trim() && !/[\x00-\x1f\x7f]/.test(v.recipientName) && typeof v.recipientPhone === 'string' && /^\+?[\d ()-]{5,30}$/.test(v.recipientPhone));
@@ -24,7 +25,8 @@ export function handoffCommand(value: unknown): Exclude<MobileHandoffInput, { ac
 }
 function receipt(value: unknown, pending: ReturnType<typeof handoffCommand>, caseId: string, port: DraftPort): MobileHandoffMutation {
   const v = draftObject(value);
-  draftKeys(v, ['ok', 'apiVersion', 'environment', 'profileId', 'checkedAt', 'kind', 'caseId', 'handoffId', 'commandId', 'action', 'committedRevision', 'currentRevision', 'refreshRequired', 'link']);
+  draftKeys(v, ['ok', 'apiVersion', 'environment', 'profileId', 'checkedAt', 'kind', 'caseId', 'handoffId', 'commandId', 'action', 'committedRevision', 'currentRevision', 'refreshRequired', 'link'], ['delivery']);
+  if (v.delivery !== undefined) { const d = draftObject(v.delivery); draftKeys(d, ['status', 'memberId']); requireDraft(['sent', 'failed'].includes(d.status as string) && draftId(d.memberId)); }
   requireDraft(port.acceptsScope(v) && v.kind === 'mutation' && v.caseId === caseId && draftId(v.handoffId) && v.commandId === pending.commandId && v.action === pending.action && v.refreshRequired === true);
   const expected = pending.action === 'issue' ? 1 : pending.expectedRevision + 1;
   requireDraft(v.committedRevision === expected && revision(v.currentRevision) && v.currentRevision >= expected && (pending.action === 'issue' || v.handoffId === pending.handoffId));
@@ -39,7 +41,8 @@ export function handoffProjection(caseId: string, state: HandoffState) {
 export function restoreHandoff(value: unknown, caseId: string, port: DraftPort): Pick<HandoffState, 'input' | 'selected' | 'status' | 'pending' | 'receipt'> {
   const v = draftObject(value); draftKeys(v, ['version', 'caseId', 'input', 'selected', 'status', 'pending', 'receipt']);
   requireDraft(v.version === 1 && v.caseId === caseId && ['editing', 'saving', 'uncertain', 'conflict', 'saved'].includes(v.status as string));
-  const input = draftObject(v.input); draftKeys(input, ['recipientName', 'recipientPhone', 'instructions', 'scheduledAt', 'hours', 'comment']);
+  const input = draftObject(v.input); draftKeys(input, ['recipientName', 'recipientPhone', 'instructions', 'scheduledAt', 'hours', 'comment'], ['recipientMemberId']);
+  requireDraft(input.recipientMemberId === undefined || input.recipientMemberId === '' || draftId(input.recipientMemberId));
   for (const [key, max] of [['recipientName', 160], ['recipientPhone', 30], ['instructions', 2000], ['scheduledAt', 64], ['hours', 10], ['comment', 1000]] as const) requireDraft(validText(input[key], max));
   let selected: HandoffState['selected'] = null;
   if (v.selected !== null) {
@@ -59,7 +62,7 @@ export function restoreHandoff(value: unknown, caseId: string, port: DraftPort):
     if (pending.action === 'issue' || pending.action === 'publish') requireDraft(pending.previewVersion === selected.previewVersion);
   }
   requireDraft((v.status === 'saved') === (v.receipt !== null));
-  return { input: clone(input) as HandoffState['input'], selected, pending,
+  return { input: { recipientMemberId: '', ...clone(input) } as HandoffState['input'], selected, pending,
     receipt: v.receipt === null ? null : receipt(v.receipt, pending!, caseId, port),
     status: v.status === 'saving' ? 'uncertain' : v.status === 'editing' && selected ? 'conflict' : v.status as HandoffState['status'] };
 }

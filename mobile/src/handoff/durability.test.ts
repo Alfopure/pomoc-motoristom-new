@@ -104,3 +104,26 @@ describe('link retrieval storage gate', () => {
     expect(finish).toHaveBeenCalledOnce(); expect(f.api.command).not.toHaveBeenCalled();
   });
 });
+
+describe('handoff to a pristavovač survives a restart', () => {
+  const memberId = '77777777-7777-4777-8777-777777777777';
+  it('keeps the chosen pristavovač in the original command and its receipt', async () => {
+    const f = storage(), api = { context: vi.fn(async () => ({ ...context(), delivery: { members: [{ id: memberId, displayName: 'MOCK Pristavovač', lastPhone: null }] } })),
+      command: vi.fn(async () => ({ ...receipt(), delivery: { status: 'failed' as const, memberId } })) };
+    const draft = new HandoffDraft(api, caseId, () => commandId, () => {}, f.port);
+    await draft.refresh(); draft.select('issue'); draft.edit({ recipientMemberId: memberId, recipientName: 'MOCK Pristavovač', recipientPhone: '+421900000002' });
+    await draft.submit();
+    const restored = new HandoffDraft(api, caseId, () => commandId, () => {}, storage(jsonCopy(f.record.payload)).port);
+    expect(restored.snapshot().pending).toMatchObject({ action: 'issue', recipientMemberId: memberId });
+    expect(restored.snapshot().receipt?.delivery).toEqual({ status: 'failed', memberId });
+  });
+  it('rejects a stored pristavovač that is not an id', async () => {
+    const f = storage(); const api = { context: vi.fn(async () => context()), command: vi.fn(async () => receipt()) };
+    const draft = new HandoffDraft(api, caseId, () => commandId, () => {}, f.port);
+    await draft.refresh(); draft.select('issue'); draft.edit({ recipientName: 'MOCK', recipientPhone: '+421900000000' });
+    const saved = jsonCopy(draft.exportDraft()) as { input: Record<string, unknown> };
+    saved.input.recipientMemberId = 'someone';
+    const restored = new HandoffDraft(api, caseId, () => commandId, () => {}, storage(saved).port);
+    expect(restored.snapshot().error).toBe('Uložený koncept odovzdania sa nepodarilo overiť.');
+  });
+});

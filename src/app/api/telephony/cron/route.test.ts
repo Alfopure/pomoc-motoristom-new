@@ -17,7 +17,8 @@ let jobControl: { enabled: boolean } | null = { enabled: true };
 
 vi.mock("@/server/telephony/recording-processing", () => ({ runRecordingProcessing: (...args: unknown[]) => runRecordingProcessing(...args) }));
 vi.mock("@/server/diagnostics/service", () => ({ runDiagnosticsMaintenance: (...args: unknown[]) => runDiagnosticsMaintenance(...args) }));
-vi.mock("@/server/mobile/push-events", () => ({ runMobileCallbackPush: (...args: unknown[]) => runMobileCallbackPush(...(args as [])), runMobilePushUpkeep: async () => null }));
+const runMobilePushUpkeep = vi.fn(async (): Promise<unknown> => null);
+vi.mock("@/server/mobile/push-events", () => ({ runMobileCallbackPush: (...args: unknown[]) => runMobileCallbackPush(...(args as [])), runMobilePushUpkeep: (...args: unknown[]) => runMobilePushUpkeep(...(args as [])) }));
 vi.mock("@/server/diagnostics/cron-monitor", () => ({
   startCronMonitor: (...args: unknown[]) => startCronMonitor(...(args as [])),
   finishCronMonitor: (...args: unknown[]) => finishCronMonitor(...(args as [])),
@@ -94,6 +95,7 @@ describe("GET /api/telephony/cron", () => {
     runRecordingProcessing.mockReset().mockResolvedValue({ job: "telephony.recordings.process", status: "ok", detail: { processed: 0 } });
     runDiagnosticsMaintenance.mockReset().mockResolvedValue({ job: "diagnostics.maintenance", status: "disabled", detail: {} });
     runMobileCallbackPush.mockClear();
+    runMobilePushUpkeep.mockReset().mockResolvedValue(null);
     jobControl = { enabled: true };
   });
 
@@ -175,6 +177,31 @@ describe("GET /api/telephony/cron", () => {
     expect(finishCronMonitor).toHaveBeenCalledWith(monitorRun, "degraded");
     expect(recordCronHeartbeat).toHaveBeenCalledWith(heartbeatAdmin, expect.any(Number), "auxiliary_degraded");
     consoleError.mockRestore();
+  });
+
+  it("deletes old positions even while the callback push fails, and the other way round", async () => {
+    vi.stubEnv("MOBILE_PUSH_ENABLED", "true");
+    runMobilePushUpkeep.mockResolvedValueOnce({ devices: 0, claims: 0, positions: 4 });
+    runMobileCallbackPush.mockRejectedValueOnce(new Error("push down"));
+    const failedPush = await (await GET(cronRequest(SECRET))).json();
+    expect(runMobilePushUpkeep).toHaveBeenCalledOnce();
+    expect(failedPush.jobs.find((job: {job: string}) => job.job === "notifications.mobile-push")).toMatchObject({ status: "failed", error: "push down" });
+    runMobilePushUpkeep.mockRejectedValueOnce(new Error("position upkeep unavailable"));
+    const failedUpkeep = await (await GET(cronRequest(SECRET))).json();
+    expect(runMobileCallbackPush).toHaveBeenCalledTimes(2);
+    expect(failedUpkeep.jobs.find((job: {job: string}) => job.job === "notifications.mobile-push")).toMatchObject({ status: "failed", error: "position upkeep unavailable" });
+    vi.stubEnv("MOBILE_PUSH_ENABLED", "");
+    runMobilePushUpkeep.mockResolvedValueOnce({ devices: 0, claims: 0, positions: 1 });
+    const pushOff = await (await GET(cronRequest(SECRET))).json();
+    expect(pushOff.jobs.find((job: {job: string}) => job.job === "notifications.mobile-push")).toMatchObject({ status: "disabled", detail: { reason: "push_disabled", upkeep: { positions: 1 } } });
+  });
+
+  it("runs no phone job at all on a working-branch Preview", async () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("MOBILE_PUSH_ENABLED", "true");
+    const body = await (await GET(cronRequest(SECRET))).json();
+    expect(body.jobs.find((job: {job: string}) => job.job === "notifications.mobile-push")).toMatchObject({ status: "disabled", detail: { reason: "push_disabled" } });
+    expect(runMobileCallbackPush).not.toHaveBeenCalled();
   });
 
   it("alerts phones about overdue callbacks only where push is switched on, as an auxiliary job", async () => {

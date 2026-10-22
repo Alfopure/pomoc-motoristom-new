@@ -59,7 +59,7 @@ const config: ExpoConfig = {
     cameraPermission: "Aplikácia potrebuje fotoaparát na odfotografovanie prílohy prípadu.",
     microphonePermission: voiceProof ? "Aplikácia potrebuje mikrofón na telefonovanie." : false,
   }], ["expo-location", {
-    locationWhenInUsePermission: "Aplikácia použije polohu telefónu iba na váš pokyn pri výbere miesta zásahu.",
+    locationWhenInUsePermission: "Aplikácia použije polohu telefónu iba na váš pokyn: pri výbere miesta zásahu a počas pristavenia, ktoré ste prijali, aby dispečer videl, kde ste. Na pozadí nikdy.",
     locationAlwaysPermission: false,
     locationAlwaysAndWhenInUsePermission: false,
     motionUsagePermission: false,

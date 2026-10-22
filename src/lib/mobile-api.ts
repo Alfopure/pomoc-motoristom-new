@@ -48,10 +48,10 @@ export type MobileAppErrorReport = {
   version: string; build: string | null; platform: "ios" | "android"; osVersion: string; preview: boolean;
 };
 /** Kinds of push notifications the dispatcher can switch on or off in Účet. */
-export type MobilePushType = "tasks" | "task_due" | "callbacks_mine" | "callbacks_unclaimed" | "cases";
+export type MobilePushType = "tasks" | "task_due" | "callbacks_mine" | "callbacks_unclaimed" | "cases" | "handoffs";
 export type MobilePushPreferences = Record<MobilePushType, boolean>;
 export type MobilePushRegistration = MobileScope & { preferences: MobilePushPreferences };
-export type MobilePushData = { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" };
+export type MobilePushData = { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" } | { kind: "delivery"; id: string };
 /** What a delivered notification carries: where a tap leads and whose phone it was sent to. */
 export type MobilePushPayload = MobilePushData & { profileId: string };
 export type MobileVoiceAttemptEnded = MobileScope & {
@@ -372,13 +372,21 @@ export type MobileHandoffGrant = {
   recoverable: boolean;
   published: MobileHandoffSnapshot | null;
   events: HandoffEvent[];
+  /** Sent to a pristavovač in the app; null for a link-only handoff. Older apps ignore it. */
+  app?: MobileHandoffApp | null;
 };
+/** A field member who receives replacement-car deliveries in the app. */
+export type MobileDeliveryMember = { id: string; displayName: string; lastPhone: string | null };
+export type MobileDeliveryPosition = { lat: number; lng: number; accuracy: number | null; recordedAt: string };
+export type MobileHandoffApp = { memberId: string; lastPosition: MobileDeliveryPosition | null };
 export type MobileCaseHandoffs = MobileScope & {
   caseId: string;
   preview: MobileHandoffSnapshot;
   previewVersion: string;
   handoffs: MobileHandoffGrant[];
   enhanced: boolean;
+  /** Pristavovači who can receive this case in the app; absent where deliveries are off. */
+  delivery?: { members: MobileDeliveryMember[] };
 };
 type MobileHandoffTarget = { handoffId: string; expectedRevision: number };
 export type MobileHandoffInput = { commandId: string } & (
@@ -390,6 +398,8 @@ export type MobileHandoffInput = { commandId: string } & (
       instructions?: string;
       scheduledAt?: string | null;
       hours?: number;
+      /** Also send it to this pristavovač in the app. */
+      recipientMemberId?: string;
     }
   | (MobileHandoffTarget & {
       action: "publish";
@@ -400,6 +410,7 @@ export type MobileHandoffInput = { commandId: string } & (
   | (MobileHandoffTarget & { action: "renew" | "extend"; hours?: number })
   | (MobileHandoffTarget & { action: "revoke"; comment: string })
   | (MobileHandoffTarget & { action: "recover" })
+  | (MobileHandoffTarget & { action: "deliver"; recipientMemberId: string })
 );
 export type MobileHandoffLink =
   | { status: "available"; url: string; expiresAt: string; currentRevision: number }
@@ -410,12 +421,43 @@ export type MobileHandoffMutation = MobileScope & {
   caseId: string;
   handoffId: string;
   commandId: string;
-  action: Exclude<MobileHandoffInput["action"], "recover">;
+  action: Exclude<MobileHandoffInput["action"], "recover" | "deliver">;
   committedRevision: number;
   currentRevision: number;
   refreshRequired: true;
   link: MobileHandoffLink;
+  /** Issue with a pristavovač: whether it reached the app; the link works either way. */
+  delivery?: { status: "sent" | "failed"; memberId: string };
 };
+/** "deliver": an existing handoff sent to a pristavovač in the app; no new revision. */
+export type MobileHandoffDelivered = MobileScope & {
+  kind: "delivery"; caseId: string; handoffId: string; commandId: string; memberId: string; sent: boolean; currentRevision: number;
+};
+
+/** The pristavovač's side: a field member without a dispatch profile. */
+export type MobileFieldScope = { ok: true; apiVersion: 1; environment: MobileEnvironment; memberId: string; checkedAt: string };
+export type MobileFieldMe = MobileFieldScope & { member: { id: string; displayName: string; email: string | null } };
+export type MobileDelivery = {
+  id: string; status: HandoffState; revision: number; publishedVersion: number; caseNumber: string;
+  expiresAt: string; createdAt: string; openedAt: string | null; eta: string | null; createdBy: string | null;
+  /** The shared card; null once finished, so the phone keeps no customer data. */
+  card: MobileHandoffSnapshot | null;
+  events: HandoffEvent[];
+  /** GPS of the assigned replacement car while the delivery is open. */
+  replacementPosition: { lat: number; lng: number; recordedAt: string } | null;
+  /** This pristavovač shares their position: from their own first step in the app until it closes. */
+  tracking: boolean;
+};
+export type MobileDeliveries = MobileFieldScope & { deliveries: MobileDelivery[] };
+export type MobileDeliveryDetail = MobileFieldScope & { delivery: MobileDelivery };
+export type MobileDeliveryAction = "accept" | "reject" | "en_route" | "arrived" | "complete" | "update" | "blocked";
+export type MobileDeliveryCommand = {
+  commandId: string; action: MobileDeliveryAction; expectedRevision: number; publishedVersion: number; comment?: string; eta?: string | null;
+};
+export type MobileDeliveryReceipt = MobileFieldScope & { delivery: MobileDelivery; commandId: string; committedRevision: number };
+export type MobileDeliveryPositionInput = { lat: number; lng: number; accuracy: number | null; recordedAt: string };
+/** `active` false: the delivery no longer takes this pristavovač's position, so the phone stops. */
+export type MobileDeliveryPositionReceipt = MobileFieldScope & { stored: boolean; active: boolean };
 /** Current-link retrieval has no immutable mutation receipt in the existing RPC. */
 export type MobileHandoffRecovered = MobileScope & {
   kind: "link";
@@ -425,7 +467,7 @@ export type MobileHandoffRecovered = MobileScope & {
   currentRevision: number;
   link: Extract<MobileHandoffLink, { status: "available" }>;
 };
-export type MobileHandoffResult = MobileHandoffMutation | MobileHandoffRecovered;
+export type MobileHandoffResult = MobileHandoffMutation | MobileHandoffRecovered | MobileHandoffDelivered;
 
 export type MobileVoiceMedia = {
   version: number;

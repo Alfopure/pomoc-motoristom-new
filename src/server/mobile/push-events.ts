@@ -5,6 +5,8 @@ import type { Database } from "@/lib/supabase/database.types";
 import { callbackDeadline, CALLBACK_OVERDUE_MINUTES } from "@/lib/telephony/callback-queue";
 import { isUuid } from "@/lib/telephony/uuid";
 import { claimedEvents, claimPushes, deliverPushNotices, mobilePushEnabled, pruneMobilePush, pushRecipients, queueMobilePush, releaseClaims, sendMobilePush, type PushClaim, type PushDevice, type PushNotice, type PushTransport } from "./push";
+import { canOperateTelephony } from "@/lib/app-environment";
+import { missingSchema } from "./field-auth";
 
 /** The events that reach a dispatcher's phone. Each text names at most a case
  * number and a time; titles of tasks, names and phone numbers stay in the app. */
@@ -159,8 +161,19 @@ export async function runMobileCallbackPush(admin: Admin, organizationId: string
   return { status: "ok" as const, detail };
 }
 
-/** Cron step, once an hour: forgets silent phones and old announcements. */
+/** Cron step, once an hour: forgets silent phones, old announcements and delivery
+ * positions older than 30 days. Positions go even while deliveries are switched
+ * off, as the privacy policy promises; a database without them is fine. */
 export async function runMobilePushUpkeep(admin: Admin, organizationId: string, now = new Date()) {
   if (now.getUTCMinutes() >= 5) return null;
-  return pruneMobilePush(admin, organizationId, now);
+  // Independent steps: a failing push table must not keep positions past 30 days.
+  let positions = 0, failure: Error | null = null;
+  if (canOperateTelephony()) {
+    const pruned = await admin.rpc("motorist_handoff_positions_prune");
+    if (pruned.error && !missingSchema(pruned.error.code)) failure = new Error("position upkeep unavailable");
+    else positions = typeof pruned.data === "number" ? pruned.data : 0;
+  }
+  const pushed = mobilePushEnabled() ? await pruneMobilePush(admin, organizationId, now) : null;
+  if (failure) throw failure;
+  return { ...(pushed ?? { devices: 0, claims: 0 }), positions };
 }

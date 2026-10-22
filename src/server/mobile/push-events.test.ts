@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createFakeSupabase, type FakeSupabase } from "@/test/fake-supabase";
-import { callbackPushText, pushCaseAssigned, pushTaskAssigned, pushTaskDue, pushTaskReview, runMobileCallbackPush } from "./push-events";
+import { createFakeSupabase, fakeError, type FakeSupabase } from "@/test/fake-supabase";
+import { callbackPushText, pushCaseAssigned, pushTaskAssigned, pushTaskDue, pushTaskReview, runMobileCallbackPush, runMobilePushUpkeep } from "./push-events";
 
 const queued: (() => Promise<unknown>)[] = [];
 vi.mock("next/server", () => ({ after: (work: () => Promise<unknown>) => { queued.push(work); } }));
@@ -201,5 +201,30 @@ describe("overdue callbacks", () => {
   it("fails the job when the callbacks cannot be read", async () => {
     fake.db.failNext("motorist_callback_requests", "select", "down");
     await expect(runMobileCallbackPush(fake.admin, ORG, NOW, transport)).rejects.toThrow("Overdue callbacks unavailable");
+  });
+});
+
+describe("hourly upkeep", () => {
+  const atMinute = (minute: number) => new Date(Date.UTC(2026, 9, 21, 10, minute));
+  it("deletes old delivery positions even with push switched off, once an hour", async () => {
+    vi.stubEnv("MOBILE_PUSH_ENABLED", "");
+    const prune = vi.fn(() => 2);
+    fake.db.registerRpc("motorist_handoff_positions_prune", prune);
+    await expect(runMobilePushUpkeep(fake.admin, ORG, atMinute(3))).resolves.toEqual({ devices: 0, claims: 0, positions: 2 });
+    await expect(runMobilePushUpkeep(fake.admin, ORG, atMinute(10))).resolves.toBeNull();
+    expect(prune).toHaveBeenCalledOnce();
+  });
+
+  it("goes on with the phones when positions cannot be deleted, then reports it", async () => {
+    fake.db.registerRpc("motorist_handoff_positions_prune", () => { throw fakeError("boom", "XX000"); });
+    const old = new Date(NOW.getTime() - 100 * 86_400_000).toISOString();
+    fake.db.seed("motorist_mobile_push_devices", [{ organization_id: ORG, profile_id: ME, environment: "test", installation_id: "00000000-0000-4000-8000-0000000000e1",
+      expo_push_token: token("silent"), platform: "ios", preferences: {}, app_version: null, created_at: old, updated_at: old, last_seen_at: old }]);
+    await expect(runMobilePushUpkeep(fake.admin, ORG, atMinute(1))).rejects.toThrow("position upkeep unavailable");
+    expect(fake.db.storage("motorist_mobile_push_devices").map(row => row.installation_id)).not.toContain("00000000-0000-4000-8000-0000000000e1");
+  });
+
+  it("is fine on a database without deliveries", async () => {
+    await expect(runMobilePushUpkeep(fake.admin, ORG, atMinute(0))).resolves.toMatchObject({ positions: 0 });
   });
 });

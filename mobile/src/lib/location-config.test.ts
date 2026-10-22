@@ -30,6 +30,7 @@ describe("resolved foreground location permissions", () => {
     });
     const plist = resolved.ios?.infoPlist;
     expect(plist?.NSLocationWhenInUseUsageDescription).toContain("iba na váš pokyn");
+    expect(plist?.NSLocationWhenInUseUsageDescription).toContain("počas pristavenia");
     for (const key of ["NSLocationAlwaysUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription", "NSMotionUsageDescription"]) {
       expect(plist).not.toHaveProperty(key);
     }
