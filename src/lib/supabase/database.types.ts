@@ -737,7 +737,9 @@ export type Database = {
       motorist_mobile_push_devices: Table<{
         id: string;
         organization_id: string;
-        profile_id: string;
+        /** Exactly one of profile_id (dispatcher) and member_id (pristavovač, delivery migration). */
+        profile_id: string | null;
+        member_id?: string | null;
         environment: "test" | "production";
         installation_id: string;
         expo_push_token: string;
@@ -1695,6 +1697,9 @@ export type Database = {
 
       motorist_case_handoff: { Args: { p_organization_id: string; p_actor_id: string; p_case_id: string; p_action: string; p_input?: Json }; Returns: Json };
       motorist_public_handoff: { Args: { p_action: string; p_token_hash: string; p_input?: Json }; Returns: Json };
+      motorist_case_handoff_app: { Args: { p_organization_id: string; p_actor_id: string; p_case_id: string; p_action: string; p_input?: Json }; Returns: Json };
+      motorist_member_handoff: { Args: { p_user_id: string; p_organization_id: string; p_membership_version: number; p_action: string; p_input?: Json }; Returns: Json };
+      motorist_handoff_positions_prune: { Args: Record<string, never>; Returns: number };
       motorist_ensure_task_assignment: { Args: { p_organization_id: string; p_task_id: string }; Returns: Json };
       motorist_claim_task_assignments: { Args: { p_organization_id: string; p_task_id?: string | null; p_limit?: number }; Returns: Json };
       motorist_finish_task_assignment: { Args: { p_organization_id: string; p_notification_id: string; p_lease_id: string; p_success: boolean }; Returns: boolean };

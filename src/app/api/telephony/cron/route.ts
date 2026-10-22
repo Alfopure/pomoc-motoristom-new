@@ -153,8 +153,8 @@ const MOBILE_PUSH_LATEST_START_MS = 75_000;
  * each callback deadline is announced once, so a repeated tick sends nothing. */
 async function runMobilePushMaterialisation(organizationId: string, cronStartedAt: number): Promise<TelephonyCronJobResult> {
   const job = "notifications.mobile-push";
-  const { mobilePushEnabled } = await import("@/server/mobile/push");
-  if (!mobilePushEnabled()) return { job, status: "disabled", detail: { reason: "push_disabled" } };
+  const [{ mobilePushEnabled }, { mobileDeliveryEnabled }] = await Promise.all([import("@/server/mobile/push"), import("@/server/mobile/field-auth")]);
+  if (!mobilePushEnabled() && !mobileDeliveryEnabled()) return { job, status: "disabled", detail: { reason: "push_disabled" } };
   // Late in a slow run the next tick announces the same callbacks; the run must end in time.
   if (Date.now() - cronStartedAt > MOBILE_PUSH_LATEST_START_MS) return { job, status: "skipped", detail: { reason: "cron_budget" } };
   const { createSupabaseAdminClient } = await import("@/lib/supabase/admin");

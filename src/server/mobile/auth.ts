@@ -26,8 +26,11 @@ function isUserJwtShape(token: string): boolean {
   } catch { return false; }
 }
 
+/** A verified signed-in user of this environment, before any role is looked up. */
+export type MobileUser = { userId: string; email: string | undefined; organizationId: string; expectedOrganization: string | null };
+
 /** User JWT only. No cookie, machine-secret or development-bypass fallback. */
-export async function requireMobileActor(request: Request): Promise<MotoristActor> {
+export async function verifyMobileUser(request: Request): Promise<MobileUser> {
   const header = request.headers.get("authorization") ?? "";
   const match = header.length <= 8192 && /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/i.exec(header);
   if (!match || !isUserJwtShape(match[1])) throw new MutationError("Prihláste sa do aplikácie.", 401);
@@ -63,21 +66,28 @@ export async function requireMobileActor(request: Request): Promise<MotoristActo
   }
 
   const organizationId = await resolveDefaultOrganizationId();
+  return { userId: claims.sub, email: typeof claims.email === "string" ? claims.email : undefined, organizationId, expectedOrganization };
+}
+
+/** A dispatcher of this environment. A signed-in user without a dispatch profile gets
+ * the code `mobile_no_dispatch_profile`, so the app can try the pristavovač side. */
+export async function requireMobileActor(request: Request): Promise<MotoristActor> {
+  const { userId, email, organizationId, expectedOrganization } = await verifyMobileUser(request);
   const { data: profile, error: profileError } = await createSupabaseAdminClient()
     .from("motorist_profiles").select("id,display_name,email,role")
-    .eq("organization_id", organizationId).eq("user_id", claims.sub)
+    .eq("organization_id", organizationId).eq("user_id", userId)
     .eq("active", true).eq("access_status", "active").neq("kind", "ai").maybeSingle();
   if (profileError) throw new MutationError("Oprávnenie sa nepodarilo overiť.", 503);
   if (!profile || !MOBILE_ROLES.includes(profile.role)) {
-    throw new MutationError("Nemáte prístup k mobilnému dispečingu.", 403);
+    throw new MutationError("Nemáte prístup k mobilnému dispečingu.", 403, "mobile_no_dispatch_profile");
   }
   // The header fences an already authorized actor; it never selects their org.
   if (expectedOrganization !== null && expectedOrganization.toLowerCase() !== organizationId.toLowerCase()) {
     throw new MutationError("Organizácia účtu sa zmenila. Obnovte prihlásenie pred pokračovaním.", 409, "expected_organization_mismatch");
   }
   return {
-    userId: claims.sub, profileId: profile.id, organizationId,
+    userId, profileId: profile.id, organizationId,
     displayName: profile.display_name, role: profile.role,
-    email: profile.email ?? (typeof claims.email === "string" ? claims.email : undefined),
+    email: profile.email ?? email,
   };
 }

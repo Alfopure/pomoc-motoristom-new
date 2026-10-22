@@ -14,11 +14,13 @@ export default async function Home() {
   const authState = await getDefaultMotoristAuthState();
   const appRelease = getAppRelease();
   const towingState = towingEnabled() ? await getTowingAuthState() : null;
-  const towingHref = towingState?.authorized ? towingLoginDestination(towingState.actor) : undefined;
+  const towingHref = towingState?.authorized ? towingLoginDestination(towingState.actor) ?? undefined : undefined;
 
   if (!authState.authorized) {
     if (towingHref) redirect(towingHref);
-    return <MotoristLogin message={authState.message} appRelease={appRelease} />;
+    // A pristavovač has no web workspace; the deliveries are in the phone app.
+    const fieldOnly = towingState?.authorized && !towingHref;
+    return <MotoristLogin message={fieldOnly ? "Pristavenia nájdete v aplikácii Dispatching v telefóne. Prihláste sa v nej rovnakým e-mailom a heslom." : authState.message} appRelease={appRelease} />;
   }
 
   const dispatchData = await loadDispatchData(authState.profile ? { organizationId: authState.profile.organizationId, profileId: authState.profile.profileId } : undefined, { attendance: false, history: false });

@@ -16,7 +16,7 @@ function email(value: unknown) {
   return value.trim().toLowerCase();
 }
 function roles(value: unknown): TowingRole[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 4 || value.some(role => !['driver','dispatch','billing','manager'].includes(role))) throw new TowingError('invalid_input',400,'Vyberte oprávnenia účtu.');
+  if (!Array.isArray(value) || value.length < 1 || value.length > 5 || value.some(role => !['driver','dispatch','billing','manager','delivery'].includes(role))) throw new TowingError('invalid_input',400,'Vyberte oprávnenia účtu.');
   return [...new Set(value)] as TowingRole[];
 }
 function displayName(value: unknown) {

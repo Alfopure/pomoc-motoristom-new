@@ -104,6 +104,7 @@ describe("mobile handoff command boundary", () => {
   it("fresh legacy URL uses canonical configuration, not request host", async () => {
     const { session, rpc } = fixture(); rpc.mockResolvedValue({ data: receipt({ tokenAccepted: true }), error: null });
     const result = await commandMobileCaseHandoff(session, new Request("https://attacker.test"), caseId, issue);
+    if (!("link" in result)) throw new Error("Missing link");
     expect(result.link).toMatchObject({ status: "available", expiresAt, currentRevision: 1 });
     expect(JSON.stringify(result)).toContain(origin + "/handoff#token="); expect(JSON.stringify(result)).not.toContain("attacker.test");
   });
@@ -123,6 +124,7 @@ describe("mobile handoff command boundary", () => {
     const { session, rpc } = fixture(); rpc.mockResolvedValue({ data: receipt({ handoff: grant(patch), tokenAccepted: true }), error: null });
     const result = await commandMobileCaseHandoff(session, request(), caseId, issue);
     expect(result).toMatchObject({ kind: "mutation", committedRevision: 1 });
+    if (!("link" in result)) throw new Error("Missing link");
     expect(result.link.status).toBe("published" in patch ? "available" : "unavailable");
   });
 });

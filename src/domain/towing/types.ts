@@ -1,6 +1,6 @@
 /** Isolated towing DTOs. Amounts are integer EUR cents; quantities/prices are decimal strings. */
-export type TowingRole = 'driver' | 'dispatch' | 'billing' | 'manager';
-export type TowingCapability = 'drive' | 'operate' | 'price' | 'bill' | 'cash' | 'correct' | 'members' | 'documents' | 'report';
+export type TowingRole = 'driver' | 'dispatch' | 'billing' | 'manager' | 'delivery';
+export type TowingCapability = 'drive' | 'operate' | 'price' | 'bill' | 'cash' | 'correct' | 'members' | 'documents' | 'report' | 'deliver';
 export type TowingView = 'office' | 'driver';
 export type TowingWorkStatus = 'draft' | 'assigned' | 'in_progress' | 'submitted' | 'needs_changes' | 'cancelled';
 export type TowingBillingStatus = 'not_ready' | 'ready' | 'invoiced' | 'not_required';

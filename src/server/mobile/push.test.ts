@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeSupabase, type FakeSupabase } from "@/test/fake-supabase";
 import type { MotoristActor } from "@/server/api-auth";
-import { claimPushes, defaultPushPreferences, mobilePushEnabled, pruneMobilePush, pushRecipients, queueMobilePush, readPushRegistration, registerMobilePush, sendMobilePush, unregisterMobilePush } from "./push";
+import { claimPushes, defaultPushPreferences, mobilePushEnabled, pruneMobilePush, pushRecipients, queueMobilePush, readPushRegistration, registerMobilePush, sendMemberPush, sendMobilePush, unregisterMobilePush } from "./push";
 
 const queued: (() => Promise<unknown>)[] = [];
 vi.mock("next/server", () => ({ after: (work: () => Promise<unknown>) => { queued.push(work); } }));
@@ -91,6 +91,16 @@ describe("push registration", () => {
     expect(devices()).toEqual([expect.objectContaining({ profile_id: ME, installation_id: PHONE })]);
   });
 
+  it("registers a pristavovač's phone by member, and a later dispatcher takes the phone over cleanly", async () => {
+    const MEMBER = "00000000-0000-4000-8000-0000000000e1";
+    const member = { organizationId: ORG, memberId: MEMBER };
+    await expect(registerMobilePush(fake.admin, member, { installationId: PHONE, token: token("abc"), platform: "ios", preferences: { handoffs: false } }, NOW)).resolves.toMatchObject({ preferences: { handoffs: false } });
+    expect(devices()).toEqual([expect.objectContaining({ member_id: MEMBER, profile_id: null, installation_id: PHONE })]);
+    await registerMobilePush(fake.admin, actor, { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
+    expect(devices()).toEqual([expect.objectContaining({ profile_id: ME, installation_id: PHONE })]);
+    expect(devices()[0].member_id ?? null).toBeNull();
+  });
+
   it("keeps a token on one installation only", async () => {
     const other = "00000000-0000-4000-8000-0000000000f2";
     fake.db.seed("motorist_mobile_push_devices", [device(ME, other, token("abc"))]);
@@ -100,12 +110,12 @@ describe("push registration", () => {
 
   it("forgets this phone at logout, also when an earlier account left it registered", async () => {
     fake.db.seed("motorist_mobile_push_devices", [device(COLLEAGUE, PHONE, token("earlier")), device(COLLEAGUE, "00000000-0000-4000-8000-0000000000f2", token("theirs"))]);
-    await expect(unregisterMobilePush(fake.admin, actor, { installationId: PHONE })).resolves.toEqual({ removed: true });
-    await expect(unregisterMobilePush(fake.admin, actor, { installationId: PHONE })).resolves.toEqual({ removed: false });
+    await expect(unregisterMobilePush(fake.admin, { installationId: PHONE })).resolves.toEqual({ removed: true });
+    await expect(unregisterMobilePush(fake.admin, { installationId: PHONE })).resolves.toEqual({ removed: false });
     expect(devices().map(row => row.installation_id)).toEqual(["00000000-0000-4000-8000-0000000000f2"]);
-    await expect(unregisterMobilePush(fake.admin, actor, { installationId: PHONE, token: "x" })).rejects.toMatchObject({ status: 400 });
+    await expect(unregisterMobilePush(fake.admin, { installationId: PHONE, token: "x" })).rejects.toMatchObject({ status: 400 });
     fake.db.failNext("motorist_mobile_push_devices", "delete", { message: "missing", code: "42P01", details: null, hint: null });
-    await expect(unregisterMobilePush(fake.admin, actor, { installationId: PHONE })).resolves.toEqual({ removed: false });
+    await expect(unregisterMobilePush(fake.admin, { installationId: PHONE })).resolves.toEqual({ removed: false });
   });
 });
 
@@ -189,6 +199,23 @@ describe("push delivery", () => {
     await expect(pruneMobilePush(fake.admin, ORG, NOW)).resolves.toEqual({ devices: 1, claims: 1 });
     expect(devices().map(row => row.expo_push_token)).toEqual([token("recent")]);
     expect(fake.db.storage("motorist_notifications").map(row => row.dedupe_key)).toEqual(["mobile-push:new", "call-push:old"]);
+  });
+
+  it("sends a delivery notice only to an active pristavovač's phone, never to dispatchers", async () => {
+    const MEMBER = "00000000-0000-4000-8000-0000000000e1", GONE = "00000000-0000-4000-8000-0000000000e2";
+    fake.db.seed("motorist_towing_memberships", [{ id: MEMBER, organization_id: ORG, active: true, capabilities: ["deliver"] }, { id: GONE, organization_id: ORG, active: false, capabilities: ["deliver"] }]);
+    fake.db.seed("motorist_mobile_push_devices", [
+      { ...device(ME, PHONE, token("dispatcher")) },
+      { ...device(ME, "00000000-0000-4000-8000-0000000000f2", token("pavol")), profile_id: null, member_id: MEMBER },
+      { ...device(ME, "00000000-0000-4000-8000-0000000000f3", token("former")), profile_id: null, member_id: GONE },
+    ]);
+    const transport = expoOk(1);
+    await expect(sendMemberPush(fake.admin, { organizationId: ORG, memberIds: [MEMBER, GONE], title: "Nové pristavenie", body: "Prípad PM-1.", data: { kind: "delivery", id: "d1" } }, transport, 0))
+      .resolves.toEqual({ sent: 1, skipped: 0, failed: 0 });
+    expect(JSON.parse(String(transport.mock.calls[0][1].body))[0]).toMatchObject({ to: token("pavol"), data: { kind: "delivery", id: "d1", profileId: MEMBER } });
+    // Team notices for dispatchers skip a pristavovač's phone.
+    const team = await pushRecipients(fake.admin, ORG, "callbacks_unclaimed", "team", NOW);
+    expect([...team.keys()]).toEqual([ME]);
   });
 
   it("finds the whole team for a team notice", async () => {

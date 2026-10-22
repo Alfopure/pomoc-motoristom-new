@@ -3,6 +3,7 @@ export const towingRoleCapabilities: Record<TowingRole, readonly TowingCapabilit
   driver: ['drive'], dispatch: ['operate', 'price', 'documents'],
   billing: ['price', 'bill', 'cash', 'documents', 'report'],
   manager: ['operate', 'price', 'bill', 'cash', 'correct', 'members', 'documents', 'report'],
+  delivery: ['deliver'],
 };
 export function capabilitiesForTowingRoles(roles: TowingRole[]): TowingCapability[] {
   return [...new Set(roles.flatMap(role => towingRoleCapabilities[role]))];
