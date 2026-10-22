@@ -100,12 +100,16 @@ export async function registerMobilePush(admin: Admin, owner: PushOwner, value: 
   // A token belongs to one installation only.
   const stale = await admin.from(TABLE).delete().eq("expo_push_token", input.token).neq("installation_id", input.installationId);
   if (stale.error) throw new MutationError("Upozornenia sa nepodarilo uložiť.", 503);
-  const saved = await admin.from(TABLE).upsert({
-    organization_id: owner.organizationId, profile_id: owner.profileId, ...(member || row?.member_id !== undefined ? { member_id: owner.memberId } : {}),
+  const store = (memberId: string | null) => admin.from(TABLE).upsert({
+    organization_id: owner.organizationId, profile_id: owner.profileId, ...(member || row?.member_id !== undefined ? { member_id: memberId } : {}),
     environment, installation_id: input.installationId,
     expo_push_token: input.token, platform: input.platform, preferences: preferences as unknown as Json, app_version: input.appVersion,
     updated_at: now.toISOString(), last_seen_at: now.toISOString(),
   }, { onConflict: "environment,installation_id" }).select("preferences").single();
+  let saved = await store(owner.memberId);
+  // Before the background migration a phone names one person only: a dispatcher who
+  // also delivers keeps the dispatch notices then.
+  if (saved.error?.code === "23514" && owner.profileId && owner.memberId) saved = await store(null);
   if (saved.error || !saved.data) throw new MutationError("Upozornenia sa nepodarilo uložiť.", 503);
   return { preferences: storedPreferences(saved.data.preferences) };
 }

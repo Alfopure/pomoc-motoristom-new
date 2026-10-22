@@ -103,6 +103,16 @@ describe("background sharing of the pristavovač's position", () => {
     expect(nobody.source.permission).not.toHaveBeenCalled();
   });
 
+  it("lets a late logout of one account not undo the next account's start", async () => {
+    const first = setup({ stored: kept(A), running: true });
+    const second = setup();
+    const leaving = first.tracker.forget();
+    const starting = second.tracker.follow(B);
+    await Promise.all([leaving, starting]);
+    expect(first.revoke).toHaveBeenCalled();
+    expect(second.running()).toBe(true);
+  });
+
   it("keeps sending after the screen went away", async () => {
     const screen = setup();
     await screen.tracker.follow(A);

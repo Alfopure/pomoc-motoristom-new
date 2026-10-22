@@ -111,6 +111,13 @@ describe("push registration", () => {
     await expect(registerMobilePush(fake.admin, { organizationId: ORG, profileId: null, memberId: null }, { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW)).rejects.toMatchObject({ status: 403 });
   });
 
+  it("keeps the dispatch notices of someone with both roles before the background migration", async () => {
+    const MEMBER = "00000000-0000-4000-8000-0000000000e1";
+    fake.db.failNext("motorist_mobile_push_devices", "upsert", { message: "check", code: "23514", details: null, hint: null });
+    await registerMobilePush(fake.admin, { organizationId: ORG, profileId: ME, memberId: MEMBER }, { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
+    expect(devices()).toEqual([expect.objectContaining({ profile_id: ME, member_id: null, installation_id: PHONE })]);
+  });
+
   it("keeps a token on one installation only", async () => {
     const other = "00000000-0000-4000-8000-0000000000f2";
     fake.db.seed("motorist_mobile_push_devices", [device(ME, other, token("abc"))]);

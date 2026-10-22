@@ -10,9 +10,15 @@ export type TrackingState = { version: 1; environment: MobileEnvironment; apiOri
 export type TrackingStore = { load: () => Promise<TrackingState | null>; save: (state: TrackingState) => Promise<void>; clear: () => Promise<void> };
 export type ReadingQueue = { load: () => Promise<Reading[]>; save: (readings: Reading[]) => Promise<void>; clear: () => Promise<void> };
 export type SendResult = "ok" | "stop" | "retry";
-export type TaskDeps = { store: TrackingStore; queue: ReadingQueue; stopUpdates: () => Promise<void>; send: (state: TrackingState, batch: Reading[]) => Promise<SendResult> };
+export type TaskDeps = {
+  store: TrackingStore; queue: ReadingQueue; stopUpdates: () => Promise<void>; send: (state: TrackingState, batch: Reading[]) => Promise<SendResult>;
+  /** When this phone last sent, so the open app sends no more than every 20 s either. */
+  sentAt: () => number; markSent: (at: number) => void;
+};
 
-const KEEP_MS = 12 * 3_600_000, FUTURE_MS = 2 * 60_000, KEEP_COUNT = 300, BATCH = 100;
+/** One reading per 20 s at most, kept up to half a day (about 2 200 of them). */
+export const GAP_MS = 20_000;
+const KEEP_MS = 12 * 3_600_000, FUTURE_MS = 2 * 60_000, KEEP_COUNT = 2_200, BATCH = 100, ROUNDS = 5;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** A reading from the location service, or nothing if it is not a usable position. */
@@ -24,14 +30,19 @@ export function toReading(value: unknown): Reading[] {
   return [{ lat, lng, accuracy: typeof accuracy === "number" && Number.isFinite(accuracy) && accuracy >= 0 && accuracy <= 100_000 ? accuracy : null, recordedAt: new Date(time).toISOString() }];
 }
 
-/** Kept and new readings, oldest first, once each; at most half a day and 300 of them. */
+/** Kept and new readings, oldest first, at least 20 s apart, at most half a day. */
 export function mergeReadings(kept: readonly Reading[], incoming: readonly Reading[], now = Date.now()): Reading[] {
   const byTime = new Map<string, Reading>();
   for (const reading of [...kept, ...incoming]) {
     const time = Date.parse(reading.recordedAt);
     if (Number.isFinite(time) && time >= now - KEEP_MS && time <= now + FUTURE_MS) byTime.set(new Date(time).toISOString(), { ...reading, recordedAt: new Date(time).toISOString() });
   }
-  return [...byTime.values()].sort((a, b) => Date.parse(a.recordedAt) - Date.parse(b.recordedAt)).slice(-KEEP_COUNT);
+  const spaced: Reading[] = [];
+  for (const reading of [...byTime.values()].sort((a, b) => Date.parse(a.recordedAt) - Date.parse(b.recordedAt))) {
+    const last = spaced[spaced.length - 1];
+    if (!last || Date.parse(reading.recordedAt) - Date.parse(last.recordedAt) >= GAP_MS) spaced.push(reading);
+  }
+  return spaced.slice(-KEEP_COUNT);
 }
 
 export function parseTrackingState(raw: string | null): TrackingState | null {
@@ -57,18 +68,24 @@ export function parseQueue(raw: string | null): Reading[] {
   } catch { return []; }
 }
 
-/** One run of the background task: what came now plus what waited, the oldest
- * hundred at a time. The server's "stop" ends the sharing on this phone. */
+/** One run of the background task (one at a time): what came now plus what
+ * waited. It sends at most every 20 s, then the oldest hundred at a time, a few
+ * hundred at most per run. The server's "stop" ends the sharing on this phone. */
 export async function deliverReadings(deps: TaskDeps, incoming: readonly Reading[], now = Date.now()): Promise<"sent" | "kept" | "stopped" | "idle"> {
   const state = await deps.store.load();
   if (!state || Date.parse(state.expiresAt) <= now) { await halt(deps); return "stopped"; }
-  const queue = mergeReadings(await deps.queue.load(), incoming, now);
+  let queue = mergeReadings(await deps.queue.load(), incoming, now);
   if (!queue.length) return "idle";
-  const batch = queue.slice(0, BATCH);
-  const result = await deps.send(state, batch);
-  if (result === "stop") { await halt(deps); return "stopped"; }
-  if (result === "retry") { await deps.queue.save(queue); return "kept"; }
-  await deps.queue.save(queue.slice(batch.length));
+  if (now - deps.sentAt() < GAP_MS && queue.length <= BATCH) { await deps.queue.save(queue); return "kept"; }
+  for (let round = 0; round < ROUNDS && queue.length; round++) {
+    const batch = queue.slice(0, BATCH);
+    const result = await deps.send(state, batch);
+    if (result === "stop") { await halt(deps); return "stopped"; }
+    if (result === "retry") { await deps.queue.save(queue); return "kept"; }
+    deps.markSent(now);
+    queue = queue.slice(batch.length);
+  }
+  await deps.queue.save(queue);
   return "sent";
 }
 async function halt(deps: Pick<TaskDeps, "store" | "queue" | "stopUpdates">) {
@@ -89,8 +106,10 @@ export async function sendReadings(state: TrackingState, batch: readonly Reading
     if ([401, 403, 404, 409].includes(response.status)) return "stop";
     // A batch the server cannot read is dropped, not repeated for ever.
     if (response.status === 400) return "ok";
+    const body = await response.json().catch(() => null) as { ok?: unknown; environment?: unknown; active?: unknown; code?: unknown } | null;
+    // Deliveries switched off in this environment: nothing more to send.
+    if (response.status === 503 && body?.code === "delivery_unavailable") return "stop";
     if (!response.ok) return "retry";
-    const body = await response.json().catch(() => null) as { ok?: unknown; environment?: unknown; active?: unknown } | null;
     if (!body || body.ok !== true || body.environment !== state.environment || typeof body.active !== "boolean") return "retry";
     return body.active ? "ok" : "stop";
   } catch { return "retry"; } finally { clearTimeout(timer); }

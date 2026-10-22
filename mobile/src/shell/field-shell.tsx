@@ -89,7 +89,8 @@ export function FieldShell(props: Props) {
     const pending = setTimeout(consume, 0);
     return () => { unsubscribe(); clearTimeout(pending); };
   }, [memberId, pins, available]);
-  useAndroidBack(active && (nav.account || nav.tab === "moduly" && nav.opened !== null), back);
+  // A delivery opened in the module owns Back first; then the account and Moduly.
+  useAndroidBack(active && (nav.account || nav.tab === "moduly" && nav.opened !== null && !moduleBack), back);
   const deliveries = sortDeliveries(session.list.data ?? []);
   const open = deliveries.filter(delivery => isOpen(delivery));
   const status = locationStatus(location, open.length);

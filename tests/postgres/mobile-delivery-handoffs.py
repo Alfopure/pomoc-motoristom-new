@@ -387,6 +387,20 @@ class DeliveryHandoffContract(unittest.TestCase):
             self.rejected("42501", lambda: client.execute("select motorist_handoff_track(%s,'[]'::jsonb)", (third,)))
             self.rejected("42501", lambda: client.execute("select * from motorist_handoff_trackers"))
 
+    def test_20_an_extended_delivery_keeps_its_background_secret(self):
+        case, handoff = self.sent("pavol")
+        self.step("pavol", handoff, "accept")
+        # About to expire when the secret is issued; the dispatcher then extends it.
+        self.db.execute("update motorist_case_handoffs set expires_at=now()+interval '2 minutes' where id=%s", (handoff["id"],))
+        token = digest("tracker-" + uuid.uuid4().hex)
+        self.member("pavol", "tracker", {"handoffId": handoff["id"], "tokenHash": token})
+        self.db.execute("update motorist_case_handoffs set expires_at=now()+interval '2 days' where id=%s", (handoff["id"],))
+        expires = self.db.execute("select expires_at>now()+interval '7 days' from motorist_handoff_trackers where token_hash=%s", (token,)).fetchone()[0]
+        self.assertTrue(expires)
+        now = self.db.execute("select now()").fetchone()[0]
+        result = self.db.execute("select motorist_handoff_track(%s,%s::jsonb)", (token, json.dumps([{"lat": 49, "lng": 18, "accuracy": None, "recordedAt": now.isoformat()}]))).fetchone()[0]
+        self.assertEqual(result, {"stored": 1, "active": True})
+
     def test_18_lost_access_stops_the_background_secret(self):
         case, handoff = self.sent("peter")
         self.step("peter", handoff, "accept")

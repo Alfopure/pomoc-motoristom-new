@@ -161,6 +161,9 @@ describe("position in the background", () => {
     expect(JSON.stringify(mocks.rpc.mock.calls.at(-1))).not.toContain(tracker.token);
     mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "PT409", message: "Not tracking" } });
     await expect(issueDeliveryTracker(actor, GRANT)).rejects.toMatchObject({ status: 409, code: "delivery_not_tracking" });
+    // Only the first delivery migration: no background secret yet.
+    mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "22023", message: "Invalid command" } });
+    await expect(issueDeliveryTracker(actor, GRANT)).rejects.toMatchObject({ status: 503, code: "delivery_background_unavailable" });
     mocks.rpc.mockResolvedValueOnce({ data: { revoked: true }, error: null });
     await expect(revokeDeliveryTracker(actor, GRANT)).resolves.toEqual({ revoked: true });
     expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_member_handoff", expect.objectContaining({ p_action: "untrack", p_input: { handoffId: GRANT } }));

@@ -21,6 +21,8 @@ function deliveryError(error: { code?: string; message?: string }): never {
   if (code === "42501") throw new MutationError("Nemáte prístup k pristaveniam.", 403, "mobile_no_field_access");
   if (code === "P0002") throw new MutationError("Pristavenie už nie je dostupné. Dispečer ho mohol zrušiť alebo mu skončila platnosť.", 404);
   if (code === "PT409" && error.message === "Not tracking") throw new MutationError("Polohu môžete posielať od svojho kroku v pristavení, kým je otvorené.", 409, "delivery_not_tracking");
+  // A database with the first delivery migration only knows no background secret yet.
+  if (code === "22023" && error.message === "Invalid command") throw new MutationError("Zdieľanie polohy na pozadí ešte nie je v tomto prostredí zapnuté.", 503, "delivery_background_unavailable");
   if (["PT409", "23505", "40001"].includes(code)) throw new MutationError("Pristavenie sa medzitým zmenilo. Načítajte ho znova a rozhodnite sa.", 409);
   if (["22023", "22P02", "23514", "22007", "22008"].includes(code)) throw new MutationError("Skontrolujte údaje a dôvod.", 400);
   return unconfirmed();

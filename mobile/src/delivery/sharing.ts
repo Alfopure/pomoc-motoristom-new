@@ -35,13 +35,21 @@ type Deps = {
   scope: { environment: MobileEnvironment; apiOrigin: string };
 };
 
+/** Every change of the background sharing, of any account's tracker on this phone,
+ * runs one at a time: a late logout cannot undo the next account's start. */
+let chain: Promise<void> = Promise.resolve();
+export function serially(work: () => Promise<void>): Promise<void> {
+  const next = chain.then(work, work);
+  chain = next.catch(() => undefined);
+  return next;
+}
+
 /** The native app: iOS keeps delivering positions to a background task, also while
  * the phone is locked, and wakes a closed app on a larger move. One step at a time. */
 export class BackgroundTracker implements LocationSharing {
   readonly mode = "background" as const;
   private state: SharingState = { status: "off", lastSentAt: null, background: null };
   private listeners = new Set<() => void>();
-  private chain: Promise<void> = Promise.resolve();
   private disposed = false;
   private member: string | null = null;
   constructor(private deps: Deps) {}
@@ -66,9 +74,7 @@ export class BackgroundTracker implements LocationSharing {
   dispose() { this.disposed = true; this.listeners.clear(); }
 
   private serial(work: () => Promise<void>): Promise<void> {
-    const next = this.chain.then(work, work);
-    this.chain = next.catch(() => undefined);
-    return next.catch(() => this.update({ status: "error", background: null }));
+    return serially(work).catch(() => this.update({ status: "error", background: null }));
   }
   private update(change: Partial<SharingState>) {
     if (this.disposed) return;

@@ -28,6 +28,7 @@ import { createPushDevice, installPushTaps } from "./src/notifications/device";
 import { PushSettings } from "./src/notifications/settings";
 import { pushTaps } from "./src/notifications/taps";
 import { useDeliverySession } from "./src/delivery/session";
+import { haltBackgroundSharing } from "./src/delivery/native-sharing";
 import { FieldShell } from "./src/shell/field-shell";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
@@ -82,6 +83,8 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
       if (!alive) return;
       observedEvent = true;
       logout.observe(event, next?.user.id ?? null);
+      // Signed out, also by an expired session: no more position from this phone.
+      if (event === "SIGNED_OUT") void haltBackgroundSharing();
       if (authScope.observe(next?.user.id ?? null)) queryClient.clear();
       setSessionEpoch(authScope.snapshot().epoch);
       setSession(next); setBooting(false);

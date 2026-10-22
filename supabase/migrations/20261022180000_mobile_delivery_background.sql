@@ -26,7 +26,8 @@ alter table public.motorist_mobile_push_devices add constraint motorist_mobile_p
 
 -- 3. Position in the background: a secret for one delivery and one pristavovač
 -- lets the phone send positions without the sign-in session. Only its hash is
--- kept; it ends with the delivery, a new secret or the pristavovač's logout.
+-- kept; it ends with the delivery (also when the dispatcher extends it, it lasts),
+-- a new secret or the pristavovač's logout, and in any case after 8 days.
 create table public.motorist_handoff_trackers (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null references public.motorist_organizations(id) on delete cascade,
@@ -78,7 +79,7 @@ revoke all on function app_private.motorist_handoff_record_positions(uuid,uuid,j
 create or replace function public.motorist_member_handoff(p_user_id uuid,p_organization_id uuid,p_membership_version bigint,p_action text,p_input jsonb default '{}')
 returns jsonb language plpgsql security definer set search_path='' as $$
 declare m public.motorist_towing_memberships; h public.motorist_case_handoffs; receipt public.motorist_handoff_receipts;
- cid uuid; action text; v_actor_key text; fingerprint jsonb; comment text; next_status text; v_hash text; result jsonb;
+ cid uuid; action text; v_actor_key text; fingerprint jsonb; comment text; next_status text; v_hash text; result jsonb; v_expires timestamptz;
 begin
  m:=app_private.towing_authorize(p_user_id,p_organization_id,p_membership_version);
  if not 'deliver'=any(m.capabilities) then raise exception 'Delivery access denied' using errcode='42501'; end if;
@@ -119,8 +120,9 @@ begin
   if h.status not in ('accepted','en_route','arrived') or not exists(select 1 from public.motorist_handoff_events e
    where e.handoff_id=h.id and e.actor_member_id=m.id and e.action in ('accept','en_route','arrived')) then raise exception 'Not tracking' using errcode='PT409'; end if;
   update public.motorist_handoff_trackers set revoked_at=clock_timestamp() where handoff_id=h.id and member_id=m.id and revoked_at is null;
-  insert into public.motorist_handoff_trackers(organization_id,handoff_id,member_id,token_hash,expires_at) values(h.organization_id,h.id,m.id,v_hash,h.expires_at);
-  return jsonb_build_object('expiresAt',h.expires_at);
+  insert into public.motorist_handoff_trackers(organization_id,handoff_id,member_id,token_hash,expires_at)
+   values(h.organization_id,h.id,m.id,v_hash,clock_timestamp()+interval '8 days') returning expires_at into v_expires;
+  return jsonb_build_object('expiresAt',v_expires);
  end if;
  if p_action<>'command' then raise exception 'Invalid command' using errcode='22023'; end if;
  cid:=(p_input->>'commandId')::uuid; action:=p_input->>'action';
@@ -167,13 +169,17 @@ grant execute on function public.motorist_member_handoff(uuid,uuid,bigint,text,j
 
 -- 6. What the phone sends in the background, identified only by the secret's hash.
 -- An unknown, ended or revoked secret, or a pristavovač who lost access, gets
--- `active` false, so the phone stops.
+-- `active` false, so the phone stops. The delivery row is locked before the
+-- secret, in the same order as issuing and revoking.
 create function public.motorist_handoff_track(p_token_hash text,p_positions jsonb) returns jsonb language plpgsql security definer set search_path='' as $$
 declare t public.motorist_handoff_trackers; m public.motorist_towing_memberships; result jsonb;
 begin
  if p_token_hash is null or p_token_hash!~'^[a-f0-9]{64}$' then return jsonb_build_object('stored',0,'active',false); end if;
- select * into t from public.motorist_handoff_trackers where token_hash=p_token_hash for update;
- if not found or t.revoked_at is not null or t.expires_at<=clock_timestamp() then return jsonb_build_object('stored',0,'active',false); end if;
+ select * into t from public.motorist_handoff_trackers where token_hash=p_token_hash;
+ if not found then return jsonb_build_object('stored',0,'active',false); end if;
+ perform 1 from public.motorist_case_handoffs where id=t.handoff_id for update;
+ select * into t from public.motorist_handoff_trackers where id=t.id for update;
+ if t.revoked_at is not null or t.expires_at<=clock_timestamp() then return jsonb_build_object('stored',0,'active',false); end if;
  select * into m from public.motorist_towing_memberships where id=t.member_id and organization_id=t.organization_id;
  if not found or not app_private.motorist_delivery_member_ready(m) then
   update public.motorist_handoff_trackers set revoked_at=clock_timestamp() where id=t.id;

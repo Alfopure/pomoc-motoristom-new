@@ -9,7 +9,7 @@ import { MobileApiError } from "../lib/api";
 import type { DeliveryApi } from "./api";
 import { DELIVERY_TASK, deliverReadings, parseQueue, parseTrackingState, sendReadings, toReading, type ReadingQueue, type TaskDeps, type TrackingStore } from "./background";
 import { phoneLocation } from "./location";
-import { BackgroundTracker, type BackgroundSource, type LocationSharing, type Permission } from "./sharing";
+import { BackgroundTracker, serially, type BackgroundSource, type LocationSharing, type Permission } from "./sharing";
 import { DeliveryTracker } from "./tracker";
 
 /** Background location needs the native app: Expo Go cannot keep it, and Android
@@ -26,7 +26,8 @@ export const keychainStore: TrackingStore = {
   save: async state => { await SecureStore.setItemAsync(STATE_KEY, JSON.stringify(state), keychain); },
   clear: async () => { await SecureStore.deleteItemAsync(STATE_KEY, keychain); },
 };
-const queueFile = () => new File(Paths.document, "pm-delivery-queue-v1.json");
+// In caches: not backed up, and losing it only loses positions not yet sent.
+const queueFile = () => new File(Paths.cache, "pm-delivery-queue-v1.json");
 export const fileQueue: ReadingQueue = {
   load: async () => { const file = queueFile(); return file.exists ? parseQueue(await file.text()) : []; },
   save: async readings => {
@@ -53,18 +54,33 @@ export const backgroundSource: BackgroundSource = {
   }),
   stop: () => Location.stopLocationUpdatesAsync(DELIVERY_TASK),
 };
+let lastSent = 0;
 const taskDeps: TaskDeps = {
   store: keychainStore, queue: fileQueue, send: (state, batch) => sendReadings(state, batch),
   stopUpdates: async () => { if (await running()) await Location.stopLocationUpdatesAsync(DELIVERY_TASK); },
+  sentAt: () => lastSent, markSent: at => { lastSent = at; },
 };
 
-/** Registered when the app starts, also when iOS starts it in the background for a location. */
+/** Registered when the app starts, also when iOS starts it in the background for a location.
+ * Runs one after another, so two readings never write the waiting list at once. */
 export function defineDeliveryTask() {
   if (TaskManager.isTaskDefined(DELIVERY_TASK)) return;
   TaskManager.defineTask<{ locations?: unknown[] }>(DELIVERY_TASK, async ({ data, error }) => {
     if (error) return;
-    await deliverReadings(taskDeps, (data?.locations ?? []).flatMap(toReading)).catch(() => undefined);
+    const readings = (data?.locations ?? []).flatMap(toReading);
+    await serially(async () => { await deliverReadings(taskDeps, readings); }).catch(() => undefined);
   });
+}
+
+/** Signed out, also without a logout in the app (an expired session): nothing more
+ * leaves this phone. The secret itself ends with the delivery. */
+export function haltBackgroundSharing(): Promise<void> {
+  if (!backgroundSupported()) return Promise.resolve();
+  return serially(async () => {
+    await taskDeps.stopUpdates().catch(() => undefined);
+    await keychainStore.clear().catch(() => undefined);
+    await fileQueue.clear().catch(() => undefined);
+  }).catch(() => undefined);
 }
 
 export function createLocationSharing(api: DeliveryApi, config: MobileConfig): LocationSharing {
