@@ -1,214 +1,58 @@
 # Pripravenosť mobilnej aplikácie na nasadenie (iPhone)
 
-Stav k 19. 10. 2026, zdroj `dev` `aa68c9e` (TEST, Expo Go), doplnený 22. 10. 2026
-(Apple účet, TestFlight, F3 a F6 na TEST). Dokument spisuje,
-čo aplikácia vie, čo chýba na každodenné používanie, čo vyžaduje Apple, čo
-potrebujeme pripraviť my a v akom poradí. Postup natívneho telefonovania po
-schválení Apple je osobitne v [iPhone TEST postupe](iphone-voice-test.md).
+Aktualizované 22. 10. 2026 po prvých fyzických skúškach majiteľa. Aktuálny
+[audit spoľahlivosti a plán](reliability-audit-2026-10-22.md) obsahuje zistenia,
+rozsah opráv a otvorené skúšky. Podrobná história F1–F6 je nižšie.
 
-## 1. Zhrnutie
+## Aktuálny stav
 
-- **Dnes:** aplikácia funguje v Expo Go proti TEST serveru. Dispečer v nej
-  vie pracovať s prípadmi, úlohami a spätnými volaniami; telefonovať z nej
-  zatiaľ nevie a dostáva iba upozornenia viditeľné pri otvorenej aplikácii.
-- **TestFlight (pripravené 22. 10. 2026):** Apple účet je aktívny; TEST aplikácia
-  má App ID, kartu v App Store Connect aj podpis. Build ide cez interný TestFlight
-  bez App Review podľa [postupu](testflight.md). Vhodné na pilot a na prvé
-  fyzické skúšky telefonovania a polohy pristavovača.
-- **Ostrá prevádzka bez telefonovania:** treba vydať server s mobilným API na
-  produkciu, doplniť povinné náležitosti pre Apple a prejsť App Review.
-- **Ostrá prevádzka s telefonovaním:** naviac fyzicky overiť hovory na iPhone
-  (zvonenie pri zamknutí, zvuk, VoIP push) a až potom ich povoliť pre
-  produkciu; dnes sú zámerne iba v TEST variante.
+| Oblasť | Stav |
+| --- | --- |
+| Distribúcia TEST | Dispatching TEST 0.1.0 (18) v internom TestFlighte; zdroj `47882b1a`, OTA vypnuté. |
+| Server TEST pri začiatku auditu | `dev` `0ef3445d`, https://test.dispecing.linkapomoci.sk; novší stav sa vždy overuje cez health a metadáta nasadenia. |
+| Telefonovanie | Natívny Telnyx/CallKit/PushKit, TEST hlas a VoIP push zapnuté; serverové opravy #489–#491 sú na TEST a fungujú aj s buildom 18. |
+| Fyzická skúška | Majiteľ potvrdil úspešné dovolanie aj pri zamknutom mobile. Ostatné kombinácie sa neoznačujú za overené bez samostatnej skúšky. |
+| Apple | Aktívny účet MICT s. r. o.; TEST App ID, App Store Connect, podpis, Expo APNs a Telnyx TEST VoIP credential pripravené. |
+| Základ aplikácie | Prihlásenie, kostra a moduly, prípady, úlohy, spätné volania, koncepty, kontext hovoru a odovzdanie sú na TEST. |
+| Úkony hovoru | Prijať/odmietnuť, ukončiť, stíšiť, reproduktor, klávesnica, podržať, prepojiť na kolegu a zastaviť nahrávanie sú v kóde. Fyzická akceptácia každého úkonu je samostatná. |
+| Pristavenia | Modul roly pristavovača, odovzdanie z dispečingu, kroky a poloha na pozadí sú na TEST vrátane SQL a prepínača. Pohyb a zastavenie na iPhone ešte treba doložiť. |
+| Bežné push upozornenia | Kód, TEST SQL a prepínač aj Expo APNs sú pripravené; reálne doručenie a otvorenie cieľa treba doložiť. |
+| Podklady vydania | Ikona, spúšťacia obrazovka, skutočná verzia/build v Účte, zásady súkromia, podpora, privacy manifest, hlásenie chýb a minimálna verzia sú implementované. |
+| Produkcia | Mobilné vydanie nie je schválené ani nasadené; produkčné API, SQL, poskytovateľ a binárka potrebujú konkrétny release. |
+| Android | Základná TEST aplikácia bez natívneho hlasu; produkčná distribúcia je ďalšia etapa. |
 
-## 2. Čo aplikácia má
+## Čo zostáva pred každodennou prevádzkou
 
-| Oblasť | Obsah | Overené |
-| --- | --- | --- |
-| Prihlásenie | e-mail a heslo, zabudnuté heslo cez web, relácia v Keychain, odhlásenie, prostredie TEST/produkcia bez prepínača | Expo Go, TEST |
-| Kostra | Prehľad, spodná lišta s vlastnými modulmi, Moduly, Účet, Hľadať, Upozornenia, lišta hovoru, Späť v hornej lište | prehliadačový náhľad, Expo Go |
-| Hovory | Ústredňa (stav, hovory na účte, nové číslo), História s filtrami, Spätné volania (prevziať, vybaviť, zrušiť), detail hovoru a záznam po hovore | náhľad, TEST API |
-| Prípady | zoznam a filtre, detail, nový prípad a úpravy, poznámky, dispečer prípadu, prílohy, úlohy prípadu, odovzdanie, mapa, navigácia, poloha telefónu | náhľad, TEST API |
-| Moje úlohy | zoznam, detail, zmena stavu, kontrola, správy | náhľad, TEST API |
-| Nástroje | vozidlo podľa EČV/VIN, trasa, mapa, flotila | náhľad, TEST API |
-| Koncepty | rozpísané formuláre v chránenom úložisku, obnovenie a zahodenie | náhľad |
-| Telefonovanie | natívny modul `linka-voice` (Telnyx iOS SDK 4.2.2, CallKit, PushKit) | iba kompilácia a simulátor; **fyzicky neoverené** |
-| Android | TEST APK z predchádzajúcich fáz | bez telefonovania |
+1. Dokončiť opravy spoľahlivosti podľa auditu a dostať identifikovaný výsledok
+   do stabilného TEST a TestFlightu. Serverový deploy nezmení JavaScript v
+   nainštalovanom builde, keďže OTA sú vypnuté.
+2. Na fyzickom iPhone prejsť [akceptáciu hovorov](iphone-voice-test.md#akceptácia-na-fyzickom-iphone):
+   príjem v popredí, na pozadí a pri zamknutí, obojsmerný zvuk, výpadok siete,
+   súbeh web/mobil, podržanie, prepojenie, zastavenie nahrávania a ukončenie.
+   Úspešný zamknutý hovor je prvý potvrdený výsledok.
+3. Doložiť doručenie bežných push notifikácií a polohu pristavovača počas
+   pohybu, aj po návrate signálu a po ukončení pristavenia.
+4. Pripraviť presný produkčný release diff. Porovnať potrebné DB objekty
+   čítaním katalógu; starý počet PR a zoznam názvov migrácií z 19. 10. nie je
+   aktuálny plán SQL. Produkčný projekt a presný SQL musia byť schválené.
+5. Produkčný hlas je stále samostatne vypnutý. Pripraviť presné produkčné
+   APNs/Telnyx zdroje a kódový rozsah až v schválenom vydaní.
+6. Dokončiť produkčnú binárku, účet pre kontrolu Apple, metadata, snímky,
+   review a nezaradenú distribúciu podľa [podkladov App Store](app-store.md).
 
-## 3. Čo chýba na každodenné používanie
+## Rozhodnutia a hranice
 
-### Blokuje ostrú prevádzku
+Vydavateľ **MICT, s. r. o.**, názov **Dispatching**, jedna aplikácia s modulmi
+podľa roly; nezaradená distribúcia App Store. Push notifikácie a hlásenie
+chýb sú schválené. TEST má vlastnú databázu a poskytovateľské zdroje.
+Produkčný release vyžaduje výslovné schválenie konkrétneho rozsahu podľa
+[release postupu](../operations/release-workflow.md).
 
-1. **Mobilné API na produkčnom serveri.** Všetky `/api/mobile/v1/*` sú iba
-   v `dev`. Produkcia (`main`) je na vydaní #438; od neho je v `dev` 51 PR,
-   aj inej práce (telefónia, Sentry, infraštruktúra). Vydanie musí mať
-   presný rozsah, overenie na TEST a výslovné schválenie.
-2. **Produkčné migrácie.** Podľa porovnania názvov chýba na produkcii 9
-   migrácií z repozitára: `assistance_line_labels`, `queue_escalation_setting`,
-   `provider_journal_batch`, `apply_critical_rows`, `call_history_search`,
-   `incoming_routing_workspace`, `assistance_directory_starters`,
-   `case_owner_assignment` (priradenie dispečera z mobilu) a
-   `towing_work_orders` (zákazky odťahu za prepínačom). Časť môžu byť dáta
-   alebo zmeny už aplikované pod iným názvom; každú treba pred vydaním prejsť
-   a výslovne schváliť pre produkčný projekt.
-3. **Produkčný build aplikácie** ešte nikdy nevznikol. Chýba ikona aplikácie
-   (1024 × 1024 bez priehľadnosti), spúšťacia obrazovka a skutočná verzia
-   v Účte (dnes napevno „0.1.0“).
-4. **Odkaz na zásady ochrany súkromia v aplikácii** a verejná stránka zásad
-   pre mobil (Apple 5.1.1(i)). Existuje iba stránka o nahrávaní hovorov.
-   Treba aj verejnú stránku podpory s kontaktom; návod na webe je za prihlásením.
-5. **Demo účet pre App Review** (Apple 2.1): samostatná demo organizácia
-   s vymyslenými údajmi na produkcii, aby recenzent nevidel zákazníkov.
+[Postup TestFlightu](testflight.md) uvádza build, podpis a nahratie;
+[iPhone TEST postup](iphone-voice-test.md) uvádza technické hranice a rollback.
+Kompilácia, simulátor ani zdravý server nenahrádzajú fyzickú akceptáciu.
 
-### Telefonovanie z aplikácie
-
-6. **Fyzické overenie na iPhone** podľa [akceptácie](iphone-voice-test.md#akceptácia-na-fyzickom-iphone):
-   zvonenie pri zamknutí, obojstranný zvuk, VoIP push, súbeh webu a mobilu.
-7. **Povolenie pre produkciu:** kód hlasu je zámerne iba v TEST variante a
-   server ho púšťa iba v dedikovanom TEST projekte. Pre produkciu treba
-   úpravu kódu, produkčný Telnyx prístup a push credential (APNs) a
-   prepínače, všetko so schválením. Do vtedy hovory ostávajú na webe a
-   stolových telefónoch; mobil ich iba ukazuje (lišta hovoru, detail).
-
-### Dôležité pre pohodlné používanie
-
-8. **Push notifikácie** (nová úloha, spätné volanie po termíne, priradený
-   prípad) sú v kóde hotové (F3). Na TEST sú od 22. 10. 2026 zapnuté (migrácia
-   `20261020210000_mobile_push_devices.sql` a prepínač `MOBILE_PUSH_ENABLED`);
-   do iPhonu ich doručí build z TestFlightu (APNs kľúč je v Expo od 22. 10. 2026).
-   Produkcia ich zapne až so svojím vydaním.
-9. **Hlásenie pádov** (napr. Sentry pre React Native), aby sme o chybe
-   vedeli skôr než od používateľa.
-10. **Aktualizácie:** natívny build dnes nepreberá OTA aktualizácie, každá
-    oprava je nový build a review. Rozhodnúť, či zapnúť EAS Update pre
-    opravy JavaScriptu, a doplniť serverovú kontrolu minimálnej verzie
-    (stará verzia dostane výzvu na aktualizáciu).
-11. **Stav Dostupný/Pauza z mobilu** je dnes dostupný iba s pripojeným
-    natívnym telefónom; bez hlasu sa mení na webe.
-
-### Neskôr alebo kozmetika
-
-12. Odovzdanie prípadu v novom vzhľade (náhľad preň potrebuje náhradné API).
-13. Moduly ďalších rolí (vodič, zákazky odťahu, pristavenie, fakturácia…);
-    vodič má dnes webovú stránku `/vodic`.
-14. Android a Google Play (FCM, Telnyx Android) po iPhone pilote.
-
-## 4. Čo vyžaduje Apple
-
-### 4.1 Účet a zmluvy
-
-- **Apple Developer Program** 99 USD ročne. Pre firmu členstvo
-  **organizácie**: D-U-N-S číslo právnickej osoby, verejný web na doméne
-  firmy, firemný e-mail a osoba oprávnená zaväzovať firmu. Meno predajcu
-  v App Store je potom názov firmy.
-- Pre bezplatnú aplikáciu stačí základná zmluva; bankové a daňové údaje netreba.
-- **EÚ DSA status obchodníka:** pri distribúcii cez App Store v EÚ (aj
-  nezaradenej) treba v App Store Connect vyplniť status obchodníka a kontakt.
-
-### 4.2 Technické požiadavky
-
-- Od 28. 4. 2026 build z **Xcode 26 a iOS 26 SDK**; aktuálne EAS obrazy
-  pre Expo SDK 54+ to spĺňajú, overí sa pri prvom nahraní.
-- Registrácia App ID `sk.linkapomoci.dispecing` (a `.test`) so schopnosťou
-  Push Notifications; certifikáty a provisioning profily spravuje EAS.
-- **APNs kľúč (.p8)** a pre Telnyx VoIP Services certifikát podľa
-  [postupu](iphone-voice-test.md#zapojenie-po-schválení-apple).
-- **Pozadie iba na určený účel** (2.5.4): `voip` a `audio` len pre hovory;
-  každý PushKit push hlási hovor do CallKit (máme).
-- **Popisy oprávnení** v Info.plist: fotoaparát, fotky, poloha, mikrofón
-  (vo všetkých buildoch, hlasový modul je pripojený vždy), pohyb a Face ID
-  (knižnice ich obsahujú, aplikácia o ne nežiada); bez nich App Store Connect
-  build odmietne (ITMS-90683).
-- **Privacy manifest** (dôvody pre UserDefaults, časy súborov, čas od štartu,
-  voľné miesto): doplniť do `app.config.ts`; chýbajúce dôvody Apple vráti
-  e-mailom po nahratí.
-- **Šifrovanie (export compliance):** aplikácia používa HTTPS a WebRTC
-  (štandardné algoritmy); odpoveď treba potvrdiť pri prvom nahraní.
-- iPad netreba (`supportsTablet: false`), takže netreba ani iPad snímky.
-
-### 4.3 App Review a obsah
-
-- **2.1:** finálna verzia bez zástupných textov a pádov, **demo účet**
-  a bežiaci backend.
-- **3.2:** aplikáciu pre jednu firmu a jej zamestnancov Apple vo verejnom
-  App Store zamieta; použiť nezaradenú distribúciu alebo Custom app
-  (tabuľka nižšie).
-- **4.8:** Prihlásenie cez Apple netreba (firemné účty).
-- **5.1.1(i):** odkaz na zásady ochrany súkromia v App Store Connect **aj
-  v aplikácii**. Zásady musia uviesť, aké údaje, prečo, komu a ako dlho,
-  a ako požiadať o vymazanie.
-- **5.1.1(v):** mazanie účtu v aplikácii je povinné iba vtedy, keď sa v nej
-  dá účet založiť. U nás účty zakladá administrátor; uvedie sa to
-  v poznámkach pre review.
-- **App Privacy (štítky):** kontaktné údaje (meno, e-mail), presná poloha
-  iba na pokyn, fotografie a dokumenty, obsah (poznámky, prípady),
-  identifikátory používateľa a zariadenia; pri telefonovaní zvuk hovoru,
-  pri hlásení pádov diagnostika.
-- **Veková kategória:** nový dotazník (4+/9+/13+/16+/18+).
-- **Metadáta:** jedinečný názov (do 30 znakov), podnázov, popis, kľúčové
-  slová, kategória Business, URL podpory a súkromia, snímky iPhone 6,9"
-  (napr. 1320 × 2868, 1–10 kusov), kontakt a poznámky pre review.
-- **CallKit v Číne:** čínsky App Store CallKit nepovoľuje; územie obmedziť
-  (napr. iba Slovensko).
-
-### 4.4 Spôsob distribúcie
-
-| Cesta | Review | Pre koho | Obmedzenia | Na čo |
-| --- | --- | --- | --- | --- |
-| TestFlight interný | nie | do 100 členov tímu v App Store Connect | build platí 90 dní | pilot |
-| TestFlight externý | áno (beta) | do 10 000 cez pozvánku alebo odkaz | build platí 90 dní | širší pilot |
-| Ad Hoc | nie | registrované iPhony (UDID) | do 100 zariadení ročne | skúšky hovorov |
-| Nezaradená v App Store | áno + žiadosť | ktokoľvek s odkazom, prístup riadi prihlásenie | žiadosť podáva držiteľ účtu po odoslaní na review | **ostrá prevádzka** |
-| Custom app (Apple Business Manager) | áno | organizácie v ABM, cez MDM alebo kódy | jedna krajina, kódy sa nedajú odobrať | ak firma používa MDM |
-
-Odporúčanie: pilot cez Ad Hoc alebo interný TestFlight hneď po licencii,
-ostrá prevádzka cez **nezaradenú distribúciu** v App Store, obmedzenú na
-Slovensko.
-
-## 5. Čo potrebujeme pripraviť my
-
-| Položka | Kto | Stav |
-| --- | --- | --- |
-| Schválené Apple členstvo (typ: organizácia / jednotlivec) | majiteľ | aktívne od 22. 10. 2026 (MICT s. r. o., tím `792TJPXTL3`) |
-| Vydavateľ a názov v App Store („Linka pomoci“ vs. „Pomoc Motoristom“) | majiteľ | rozhodnúť |
-| Zásady ochrany súkromia pre mobil a stránka podpory (text, prevádzkovateľ) | majiteľ + vývoj | chýba |
-| Ikona a spúšťacia obrazovka (z existujúcej značky) | vývoj, schválenie majiteľ | chýba |
-| Vydanie servera s mobilným API na produkciu | vývoj, schválenie majiteľ | čaká |
-| Produkčné migrácie (zoznam v časti 3) | vývoj, schválenie majiteľ | čaká |
-| Účet pre kontrolu Apple v organizácii majiteľa (rozhodnutie 20. 10. 2026) | majiteľ | pred odoslaním |
-| Telnyx a APNs pre produkčný hlas | vývoj, schválenie majiteľ | po TEST akceptácii |
-| Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | hotové; push na TEST zapnutý, APNs kľúč v Expo |
-| Pristavovač v aplikácii (F6) | vývoj, schválenie majiteľa | na TEST vrátane migrácií (22. 10. 2026) |
-| TEST build cez interný TestFlight | vývoj | 0.1.0 (18) z `dev` `47882b1a` v TestFlighte od 22. 10. 2026; hlas a VoIP push zapnuté na TEST ([postup](testflight.md)) |
-| Texty do App Store, poznámky pre review, snímky | vývoj, schválenie majiteľ | chýba |
-
-## 6. Poradie
-
-**Teraz, bez licencie a bez zásahu do produkcie**
-
-1. Ikona a spúšťacia obrazovka, verzia a build v Účte.
-2. Odkazy v Účte: Zásady ochrany súkromia a Podpora (po schválení textov).
-3. Privacy manifest a príprava odpovedí pre App Store Connect.
-4. Serverová kontrola minimálnej verzie aplikácie.
-5. Hlásenie pádov pripravené tak, aby sa zaplo nastavením.
-6. Push notifikácie: návrh, kód a migrácia na schválenie.
-7. Odovzdanie prípadu v novom vzhľade.
-8. Texty do App Store v slovenčine a plán snímok.
-
-**V deň licencie (asi 1 deň)**
-
-1. App ID a podpis (hotové 22. 10. 2026), APNs kľúč, Telnyx TEST push credential.
-2. TEST build cez interný TestFlight ([postup](testflight.md)).
-3. Začiatok fyzickej akceptácie telefonovania.
-
-**Ostrá prevádzka**
-
-1. Vydanie servera a schválené migrácie na produkciu.
-2. Účet pre kontrolu Apple, produkčný build, snímky, metadáta, review.
-3. Žiadosť o nezaradenú distribúciu, odkaz pre dispečerov.
-4. Po prijatí hovorov na TEST ich povolenie pre produkciu ako samostatné vydanie.
-
-## 7. Plán dokončenia verzie 1 (zmrazenie pred licenciou)
+## História rozsahu verzie 1 (F1–F6)
 
 Rozhodnutia majiteľa z 19. 10. 2026: vydavateľ **MICT, s. r. o.** (IČO 53 167 422,
 Žilina), pracovný názov **Dispatching**, **nezaradená distribúcia** v App Store,

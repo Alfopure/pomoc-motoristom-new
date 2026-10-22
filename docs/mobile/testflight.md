@@ -22,7 +22,9 @@ Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 | Interní testeri | skupina „Team (Expo)“ s prístupom ku všetkým buildom; držiteľ účtu pozvaný 22. 10. 2026 |
 
 APNs kľúč, Telnyx push credential a prepínače sú mimo buildu; menia sa bez
-nového buildu. Fyzicky na iPhone zatiaľ nič overené nie je (pozri Akceptácia).
+nového buildu. Majiteľ 22. 10. potvrdil úspešné dovolanie aj pri zamknutom
+mobile. Ostatné body fyzickej akceptácie ostávajú otvorené, kým ich samostatne
+neoverí (pozri [aktuálny audit a plán](reliability-audit-2026-10-22.md)).
 
 ## Build
 
@@ -36,7 +38,7 @@ na build serveri nemusí prijať.
 Build sa spúšťa iba z identifikovaného commitu `dev` v čistom klone; zapíše sa
 build ID, commit a číslo buildu. Číslo zvyšuje EAS (vzdialené číslo pred prvým
 buildom pre TestFlight bolo 16). Free plán Expo má 15 iOS buildov mesačne,
-22. 10. 2026 zostávali 3; ráta sa aj neúspešný build.
+po nahratí buildu 18 zostával 22. 10. 2026 jeden; ráta sa aj neúspešný build.
 
 ```sh
 cd mobile

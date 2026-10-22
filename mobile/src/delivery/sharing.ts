@@ -1,5 +1,5 @@
 import type { MobileEnvironment } from "../../../src/lib/mobile-api";
-import type { ReadingQueue, TrackingStore } from "./background";
+import type { ReadingQueue, TrackingState, TrackingStore } from "./background";
 
 export type Permission = "granted" | "denied" | "undetermined";
 /** `background`: "always" keeps sending when the app is closed, "whenInUse" only
@@ -52,18 +52,23 @@ export class BackgroundTracker implements LocationSharing {
   private listeners = new Set<() => void>();
   private disposed = false;
   private member: string | null = null;
+  private generation = 0;
   constructor(private deps: Deps) {}
   snapshot = () => this.state;
-  setMember(memberId: string | null) { this.member = memberId; }
+  setMember(memberId: string | null) { if (memberId !== this.member) this.generation += 1; this.member = memberId; }
   subscribe = (notify: () => void) => { this.listeners.add(notify); return () => { this.listeners.delete(notify); }; };
-  follow(deliveryId: string | null, ask = false) { return this.serial(() => this.apply(deliveryId, ask)); }
+  follow(deliveryId: string | null, ask = false) {
+    const generation = this.generation;
+    return this.serial(async () => { if (this.current(generation)) await this.apply(deliveryId, ask, generation); });
+  }
   reconcile(memberId: string | null) {
     return this.serial(async () => {
       const stored = await this.deps.store.load();
-      if (stored && stored.memberId !== memberId) { await this.halt(); this.update({ status: "off", background: null }); }
+      if (stored && (stored.memberId !== memberId || !this.inScope(stored))) { await this.halt(); this.update({ status: "off", background: null }); }
     });
   }
   forget() {
+    this.generation += 1;
     return this.serial(async () => {
       const stored = await this.deps.store.load();
       if (stored) await this.deps.revoke(stored.deliveryId).catch(() => undefined);
@@ -71,7 +76,12 @@ export class BackgroundTracker implements LocationSharing {
       this.update({ status: "off", background: null });
     });
   }
-  dispose() { this.disposed = true; this.listeners.clear(); }
+  dispose() { this.disposed = true; this.generation += 1; this.listeners.clear(); }
+
+  private current(generation: number) { return !this.disposed && generation === this.generation; }
+  private inScope(stored: TrackingState) {
+    return stored.environment === this.deps.scope.environment && stored.apiOrigin === this.deps.scope.apiOrigin;
+  }
 
   private serial(work: () => Promise<void>): Promise<void> {
     return serially(work).catch(() => this.update({ status: "error", background: null }));
@@ -87,9 +97,10 @@ export class BackgroundTracker implements LocationSharing {
     await store.clear().catch(() => undefined);
     await queue.clear().catch(() => undefined);
   }
-  private async apply(deliveryId: string | null, ask: boolean) {
+  private async apply(deliveryId: string | null, ask: boolean, generation: number) {
     const { source, store, queue, scope } = this.deps;
     const stored = await store.load();
+    if (!this.current(generation)) return;
     if (!deliveryId) {
       if (stored || await source.running().catch(() => false)) await this.halt();
       this.update({ status: "off", background: null });
@@ -98,23 +109,36 @@ export class BackgroundTracker implements LocationSharing {
     const memberId = this.member;
     if (!memberId) return;
     let permission = await source.permission();
+    if (!this.current(generation)) return;
     if (permission === "undetermined" && ask) permission = await source.request();
+    if (!this.current(generation)) return;
     if (permission !== "granted") {
       if (stored) await this.halt();
       this.update({ status: permission === "denied" ? "denied" : "off", background: null });
       return;
     }
     let always = await source.backgroundPermission();
+    if (!this.current(generation)) return;
     if (always === "undetermined" && ask) always = await source.requestBackground();
+    if (!this.current(generation)) return;
     const background = always === "granted" ? "always" as const : "whenInUse" as const;
-    const current = stored !== null && stored.deliveryId === deliveryId && stored.memberId === memberId && Date.parse(stored.expiresAt) > Date.now();
-    if (current && await source.running()) { this.update({ status: "sharing", background }); return; }
+    const current = stored !== null && this.inScope(stored) && stored.deliveryId === deliveryId && stored.memberId === memberId && Date.parse(stored.expiresAt) > Date.now();
+    if (current && await source.running()) { if (this.current(generation)) this.update({ status: "sharing", background }); return; }
+    if (!this.current(generation)) return;
     if (!current) {
+      // A new delivery/account/server must never leave the previous tracker
+      // running when obtaining its replacement fails.
+      await this.halt();
+      if (!this.current(generation)) return;
       const tracker = await this.deps.issue(deliveryId);
+      if (!this.current(generation)) return;
       await queue.clear();
+      if (!this.current(generation)) return;
       await store.save({ version: 1, environment: scope.environment, apiOrigin: scope.apiOrigin, memberId, deliveryId, token: tracker.token, expiresAt: tracker.expiresAt });
     }
+    if (!this.current(generation)) { await this.halt(); return; }
     await source.start();
+    if (!this.current(generation)) { await this.halt(); return; }
     this.update({ status: "sharing", background });
   }
 }

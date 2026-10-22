@@ -93,13 +93,16 @@ export class PushSettings {
         return;
       }
       const wasOn = this.view.status === "on";
-      if (wasOn && this.clock() - this.syncedAt < REFRESH_MS) return;
       const permission = await this.device.permission().catch(() => null);
+      if (this.forgotten || this.disposed) return;
       // The phone could not answer now; the next return to the app asks again.
       if (permission === null) return;
       // Reinstalled, or the system forgot the answer: notifications are simply off again.
       if (permission === "undetermined") { this.device.remember(false); this.update({ status: "off", preferences: null, message: null }); return; }
       if (permission !== "granted") { this.update({ status: "denied", preferences: null, message: PUSH_DENIED }); return; }
+      // System permission can change at any time. Only the server registration
+      // is throttled; returning from Settings must show the current answer.
+      if (wasOn && this.clock() - this.syncedAt < REFRESH_MS) return;
       if (!wasOn) this.update({ status: "working", message: null });
       await this.connect(wasOn);
     });
@@ -109,7 +112,9 @@ export class PushSettings {
     return this.exclusive(async () => {
       this.update({ status: "working", message: null });
       let permission = await this.device.permission().catch(() => "denied" as const);
+      if (this.forgotten || this.disposed) return;
       if (permission === "undetermined") permission = await this.device.request().catch(() => "denied" as const);
+      if (this.forgotten || this.disposed) return;
       if (permission !== "granted") { this.update({ status: "denied", preferences: null, message: PUSH_DENIED }); return; }
       await this.connect(false);
     });
@@ -174,6 +179,9 @@ export class PushSettings {
   private async connect(quiet: boolean) {
     try {
       this.token = await within(this.device.token(), TOKEN_MS);
+      // The token request may outlive logout's bounded wait. Nothing has been
+      // sent yet, so do not create a subscription for the departed account.
+      if (this.forgotten || this.disposed) return;
       // Marked before sending: an answer lost on the way may still leave the server registered.
       this.device.markRegistered(true);
       // The phone keeps this account's switches, so a new login starts where it ended.

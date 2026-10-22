@@ -1,5 +1,6 @@
 import type { MobileDelivery, MobileDeliveryAction } from "../../../src/lib/mobile-api";
 import type { TagTone } from "../design/detail";
+import { MobileApiError } from "../lib/api";
 
 /** What a pristavovač sees and does with one delivery, without any screen. */
 export const deliveryStatusLabels: Record<MobileDelivery["status"], string> = {
@@ -10,6 +11,19 @@ export const deliveryStatusTones: Record<MobileDelivery["status"], TagTone> = {
   offered: "orange", accepted: "blue", en_route: "blue", arrived: "green", completed: "gray", rejected: "red", cancelled: "gray", expired: "gray",
 };
 const OPEN = ["offered", "accepted", "en_route", "arrived"];
+
+/** A temporary connection failure can leave the last known delivery on screen.
+ * Lost authority or an untrusted answer must hide the cached customer data. */
+export function canUseDeliveryCache(error: unknown): boolean {
+  return !error || error instanceof MobileApiError && (error.status === 0 || error.status >= 500 && error.status <= 599 && error.status !== 502);
+}
+
+/** Expiration also applies while offline, before the server can send a redacted
+ * view. Keep the closing summary, remove customer data, vehicle GPS and tracking. */
+export function visibleDelivery(delivery: MobileDelivery, now = Date.now()): MobileDelivery {
+  if (isOpen(delivery, now)) return delivery;
+  return { ...delivery, status: OPEN.includes(delivery.status) ? "expired" : delivery.status, card: null, replacementPosition: null, tracking: false };
+}
 
 export function isOpen(delivery: Pick<MobileDelivery, "status" | "expiresAt">, now = Date.now()): boolean {
   return OPEN.includes(delivery.status) && Date.parse(delivery.expiresAt) > now;

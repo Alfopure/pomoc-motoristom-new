@@ -702,6 +702,50 @@ describe("native phone lifecycle", () => {
     expect(f.api.start).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(120_000); expect(f.native.connect).toHaveBeenCalledTimes(4);
   });
+  it("recovers the first connection after a temporary token outage without dialing or taking over", async () => {
+    const f = fixture(); await f.phone.initialise(); vi.useFakeTimers();
+    vi.mocked(f.api.token).mockRejectedValueOnce(new MobileApiError("offline", 0));
+    await f.phone.connect();
+    expect(f.phone.state.registration).toBe("error");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.api.token).toHaveBeenCalledTimes(2);
+    expect(f.api.token).toHaveBeenLastCalledWith(lease, false);
+    expect(f.phone.state.registration).toBe("registered");
+    expect(f.api.start).not.toHaveBeenCalled(); expect(f.api.startInternal).not.toHaveBeenCalled();
+  });
+  it("bounds first-connection retries and gives a fresh chance on returning to the app", async () => {
+    const f = fixture(); await f.phone.initialise(); vi.useFakeTimers();
+    vi.mocked(f.api.token).mockRejectedValue(new MobileApiError("server unavailable", 503));
+    await f.phone.connect(); await vi.advanceTimersByTimeAsync(120_000);
+    expect(f.api.token).toHaveBeenCalledTimes(4);
+    f.phone.setForeground(false); await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.api.token).toHaveBeenCalledTimes(4);
+    f.phone.setForeground(true); await vi.advanceTimersByTimeAsync(1_000);
+    expect(f.api.token).toHaveBeenCalledTimes(5);
+  });
+  it.each([401, 403, 409, 502])("never automatically retries a refused or untrusted first connection (%s)", async status => {
+    const f = fixture(); await f.phone.initialise(); vi.useFakeTimers();
+    vi.mocked(f.api.token).mockRejectedValue(new MobileApiError("refused", status));
+    await f.phone.connect(); await vi.advanceTimersByTimeAsync(30_000);
+    f.phone.setForeground(false); f.phone.setForeground(true); await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.api.token).toHaveBeenCalledTimes(1);
+    expect(f.native.connect).not.toHaveBeenCalled();
+  });
+  it("does not retry a refused refresh on return when a previous token is still in memory", async () => {
+    const f = await connected(); vi.useFakeTimers();
+    vi.mocked(f.api.token).mockRejectedValue(new MobileApiError("other phone", 409));
+    await f.phone.connect();
+    f.phone.setForeground(false); f.phone.setForeground(true); await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.api.token).toHaveBeenCalledTimes(2);
+    expect(f.phone.state.takeoverRequired).toBe(true);
+  });
+  it("does not re-enable a manually disconnected phone after a failed first connection", async () => {
+    const f = fixture(); await f.phone.initialise(); vi.useFakeTimers();
+    vi.mocked(f.api.token).mockRejectedValue(new MobileApiError("offline", 0));
+    await f.phone.connect(); await f.phone.disconnect();
+    f.phone.setForeground(false); f.phone.setForeground(true); await vi.advanceTimersByTimeAsync(30_000);
+    expect(f.api.token).toHaveBeenCalledTimes(1);
+  });
   it.each(["background", "call", "disconnect", "dispose"])("cancels idle reconnect when %s takes ownership", async reason => {
     const f = await connected(); vi.useFakeTimers();
     f.emit({ type: "registration", state: "unregistered" });

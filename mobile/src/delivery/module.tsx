@@ -1,4 +1,4 @@
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
@@ -17,7 +17,8 @@ import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import { Button, ErrorNotice, Loading, styles } from "../ui";
 import type { DeliveryApi } from "./api";
 import { DeliveryMap } from "./map";
-import { agoLabel, deliveryPlace, deliveryPoints, deliveryStatusLabels, deliveryStatusTones, deliveryTitle, isOpen, nextStep, replacementCar, sortDeliveries, timeLabel } from "./model";
+import { agoLabel, canUseDeliveryCache, deliveryPlace, deliveryPoints, deliveryStatusLabels, deliveryStatusTones, deliveryTitle, isOpen, nextStep, replacementCar, sortDeliveries, timeLabel, visibleDelivery } from "./model";
+import { useDeliveryTime } from "./use-delivery-time";
 import type { DeliverySession } from "./session";
 import type { LocationSharing, SharingState } from "./sharing";
 
@@ -38,7 +39,7 @@ export function DeliveryModule({ session, active, visible, openRequest }: {
     : <ErrorNotice message={session.me.error instanceof MobileApiError ? session.me.error.message : "Pristavenia sa nepodarilo načítať."} onRetry={() => { void session.me.refetch(); }} />}</View>;
   return selected ? <DeliveryDetail key={selected} api={session.api} id={selected} active={active && visible} queryKey={session.key} tracker={session.location}
     onChanged={() => { void queryClient.invalidateQueries({ queryKey: [...session.key, "deliveries"] }); }} />
-    : <DeliveryList query={session.list} onOpen={setSelected} />;
+    : <DeliveryList query={session.list} active={active && visible} onOpen={setSelected} />;
 }
 
 /** What the pristavovač reads about their position, for the app they have. */
@@ -52,12 +53,14 @@ function locationNote(tracking: boolean, location: SharingState, mode: LocationS
     : "Poloha sa posiela, aj keď je aplikácia na pozadí, ale po jej zatvorení sa zastaví. V nastaveniach telefónu povoľte polohu „Vždy“.";
 }
 
-function DeliveryList({ query, onOpen }: { query: UseQueryResult<MobileDelivery[]>; onOpen: (id: string) => void }) {
-  const deliveries = sortDeliveries(query.data ?? []);
+function DeliveryList({ query, active, onOpen }: { query: UseQueryResult<MobileDelivery[]>; active: boolean; onOpen: (id: string) => void }) {
+  const now = useDeliveryTime(active);
+  const usable = canUseDeliveryCache(query.error);
+  const deliveries = sortDeliveries(usable ? (query.data ?? []).map(delivery => visibleDelivery(delivery, now)) : [], now);
   const open = deliveries.filter(delivery => isOpen(delivery)), done = deliveries.filter(delivery => !isOpen(delivery));
   return <ScrollView contentContainerStyle={formLayout.content}>
     {query.isError && <View style={formLayout.notices}><ErrorNotice message={query.error instanceof MobileApiError ? query.error.message : "Pristavenia sa nepodarilo načítať."} onRetry={() => { void query.refetch(); }} /></View>}
-    {query.isPending ? <Loading label="Načítavam pristavenia…" /> : <>
+    {query.isPending ? <Loading label="Načítavam pristavenia…" /> : usable && <>
       <SectionHeader title="Na vybavenie" detail={open.length ? String(open.length) : null} />
       {open.length ? <Group>{open.map((delivery, index) => <DeliveryRow key={delivery.id} delivery={delivery} first={index === 0} onOpen={onOpen} />)}</Group>
         : <Text style={s.empty}>Teraz nemáte žiadne pristavenie. Keď vám ho dispečer pošle, príde aj notifikácia.</Text>}
@@ -95,9 +98,12 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
   const { height } = useWindowDimensions();
   const [busy, setBusy] = useState<MobileDeliveryAction | null>(null), [error, setError] = useState<string | null>(null);
   const [reason, setReason] = useState<{ action: "reject" | "blocked"; text: string } | null>(null);
-  const delivery = query.data;
+  const now = useDeliveryTime(active);
+  const running = useRef(false);
+  const delivery = query.data && canUseDeliveryCache(query.error) ? visibleDelivery(query.data, now) : undefined;
   async function run(action: MobileDeliveryAction, extra: { comment?: string; eta?: string | null } = {}) {
-    if (!delivery || busy) return;
+    if (!delivery || running.current || !isOpen(delivery)) return;
+    running.current = true;
     setBusy(action); setError(null);
     try {
       const next = await api.command(delivery.id, { commandId: randomUUID(), action, expectedRevision: delivery.revision, publishedVersion: delivery.publishedVersion, ...extra });
@@ -109,7 +115,7 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
     } catch (failure) {
       setError(failure instanceof MobileApiError ? failure.message : "Krok sa nepodarilo potvrdiť. Skúste znova.");
       if (failure instanceof MobileApiError && failure.status === 409) void query.refetch();
-    } finally { setBusy(null); }
+    } finally { running.current = false; setBusy(null); }
   }
   if (query.isPending) return <Loading label="Načítavam pristavenie…" />;
   if (!delivery) return <View style={styles.content}><ErrorNotice message={query.error instanceof MobileApiError ? query.error.message : "Pristavenie sa nepodarilo načítať."} onRetry={() => { void query.refetch(); }} /></View>;
@@ -128,8 +134,9 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
       <DetailHeader title={deliveryTitle(delivery)} subtitle={"Prípad " + delivery.caseNumber + (card ? " · " + card.action : "")}
         tags={<Tag text={deliveryStatusLabels[delivery.status]} tone={deliveryStatusTones[delivery.status]} />}
         meta={(delivery.createdBy ? "Poslal " + delivery.createdBy + " · " : "") + timeLabel(delivery.createdAt)} />
-      {(error || !card) && <View style={formLayout.notices}>
+      {(error || query.isError || !card) && <View style={formLayout.notices}>
         {error && <ErrorNotice message={error} />}
+        {query.isError && <ErrorNotice message="Údaje sa nepodarilo obnoviť. Zobrazený je posledný načítaný stav." onRetry={() => { void query.refetch(); }} />}
         {!card && <Text style={styles.muted}>Pristavenie je uzavreté; údaje zákazníka sa už nezobrazujú.</Text>}
       </View>}
       {open && card && <ActionBar actions={[
@@ -139,7 +146,7 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
         { icon: AlertTriangle, label: delivery.status === "offered" ? "Odmietnuť" : "Problém", accessibilityLabel: delivery.status === "offered" ? "Odmietnuť pristavenie" : "Nahlásiť problém",
           onPress: () => setReason({ action: delivery.status === "offered" ? "reject" : "blocked", text: "" }) },
       ]} />}
-      {reason && <>
+      {reason && open && <>
         <FormSection title={reason.action === "reject" ? "Odmietnuť pristavenie" : "Nahlásiť problém"} footer="Dispečer dostane upozornenie s vaším dôvodom.">
           <Field label="Dôvod" value={reason.text} onChangeText={text => setReason({ ...reason, text })} multiline maxLength={1000} autoFocus />
         </FormSection>
@@ -191,6 +198,7 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
     {card && <DeliveryMap points={deliveryPoints(delivery)} showsUser={location.status === "sharing"} height={mapHeight + NAVIGATION_CONTENT_BOTTOM} inset={NAVIGATION_CONTENT_BOTTOM} />}
   </View>;
 }
+
 const eventLabels: Record<string, string> = {
   issue: "Odovzdanie vytvorené", publish: "Údaje aktualizované", renew: "Odkaz obnovený", extend: "Platnosť predĺžená", recover: "Odkaz získaný",
   accept: "Prijaté", reject: "Odmietnuté", en_route: "Na ceste", arrived: "Na mieste", complete: "Dokončené", update: "Aktualizácia", blocked: "Problém", revoke: "Zrušené",

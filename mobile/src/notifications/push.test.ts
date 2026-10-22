@@ -106,6 +106,36 @@ describe("push settings", () => {
     expect(phone.request).not.toHaveBeenCalled();
   });
 
+  it("checks a changed system permission on every return, even before registration is due", async () => {
+    const phone = device({ permission: vi.fn(async () => "granted" as const) }), api = server();
+    const settings = new PushSettings(phone, api, () => 0);
+    await settings.enable();
+    vi.mocked(phone.permission).mockResolvedValueOnce("denied");
+    await settings.resume();
+    expect(settings.snapshot()).toMatchObject({ status: "denied", message: PUSH_DENIED });
+    expect(api.register).toHaveBeenCalledTimes(1);
+    await settings.resume();
+    expect(settings.snapshot().status).toBe("on");
+    expect(phone.request).not.toHaveBeenCalled();
+  });
+
+  it.each(["logout", "dispose"])("does not send a registration when a token arrives after %s", async reason => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (token: string) => void;
+      const phone = device({ permission: vi.fn(async () => "granted" as const), token: vi.fn(() => new Promise<string>(resolve => { finish = resolve; })) });
+      const api = server(), settings = new PushSettings(phone, api);
+      const enabling = settings.enable();
+      await vi.advanceTimersByTimeAsync(0);
+      if (reason === "logout") {
+        const leaving = settings.forget(); await vi.advanceTimersByTimeAsync(5_000); await leaving;
+      } else settings.dispose();
+      finish("ExponentPushToken[abcdefghijkl]"); await enabling;
+      expect(api.register).not.toHaveBeenCalled();
+      expect(phone.registered()).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("shows when the environment has notifications switched off", async () => {
     const phone = device({ permission: vi.fn(async () => "granted" as const) });
     const settings = new PushSettings(phone, server({ register: vi.fn(async () => { throw new MobileApiError("x", 503, "push_unavailable"); }) }));
