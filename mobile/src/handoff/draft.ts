@@ -14,8 +14,10 @@ function localTime(value: string | null | undefined) {
   const d = new Date(value), p = (v: number) => String(v).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-type Action = Exclude<MobileHandoffInput['action'], 'recover'>;
+type Action = Exclude<MobileHandoffInput['action'], 'recover' | 'deliver'>;
 type Input = {
+  /** A pristavovač in the app, or '' for a link only. */
+  recipientMemberId: string;
   recipientName: string;
   recipientPhone: string;
   instructions: string;
@@ -49,11 +51,15 @@ export type HandoffState = {
   loading: boolean;
   recovering: boolean;
   canRebase: boolean;
+  /** An existing handoff being sent to a pristavovač in the app. */
+  delivering: string | null;
+  /** The last send to the app that went through, for the confirmation. */
+  delivered: { handoffId: string; memberId: string } | null;
 };
 const active = (grant: MobileHandoffGrant) => ['offered', 'accepted', 'en_route', 'arrived'].includes(grant.status) && Date.parse(grant.expiresAt) > Date.now();
 const message = (error: unknown) => error instanceof MobileApiError || error instanceof DraftNotSentError ? error.message : 'Požiadavku sa nepodarilo dokončiť.';
 const initialInput = (): Input => ({
-  recipientName: '', recipientPhone: '', instructions: '', scheduledAt: '', hours: '24', comment: ''
+  recipientMemberId: '', recipientName: '', recipientPhone: '', instructions: '', scheduledAt: '', hours: '24', comment: ''
 });
 const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 /** A reviewed command keeps its UTC schedule even if the device timezone changes. */
@@ -74,7 +80,8 @@ export function previewSnapshot(state: HandoffState): MobileHandoffSnapshot | nu
 /** Retained by the authenticated Cases workspace. URLs never enter query/persistent caches. */
 export class HandoffDraft {
   private state: HandoffState = {
-    now: Date.now(), context: null, selected: null, input: initialInput(), status: 'editing', pending: null, receipt: null, link: null, error: null, loading: false, recovering: false, canRebase: false
+    now: Date.now(), context: null, selected: null, input: initialInput(), status: 'editing', pending: null, receipt: null, link: null, error: null, loading: false, recovering: false, canRebase: false,
+    delivering: null, delivered: null
   };
   private listeners = new Set<() => void>();
   private disposed = false;
@@ -239,9 +246,12 @@ export class HandoffDraft {
       return { action: 'publish', ...common, ...target };
     const recipientName = i.recipientName.trim(), recipientPhone = i.recipientPhone.trim();
     if (!recipientName || recipientName.length > 160 || !/^\+?[\d ()-]{5,30}$/.test(recipientPhone) || /[\x00-\x1f\x7f]/.test(recipientName))
-      throw new MobileApiError('Vyplňte meno a platné telefónne číslo kolegu.', 400);
+      throw new MobileApiError(i.recipientMemberId ? 'Doplňte platné telefónne číslo pristavovača.' : 'Vyplňte meno a platné telefónne číslo kolegu.', 400);
+    // The chosen pristavovač must still be offered by the server.
+    if (i.recipientMemberId && !this.state.context?.delivery?.members.some(m => m.id === i.recipientMemberId))
+      throw new MobileApiError('Vybraný pristavovač už nie je dostupný. Vyberte ho znova.', 400);
     return {
-      action: 'issue', ...common, recipientName, recipientPhone, hours
+      action: 'issue', ...common, recipientName, recipientPhone, hours, ...(i.recipientMemberId ? { recipientMemberId: i.recipientMemberId } : {})
     };
   }
   async submit() {
@@ -348,6 +358,32 @@ export class HandoffDraft {
     finally {
       if (recovery === this.recovery)
         this.set({ recovering: false });
+    }
+  }
+  /** Sends an existing handoff that waits for acceptance to a pristavovač in the app. */
+  async deliver(handoffId: string, memberId: string) {
+    if (this.disposed || this.rejected || this.sending || this.state.delivering || ['uncertain', 'conflict'].includes(this.state.status))
+      return;
+    const grant = this.state.context?.handoffs.find(h => h.id === handoffId);
+    if (!grant || grant.status !== 'offered' || !active(grant) || !this.state.context?.delivery?.members.some(m => m.id === memberId))
+      return;
+    const epoch = this.epoch;
+    this.set({ delivering: handoffId, error: null }, false);
+    try {
+      const result = await this.api.command(this.caseId, { action: 'deliver', commandId: this.uuid(), handoffId, expectedRevision: grant.revision, recipientMemberId: memberId });
+      if (this.disposed || epoch !== this.epoch)
+        return;
+      if (result.kind !== 'delivery')
+        throw new MobileApiError('Odoslanie do aplikácie sa nepodarilo overiť.', 502);
+      this.set({ delivered: { handoffId, memberId } }, false);
+      void this.refresh();
+    }
+    catch (error) {
+      if (!this.disposed)
+        this.set({ error: message(error) }, false);
+    }
+    finally {
+      this.set({ delivering: null }, false);
     }
   }
   expire(now = Date.now()) {

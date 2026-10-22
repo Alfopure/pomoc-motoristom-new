@@ -60,7 +60,7 @@ export function PickerRow({ label, value, onPress, disabled, accessibilityLabel 
 
 /** One choice of a list; the chosen one carries a check mark. */
 export function SelectRow({ label, detail, selected, onPress, disabled }: { label: string; detail?: string | null; selected: boolean; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected, disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected, disabled: Boolean(disabled) }} aria-selected={selected} disabled={disabled} onPress={onPress}
     style={({ pressed }) => [s.select, disabled && { opacity: 0.5 }, pressed && { backgroundColor: "#ECECF0" }]}>
     <View style={{ flex: 1, minWidth: 0 }}><Text numberOfLines={2} style={[s.text, selected && { fontWeight: "600" }]}>{label}</Text>
       {detail ? <Text style={s.hint}>{detail}</Text> : null}</View>

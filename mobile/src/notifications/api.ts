@@ -2,7 +2,9 @@ import type { MobilePushPreferences, MobilePushType } from "../../../src/lib/mob
 import { MobileApiError, type MobileTransport } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 
-export const PUSH_TYPES: readonly MobilePushType[] = ["tasks", "task_due", "cases", "callbacks_mine", "callbacks_unclaimed"];
+export const PUSH_TYPES: readonly MobilePushType[] = ["tasks", "task_due", "cases", "callbacks_mine", "callbacks_unclaimed", "handoffs"];
+/** Kinds a server before deliveries does not know yet; they stay on. */
+const OPTIONAL: readonly MobilePushType[] = ["handoffs"];
 export type PushRegistration = {
   installationId: string; token: string; platform: "ios" | "android"; appVersion: string | null;
   preferences?: Partial<MobilePushPreferences>;
@@ -46,8 +48,8 @@ export function createPushApi(config: MobileConfig, getToken: () => Promise<stri
       if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) throw contractError();
       const switches = preferences as Record<string, unknown>;
       // A newer server may add kinds; this app shows the ones it knows.
-      if (PUSH_TYPES.some(type => typeof switches[type] !== "boolean")) throw contractError();
-      return Object.fromEntries(PUSH_TYPES.map(type => [type, switches[type]])) as MobilePushPreferences;
+      if (PUSH_TYPES.some(type => typeof switches[type] !== "boolean" && !(OPTIONAL.includes(type) && switches[type] === undefined))) throw contractError();
+      return Object.fromEntries(PUSH_TYPES.map(type => [type, switches[type] ?? true])) as MobilePushPreferences;
     },
     // At logout the phone must not wait long for a server that is away.
     unregister: async installationId => { await post("unregister", { installationId }, 4_000); },

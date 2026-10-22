@@ -70,7 +70,8 @@ export function createMobileApi(config: MobileConfig, getToken: TokenGetter, tra
       try { body = await response.json(); } catch { throw contractError(); }
       if (!response.ok) {
         const error = object(body).error;
-        throw new MobileApiError(text(error) ? error : "Údaje sa nepodarilo načítať.", response.status);
+        const code = object(body).code;
+        throw new MobileApiError(text(error) ? error : "Údaje sa nepodarilo načítať.", response.status, typeof code === "string" && code.length <= 100 ? code : undefined);
       }
       return body;
     } catch (error) {

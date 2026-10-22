@@ -27,6 +27,7 @@ import { createPushApi } from "./src/notifications/api";
 import { createPushDevice, installPushTaps } from "./src/notifications/device";
 import { PushSettings } from "./src/notifications/settings";
 import { pushTaps } from "./src/notifications/taps";
+import { FieldWorkspace } from "./src/delivery/ui";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
 
@@ -221,6 +222,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   // First authenticated snapshot must also load during a PushKit cold launch.
   // Periodic reads still stop when iOS suspends the app.
   const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), refetchInterval: active ? 30_000 : false });
+  // Signed in without a dispatch profile: a pristavovač, who gets the deliveries instead.
+  const fieldOnly = me.error instanceof MobileApiError && me.error.code === "mobile_no_dispatch_profile";
   const identity = usableMobileIdentity(me.data, me.error);
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   const push = useMemo(() => new PushSettings(createPushDevice(config.environment, userId), createPushApi(config, async () => {
@@ -264,6 +267,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     ]);
   }
   if (me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do dispečingu…" /></>;
+  if (fieldOnly) return <FieldWorkspace config={config} client={client} userId={userId} liveUser={liveUser} active={active} push={push}
+    logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} />;
   if (!identity) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
     <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />
     {logoutState.message && <ErrorNotice message={logoutState.message} />}

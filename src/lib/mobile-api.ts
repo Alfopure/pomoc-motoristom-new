@@ -464,7 +464,7 @@ export type MobileHandoffRecovered = MobileScope & {
   currentRevision: number;
   link: Extract<MobileHandoffLink, { status: "available" }>;
 };
-export type MobileHandoffResult = MobileHandoffMutation | MobileHandoffRecovered;
+export type MobileHandoffResult = MobileHandoffMutation | MobileHandoffRecovered | MobileHandoffDelivered;
 
 export type MobileVoiceMedia = {
   version: number;

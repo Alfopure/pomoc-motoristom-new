@@ -6,7 +6,7 @@ import { PUSH_DENIED, PUSH_UNAVAILABLE, PushSettings, type PushDevice } from "./
 import { PushTapInbox, readPushTap } from "./taps";
 
 const config = { environment: "test" as const, apiOrigin: "https://test.dispecing.linkapomoci.sk", supabaseUrl: "https://nzpnqdstvkfncflgqlny.supabase.co", publishableKey: "fixture" };
-const ALL: MobilePushPreferences = { tasks: true, task_due: true, cases: true, callbacks_mine: true, callbacks_unclaimed: true };
+const ALL: MobilePushPreferences = { tasks: true, task_due: true, cases: true, callbacks_mine: true, callbacks_unclaimed: true, handoffs: true };
 const PHONE = "00000000-0000-4000-8000-0000000000f1";
 const ME = "00000000-0000-4000-8000-000000000001";
 const TASK = "00000000-0000-4000-8000-0000000000b1";
@@ -45,6 +45,12 @@ describe("push api", () => {
     transport.mockResolvedValueOnce(json({ ...scope, preferences: { ...ALL, sms: true } }));
     await expect(api.register({ installationId: PHONE, token: "t", platform: "ios", appVersion: null })).resolves.toEqual(ALL);
     transport.mockResolvedValueOnce(json({ ...scope, environment: "production", preferences: ALL }));
+    await expect(api.register({ installationId: PHONE, token: "t", platform: "ios", appVersion: null })).rejects.toMatchObject({ status: 502 });
+    // A server from before deliveries does not send their switch; it stays on.
+    const { handoffs: _handoffs, ...older } = ALL;
+    transport.mockResolvedValueOnce(json({ ...scope, preferences: older }));
+    await expect(api.register({ installationId: PHONE, token: "t", platform: "ios", appVersion: null })).resolves.toEqual(ALL);
+    transport.mockResolvedValueOnce(json({ ...scope, preferences: { ...ALL, handoffs: "yes" } }));
     await expect(api.register({ installationId: PHONE, token: "t", platform: "ios", appVersion: null })).rejects.toMatchObject({ status: 502 });
   });
 
@@ -250,7 +256,8 @@ describe("notification taps", () => {
   it("reads only known targets", () => {
     expect(readPushTap(response({ kind: "task", id: TASK.toUpperCase(), profileId: ME }))).toEqual({ key: "n1", profileId: ME, target: { kind: "task", id: TASK } });
     expect(readPushTap(response({ kind: "callbacks", profileId: ME }))).toEqual({ key: "n1", profileId: ME, target: { kind: "callbacks" } });
-    for (const data of [null, {}, { kind: "task", id: "x", profileId: ME }, { kind: "sms", profileId: ME }, { kind: "case", id: TASK }, { kind: "case", id: TASK, profileId: "me" }]) {
+    expect(readPushTap(response({ kind: "delivery", id: TASK, profileId: ME }))).toEqual({ key: "n1", profileId: ME, target: { kind: "delivery", id: TASK } });
+    for (const data of [null, {}, { kind: "task", id: "x", profileId: ME }, { kind: "sms", profileId: ME }, { kind: "case", id: TASK }, { kind: "case", id: TASK, profileId: "me" }, { kind: "delivery", profileId: ME }]) {
       expect(readPushTap(response(data))).toBeNull();
     }
     expect(readPushTap(null)).toBeNull();

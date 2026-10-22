@@ -6,7 +6,7 @@ import AppSupportPage from "./podpora/page";
 describe("public pages of the app", () => {
   it("names the controller, the publisher and the contact", () => {
     const html = renderToStaticMarkup(<AppPrivacyPage />);
-    for (const text of ["ALFOPURE s.r.o., IČO 11698055", "MICT, s. r. o., IČO 53 167 422", "mailto:info@alfopure.tech", "/ochrana-hovorov", "nikdy nie na pozadí",
+    for (const text of ["ALFOPURE s.r.o., IČO 11698055", "MICT, s. r. o., IČO 53 167 422", "mailto:info@alfopure.tech", "/ochrana-hovorov", "na pozadí nikdy", "požiada až po prijatí pristavenia", "Polohy pristavovača sa vymažú po 30 dňoch", "<strong>Mapy Apple</strong>",
       "Supabase Auth", "<strong>Google</strong>", "Registre vozidiel", "stkonline.sk", "skp.sk", "NHTSA", "EČV a VIN sa v ňom maskujú",
       "Expo – 650 Industries, Inc., USA", "Apple Push Notification service", "neobsahuje mená, telefónne čísla, EČV ani názov úlohy", "požiada až po ťuknutí na Zapnúť notifikácie"]) expect(html).toContain(text);
   });

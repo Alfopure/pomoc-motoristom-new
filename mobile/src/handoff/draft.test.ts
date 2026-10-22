@@ -304,3 +304,76 @@ describe('schedule input feedback', () => {
     expect(draft.snapshot().error).toContain('RRRR-MM-DD HH:mm');
   });
 });
+
+describe('handoff to a pristavovač in the app', () => {
+  const member = { id: '77777777-7777-4777-8777-777777777777', displayName: 'MOCK Pristavovač', lastPhone: '+421900000002' };
+  const withMembers = (value = context()) => ({ ...value, delivery: { members: [member] } });
+  it('issues to the chosen pristavovač with their phone', async () => {
+    const { api, draft } = setup(withMembers());
+    await draft.refresh();
+    draft.select('issue');
+    draft.edit({ recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: member.lastPhone });
+    api.command.mockResolvedValueOnce({ ...receipt(), delivery: { status: 'sent', memberId: member.id } });
+    await draft.submit();
+    expect(api.command.mock.calls[0][1]).toMatchObject({ action: 'issue', recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: member.lastPhone });
+    expect(draft.snapshot().receipt?.delivery).toEqual({ status: 'sent', memberId: member.id });
+  });
+  it('leaves the member out of a link-only handoff', async () => {
+    const { api, draft } = setup(withMembers());
+    await issue(draft);
+    await draft.submit();
+    expect(api.command.mock.calls[0][1]).not.toHaveProperty('recipientMemberId');
+  });
+  it('refuses a pristavovač the server no longer offers', async () => {
+    const { api, draft } = setup(withMembers());
+    await draft.refresh();
+    draft.select('issue');
+    draft.edit({ recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: member.lastPhone });
+    api.context.mockResolvedValueOnce(context());
+    await draft.refresh();
+    await draft.submit();
+    expect(api.command).not.toHaveBeenCalled();
+    expect(draft.snapshot().error).toBe('Vybraný pristavovač už nie je dostupný. Vyberte ho znova.');
+  });
+  it('asks for the pristavovač phone when none is known', async () => {
+    const { api, draft } = setup(withMembers());
+    await draft.refresh();
+    draft.select('issue');
+    draft.edit({ recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: '' });
+    await draft.submit();
+    expect(api.command).not.toHaveBeenCalled();
+    expect(draft.snapshot().error).toBe('Doplňte platné telefónne číslo pristavovača.');
+  });
+  it('sends a waiting link-only handoff to the app once and refreshes', async () => {
+    const { api, draft } = setup(withMembers(withGrant()));
+    await draft.refresh();
+    const answer = deferred<Awaited<ReturnType<HandoffApi['command']>>>();
+    api.command.mockImplementationOnce(() => answer.promise);
+    const sending = draft.deliver(grantId, member.id);
+    await draft.deliver(grantId, member.id);
+    expect(draft.snapshot().delivering).toBe(grantId);
+    answer.resolve({ ...receipt(), kind: 'delivery', memberId: member.id, sent: true } as unknown as Awaited<ReturnType<HandoffApi['command']>>);
+    await sending;
+    expect(api.command).toHaveBeenCalledOnce();
+    expect(api.command.mock.calls[0][1]).toEqual({ action: 'deliver', commandId, handoffId: grantId, expectedRevision: 1, recipientMemberId: member.id });
+    expect(draft.snapshot()).toMatchObject({ delivering: null, delivered: { handoffId: grantId, memberId: member.id }, error: null });
+    expect(api.context).toHaveBeenCalledTimes(2);
+  });
+  it('does not send a closed handoff or to an unknown pristavovač', async () => {
+    const accepted = withGrant();
+    accepted.handoffs[0] = { ...accepted.handoffs[0], status: 'accepted' };
+    const { api, draft } = setup(withMembers(accepted));
+    await draft.refresh();
+    await draft.deliver(grantId, member.id);
+    await draft.deliver(grantId, '88888888-8888-4888-8888-888888888888');
+    expect(api.command).not.toHaveBeenCalled();
+  });
+  it('shows a failed send and allows another try', async () => {
+    const { api, draft } = setup(withMembers(withGrant()));
+    await draft.refresh();
+    api.command.mockRejectedValueOnce(new MobileApiError('Pristavovač už nie je dostupný.', 409));
+    await draft.deliver(grantId, member.id);
+    expect(draft.snapshot()).toMatchObject({ delivering: null, delivered: null, error: 'Pristavovač už nie je dostupný.' });
+    expect(draft.snapshot().status).toBe('editing');
+  });
+});

@@ -1,4 +1,4 @@
-import type { MobileCaseHandoffs, MobileHandoffGrant, MobileHandoffInput, MobileHandoffLink, MobileHandoffResult, MobileHandoffSnapshot, MobileScope } from '../../../src/lib/mobile-api';
+import type { MobileCaseHandoffs, MobileDeliveryMember, MobileHandoffApp, MobileHandoffGrant, MobileHandoffInput, MobileHandoffLink, MobileHandoffMutation, MobileHandoffResult, MobileHandoffSnapshot, MobileScope } from '../../../src/lib/mobile-api';
 import { MobileApiError, type MobileTransport } from '../lib/api';
 import type { MobileConfig } from '../lib/config';
 const invalid = () => new MobileApiError('Odpoveď odovzdania sa nepodarilo overiť. Obnovte údaje.', 502);
@@ -90,6 +90,31 @@ export function parseSnapshot(value: unknown): MobileHandoffSnapshot {
   }
   return JSON.parse(JSON.stringify(v)) as MobileHandoffSnapshot;
 }
+/** Sent to a pristavovač in the app, with their last known position. */
+function app(value: unknown): MobileHandoffApp | null {
+  if (value === undefined || value === null)
+    return null;
+  const v = object(value), position = v.lastPosition;
+  if (!id(v.memberId))
+    throw invalid();
+  if (position === null || position === undefined)
+    return { memberId: v.memberId.toLowerCase(), lastPosition: null };
+  const p = object(position);
+  if (typeof p.lat !== 'number' || !Number.isFinite(p.lat) || Math.abs(p.lat) > 90 || typeof p.lng !== 'number' || !Number.isFinite(p.lng) || Math.abs(p.lng) > 180
+    || !(p.accuracy === null || typeof p.accuracy === 'number' && Number.isFinite(p.accuracy) && p.accuracy >= 0) || !date(p.recordedAt))
+    throw invalid();
+  return { memberId: v.memberId.toLowerCase(), lastPosition: { lat: p.lat, lng: p.lng, accuracy: p.accuracy as number | null, recordedAt: p.recordedAt } };
+}
+/** Pristavovači who can receive in the app. A malformed list only hides the choice. */
+function deliveryMembers(value: unknown): { members: MobileDeliveryMember[] } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray((value as { members?: unknown }).members))
+    return undefined;
+  const members = (value as { members: unknown[] }).members;
+  if (members.length > 200 || members.some(m => !m || typeof m !== 'object' || !id((m as Record<string, unknown>).id) || !text((m as Record<string, unknown>).displayName, 160)
+    || !((m as Record<string, unknown>).lastPhone === null || text((m as Record<string, unknown>).lastPhone, 30))))
+    return undefined;
+  return { members: members.map(m => { const v = m as Record<string, unknown>; return { id: (v.id as string).toLowerCase(), displayName: v.displayName as string, lastPhone: v.lastPhone as string | null }; }) };
+}
 function grant(value: unknown): MobileHandoffGrant {
   const v = object(value);
   if (!id(v.id) || !['offered', 'accepted', 'en_route', 'arrived', 'completed', 'rejected', 'cancelled', 'expired'].includes(v.status as string) || !integer(v.revision) || !integer(v.publishedVersion) || !text(v.recipientName, 160) || !text(v.recipientPhone, 30) || !date(v.expiresAt) || !date(v.createdAt) || !nullableDate(v.openedAt) || !nullableDate(v.eta) || !nullableDate(v.publishedAt) || !(v.createdBy === null || text(v.createdBy, 320)) || typeof v.canRenew !== 'boolean' || typeof v.recoverable !== 'boolean' || !Array.isArray(v.events) || v.events.length > 200)
@@ -105,7 +130,8 @@ function grant(value: unknown): MobileHandoffGrant {
   if (new Set(events.map(e => e.id)).size !== events.length)
     throw invalid();
   return {
-    id: v.id, status: v.status as MobileHandoffGrant['status'], revision: v.revision, publishedVersion: v.publishedVersion, recipientName: v.recipientName, recipientPhone: v.recipientPhone, expiresAt: v.expiresAt, createdAt: v.createdAt, openedAt: v.openedAt as string | null, eta: v.eta as string | null, createdBy: v.createdBy as string | null, publishedAt: v.publishedAt as string | null, canRenew: v.canRenew, recoverable: v.recoverable, published: v.published === null ? null : parseSnapshot(v.published), events
+    id: v.id, status: v.status as MobileHandoffGrant['status'], revision: v.revision, publishedVersion: v.publishedVersion, recipientName: v.recipientName, recipientPhone: v.recipientPhone, expiresAt: v.expiresAt, createdAt: v.createdAt, openedAt: v.openedAt as string | null, eta: v.eta as string | null, createdBy: v.createdBy as string | null, publishedAt: v.publishedAt as string | null, canRenew: v.canRenew, recoverable: v.recoverable, published: v.published === null ? null : parseSnapshot(v.published), events,
+    app: app(v.app)
   };
 }
 function link(value: unknown, origin: string, minRevision: number): MobileHandoffLink {
@@ -187,14 +213,22 @@ export function createHandoffApi(config: MobileConfig, profileId: string, getTok
       const handoffs = body.handoffs.map(grant);
       if (new Set(handoffs.map(h => h.id)).size !== handoffs.length)
         throw invalid();
+      const delivery = deliveryMembers(body.delivery);
       return {
-        ...scope(body), caseId, previewVersion: body.previewVersion, preview: parseSnapshot(body.preview), handoffs, enhanced: body.enhanced
+        ...scope(body), caseId, previewVersion: body.previewVersion, preview: parseSnapshot(body.preview), handoffs, enhanced: body.enhanced, ...(delivery ? { delivery } : {})
       };
     },
     command: async (caseId: string, input: MobileHandoffInput): Promise<MobileHandoffResult> => {
       const body = await request(caseId, input);
       if (body.commandId !== input.commandId || !id(body.handoffId) || 'handoffId' in input && body.handoffId !== input.handoffId || !integer(body.currentRevision))
         throw invalid();
+      if (input.action === 'deliver') {
+        if (body.kind !== 'delivery' || body.memberId !== input.recipientMemberId || body.sent !== true)
+          throw invalid();
+        return {
+          ...scope(body), kind: 'delivery', caseId, handoffId: body.handoffId, commandId: input.commandId, memberId: input.recipientMemberId, sent: true, currentRevision: body.currentRevision
+        };
+      }
       if (input.action === 'recover') {
         if (body.kind !== 'link')
           throw invalid();
@@ -220,8 +254,18 @@ export function createHandoffApi(config: MobileConfig, profileId: string, getTok
           available = { status: 'unavailable', warning: 'link_unavailable' };
         }
       }
+      // Sent to a pristavovač or not: reported beside the confirmed handoff, never instead of it.
+      let delivery: MobileHandoffMutation['delivery'];
+      if (input.action === 'issue' && input.recipientMemberId && body.delivery && typeof body.delivery === 'object') {
+        const d = body.delivery as Record<string, unknown>;
+        if ((d.status === 'sent' || d.status === 'failed') && d.memberId === input.recipientMemberId)
+          delivery = { status: d.status, memberId: input.recipientMemberId };
+      }
+      if (input.action === 'issue' && input.recipientMemberId && !delivery)
+        delivery = { status: 'failed', memberId: input.recipientMemberId };
       return {
-        ...scope(body), kind: 'mutation', caseId, handoffId: body.handoffId, commandId: input.commandId, action: input.action, committedRevision: expected, currentRevision: body.currentRevision, refreshRequired: true, link: available
+        ...scope(body), kind: 'mutation', caseId, handoffId: body.handoffId, commandId: input.commandId, action: input.action, committedRevision: expected, currentRevision: body.currentRevision, refreshRequired: true, link: available,
+        ...(delivery ? { delivery } : {})
       };
     }
   };
