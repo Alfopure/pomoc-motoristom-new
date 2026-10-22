@@ -75,7 +75,7 @@ schválení Apple je osobitne v [iPhone TEST postupe](iphone-voice-test.md).
 8. **Push notifikácie** (nová úloha, spätné volanie po termíne, priradený
    prípad) sú v kóde hotové (F3). Na TEST sú od 22. 10. 2026 zapnuté (migrácia
    `20261020210000_mobile_push_devices.sql` a prepínač `MOBILE_PUSH_ENABLED`);
-   do iPhonu ich doručí build z TestFlightu, keď bude v Expo APNs kľúč.
+   do iPhonu ich doručí build z TestFlightu (APNs kľúč je v Expo od 22. 10. 2026).
    Produkcia ich zapne až so svojím vydaním.
 9. **Hlásenie pádov** (napr. Sentry pre React Native), aby sme o chybe
    vedeli skôr než od používateľa.
@@ -175,9 +175,9 @@ Slovensko.
 | Produkčné migrácie (zoznam v časti 3) | vývoj, schválenie majiteľ | čaká |
 | Účet pre kontrolu Apple v organizácii majiteľa (rozhodnutie 20. 10. 2026) | majiteľ | pred odoslaním |
 | Telnyx a APNs pre produkčný hlas | vývoj, schválenie majiteľ | po TEST akceptácii |
-| Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | hotové; push na TEST zapnutý, doručenie čaká na APNs kľúč |
+| Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | hotové; push na TEST zapnutý, APNs kľúč v Expo |
 | Pristavovač v aplikácii (F6) | vývoj, schválenie majiteľa | na TEST vrátane migrácií (22. 10. 2026) |
-| TEST build cez interný TestFlight | vývoj, APNs kľúč a VoIP certifikát majiteľ | pripravené ([postup](testflight.md)) |
+| TEST build cez interný TestFlight | vývoj | build 0.1.0 (17) z `dev` `03389c58`, hlas a VoIP push zapnuté na TEST ([postup](testflight.md)) |
 | Texty do App Store, poznámky pre review, snímky | vývoj, schválenie majiteľ | chýba |
 
 ## 6. Poradie
@@ -233,7 +233,7 @@ príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
 - **Zastaviť nahrávanie** – zákazníkom sľubujeme, že na požiadanie ho
   dispečer zastaví; bez toho mobil nemôže ostro prijímať zákaznícke hovory.
 
-**F3 – Push notifikácie** (na TEST zapnuté 22. 10. 2026; doručenie do iPhonu čaká na APNs kľúč)
+**F3 – Push notifikácie** (na TEST zapnuté 22. 10. 2026; APNs kľúč v Expo, doručenie overí TestFlight)
 - Nová úloha pre mňa, vrátená alebo na kontrolu; termín úlohy.
 - Spätné volanie po termíne (moje prevzaté, nepridelené).
 - Prípad priradený mne.

@@ -143,7 +143,9 @@ priamo v artefakte, spolu s podpisom a entitlementmi.
    Push Notifications a pripraviť signing pre interný TEST build na iPhone
    (hotové 22. 10. 2026: tím `792TJPXTL3`, App Store profil pre TestFlight). Neskorší produkčný App ID `sk.linkapomoci.dispecing` bude mať vlastnú
    konfiguráciu a vydanie. Existujúce Alfo identifikátory nemeníme.
-2. Vytvoriť **VoIP Services** certifikát pre TEST App ID. Pripnúť ho cez
+2. Hotové 22. 10. 2026: certifikát `35S4MJY4Z3` a TEST Telnyx iOS push
+   credential pripojený na TEST credential connection.
+   Vytvoriť **VoIP Services** certifikát pre TEST App ID. Pripnúť ho cez
    samostatný TEST Telnyx iOS push credential na overenú TEST credential
    connection. Overiť bundle ID, platnosť certifikátu, production APNs režim
    zhodný s interným EAS buildom a provider resource provenance. Nemeniť
@@ -159,9 +161,12 @@ priamo v artefakte, spolu s podpisom a entitlementmi.
    `MOTORIST_NATIVE_VOICE_TEST_ENABLED=true`, nasadiť aktuálne `dev` afresh
    a overiť canonical health/SHA. Pripojiť TEST operátora v mobile; overiť
    foreground prijatý a odchádzajúci hovor, audio a cleanup. Toto povolenie
-   nevytvára produkčné vydanie. Aktuálne opt-in zatiaľ nie je nastavený.
+   nevytvára produkčné vydanie. Zapnuté 22. 10. 2026 pre TestFlight pilot;
+   fyzické overenie hovorov ostáva na akceptáciu.
 5. Po overení APNs resource a PushKit registrácie zapnúť tamtiež samostatné
-   `MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED=true`. Neprenášať ho do Preview
+   `MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED=true` (zapnuté 22. 10. 2026 spolu
+   s krokom 4 na pokyn majiteľa dokončiť TestFlight pilot; PushKit registráciu
+   a zvonenie pri zamknutí overí akceptácia). Neprenášať ho do Preview
    ani produkcie. Nový heartbeat vytvorí iba revokovateľnú `native_voip`
    dostupnosť, nie uložený push token. Dostupnosť je viazaná na aktuálnu
    device lease a platný credential, maximálne 7 dní. Po vypnutí prepínača
