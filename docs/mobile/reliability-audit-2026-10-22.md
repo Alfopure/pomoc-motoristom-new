@@ -53,6 +53,11 @@ Serverový kód, SQL a konfigurácia poskytovateľov sa nemenia. Pri
 vydaní treba identifikovať nový `dev` commit a samostatne TestFlight build;
 build 18 tieto opravy JavaScriptu ešte neobsahuje.
 
+Kontrola CI zachytila aj novú požiadavku Expo z 22. 10.:
+`expo-notifications` 57.0.23 už nevyhovoval odporúčanej verzii 57.0.24.
+Balík aj lockfile sú zosúladené; `expo install --check` opäť prechádza.
+Táto oprava zachováva Expo SDK 57 a existujúci spôsob doručovania.
+
 ## Ďalšie kroky pred každodennou prevádzkou
 
 1. Na novom TestFlight builde zopakovať zamknutý príjem, obojsmerný zvuk,
