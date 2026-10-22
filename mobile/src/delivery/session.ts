@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { randomUUID } from "expo-crypto";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -30,7 +30,8 @@ export function deliveryRefused(error: unknown): boolean {
 export function useDeliverySession({ config, client, userId, liveUser, active, enabled, writable }: {
   config: MobileConfig; client: SupabaseClient; userId: string; liveUser: () => string | null; active: boolean; enabled: boolean; writable: boolean;
 }): DeliverySession {
-  const access = useMemo(() => new DeliveryAccess(), [config, userId, liveUser]);
+  // Workspace itself is keyed by environment, user and authentication incarnation.
+  const [access] = useState(() => new DeliveryAccess());
   const accessError = useSyncExternalStore(access.subscribe, access.snapshot, access.snapshot);
   const api = useMemo(() => createDeliveryApi(config, async () => {
     if (liveUser() !== userId) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);

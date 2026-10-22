@@ -221,6 +221,7 @@ const commandLabels: Record<MobileDeliveryAction, string> = {
   accept: "Prijať pristavenie", reject: "Odmietnuť pristavenie", en_route: "Vyrážam", arrived: "Som na mieste", complete: "Auto odovzdané", update: "Čas príchodu", blocked: "Nahlásiť problém",
 };
 function CommandStorageNotice({ commands, state }: { commands: DeliveryCommands; state: DeliveryCommandsView }) {
+  if (state.ready && !state.error && Platform.OS !== "web") return null;
   return <View style={formLayout.notices}>
     {!state.ready && !state.error && <Text style={styles.muted}>Overujem uložené kroky…</Text>}
     {state.error && <ErrorNotice message={state.error} onRetry={!state.ready ? () => { void commands.load(); } : undefined} />}
