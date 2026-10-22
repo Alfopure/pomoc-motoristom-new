@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeSupabase, type FakeSupabase } from "@/test/fake-supabase";
 import type { MotoristActor } from "@/server/api-auth";
-import { claimPushes, defaultPushPreferences, mobilePushEnabled, pruneMobilePush, pushRecipients, queueMobilePush, readPushRegistration, registerMobilePush, sendMemberPush, sendMobilePush, unregisterMobilePush } from "./push";
+import { claimPushes, defaultPushPreferences, mobilePushEnabled, pruneMobilePush, pushOwner, pushRecipients, queueMobilePush, readPushRegistration, registerMobilePush, sendMemberPush, sendMobilePush, unregisterMobilePush } from "./push";
 
 const queued: (() => Promise<unknown>)[] = [];
 vi.mock("next/server", () => ({ after: (work: () => Promise<unknown>) => { queued.push(work); } }));
@@ -68,43 +68,60 @@ describe("push registration", () => {
 
   it("refuses to register where push is not switched on or the table is missing", async () => {
     vi.stubEnv("MOBILE_PUSH_ENABLED", "");
-    await expect(registerMobilePush(fake.admin, actor, { installationId: PHONE, token: token("abc"), platform: "ios" })).rejects.toMatchObject({ status: 503, code: "push_unavailable" });
+    await expect(registerMobilePush(fake.admin, pushOwner(actor), { installationId: PHONE, token: token("abc"), platform: "ios" })).rejects.toMatchObject({ status: 503, code: "push_unavailable" });
     vi.stubEnv("MOBILE_PUSH_ENABLED", "true");
     fake.db.failNext("motorist_mobile_push_devices", "select", { message: "missing", code: "PGRST205", details: null, hint: null });
-    await expect(registerMobilePush(fake.admin, actor, { installationId: PHONE, token: token("abc"), platform: "ios" })).rejects.toMatchObject({ status: 503, code: "push_unavailable" });
+    await expect(registerMobilePush(fake.admin, pushOwner(actor), { installationId: PHONE, token: token("abc"), platform: "ios" })).rejects.toMatchObject({ status: 503, code: "push_unavailable" });
   });
 
   it("stores this phone for the signed-in operator with the default switches", async () => {
-    const result = await registerMobilePush(fake.admin, actor, { installationId: PHONE, token: token("abc"), platform: "ios", appVersion: "1.0.0", preferences: { callbacks_unclaimed: false } }, NOW);
+    const result = await registerMobilePush(fake.admin, pushOwner(actor), { installationId: PHONE, token: token("abc"), platform: "ios", appVersion: "1.0.0", preferences: { callbacks_unclaimed: false } }, NOW);
     expect(result.preferences).toEqual({ ...defaultPushPreferences(), callbacks_unclaimed: false });
     expect(devices()).toEqual([expect.objectContaining({ organization_id: ORG, profile_id: ME, environment: "test", installation_id: PHONE, expo_push_token: token("abc"), platform: "ios" })]);
     // Changing one switch later keeps the others.
-    const again = await registerMobilePush(fake.admin, actor, { installationId: PHONE, token: token("abc"), platform: "ios", preferences: { cases: false } }, NOW);
+    const again = await registerMobilePush(fake.admin, pushOwner(actor), { installationId: PHONE, token: token("abc"), platform: "ios", preferences: { cases: false } }, NOW);
     expect(again.preferences).toEqual({ ...defaultPushPreferences(), callbacks_unclaimed: false, cases: false });
     expect(devices()).toHaveLength(1);
   });
 
   it("starts from the defaults when another account signs in on the same phone", async () => {
     fake.db.seed("motorist_mobile_push_devices", [device(COLLEAGUE, PHONE, token("abc"), { tasks: false, cases: false })]);
-    const result = await registerMobilePush(fake.admin, actor, { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
+    const result = await registerMobilePush(fake.admin, pushOwner(actor), { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
     expect(result.preferences).toEqual(defaultPushPreferences());
     expect(devices()).toEqual([expect.objectContaining({ profile_id: ME, installation_id: PHONE })]);
   });
 
   it("registers a pristavovač's phone by member, and a later dispatcher takes the phone over cleanly", async () => {
     const MEMBER = "00000000-0000-4000-8000-0000000000e1";
-    const member = { organizationId: ORG, memberId: MEMBER };
+    const member = { organizationId: ORG, profileId: null, memberId: MEMBER };
     await expect(registerMobilePush(fake.admin, member, { installationId: PHONE, token: token("abc"), platform: "ios", preferences: { handoffs: false } }, NOW)).resolves.toMatchObject({ preferences: { handoffs: false } });
     expect(devices()).toEqual([expect.objectContaining({ member_id: MEMBER, profile_id: null, installation_id: PHONE })]);
-    await registerMobilePush(fake.admin, actor, { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
+    await registerMobilePush(fake.admin, pushOwner(actor), { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
     expect(devices()).toEqual([expect.objectContaining({ profile_id: ME, installation_id: PHONE })]);
     expect(devices()[0].member_id ?? null).toBeNull();
+  });
+
+  it("registers one phone for someone who dispatches and delivers, keeping their switches", async () => {
+    const MEMBER = "00000000-0000-4000-8000-0000000000e1";
+    await registerMobilePush(fake.admin, { organizationId: ORG, profileId: ME, memberId: MEMBER }, { installationId: PHONE, token: token("abc"), platform: "ios", preferences: { cases: false } }, NOW);
+    expect(devices()).toEqual([expect.objectContaining({ profile_id: ME, member_id: MEMBER, installation_id: PHONE })]);
+    // Without the delivery role later: still their phone and their switches.
+    const later = await registerMobilePush(fake.admin, pushOwner(actor), { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
+    expect(later.preferences.cases).toBe(false);
+    await expect(registerMobilePush(fake.admin, { organizationId: ORG, profileId: null, memberId: null }, { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("keeps the dispatch notices of someone with both roles before the background migration", async () => {
+    const MEMBER = "00000000-0000-4000-8000-0000000000e1";
+    fake.db.failNext("motorist_mobile_push_devices", "upsert", { message: "check", code: "23514", details: null, hint: null });
+    await registerMobilePush(fake.admin, { organizationId: ORG, profileId: ME, memberId: MEMBER }, { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
+    expect(devices()).toEqual([expect.objectContaining({ profile_id: ME, member_id: null, installation_id: PHONE })]);
   });
 
   it("keeps a token on one installation only", async () => {
     const other = "00000000-0000-4000-8000-0000000000f2";
     fake.db.seed("motorist_mobile_push_devices", [device(ME, other, token("abc"))]);
-    await registerMobilePush(fake.admin, actor, { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
+    await registerMobilePush(fake.admin, pushOwner(actor), { installationId: PHONE, token: token("abc"), platform: "ios" }, NOW);
     expect(devices().map(row => row.installation_id)).toEqual([PHONE]);
   });
 

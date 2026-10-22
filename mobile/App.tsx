@@ -27,7 +27,9 @@ import { createPushApi } from "./src/notifications/api";
 import { createPushDevice, installPushTaps } from "./src/notifications/device";
 import { PushSettings } from "./src/notifications/settings";
 import { pushTaps } from "./src/notifications/taps";
-import { FieldWorkspace } from "./src/delivery/ui";
+import { useDeliverySession } from "./src/delivery/session";
+import { haltBackgroundSharing } from "./src/delivery/native-sharing";
+import { FieldShell } from "./src/shell/field-shell";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
 /** The server's answer "signed in, but not a dispatcher": a pristavovač. Kept as the
@@ -81,6 +83,8 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
       if (!alive) return;
       observedEvent = true;
       logout.observe(event, next?.user.id ?? null);
+      // Signed out, also by an expired session: no more position from this phone.
+      if (event === "SIGNED_OUT") void haltBackgroundSharing();
       if (authScope.observe(next?.user.id ?? null)) queryClient.clear();
       setSessionEpoch(authScope.snapshot().epoch);
       setSession(next); setBooting(false);
@@ -239,9 +243,11 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     return liveUser() === userId && data.session?.user.id === userId ? data.session.access_token : null;
   })), [config, client, userId, liveUser]);
   useEffect(() => () => push.dispose(), [push]);
+  // Pristavenia: a pristavovač alone, or a dispatcher who also delivers (one app, both modules).
+  const delivery = useDeliverySession({ config, client, userId, liveUser, active, enabled: Boolean(identity) || fieldOnly });
   // A phone switched on earlier refreshes its registration quietly at start and on return.
-  const verifiedProfile = identity?.profileId ?? null;
-  useEffect(() => { if (active && verifiedProfile) void push.resume(); }, [active, verifiedProfile, push]);
+  const verifiedProfile = identity?.profileId ?? null, verifiedMember = delivery.memberId;
+  useEffect(() => { if (active && (verifiedProfile || verifiedMember)) void push.resume(); }, [active, verifiedProfile, verifiedMember, push]);
   const callbackSummary = useQuery({ queryKey: [...key, "callback-summary", identity?.profileId], enabled: active && Boolean(identity),
     queryFn: ({ signal }) => api.callbackSummary(identity!.profileId, signal), refetchInterval: active ? 30_000 : false });
   const dialBlocked = dialBlockedReason(phone, phoneState, "Zavolať späť z mobilu bude možné v natívnej aplikácii s pripojeným telefónom. V tomto náhľade môžete požiadavky prevziať a uzavrieť.");
@@ -265,6 +271,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
         await phone?.disconnect();
         // Notices for this account stop reaching the phone; the choice stays for the next sign-in.
         await push.forget();
+        // Nothing more about this person's position leaves the phone.
+        await Promise.race([delivery.location.forget(), new Promise(resolve => setTimeout(resolve, 5_000))]);
       });
     } finally { preparingLogout.current = false; setLogoutBusy(false); }
   }
@@ -274,8 +282,15 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     ]);
   }
   if (me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do dispečingu…" /></>;
-  if (fieldOnly) return <FieldWorkspace config={config} client={client} userId={userId} liveUser={liveUser} active={active} push={push}
+  if (fieldOnly && delivery.memberId) return <FieldShell key={delivery.memberId} config={config} active={active} userId={userId} session={delivery} push={push}
     logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} />;
+  if (fieldOnly && delivery.me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup k pristaveniam…" /></>;
+  if (fieldOnly) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
+    <ErrorNotice message={errorMessage(delivery.me.error)} onRetry={() => { void delivery.me.refetch(); }} />
+    {logoutState.message && <ErrorNotice message={logoutState.message} />}
+    {logoutError && <ErrorNotice message={logoutError} />}
+    <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={logoutBusy || logoutState.busy} secondary />
+  </View></>;
   if (!identity) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
     <ErrorNotice message={errorMessage(me.error)} onRetry={() => { void me.refetch(); }} />
     {logoutState.message && <ErrorNotice message={logoutState.message} />}
@@ -288,7 +303,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
       <DispatchShell key={identity.profileId} config={config} client={client} api={api} active={active} userId={userId} liveUser={liveUser}
         identity={identity} queryKey={key} meError={me.isError ? me.error : null} onRetryMe={() => { void me.refetch(); }}
         phone={phone} phoneState={phoneState} callbackSummary={callbackSummary} dialer={dialer}
-        logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} push={push} />
+        logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} push={push}
+        delivery={delivery.memberId ? delivery : null} />
     </PhoneOverlayProvider>
   </View>;
 }

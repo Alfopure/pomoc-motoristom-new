@@ -53,7 +53,7 @@ s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť apli
 
 - Kontaktné údaje: meno, e-mail, telefónne číslo, adresa (miesto zásahu).
 - Poloha: presná (dispečer na pokyn pri výbere miesta; pristavovač počas
-  prijatého pristavenia, iba s otvorenou aplikáciou).
+  prijatého pristavenia, aj na pozadí).
 - Obsah používateľa: fotografie, zvuk (hovory), iný obsah (poznámky).
 - Identifikátory: ID používateľa, ID zariadenia (pripojenie k ústredni,
   identifikátor pre notifikácie a inštalácie).
@@ -70,6 +70,12 @@ s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť apli
   majiteľa (jeho firma je organizátor, s firmou klienta). Pred odoslaním: samostatný
   účet len pre kontrolu (nie osobný účet dispečera) s rolou Dispečer, ktorý sa po
   schválení deaktivuje. Kontrolór uvidí to, čo dispečer tejto organizácie.
+- **Poloha na pozadí (2.5.4, 5.1.1):** iba pre rolu pristavovač a iba počas
+  pristavenia náhradného vozidla, ktoré prijal; účel je v texte povolenia,
+  iOS ukazuje modrý ukazovateľ a posielanie končí so skončením pristavenia
+  alebo odhlásením. Do poznámky pre kontrolu: „Background location is used only
+  by replacement-car drivers during a delivery they accepted, so the dispatcher
+  sees where the car is; it stops when the delivery ends or the driver logs out.“
 - **Zrušenie účtu (5.1.1(v)):** aplikácia nedovoľuje registráciu; účty zakladá
   a ruší organizácia. Postup je na stránke Ochrana súkromia.
 - **Poznámka pre kontrolu:** „Interná aplikácia pre dispečerov asistenčnej

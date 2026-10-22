@@ -1,13 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { AccessibilityInfo, Animated, Modal, Pressable, ScrollView, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ClipboardList, FolderOpen, House, LayoutGrid, Phone, Plus, Wrench, type LucideIcon } from "lucide-react-native";
+import { Car, ClipboardList, FolderOpen, House, LayoutGrid, Phone, Plus, Wrench, type LucideIcon } from "lucide-react-native";
 import { palette, space, type } from "../design/tokens";
 import { GlassSurface } from "../ui/glass";
 import { moduleById, type ModuleId } from "./modules";
 import type { ShellTab } from "./navigation";
 
-export const moduleIcons: Record<ModuleId, LucideIcon> = { hovory: Phone, pripady: FolderOpen, ulohy: ClipboardList, nastroje: Wrench };
+export const moduleIcons: Record<ModuleId, LucideIcon> = { hovory: Phone, pripady: FolderOpen, ulohy: ClipboardList, nastroje: Wrench, pristavenia: Car };
 export const tabLabel = (tab: ShellTab) => tab === "prehlad" ? "Prehľad" : tab === "moduly" ? "Moduly" : moduleById(tab).short;
 
 /** Settings-style colored square used for modules in grids and lists. */

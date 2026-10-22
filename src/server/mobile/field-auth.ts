@@ -48,12 +48,17 @@ export function fieldScope(actor: MobileFieldActor): MobileFieldScope {
   return { ok: true, apiVersion: 1, environment: mobileEnvironment(), memberId: actor.memberId, checkedAt: new Date().toISOString() };
 }
 
-/** Either a dispatcher or a pristavovač, for what both have (their phone's notifications). */
-export async function requireMobilePerson(request: Request): Promise<{ kind: "dispatcher"; actor: MotoristActor } | { kind: "field"; actor: MobileFieldActor }> {
-  try {
-    return { kind: "dispatcher", actor: await requireMobileActor(request) };
-  } catch (error) {
-    if (!(error instanceof MutationError) || error.code !== "mobile_no_dispatch_profile") throw error;
-    return { kind: "field", actor: await requireMobileFieldActor(request) };
-  }
+/** A dispatcher, a pristavovač or both (one app with both modules), for what they
+ * share: their phone's notifications. At least one of the two is present. */
+export type MobilePerson = { dispatcher: MotoristActor; field: MobileFieldActor | null } | { dispatcher: null; field: MobileFieldActor };
+export async function requireMobilePerson(request: Request): Promise<MobilePerson> {
+  let dispatcher: MotoristActor | null = null;
+  try { dispatcher = await requireMobileActor(request); }
+  catch (error) { if (!(error instanceof MutationError) || error.code !== "mobile_no_dispatch_profile") throw error; }
+  if (!dispatcher) return { dispatcher: null, field: await requireMobileFieldActor(request) };
+  // Without deliveries (switched off, no delivery role, a passing failure) a
+  // dispatcher stays a dispatcher.
+  if (!mobileDeliveryEnabled()) return { dispatcher, field: null };
+  try { return { dispatcher, field: await requireMobileFieldActor(request) }; }
+  catch { return { dispatcher, field: null }; }
 }

@@ -1,4 +1,5 @@
 import "server-only";
+import { createHash, randomBytes } from "node:crypto";
 import { handoffStates } from "@/domain/case-handoff";
 import type { Json } from "@/lib/supabase/database.types";
 import type { MobileDelivery, MobileDeliveryAction, MobileDeliveryCommand, MobileDeliveryPositionInput } from "@/lib/mobile-api";
@@ -14,11 +15,14 @@ import { deliveryUnavailable, fieldAdmin, missingSchema, type MobileFieldActor }
 const ACTIONS: readonly MobileDeliveryAction[] = ["accept", "reject", "en_route", "arrived", "complete", "update", "blocked"];
 
 function unconfirmed(): never { throw new MutationError("Pristavenie sa nepodarilo overiť. Skúste znova.", 503, "delivery_unconfirmed"); }
-function deliveryError(error: { code?: string }): never {
+function deliveryError(error: { code?: string; message?: string }): never {
   const code = error.code ?? "";
   if (missingSchema(code)) throw deliveryUnavailable();
   if (code === "42501") throw new MutationError("Nemáte prístup k pristaveniam.", 403, "mobile_no_field_access");
   if (code === "P0002") throw new MutationError("Pristavenie už nie je dostupné. Dispečer ho mohol zrušiť alebo mu skončila platnosť.", 404);
+  if (code === "PT409" && error.message === "Not tracking") throw new MutationError("Polohu môžete posielať od svojho kroku v pristavení, kým je otvorené.", 409, "delivery_not_tracking");
+  // A database with the first delivery migration only knows no background secret yet.
+  if (code === "22023" && error.message === "Invalid command") throw new MutationError("Zdieľanie polohy na pozadí ešte nie je v tomto prostredí zapnuté.", 503, "delivery_background_unavailable");
   if (["PT409", "23505", "40001"].includes(code)) throw new MutationError("Pristavenie sa medzitým zmenilo. Načítajte ho znova a rozhodnite sa.", 409);
   if (["22023", "22P02", "23514", "22007", "22008"].includes(code)) throw new MutationError("Skontrolujte údaje a dôvod.", 400);
   return unconfirmed();
@@ -113,4 +117,43 @@ export async function recordDeliveryPosition(actor: MobileFieldActor, id: string
   const data = await call(actor, "position", { handoffId, ...input }) as { stored?: unknown; active?: unknown } | null;
   if (typeof data?.stored !== "boolean" || typeof data.active !== "boolean") unconfirmed();
   return { stored: data.stored, active: data.active };
+}
+
+/** A secret for one delivery, so the phone can send its position in the background
+ * (app closed, phone locked) without the sign-in session. Only its hash reaches the
+ * database; it ends with the delivery, a new secret or the pristavovač's logout. */
+export const trackerHash = (token: string) => createHash("sha256").update(token, "utf8").digest("hex");
+export async function issueDeliveryTracker(actor: MobileFieldActor, id: string): Promise<{ token: string; expiresAt: string }> {
+  const handoffId = deliveryId(id), token = randomBytes(32).toString("base64url");
+  const data = await call(actor, "tracker", { handoffId, tokenHash: trackerHash(token) }) as { expiresAt?: unknown } | null;
+  if (typeof data?.expiresAt !== "string" || !isHistoryTimestamp(data.expiresAt)) unconfirmed();
+  return { token, expiresAt: data.expiresAt };
+}
+export async function revokeDeliveryTracker(actor: MobileFieldActor, id: string): Promise<{ revoked: boolean }> {
+  const data = await call(actor, "untrack", { handoffId: deliveryId(id) }) as { revoked?: unknown } | null;
+  if (data?.revoked !== true) unconfirmed();
+  return { revoked: true };
+}
+
+/** `Authorization: Tracker <secret>`; anything else is not signed in. */
+export function readTrackerToken(request: Request): string {
+  const match = /^Tracker ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("authorization") ?? "");
+  if (!match) throw new MutationError("Chýba oprávnenie na odoslanie polohy.", 401);
+  return match[1];
+}
+/** What the phone kept since its last send, oldest first; at most 100 readings. */
+export function readTrackPositions(value: unknown): MobileDeliveryPositionInput[] {
+  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  if (!body || Object.keys(body).some(key => key !== "positions") || !Array.isArray(body.positions) || body.positions.length < 1 || body.positions.length > 100) {
+    throw new MutationError("Neplatné polohy.", 400);
+  }
+  return body.positions.map(readDeliveryPosition);
+}
+export async function trackDeliveryPositions(token: string, value: unknown): Promise<{ stored: number; active: boolean }> {
+  const positions = readTrackPositions(value);
+  const { data, error } = await fieldAdmin().rpc("motorist_handoff_track", { p_token_hash: trackerHash(token), p_positions: positions as unknown as Json });
+  if (error) deliveryError(error);
+  const result = data as { stored?: unknown; active?: unknown } | null;
+  if (typeof result?.stored !== "number" || !Number.isSafeInteger(result.stored) || result.stored < 0 || typeof result.active !== "boolean") unconfirmed();
+  return { stored: result.stored, active: result.active };
 }

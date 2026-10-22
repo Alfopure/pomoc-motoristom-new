@@ -289,9 +289,19 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   alebo Problém s dôvodom; Zavolať, navigácia k autu a na miesto. Po skončení
   telefón údaje klienta nezobrazuje. Notifikácia Nové pristavenie (vypínač
   Pristavenia v Účte).
+- **Jedna aplikácia s modulmi** (majiteľ 22. 10. 2026): Dispečing sú moduly
+  dispečerskej roly (Hovory, Prípady, Úlohy, Nástroje), Pristavenia samostatný
+  modul roly pristavovač. Pristavovač má rovnakú kostru (Prehľad · Pristavenia ·
+  Moduly, Účet, stav polohy vľavo hore); kto má obe roly, vidí oboje.
+- **Poloha aj na pozadí** (majiteľ 22. 10. 2026): v zostavenej aplikácii pre
+  iPhone pokračuje na pozadí, pri zamknutom telefóne a po zatvorení aplikácie
+  systémom; iOS ju obnoví aj po vynútenom zatvorení, ale iba pri väčšom presune
+  a nie spoľahlivo (pozri zdroje). Posiela sa kľúčom jedného pristavenia, nie
+  prihlásením; bez signálu čaká v telefóne najviac 12 h. Expo Go polohu na
+  pozadí nepodporuje: tam sa posiela, kým je aplikácia otvorená.
 - Poloha: o povolenie aplikácia požiada až po prijatí (alebo inom vlastnom
   kroku pristavovača v aplikácii; neskôr aj tlačidlom Zdieľať polohu
-  s dispečerom); posiela ju najviac raz za 20 s, iba s otvorenou aplikáciou.
+  s dispečerom) a potom o „Vždy“; posiela ju najviac raz za 20 s.
   Server ju prijme iba od pristavovača, ktorý v aplikácii urobil krok, a iba
   počas otvoreného pristavenia; potom telefónu povie, aby prestal. Maže ju po
   30 dňoch (pomocná úloha existujúceho cronu, aj pri vypnutom prepínači).
@@ -301,13 +311,15 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   pristavovača (bez dispečerského profilu a so zapnutým prístupom).
 - Staršia verzia servera s touto migráciou funguje ďalej (údaje odovzdania sa
   pre ňu nemenia), nová verzia bez migrácie výber pristavovača neukáže.
-- Zapnutie v prostredí: migrácia `20261022100000_mobile_delivery_handoffs.sql`
-  (až po migrácii push tabuľky; na TEST čaká na schválenie majiteľa) a
+- Zapnutie v prostredí: migrácie `20261022100000_mobile_delivery_handoffs.sql`
+  a `20261022180000_mobile_delivery_background.sql` (v tomto poradí, až po
+  migrácii push tabuľky; na TEST čakajú na schválenie majiteľa) a
   `MOBILE_DELIVERY_ENABLED=true` v projekte Vercel (dedikovaný TEST projekt ho má
   od 22. 10. 2026, iba cieľ Production); na Preview vetiev vypnuté vždy.
-- Známe obmedzenia: pri zamknutom telefóne alebo aplikácii na pozadí sa poloha
-  neposiela; mapa ukáže iba miesta so súradnicami; odťahy dostanú obdobnú,
-  samostatnú časť neskôr.
+- Známe obmedzenia: poloha na pozadí sa dá overiť až v zostavenej aplikácii
+  (po licencii Apple); Android má zatiaľ iba polohu s otvorenou aplikáciou;
+  mapa ukáže iba miesta so súradnicami; odťahy dostanú obdobnú, samostatnú
+  časť neskôr.
 
 ### Čo do verzie 1 nepatrí (neskôr)
 
@@ -333,3 +345,5 @@ Android vydanie.
 - [Expo: App Store Connect minimum SDK 26](https://expo.dev/blog/app-store-connect-minimum-sdk-26)
 - [Expo: TestFlight](https://docs.expo.dev/submit/testflight/)
 - [Apple fórum: Guideline 3.2 Business](https://developer.apple.com/forums/thread/704518)
+- [Expo: Location (poloha na pozadí, Expo Go)](https://docs.expo.dev/versions/latest/sdk/location/)
+- [Apple fórum: obnovenie po vynútenom zatvorení (iOS 26)](https://developer.apple.com/forums/thread/826964)

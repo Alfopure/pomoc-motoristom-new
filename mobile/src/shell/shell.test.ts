@@ -11,10 +11,17 @@ const all: ModuleId[] = ["hovory", "pripady", "ulohy", "nastroje"];
 describe("module registry", () => {
   it("has unique ids and readable names", () => {
     expect(new Set(MODULES.map(item => item.id)).size).toBe(MODULES.length);
-    for (const item of MODULES) { expect(item.name.length).toBeGreaterThan(2); expect(item.short.length).toBeLessThanOrEqual(9); }
+    // The bar shrinks a long label a little; anything longer would not fit five items at 320 points.
+    for (const item of MODULES) { expect(item.name.length).toBeGreaterThan(2); expect(item.short.length).toBeLessThanOrEqual(11); }
   });
   it("derives access and role defaults", () => {
     expect(moduleAccess("dispatcher")).toEqual(all);
+    // Pristavenia come with the role pristavovač, alone or beside a dispatch role.
+    expect(moduleAccess("dispatcher", true)).toEqual([...all, "pristavenia"]);
+    expect(moduleAccess(null, true)).toEqual(["pristavenia"]);
+    expect(moduleAccess(null)).toEqual([]);
+    expect(rolePins(null, true)).toEqual(["pristavenia"]);
+    expect(rolePins("dispatcher", true)).toEqual(["hovory", "pripady", "ulohy"]);
     expect(rolePins("manager")).toEqual(["hovory", "pripady", "ulohy"]);
     expect(rolePins("dispatcher")).toHaveLength(PIN_LIMIT);
     expect(moduleAccess("unknown" as never)).toEqual([]);

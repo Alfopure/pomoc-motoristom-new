@@ -8,8 +8,8 @@ export const runtime = "nodejs";
 /** Stops push notifications to this installation, e.g. at logout. */
 export async function POST(request: Request) {
   try {
-    const person = await requireMobilePerson(request);
+    const { dispatcher, field } = await requireMobilePerson(request);
     const result = await unregisterMobilePush(createSupabaseAdminClient(), await readMobileJsonBody(request));
-    return mobileJson({ ...(person.kind === "field" ? fieldScope(person.actor) : mobileScope(person.actor)), ...result });
+    return mobileJson({ ...(dispatcher ? mobileScope(dispatcher) : fieldScope(field!)), ...result });
   } catch (error) { return mobileError(error, "Upozornenia sa nepodarilo vypnúť."); }
 }

@@ -69,8 +69,10 @@ export function readPushRegistration(value: unknown): MobilePushRegistrationInpu
   return { installationId: body.installationId.toLowerCase(), token: body.token, platform: body.platform, appVersion: typeof body.appVersion === "string" ? body.appVersion : null, preferences };
 }
 
-/** Whose phone it is: a dispatcher (profile) or a pristavovač (field member). */
-export type PushOwner = Pick<MotoristActor, "organizationId" | "profileId"> | { organizationId: string; memberId: string };
+/** Whose phone it is: a dispatcher (profile), a pristavovač (field member), or
+ * someone who is both and sees both modules in the one app. */
+export type PushOwner = { organizationId: string; profileId: string | null; memberId: string | null };
+export const pushOwner = (owner: Pick<MotoristActor, "organizationId" | "profileId">): PushOwner => ({ organizationId: owner.organizationId, profileId: owner.profileId, memberId: null });
 
 /** Registers this installation for the signed-in person, or updates its switches.
  * The same phone under another account starts from the defaults, never from the
@@ -78,14 +80,17 @@ export type PushOwner = Pick<MotoristActor, "organizationId" | "profileId"> | { 
  * the first push migration, so it works before deliveries are installed. */
 export async function registerMobilePush(admin: Admin, owner: PushOwner, value: unknown, now = new Date()): Promise<{ preferences: MobilePushPreferences }> {
   if (!mobilePushEnabled()) throw unavailable();
+  if (!owner.profileId && !owner.memberId) throw new MutationError("Nemáte prístup k upozorneniam.", 403);
   const input = readPushRegistration(value), environment = mobileEnvironment();
-  const member = "memberId" in owner;
+  const member = owner.memberId !== null;
   const existing = await admin.from(TABLE).select(member ? "profile_id,member_id,organization_id,preferences" : "profile_id,organization_id,preferences")
     .eq("environment", environment).eq("installation_id", input.installationId).maybeSingle();
   if (missingTable(existing.error) || member && existing.error?.code === "42703") throw unavailable();
   if (existing.error) throw new MutationError("Upozornenia sa nepodarilo uložiť.", 503);
   const row = existing.data as { profile_id: string | null; member_id?: string | null; organization_id: string; preferences: Json } | null;
-  const own = row && row.organization_id === owner.organizationId && (member ? row.member_id === owner.memberId : row.profile_id === owner.profileId);
+  // The same person keeps their switches, also when a role was added or removed since.
+  const own = row && row.organization_id === owner.organizationId
+    && (owner.profileId !== null && row.profile_id === owner.profileId || owner.memberId !== null && row.member_id === owner.memberId);
   const preferences = { ...storedPreferences(own ? row!.preferences : null), ...(input.preferences ?? {}) };
   // Another account's row of this phone goes first: a row names exactly one person.
   if (row && !own) {
@@ -95,12 +100,16 @@ export async function registerMobilePush(admin: Admin, owner: PushOwner, value: 
   // A token belongs to one installation only.
   const stale = await admin.from(TABLE).delete().eq("expo_push_token", input.token).neq("installation_id", input.installationId);
   if (stale.error) throw new MutationError("Upozornenia sa nepodarilo uložiť.", 503);
-  const saved = await admin.from(TABLE).upsert({
-    organization_id: owner.organizationId, ...(member ? { profile_id: null, member_id: owner.memberId } : { profile_id: owner.profileId }),
+  const store = (memberId: string | null) => admin.from(TABLE).upsert({
+    organization_id: owner.organizationId, profile_id: owner.profileId, ...(member || row?.member_id !== undefined ? { member_id: memberId } : {}),
     environment, installation_id: input.installationId,
     expo_push_token: input.token, platform: input.platform, preferences: preferences as unknown as Json, app_version: input.appVersion,
     updated_at: now.toISOString(), last_seen_at: now.toISOString(),
   }, { onConflict: "environment,installation_id" }).select("preferences").single();
+  let saved = await store(owner.memberId);
+  // Before the background migration a phone names one person only: a dispatcher who
+  // also delivers keeps the dispatch notices then.
+  if (saved.error?.code === "23514" && owner.profileId && owner.memberId) saved = await store(null);
   if (saved.error || !saved.data) throw new MutationError("Upozornenia sa nepodarilo uložiť.", 503);
   return { preferences: storedPreferences(saved.data.preferences) };
 }

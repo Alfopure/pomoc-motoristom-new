@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import { ClipboardList, FolderOpen, Phone, PhoneMissed, Search, type LucideIcon } from "lucide-react-native";
+import { Car, ClipboardList, FolderOpen, Phone, PhoneMissed, Search, type LucideIcon } from "lucide-react-native";
 import type { MobileActiveCall } from "../../../src/lib/mobile-api";
 import type { MobileCallbackSummary } from "../../../src/lib/mobile-callbacks";
 import { palette, radius, space, type } from "../design/tokens";
@@ -22,6 +22,8 @@ type Props = {
   scope: HomeScope | null; scopeNotice: string | null; tip: boolean; onDismissTip: () => void;
   onOpen: (target: HomeTarget) => void; onCall: (id: string) => void; onRefresh: () => void; onSearch: () => void;
   alerts: { scope: ShellScope; targets: AlertTargets; onAll: () => void } | null;
+  /** Someone who also delivers sees their deliveries here. */
+  deliveries?: { count: number | null; detail: string; onOpen: () => void } | null;
 };
 const toneColors: Record<PresenceTone, [string, string]> = {
   green: [palette.greenSoft, palette.greenText], orange: [palette.orangeSoft, palette.orangeText], red: [palette.redSoft, palette.redText], gray: [palette.fill, palette.secondaryLabel],
@@ -33,7 +35,7 @@ export function todayLabel(now = new Date()): string {
 }
 
 /** What needs attention now: live calls first, then one tile per module. */
-export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scopeNotice, tip, onDismissTip, onOpen, onCall, onRefresh, onSearch, alerts }: Props) {
+export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scopeNotice, tip, onDismissTip, onOpen, onCall, onRefresh, onSearch, alerts, deliveries }: Props) {
   const counts = callbacks.data?.counts;
   return <ScrollView contentContainerStyle={s.content} refreshControl={<RefreshControl refreshing={false} onRefresh={onRefresh} />}>
     <View style={s.titleRow}><Text accessibilityRole="header" style={s.title}>Prehľad</Text><Text style={s.date}>{todayLabel()}</Text></View>
@@ -57,6 +59,8 @@ export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scope
         <Tile title="Moje úlohy" icon={ClipboardList} colors={[palette.blueSoft, palette.blueText]} value={null} detail={scopeNotice ?? "Overujem prístup…"} onPress={() => onOpen("tasks")} />
       </>}
       <Tile title="Telefón" icon={Phone} colors={toneColors[phone.tone]} value={phone.label} small detail={phone.detail} onPress={() => onOpen("console")} />
+      {deliveries && <Tile title="Pristavenia" icon={Car} colors={[palette.blueSoft, palette.blueText]} value={deliveries.count === null ? null : String(deliveries.count)}
+        detail={deliveries.detail} onPress={deliveries.onOpen} />}
     </View>
     {alerts && <AlertsPreview scope={alerts.scope} active={active} targets={alerts.targets} onAll={alerts.onAll} />}
     {tip && <View style={s.tip}>

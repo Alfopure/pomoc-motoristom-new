@@ -28,7 +28,7 @@ import { HomeScreen, type HomeTarget } from "./home";
 import { SearchScreen } from "./search";
 import { AlertsScreen } from "../alerts/ui";
 import { ModulesScreen } from "./modules-screen";
-import { PIN_LIMIT, moduleAccess, moduleById, roleNames, rolePins, type ModuleId } from "./modules";
+import { PIN_LIMIT, accessLabel, moduleAccess, moduleById, roleNames, rolePins, type ModuleId } from "./modules";
 import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, type DispatchView, type HovoryView, type ShellState, type ShellTab } from "./navigation";
 import { Group, Row } from "../design/list";
 import { GlassButton, ModuleTile, Sheet, Toast, tabLabel } from "./parts";
@@ -49,6 +49,11 @@ import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
 import { AppErrorBoundary, ErrorReporterContext } from "../ui/error-boundary";
 import { CallScreenFallback, CallStripFallback } from "../calls/call-screen";
 import type { PushSettings } from "../notifications/settings";
+import { pushTaps } from "../notifications/taps";
+import { pushKinds } from "../notifications/ui";
+import { DeliveryModule } from "../delivery/module";
+import { deliveryStatusLabels, isOpen, sortDeliveries } from "../delivery/model";
+import type { DeliverySession } from "../delivery/session";
 
 type Props = {
   config: MobileConfig; client: SupabaseClient; api: MobileApi; active: boolean; userId: string; liveUser: () => string | null;
@@ -57,6 +62,8 @@ type Props = {
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void;
   /** Notifications of this operator on this phone (Účet). */
   push: PushSettings;
+  /** Pristavenia of someone who dispatches and also delivers; null without that role. */
+  delivery: DeliverySession | null;
 };
 type ShellSheet = { kind: "edit" } | { kind: "pin"; id: ModuleId } | { kind: "menu"; id: ModuleId };
 const shellOwnedBack: readonly DispatchView[] = ["modules", "console", "history", "account", "search", "alerts"];
@@ -73,10 +80,11 @@ export function DispatchShell(props: Props) {
   const forgetScreenData = () => queryClient.removeQueries({ predicate: query => query.queryKey.at(-1) !== "me" });
   const insets = useSafeAreaInsets();
   const { fontScale } = useWindowDimensions();
-  const available = useMemo(() => moduleAccess(identity.profile.role), [identity.profile.role]);
+  const delivery = props.delivery?.memberId ? props.delivery : null, delivers = delivery !== null;
+  const available = useMemo(() => moduleAccess(identity.profile.role, delivers), [identity.profile.role, delivers]);
   const prefs = useMemo(() => new ShellPreferences(createShellPreferencesStorage(),
-    shellPreferencesKey({ environment: config.environment, userId, profileId: identity.profileId }), available, rolePins(identity.profile.role)),
-  [config.environment, userId, identity.profileId, identity.profile.role, available]);
+    shellPreferencesKey({ environment: config.environment, userId, profileId: identity.profileId }), available, rolePins(identity.profile.role, delivers)),
+  [config.environment, userId, identity.profileId, identity.profile.role, available, delivers]);
   useEffect(() => () => prefs.dispose(), [prefs]);
   const preferences = useSyncExternalStore(prefs.subscribe, prefs.snapshot, prefs.snapshot);
   // An unreadable Keychain (locked phone) is retried each time the app returns to the foreground.
@@ -91,6 +99,7 @@ export function DispatchShell(props: Props) {
   const [search, setSearch] = useState("");
   const [callSelection, setCallSelection] = useState<{ target: MobileCallContextTarget; view: DispatchView } | null>(null);
   const [toast, setToast] = useState<{ message: string; key: number } | null>(null);
+  const [deliveryRequest, setDeliveryRequest] = useState<{ id: string; nonce: number } | null>(null);
   const sheet = usePhoneOverlay<ShellSheet>(active);
   const [backStore] = useState(() => new ShellBackStore());
   const moduleBack = useSyncExternalStore(backStore.subscribe, backStore.snapshot, backStore.snapshot);
@@ -129,6 +138,22 @@ export function DispatchShell(props: Props) {
   const dialBlocked = dialBlockedReason(phone, phoneState);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 2400); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => { if (view === "modules" && preferences.loaded && !preferences.tipDismissed) prefs.dismissTip(); }, [view, preferences.loaded, preferences.tipDismissed, prefs]);
+  // A tapped delivery notice opens it in Pristavenia, under the pristavovač's own id.
+  const memberId = delivery?.memberId ?? null;
+  useEffect(() => {
+    if (!memberId) return;
+    const consume = () => {
+      if (pushTaps.snapshot()?.target.kind !== "delivery") return;
+      const target = pushTaps.take(memberId);
+      if (target?.kind !== "delivery") return;
+      setShell(current => openModule(reconcileShell(current, pins, available), pins, "pristavenia"));
+      setDeliveryRequest(value => ({ id: target.id, nonce: (value?.nonce ?? 0) + 1 }));
+    };
+    const unsubscribe = pushTaps.subscribe(consume);
+    const pending = setTimeout(consume, 0);
+    return () => { unsubscribe(); clearTimeout(pending); };
+  }, [memberId, pins, available]);
+  const deliveries = sortDeliveries(delivery?.list.data ?? []), openDeliveries = deliveries.filter(item => isOpen(item));
 
   const go = (next: ShellState) => { setCallSelection(null); setShell(next); };
   const navigate = (id: ModuleId, hovory?: HovoryView) => go(openModule(nav, pins, id, hovory));
@@ -254,7 +279,7 @@ export function DispatchShell(props: Props) {
       phone={phone} phoneState={phoneState} onCallContext={openCallContext} />}
     {view === "history" && !callTarget && <History api={api} me={identity} queryKey={queryKey} active={active} category={category} onCategory={setCategory}
       search={search} onSearch={setSearch} onCallContext={openCallContext} onSelect={value => { setNumber(value); navigate("hovory", "console"); }} />}
-    {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={pins.length < PIN_LIMIT} badges={{ hovory: waiting }}
+    {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={pins.length < PIN_LIMIT} badges={{ hovory: waiting, pristavenia: openDeliveries.length }}
       onOpen={id => navigate(id)} onMenu={id => sheet.open({ kind: "menu", id })} onEdit={() => sheet.open({ kind: "edit" })} onAccount={() => go({ ...nav, account: true })} />}
     <DraftWorkspace key={identity.profileId} config={config} client={props.client} identity={identity} userId={userId} liveUser={props.liveUser} active={active}
       view={view} onView={target => {
@@ -278,17 +303,22 @@ export function DispatchShell(props: Props) {
           phone={{ label: statusLabel, tone: presence ? presenceTone[presence] : "gray", detail: phoneDetail }}
           callbacks={callbackSummary} activeCalls={consoleQuery.data?.activeCalls ?? []}
           tip={preferences.loaded && !preferences.tipDismissed} onDismissTip={() => prefs.dismissTip()}
+          deliveries={delivery ? { count: delivery.list.data ? openDeliveries.length : null, onOpen: () => navigate("pristavenia"),
+            detail: delivery.list.isError ? "Pristavenia nie sú dostupné" : openDeliveries.length ? deliveryStatusLabels[openDeliveries[0].status] : "Žiadne otvorené" } : null}
           onOpen={homeTarget} onCall={id => openCallContext({ kind: "session", id })}
           onRefresh={() => { void Promise.allSettled([callbackSummary.refetch(), consoleQuery.refetch(), queryClient.invalidateQueries({ queryKey: [...queryKey, identity.profileId] })]); }} />;
       }}
       bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
-      hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} push={props.push} />
+      hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} push={props.push}
+      pushKinds={pushKinds(true, delivers)} roleLabel={accessLabel(identity.profile.role, delivers)} />
+    {delivery && <View style={view === "deliveries" ? { flex: 1 } : { display: "none" }}>
+      <DeliveryModule session={delivery} active={active} visible={view === "deliveries"} openRequest={deliveryRequest} /></View>}
     </AppErrorBoundary>
     </View></CallActionContext.Provider></ShellBackContext.Provider>
     {callBar && <AppErrorBoundary key={"bar:" + callBar.id} reporter={reporter} onReset={() => undefined} fallback={() => null}>
       <CallBar call={callBar} active={active} onPress={() => openBarCall(callBar)} /></AppErrorBoundary>}
-    <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting }} showAdd={pins.length < PIN_LIMIT}
+    <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting, pristavenia: openDeliveries.length }} showAdd={pins.length < PIN_LIMIT}
       onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => sheet.open({ kind: "edit" })} />
     <Sheet visible={sheet.value !== null} large={sheet.value?.kind === "edit"} onClose={sheet.close}
       title={sheet.value?.kind === "edit" ? "Upraviť lištu" : sheet.value?.kind === "pin" ? "Do lišty" : sheetModule ? moduleById(sheetModule).name : ""}

@@ -10,7 +10,8 @@ vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => ({ rpc
 vi.mock("./push", () => ({ queueMobilePush: mocks.queue, sendMemberPush: mocks.memberPush }));
 
 const { requireMobileFieldActor, requireMobilePerson, mobileDeliveryEnabled } = await import("./field-auth");
-const { commandDelivery, loadDeliveries, parseDelivery, readDelivery, recordDeliveryPosition } = await import("./delivery");
+const { commandDelivery, issueDeliveryTracker, loadDeliveries, parseDelivery, readDelivery, readTrackerToken, recordDeliveryPosition, revokeDeliveryTracker, trackDeliveryPositions, trackerHash } = await import("./delivery");
+const { POST: trackRoute } = await import("@/app/api/mobile/v1/field/track/route");
 const { commandMobileCaseHandoff, getMobileCaseHandoffs, parseMobileHandoffInput } = await import("./case-handoff");
 const { GET: deliveriesRoute } = await import("@/app/api/mobile/v1/field/deliveries/route");
 
@@ -62,12 +63,21 @@ describe("pristavovač identity", () => {
     await expect(requireMobileFieldActor(new Request("https://x"))).rejects.toMatchObject({ status: 503, code: "delivery_unavailable" });
   });
 
-  it("tries the pristavovač only for a signed-in user without a dispatch profile", async () => {
+  it("knows a pristavovač, a dispatcher and someone who is both", async () => {
     mocks.dispatcher.mockRejectedValueOnce(new MutationError("x", 403, "mobile_no_dispatch_profile"));
-    await expect(requireMobilePerson(new Request("https://x"))).resolves.toMatchObject({ kind: "field", actor: { memberId: MEMBER } });
+    await expect(requireMobilePerson(new Request("https://x"))).resolves.toMatchObject({ dispatcher: null, field: { memberId: MEMBER } });
+    const dispatcher = { userId: USER, profileId: id(7), organizationId: ORG, displayName: "Pavol", role: "dispatcher" };
+    mocks.dispatcher.mockResolvedValueOnce(dispatcher);
+    await expect(requireMobilePerson(new Request("https://x"))).resolves.toMatchObject({ dispatcher: { profileId: id(7) }, field: { memberId: MEMBER } });
+    // A dispatcher without the delivery role, or with deliveries failing, stays a dispatcher.
+    mocks.dispatcher.mockResolvedValueOnce(dispatcher);
+    mocks.rpc.mockResolvedValueOnce({ data: { ...member, capabilities: ["drive"] }, error: null });
+    await expect(requireMobilePerson(new Request("https://x"))).resolves.toEqual({ dispatcher, field: null });
+    vi.stubEnv("MOBILE_DELIVERY_ENABLED", "");
+    mocks.dispatcher.mockResolvedValueOnce(dispatcher);
+    await expect(requireMobilePerson(new Request("https://x"))).resolves.toEqual({ dispatcher, field: null });
     mocks.dispatcher.mockRejectedValueOnce(new MutationError("expired", 401));
     await expect(requireMobilePerson(new Request("https://x"))).rejects.toMatchObject({ status: 401 });
-    expect(mocks.rpc).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -138,6 +148,50 @@ describe("pristavovač deliveries", () => {
     const ok = await deliveriesRoute(new Request("https://x/api/mobile/v1/field/deliveries"));
     expect(ok.headers.get("cache-control")).toContain("no-store");
     expect(await ok.json()).toMatchObject({ ok: true, apiVersion: 1, environment: "test", memberId: MEMBER, deliveries: [] });
+  });
+});
+
+describe("position in the background", () => {
+  it("issues a secret for an own delivery and keeps only its hash", async () => {
+    mocks.rpc.mockResolvedValueOnce({ data: { expiresAt: later }, error: null });
+    const tracker = await issueDeliveryTracker(actor, GRANT);
+    expect(tracker.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(tracker.expiresAt).toBe(later);
+    expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_member_handoff", expect.objectContaining({ p_action: "tracker", p_input: { handoffId: GRANT, tokenHash: trackerHash(tracker.token) } }));
+    expect(JSON.stringify(mocks.rpc.mock.calls.at(-1))).not.toContain(tracker.token);
+    mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "PT409", message: "Not tracking" } });
+    await expect(issueDeliveryTracker(actor, GRANT)).rejects.toMatchObject({ status: 409, code: "delivery_not_tracking" });
+    // Only the first delivery migration: no background secret yet.
+    mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "22023", message: "Invalid command" } });
+    await expect(issueDeliveryTracker(actor, GRANT)).rejects.toMatchObject({ status: 503, code: "delivery_background_unavailable" });
+    mocks.rpc.mockResolvedValueOnce({ data: { revoked: true }, error: null });
+    await expect(revokeDeliveryTracker(actor, GRANT)).resolves.toEqual({ revoked: true });
+    expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_member_handoff", expect.objectContaining({ p_action: "untrack", p_input: { handoffId: GRANT } }));
+  });
+
+  it("takes batches by the secret alone and says when to stop", async () => {
+    const token = "a".repeat(43), positions = [{ lat: 49.2, lng: 18.7, accuracy: null, recordedAt: at }];
+    mocks.rpc.mockResolvedValueOnce({ data: { stored: 1, active: true }, error: null });
+    await expect(trackDeliveryPositions(token, { positions })).resolves.toEqual({ stored: 1, active: true });
+    expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_handoff_track", { p_token_hash: trackerHash(token), p_positions: [{ ...positions[0], recordedAt: "2026-10-22T08:00:00.000Z" }] });
+    for (const bad of [{}, { positions: [] }, { positions: Array.from({ length: 101 }, () => positions[0]) }, { positions: [{ ...positions[0], lat: 91 }] }, { positions, extra: 1 }]) {
+      await expect(trackDeliveryPositions(token, bad)).rejects.toMatchObject({ status: 400 });
+    }
+    expect(() => readTrackerToken(new Request("https://x", { headers: { authorization: "Bearer " + token } }))).toThrow(expect.objectContaining({ status: 401 }));
+    expect(readTrackerToken(new Request("https://x", { headers: { authorization: "Tracker " + token } }))).toBe(token);
+  });
+
+  it("answers the background route without a session, only with the secret", async () => {
+    const send = (headers: Record<string, string>) => trackRoute(new Request("https://x/api/mobile/v1/field/track", { method: "POST",
+      headers: { "content-type": "application/json", "x-pm-app-environment": "test", ...headers }, body: JSON.stringify({ positions: [{ lat: 49.2, lng: 18.7, accuracy: 5, recordedAt: at }] }) }));
+    expect((await send({})).status).toBe(401);
+    for (const [key, value] of Object.entries(stableTest)) vi.stubEnv(key, value);
+    mocks.rpc.mockResolvedValueOnce({ data: { stored: 0, active: false }, error: null });
+    const response = await send({ authorization: "Tracker " + "b".repeat(43) });
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(await response.json()).toEqual({ ok: true, apiVersion: 1, environment: "test", stored: 0, active: false });
+    vi.stubEnv("MOBILE_DELIVERY_ENABLED", "");
+    expect((await send({ authorization: "Tracker " + "b".repeat(43) })).status).toBe(503);
   });
 });
 

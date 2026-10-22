@@ -1,108 +1,58 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
-import { AlertTriangle, Car, ChevronLeft, Navigation, Phone } from "lucide-react-native";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { AlertTriangle, Car, Navigation, Phone } from "lucide-react-native";
 import type { MobileDelivery, MobileDeliveryAction } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
-import type { MobileConfig } from "../lib/config";
-import type { LogoutState } from "../lib/logout";
-import { appVersion, versionLabel } from "../lib/app-version";
 import { formatNumber, dialable } from "../lib/display";
+import { useAndroidBack } from "../lib/use-android-back";
 import { directionsUrl } from "../cases/maps";
 import { ActionBar, DetailHeader, InfoRow, Tag } from "../design/detail";
 import { Field, FormSection, formLayout } from "../design/form";
-import { Group, Row, SectionHeader } from "../design/list";
+import { Group, SectionHeader } from "../design/list";
 import { palette, space, type } from "../design/tokens";
-import { GlassButton } from "../shell/parts";
-import { initialsOf } from "../shell/top-bar";
+import { useShellBack } from "../shell/back";
+import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import { Button, ErrorNotice, Loading, styles } from "../ui";
-import { useAndroidBack } from "../lib/use-android-back";
-import { NotificationSettings } from "../notifications/ui";
-import type { PushSettings } from "../notifications/settings";
-import { pushTaps } from "../notifications/taps";
-import { createDeliveryApi, type DeliveryApi } from "./api";
-import { phoneLocation } from "./location";
+import type { DeliveryApi } from "./api";
 import { DeliveryMap } from "./map";
-import { agoLabel, deliveryPlace, deliveryPoints, deliveryStatusLabels, deliveryStatusTones, deliveryTitle, isOpen, nextStep, replacementCar, sharesPosition, sortDeliveries, timeLabel } from "./model";
-import { DeliveryTracker } from "./tracker";
+import { agoLabel, deliveryPlace, deliveryPoints, deliveryStatusLabels, deliveryStatusTones, deliveryTitle, isOpen, nextStep, replacementCar, sortDeliveries, timeLabel } from "./model";
+import type { DeliverySession } from "./session";
+import type { LocationSharing, SharingState } from "./sharing";
 
-type Screen = { kind: "list" } | { kind: "detail"; id: string } | { kind: "account" };
-type Props = {
-  config: MobileConfig; client: SupabaseClient; userId: string; liveUser: () => string | null; active: boolean; push: PushSettings;
-  logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; onLogout: () => void;
-};
-const ACCOUNT_LINKS = [
-  { title: "Ochrana súkromia", path: "/aplikacia/sukromie" },
-  { title: "Podpora", path: "/aplikacia/podpora" },
-] as const;
-
-/** The pristavovač's app: deliveries a dispatcher sent them, one at a time in detail,
- * with what to do on top and the map below. No dispatch module is shown. */
-export function FieldWorkspace(props: Props) {
-  const { config, client, userId, liveUser, active, push } = props;
+/** Pristavenia inside the app: the list, and one delivery with what to do on top
+ * and the map below. In a delivery the shell's top bar leads back to the list. */
+export function DeliveryModule({ session, active, visible, openRequest }: {
+  session: DeliverySession; active: boolean; visible: boolean; openRequest: { id: string; nonce: number } | null;
+}) {
   const queryClient = useQueryClient();
-  const api = useMemo(() => createDeliveryApi(config, async () => {
-    if (liveUser() !== userId) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
-    const { data } = await client.auth.getSession();
-    return liveUser() === userId && data.session?.user.id === userId ? data.session.access_token : null;
-  }), [config, client, userId, liveUser]);
-  const key = useMemo(() => ["mobile", config.environment, userId, "field"], [config.environment, userId]);
-  const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal) });
-  const memberId = me.data?.memberId ?? null;
-  const list = useQuery({ queryKey: [...key, "deliveries"], enabled: Boolean(memberId), queryFn: ({ signal }) => api.list(signal), refetchInterval: active ? 30_000 : false });
-  const [view, setView] = useState<Screen>({ kind: "list" });
-  const tracker = useMemo(() => new DeliveryTracker(phoneLocation, async (id, position) => {
-    try { return (await api.position(id, position)).active; }
-    // A delivery that is gone, or an account without access any more: stop sharing.
-    catch (error) { if (error instanceof MobileApiError && [403, 404].includes(error.status)) return false; throw error; }
-  }), [api]);
-  useEffect(() => () => tracker.dispose(), [tracker]);
-  // Position goes to the dispatcher for the delivery this pristavovač took, while the app is open.
-  const sharing = (list.data ?? []).find(delivery => sharesPosition(delivery)) ?? null;
-  useEffect(() => { void tracker.follow(active && sharing ? sharing.id : null); }, [tracker, active, sharing]);
-  useEffect(() => { if (active && memberId) void push.resume(); }, [active, memberId, push]);
-  // A tapped notice opens its delivery, only in the account it was sent to.
-  // Taken from the inbox as it arrives, also the tap that started the app.
-  useEffect(() => {
-    if (!memberId) return;
-    const consume = () => {
-      if (!pushTaps.snapshot()) return;
-      const target = pushTaps.take(memberId);
-      if (target?.kind === "delivery") setView({ kind: "detail", id: target.id });
-    };
-    const unsubscribe = pushTaps.subscribe(consume);
-    const pending = setTimeout(consume, 0);
-    return () => { unsubscribe(); clearTimeout(pending); };
-  }, [memberId]);
-  useAndroidBack(active && view.kind !== "list", () => setView({ kind: "list" }));
-
-  const top = <View style={s.bar}>
-    {view.kind === "list" ? <Text accessibilityRole="header" style={s.barTitle}>Pristavenia</Text>
-      : <GlassButton label="Pristavenia" accessibilityLabel="Späť na Pristavenia" onPress={() => setView({ kind: "list" })}
-        icon={<ChevronLeft size={20} strokeWidth={2.5} color={palette.label} accessible={false} style={{ marginLeft: -4 }} />} />}
-    <View style={{ flex: 1 }} />
-    {config.environment === "test" && <Text accessibilityLabel="Testovacie prostredie" style={s.test}>TEST</Text>}
-    <GlassButton round tone="brand" accessibilityLabel="Účet a nastavenia" onPress={() => setView({ kind: "account" })}
-      icon={<Text maxFontSizeMultiplier={1.2} style={s.initials}>{initialsOf(me.data?.member.displayName ?? "?")}</Text>} />
-  </View>;
-
-  if (me.isPending) return <>{top}<Loading label="Overujem prístup k pristaveniam…" /></>;
-  if (!me.data) return <>{top}<View style={styles.content}>
-    <ErrorNotice message={me.error instanceof MobileApiError ? me.error.message : "Účet sa nepodarilo načítať."} onRetry={() => { void me.refetch(); }} />
-    <Button label="Odhlásiť sa" secondary disabled={props.logoutBusy || props.logoutState.busy} onPress={props.onLogout} />
-  </View></>;
-  return <View style={{ flex: 1 }}>
-    {top}
-    {view.kind === "account" ? <FieldAccount {...props} name={me.data.member.displayName} email={me.data.member.email} />
-      : view.kind === "detail" ? <DeliveryDetail key={view.id} api={api} id={view.id} active={active} queryKey={key} tracker={tracker}
-        onChanged={() => { void queryClient.invalidateQueries({ queryKey: [...key, "deliveries"] }); }} />
-      : <DeliveryList query={list} onOpen={id => setView({ kind: "detail", id })} />}
-  </View>;
+  const [selected, setSelected] = useState<string | null>(null);
+  // A tapped notice opens its delivery once.
+  const [handled, setHandled] = useState<number | null>(null);
+  if (openRequest && openRequest.nonce !== handled) { setHandled(openRequest.nonce); setSelected(openRequest.id); }
+  const back = () => setSelected(null);
+  useShellBack(visible && selected !== null, "Pristavenia", back);
+  useAndroidBack(active && visible && selected !== null, back);
+  if (!session.memberId) return <View style={styles.content}>{session.me.isPending ? <Loading label="Overujem prístup k pristaveniam…" />
+    : <ErrorNotice message={session.me.error instanceof MobileApiError ? session.me.error.message : "Pristavenia sa nepodarilo načítať."} onRetry={() => { void session.me.refetch(); }} />}</View>;
+  return selected ? <DeliveryDetail key={selected} api={session.api} id={selected} active={active && visible} queryKey={session.key} tracker={session.location}
+    onChanged={() => { void queryClient.invalidateQueries({ queryKey: [...session.key, "deliveries"] }); }} />
+    : <DeliveryList query={session.list} onOpen={setSelected} />;
 }
 
-function DeliveryList({ query, onOpen }: { query: ReturnType<typeof useQuery<MobileDelivery[]>>; onOpen: (id: string) => void }) {
+/** What the pristavovač reads about their position, for the app they have. */
+function locationNote(tracking: boolean, location: SharingState, mode: LocationSharing["mode"]): string {
+  if (!tracking) return "Poloha sa zatiaľ neposiela. Začne sa posielať, keď potvrdíte ďalší krok v aplikácii.";
+  if (location.status === "denied") return "Poloha nie je povolená. Dispečer neuvidí, kde ste. Povoliť ju môžete v nastaveniach telefónu.";
+  if (location.status === "error") return "Polohu sa nepodarilo zapnúť. Skúste to znova.";
+  if (location.status !== "sharing") return "Poloha sa zatiaľ neposiela.";
+  if (mode === "foreground") return "Vaša poloha sa posiela dispečingu, kým je pristavenie otvorené a aplikácia zapnutá. V Expo Go sa na pozadí neposiela.";
+  return location.background === "always" ? "Vaša poloha sa posiela dispečingu aj na pozadí a pri zamknutom telefóne, kým je pristavenie otvorené."
+    : "Poloha sa posiela, aj keď je aplikácia na pozadí, ale po jej zatvorení sa zastaví. V nastaveniach telefónu povoľte polohu „Vždy“.";
+}
+
+function DeliveryList({ query, onOpen }: { query: UseQueryResult<MobileDelivery[]>; onOpen: (id: string) => void }) {
   const deliveries = sortDeliveries(query.data ?? []);
   const open = deliveries.filter(delivery => isOpen(delivery)), done = deliveries.filter(delivery => !isOpen(delivery));
   return <ScrollView contentContainerStyle={formLayout.content}>
@@ -121,7 +71,7 @@ function DeliveryList({ query, onOpen }: { query: ReturnType<typeof useQuery<Mob
 }
 
 /** As in the assistance app: state, the car with its plate, and what it is for. */
-function DeliveryRow({ delivery, first, onOpen }: { delivery: MobileDelivery; first: boolean; onOpen: (id: string) => void }) {
+export function DeliveryRow({ delivery, first, onOpen }: { delivery: MobileDelivery; first: boolean; onOpen: (id: string) => void }) {
   const place = deliveryPlace(delivery);
   return <Pressable accessibilityRole="button" accessibilityLabel={"Otvoriť pristavenie " + deliveryTitle(delivery) + ", " + deliveryStatusLabels[delivery.status]}
     onPress={() => onOpen(delivery.id)} style={({ pressed }) => [s.row, pressed && { backgroundColor: "#ECECF0" }]}>
@@ -137,7 +87,7 @@ function DeliveryRow({ delivery, first, onOpen }: { delivery: MobileDelivery; fi
   </Pressable>;
 }
 
-function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api: DeliveryApi; id: string; active: boolean; queryKey: string[]; tracker: DeliveryTracker; onChanged: () => void }) {
+function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api: DeliveryApi; id: string; active: boolean; queryKey: readonly string[]; tracker: LocationSharing; onChanged: () => void }) {
   const queryClient = useQueryClient();
   const detailKey = useMemo(() => [...queryKey, "delivery", id], [queryKey, id]);
   const query = useQuery({ queryKey: detailKey, queryFn: ({ signal }) => api.read(id, signal), refetchInterval: active ? 15_000 : false });
@@ -172,7 +122,7 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
     if (!step.confirm) { void run(step.action); return; }
     Alert.alert(step.label, step.confirm, [{ text: "Späť", style: "cancel" }, { text: step.label, onPress: () => { void run(step.action); } }]);
   };
-  const mapHeight = Math.max(200, Math.round(height * 0.34));
+  const mapHeight = Math.max(180, Math.round(height * 0.3));
   return <View style={{ flex: 1 }}>
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: space.l }} keyboardShouldPersistTaps="handled">
       <DetailHeader title={deliveryTitle(delivery)} subtitle={"Prípad " + delivery.caseNumber + (card ? " · " + card.action : "")}
@@ -208,13 +158,11 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
           onPress={() => { void run("update", { eta: new Date(Date.now() + minutes * 60_000).toISOString() }); }} style={({ pressed }) => [s.chip, pressed && { opacity: 0.6 }]}>
           <Text style={s.chipText}>{"o " + minutes + " min"}</Text></Pressable>)}</View>
       </>}
-      {open && delivery.status !== "offered" && <Text style={s.note}>{!delivery.tracking ? "Poloha sa zatiaľ neposiela. Začne sa posielať, keď potvrdíte ďalší krok v aplikácii."
-        : location.status === "sharing" ? "Vaša poloha sa posiela dispečingu, kým je pristavenie otvorené a aplikácia zapnutá."
-          : location.status === "denied" ? "Poloha nie je povolená. Dispečer neuvidí, kde ste. Povoliť ju môžete v nastaveniach telefónu."
-            : "Poloha sa zatiaľ neposiela."}</Text>}
+      {open && delivery.status !== "offered" && <Text style={s.note}>{locationNote(delivery.tracking, location, tracker.mode)}</Text>}
       {open && delivery.tracking && (location.status === "off" || location.status === "error") && <View style={formLayout.actions}>
         <Button label="Zdieľať polohu s dispečerom" secondary onPress={() => { void tracker.follow(delivery.id, true); }} /></View>}
-      {location.status === "denied" && open && delivery.tracking && <View style={formLayout.actions}><Button label="Otvoriť nastavenia telefónu" secondary onPress={() => { void Linking.openSettings().catch(() => undefined); }} /></View>}
+      {open && delivery.tracking && (location.status === "denied" || location.status === "sharing" && location.background === "whenInUse") && <View style={formLayout.actions}>
+        <Button label="Otvoriť nastavenia telefónu" secondary onPress={() => { void Linking.openSettings().catch(() => undefined); }} /></View>}
       {card && <>
         <SectionHeader title="Čo treba urobiť" />
         <Group>
@@ -239,39 +187,14 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
           value={eventLabels[event.action] ?? event.action} detail={event.comment || null} />)}</Group>
       </>}
     </ScrollView>
-    {card && <DeliveryMap points={deliveryPoints(delivery)} showsUser={location.status === "sharing"} height={mapHeight} />}
+    {/* The map reaches under the floating bar; its legend stays above it. */}
+    {card && <DeliveryMap points={deliveryPoints(delivery)} showsUser={location.status === "sharing"} height={mapHeight + NAVIGATION_CONTENT_BOTTOM} inset={NAVIGATION_CONTENT_BOTTOM} />}
   </View>;
 }
 const eventLabels: Record<string, string> = {
   issue: "Odovzdanie vytvorené", publish: "Údaje aktualizované", renew: "Odkaz obnovený", extend: "Platnosť predĺžená", recover: "Odkaz získaný",
   accept: "Prijaté", reject: "Odmietnuté", en_route: "Na ceste", arrived: "Na mieste", complete: "Dokončené", update: "Aktualizácia", blocked: "Problém", revoke: "Zrušené",
 };
-
-function FieldAccount(props: Props & { name: string; email: string | null }) {
-  const [version] = useState(appVersion);
-  const [linkError, setLinkError] = useState<string | null>(null);
-  const busy = props.logoutBusy || props.logoutState.busy;
-  return <ScrollView contentContainerStyle={formLayout.content}>
-    <View style={formLayout.head}><Text accessibilityRole="header" style={styles.heading}>Účet</Text></View>
-    <Group style={{ marginTop: space.m }}>
-      <InfoRow first label="Pristavovač" value={props.name} detail={props.email} />
-      <InfoRow label="Prostredie" value={props.config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"} />
-      <InfoRow label="Verzia aplikácie" value={versionLabel(version)} />
-    </Group>
-    <NotificationSettings settings={props.push} kinds={["handoffs"]} />
-    <SectionHeader title="Informácie" />
-    <Group>{ACCOUNT_LINKS.map((link, index) => <Row key={link.path} first={index === 0} title={link.title} tone="link"
-      onPress={() => { setLinkError(null); void Linking.openURL(props.config.apiOrigin + link.path).catch(() => setLinkError("Stránku sa nepodarilo otvoriť.")); }} />)}</Group>
-    {(linkError || props.logoutState.message || props.logoutError) && <View style={formLayout.notices}>
-      {linkError && <ErrorNotice message={linkError} />}
-      {props.logoutState.message && <ErrorNotice message={props.logoutState.message} />}
-      {props.logoutError && <ErrorNotice message={props.logoutError} />}
-    </View>}
-    <Group style={{ marginTop: space.xl }}>
-      <Row first title={busy ? "Odhlasujem…" : "Odhlásiť sa"} tone="danger" disabled={busy} onPress={props.onLogout} />
-    </Group>
-  </ScrollView>;
-}
 
 const s = StyleSheet.create({
   bar: { flexDirection: "row", alignItems: "center", gap: space.s, paddingHorizontal: 14, paddingTop: space.xs, paddingBottom: space.xs, minHeight: 48 },
