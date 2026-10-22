@@ -8,8 +8,8 @@ rozsah opráv a otvorené skúšky. Podrobná história F1–F6 je nižšie.
 
 | Oblasť | Stav |
 | --- | --- |
-| Distribúcia TEST | Dispatching TEST 0.1.0 (18) v internom TestFlighte; zdroj `47882b1a`, OTA vypnuté. |
-| Server TEST pri začiatku auditu | `dev` `0ef3445d`, https://test.dispecing.linkapomoci.sk; novší stav sa vždy overuje cez health a metadáta nasadenia. |
+| Distribúcia TEST | Dispatching TEST 0.1.0 (19), zdroj `ecbe6d1a`: podpísaná IPA overená, dostupnosť overiť v TestFlighte. OTA vypnuté. |
+| Server TEST s opravami spoľahlivosti | `dev` `ecbe6d1a`, https://test.dispecing.linkapomoci.sk; overené health, metadáta nasadenia a 115 HTTP kontrol. |
 | Telefonovanie | Natívny Telnyx/CallKit/PushKit, TEST hlas a VoIP push zapnuté; serverové opravy #489–#491 sú na TEST a fungujú aj s buildom 18. |
 | Fyzická skúška | Majiteľ potvrdil úspešné dovolanie aj pri zamknutom mobile. Ostatné kombinácie sa neoznačujú za overené bez samostatnej skúšky. |
 | Apple | Aktívny účet MICT s. r. o.; TEST App ID, App Store Connect, podpis, Expo APNs a Telnyx TEST VoIP credential pripravené. |
@@ -17,14 +17,15 @@ rozsah opráv a otvorené skúšky. Podrobná história F1–F6 je nižšie.
 | Úkony hovoru | Prijať/odmietnuť, ukončiť, stíšiť, reproduktor, klávesnica, podržať, prepojiť na kolegu a zastaviť nahrávanie sú v kóde. Fyzická akceptácia každého úkonu je samostatná. |
 | Pristavenia | Modul roly pristavovača, odovzdanie z dispečingu, kroky a poloha na pozadí sú na TEST vrátane SQL a prepínača. Pohyb a zastavenie na iPhone ešte treba doložiť. |
 | Bežné push upozornenia | Kód, TEST SQL a prepínač aj Expo APNs sú pripravené; reálne doručenie a otvorenie cieľa treba doložiť. |
-| Podklady vydania | Ikona, spúšťacia obrazovka, skutočná verzia/build v Účte, zásady súkromia, podpora, privacy manifest, hlásenie chýb a minimálna verzia sú implementované. |
+| Podklady vydania | Ikona, spúšťacia obrazovka, skutočná verzia/build v Účte, zásady súkromia, podpora, privacy manifest, hlásenie chýb JavaScriptu a minimálna verzia sú implementované. |
 | Produkcia | Mobilné vydanie nie je schválené ani nasadené; produkčné API, SQL, poskytovateľ a binárka potrebujú konkrétny release. |
 | Android | Základná TEST aplikácia bez natívneho hlasu; produkčná distribúcia je ďalšia etapa. |
 
 ## Čo zostáva pred každodennou prevádzkou
 
-1. Dokončiť opravy spoľahlivosti podľa auditu a dostať identifikovaný výsledok
-   do stabilného TEST a TestFlightu. Serverový deploy nezmení JavaScript v
+1. Overiť nový build podľa auditu: opravy sú na stabilnom TEST v `ecbe6d1a`,
+   podpísaný build 19 je overený a aktualizuje sa cez TestFlight podľa
+   [postupu](testflight.md). Serverový deploy nezmení JavaScript v
    nainštalovanom builde, keďže OTA sú vypnuté.
 2. Na fyzickom iPhone prejsť [akceptáciu hovorov](iphone-voice-test.md#akceptácia-na-fyzickom-iphone):
    príjem v popredí, na pozadí a pri zamknutí, obojsmerný zvuk, výpadok siete,

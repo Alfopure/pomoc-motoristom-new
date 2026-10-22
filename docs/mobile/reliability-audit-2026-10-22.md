@@ -75,3 +75,36 @@ Táto oprava zachováva Expo SDK 57 a existujúci spôsob doručovania.
 
 Fyzické skúšky, ktoré agent nevykonal a majiteľ nepotvrdil, zostávajú otvorené.
 Build, testy a zdravý server samy nepreukazujú funkčný zvuk ani pohyb telefónu.
+
+## Zdrojový stav budúceho produkčného vydania
+
+Read-only porovnanie 22. 10.: `main` `7ff4247c` oproti funkčnému TEST zdroju
+`ecbe6d1a`. Na `main` nie je adresár `mobile` ani `/api/mobile/v1`; v TEST
+zdroji majú spolu 311 súborov. Celý rozdiel vetiev zahŕňa 695 súborov, teda
+aj ďalšie zmeny mimo dnešných opráv. Vydanie mobilu nemožno zameniť za
+samostatné vydanie PR #492.
+
+Voči `main` sú v Gite navyše tieto SQL súbory:
+
+- `20261012183000_case_owner_assignment.sql`
+- `20261013120000_towing_work_orders.sql`
+- `20261020210000_mobile_push_devices.sql`
+- `20261022100000_mobile_delivery_handoffs.sql`
+- `20261022180000_mobile_delivery_background.sql`
+
+Toto **nie je zoznam SQL na aplikovanie**. Stav produkčného katalógu sa v tomto
+audite neporovnával; súbory môžu mať už aplikovaný ekvivalent a nie každá
+pripravovaná funkcia musí byť súčasťou prvého produkčného vydania. Pred
+schválením presného projektu a SQL porovnať konkrétne objekty aj ledger.
+Žiadne produkčné SQL sa nevykonalo.
+
+## Vydanie na TEST
+
+- Opravy: PR #492, `dev` `ecbe6d1ac876156e01f92697f47da96c2bdd3685`.
+- Stabilný TEST: https://test.dispecing.linkapomoci.sk, nasadenie
+  `dpl_EBPqVgr53rZ6RsUWiwug35UWYDMz`; zdravie, Git SHA aj 115 HTTP kontrol prešli.
+- iPhone: 0.1.0 (19), EAS `a0e05eed-cd26-4245-a635-d071fb262ebc`, ten istý
+  zdroj; podpísaná IPA prešla kontrolou vrátane nových opráv v JavaScripte.
+  Stav nahratia a spracovania v Apple sa overuje oddelene od výsledku buildu.
+- Produkcia sa týmto vydaním nemenila. Nasledujúca úprava dokumentácie nemení
+  mobilný kód ani zdroj nainštalovaného buildu.

@@ -18,7 +18,8 @@ Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 | VoIP Services certifikát `35S4MJY4Z3` (do 21. 11. 2027) a TEST Telnyx iOS push credential | pripojené na TEST credential connection |
 | Prepínače `MOTORIST_NATIVE_VOICE_TEST_ENABLED` a `MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED` | zapnuté iba v dedikovanom TEST projekte (cieľ Production) |
 | Prvý TestFlight build | 0.1.0 (17) z `dev` `03389c58` Apple odmietol (ITMS-90683: chýbal text pre pohyb) |
-| Aktuálny TestFlight build | 0.1.0 (18) z `dev` `47882b1a`: spracovaný bez chýb, interné testovanie, platí do 20. 1. 2027 |
+| Prvý úspešný TestFlight build | 0.1.0 (18) z `dev` `47882b1a`: interné testovanie od 22. 10. 2026 |
+| Najnovší zostavený TestFlight build | 0.1.0 (19) z `dev` `ecbe6d1a`, EAS `a0e05eed-cd26-4245-a635-d071fb262ebc`: zostavený, podpísaná IPA overená; dostupnosť pred inštaláciou overiť v TestFlighte |
 | Interní testeri | skupina „Team (Expo)“ s prístupom ku všetkým buildom; držiteľ účtu pozvaný 22. 10. 2026 |
 
 APNs kľúč, Telnyx push credential a prepínače sú mimo buildu; menia sa bez
@@ -38,7 +39,7 @@ na build serveri nemusí prijať.
 Build sa spúšťa iba z identifikovaného commitu `dev` v čistom klone; zapíše sa
 build ID, commit a číslo buildu. Číslo zvyšuje EAS (vzdialené číslo pred prvým
 buildom pre TestFlight bolo 16). Free plán Expo má 15 iOS buildov mesačne,
-po nahratí buildu 18 zostával 22. 10. 2026 jeden; ráta sa aj neúspešný build.
+pred buildom 19 zostával 22. 10. 2026 jeden; ráta sa aj neúspešný build. Pred ďalším buildom znovu overiť limit v Expo.
 
 ```sh
 cd mobile
@@ -86,6 +87,36 @@ EXPO_ASC_API_KEY_PATH=… EXPO_ASC_KEY_ID=… EXPO_ASC_ISSUER_ID=… EXPO_APPLE_
   a pristavovač: prijatie, povolenie polohy „Vždy“, poloha na pozadí a pri
   zamknutom telefóne (modrý ukazovateľ), u dispečera „pred X min“, zastavenie
   po skončení pristavenia a pri odhlásení.
+
+## Build 19 – opravy spoľahlivosti
+
+Zdroj `ecbe6d1ac876156e01f92697f47da96c2bdd3685` (PR #492). Nový build
+obsahuje obnovu prvého pripojenia po výpadku, kontrolu povolenia notifikácií
+po návrate z Nastavení, zrušenie oneskorenej push registrácie po odhlásení,
+uchovanie čakajúcich polôh a bezpečné prepínanie pristavení. Strata prístupu
+skryje zákaznícke údaje z cache a vypršanie odstráni klienta aj GPS bez siete.
+`expo-notifications` je na opravnej verzii 57.0.24 vyžadovanej Expo SDK 57.
+
+Overené: 1 247 mobilných testov, typy/lint, CI vrátane iOS a Android exportu,
+šesť prehliadačových scenárov na 390/320 b a 115 kontrol stabilného TEST.
+Podpísaná IPA má správny TEST App ID, server, databázu, podpis, hlasové
+režimy a popisy oprávnení; zabalený JavaScript obsahuje nové opravy.
+
+V TestFlighte aktualizovať **Dispatching TEST na 0.1.0 (19)**. Build 18
+si tieto opravy nestiahne, pretože OTA sú vypnuté. Skúsiť návrat po výpadku
+siete, zmenu notifikácií v Nastaveniach a pristavenie pri slabom signále.
+Reálne audio, podržanie/prepojenie, push doručenie a pohyb telefónu zostávajú
+podľa [akceptačného plánu](reliability-audit-2026-10-22.md) samostatné skúšky.
+
+Krátka skúška nového buildu (iba TEST účty a vlastné skúšobné pristavenie):
+
+| Skúška | Očakávaný výsledok |
+| --- | --- |
+| Pred prvým pripojením vypnúť internet, skúsiť Pripojiť telefón, potom obnoviť internet a vrátiť sa do aplikácie. | Telefón zopakuje pripojenie; nezačne sám nový hovor a neprevezme iný iPhone. |
+| V nastaveniach iPhone vypnúť notifikácie a vrátiť sa do Účtu; potom ich opäť povoliť. | Zobrazené povolenie sa zmení pri návrate, bez šesťhodinového čakania. |
+| Po pripojení zopakovať úspešný hovor pri zamknutom telefóne. | Prijatie, obojstranný zvuk a zavesenie; samotné zvonenie neoznačiť za celý úspešný hovor. |
+| Prijať skúšobné pristavenie, povoliť polohu, chvíľu ísť bez signálu a potom obnoviť spojenie. | Dispečer dostane čakajúce polohy; čerstvosť polohy na jeho obrazovke sa obnoví. |
+| Dokončiť alebo zrušiť pristavenie a overiť obidva pohľady. | Údaje klienta sa skryjú a telefón prestane zdieľať polohu tohto pristavenia. |
 
 ## Hranice
 
