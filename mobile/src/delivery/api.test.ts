@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MobileApiError } from "../lib/api";
 import { createDeliveryApi, parseDelivery } from "./api";
 import { delivery } from "./fixtures";
+import { DeliveryAccess } from "./access";
 
 const ME = "77777777-7777-4777-8777-777777777777", ID = delivery().id;
 const config = { environment: "test" as const, apiOrigin: "https://test.dispecing.linkapomoci.sk", supabaseUrl: "https://nzpnqdstvkfncflgqlny.supabase.co", publishableKey: "unused" };
@@ -67,6 +68,29 @@ describe("pristavovač API", () => {
     const transport = vi.fn(async () => { current = false; return new Response(JSON.stringify({ ...scope, deliveries: [delivery()] })); });
     const api = createDeliveryApi(config, async () => "MOCK", transport, () => current);
     await expect(api.list()).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("reports a command's access refusal immediately and restores only after verified identity/list", async () => {
+    const access = new DeliveryAccess(), notify = vi.fn(); access.subscribe(notify);
+    const replies = [new Response(JSON.stringify({ error: "no access" }), { status: 403 }),
+      new Response(JSON.stringify({ ...scope, delivery: delivery() })),
+      new Response(JSON.stringify({ ...scope, deliveries: [delivery()] }))];
+    const api = createDeliveryApi(config, async () => "MOCK", vi.fn(async () => replies.shift()!), () => true, access);
+    await expect(api.command(ID, { commandId: "33333333-3333-4333-8333-333333333333", action: "accept", expectedRevision: 1, publishedVersion: 1 })).rejects.toMatchObject({ status: 403 });
+    expect(access.snapshot()?.status).toBe(403); expect(notify).toHaveBeenCalledOnce();
+    await api.read(ID); expect(access.snapshot()?.status).toBe(403);
+    await api.list(); expect(access.snapshot()).toBeNull(); expect(notify).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not restore access through a successful list that began before the command refusal", async () => {
+    const access = new DeliveryAccess(); let release!: (response: Response) => void;
+    const transport = vi.fn(async (url: string) => url.endsWith("/commands") ? new Response(JSON.stringify({ error: "no access" }), { status: 403 })
+      : new Promise<Response>(resolve => { release = resolve; }));
+    const api = createDeliveryApi(config, async () => "MOCK", transport, () => true, access);
+    const listing = api.list(); await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
+    await expect(api.command(ID, { commandId: "33333333-3333-4333-8333-333333333333", action: "accept", expectedRevision: 1, publishedVersion: 1 })).rejects.toMatchObject({ status: 403 });
+    release(new Response(JSON.stringify({ ...scope, deliveries: [delivery()] }))); await listing;
+    expect(access.snapshot()?.status).toBe(403);
   });
 
   it("sends a position and reads whether it was kept and should go on", async () => {

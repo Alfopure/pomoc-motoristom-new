@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MobileFieldMe } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
-import { deliveryMember, deliverySharing } from "./access";
+import { DeliveryAccess, deliveryMember, deliverySharing } from "./access";
 import { delivery } from "./fixtures";
 import { newestDelivery } from "./model";
 
@@ -29,5 +29,20 @@ describe("delivery access and reconciliation", () => {
     expect(newestDelivery(confirmed, delivery({ revision: 4, status: "en_route" }))).toBe(confirmed);
     const refreshed = delivery({ revision: 5, eta: "2026-10-22T11:00:00Z" });
     expect(newestDelivery(confirmed, refreshed)).toBe(refreshed);
+  });
+
+  it("does not revoke the whole account for an individual delivery's conflict, absence or network outage", () => {
+    const access = new DeliveryAccess();
+    for (const status of [0, 400, 404, 409, 429, 500, 502, 503, 504]) access.failed(new MobileApiError("temporary or delivery-specific", status));
+    expect(access.snapshot()).toBeNull();
+    access.failed(new MobileApiError("off", 503, "delivery_unavailable")); expect(access.snapshot()?.code).toBe("delivery_unavailable");
+    access.verified(); expect(access.snapshot()).toBeNull();
+  });
+
+  it("a read started before a refusal cannot restore access when it finishes late", () => {
+    const access = new DeliveryAccess(), before = access.ticket();
+    access.failed(new MobileApiError("revoked", 403)); access.verified(before);
+    expect(access.snapshot()?.status).toBe(403);
+    access.verified(access.ticket()); expect(access.snapshot()).toBeNull();
   });
 });

@@ -39,16 +39,20 @@ export function parseDelivery(value: unknown): MobileDelivery {
 }
 
 export type DeliveryApi = ReturnType<typeof createDeliveryApi>;
-export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<string | null>, transport: MobileTransport = fetch, current: () => boolean = () => true) {
+export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<string | null>, transport: MobileTransport = fetch, current: () => boolean = () => true,
+  access?: { ticket: () => number; failed: (error: MobileApiError) => void; verified: (ticket: number) => void }) {
   let memberId: string | null = null;
+  const tickets = new WeakMap<Record<string, unknown>, number>();
+  function refused(error: MobileApiError): never { access?.failed(error); throw error; }
   function requireCurrent() {
-    if (!current()) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
+    if (!current()) refused(new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401));
   }
   async function request(path: string, init: { method: "GET" | "POST" | "DELETE"; body?: unknown; signal?: AbortSignal; timeout?: number }): Promise<Record<string, unknown>> {
     requireCurrent();
+    const ticket = access?.ticket();
     const token = await getToken();
     requireCurrent();
-    if (!token) throw new MobileApiError("Prihlásenie vypršalo. Prihláste sa znova.", 401);
+    if (!token) refused(new MobileApiError("Prihlásenie vypršalo. Prihláste sa znova.", 401));
     const controller = new AbortController(), abort = () => controller.abort();
     if (init.signal?.aborted) abort();
     init.signal?.addEventListener("abort", abort, { once: true });
@@ -66,9 +70,11 @@ export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<
         throw new MobileApiError(text(record.error, 1000) ? record.error : "Pristavenia sa nepodarilo načítať.", response.status, typeof record.code === "string" ? record.code : undefined);
       }
       if (record.ok !== true || record.apiVersion !== 1 || record.environment !== config.environment || !id(record.memberId) || memberId && record.memberId !== memberId) throw invalid();
+      if (ticket !== undefined) tickets.set(record, ticket);
       return record;
     } catch (error) {
-      if (error instanceof MobileApiError || init.signal?.aborted) throw error;
+      if (error instanceof MobileApiError) refused(error);
+      if (init.signal?.aborted) throw error;
       throw new MobileApiError("Nepodarilo sa spojiť s aplikáciou. Skontrolujte pripojenie a skúste znova.", 0);
     } finally { clearTimeout(timer); init.signal?.removeEventListener("abort", abort); }
   }
@@ -78,12 +84,15 @@ export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<
       const member = object(body.member);
       if (!id(member.id) || member.id !== body.memberId || !text(member.displayName, 160) || !(member.email === null || text(member.email, 320))) throw invalid();
       memberId = body.memberId as string;
+      access?.verified(tickets.get(body) ?? -1);
       return body as MobileFieldMe;
     },
     list: async (signal?: AbortSignal): Promise<MobileDelivery[]> => {
       const body = await request("deliveries", { method: "GET", signal });
       if (!Array.isArray(body.deliveries) || body.deliveries.length > 100) throw invalid();
-      return body.deliveries.map(parseDelivery);
+      const deliveries = body.deliveries.map(parseDelivery);
+      access?.verified(tickets.get(body) ?? -1);
+      return deliveries;
     },
     read: async (deliveryId: string, signal?: AbortSignal): Promise<MobileDelivery> => {
       if (!id(deliveryId)) throw new MobileApiError("Pristavenie sa nenašlo.", 404);

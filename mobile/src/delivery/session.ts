@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useSyncExternalStore } from "react";
 import { randomUUID } from "expo-crypto";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -7,7 +7,7 @@ import { MobileApiError } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 import { createDeliveryApi, type DeliveryApi } from "./api";
 import { canUseDeliveryCache } from "./model";
-import { deliveryMember, deliverySharing } from "./access";
+import { DeliveryAccess, deliveryMember, deliverySharing } from "./access";
 import { DeliveryCommands } from "./commands";
 import { createDeliveryCommandStorage } from "./command-storage";
 import { createLocationSharing } from "./native-sharing";
@@ -30,11 +30,13 @@ export function deliveryRefused(error: unknown): boolean {
 export function useDeliverySession({ config, client, userId, liveUser, active, enabled, writable }: {
   config: MobileConfig; client: SupabaseClient; userId: string; liveUser: () => string | null; active: boolean; enabled: boolean; writable: boolean;
 }): DeliverySession {
+  const access = useMemo(() => new DeliveryAccess(), [config, userId, liveUser]);
+  const accessError = useSyncExternalStore(access.subscribe, access.snapshot, access.snapshot);
   const api = useMemo(() => createDeliveryApi(config, async () => {
     if (liveUser() !== userId) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
     const { data } = await client.auth.getSession();
     return liveUser() === userId && data.session?.user.id === userId ? data.session.access_token : null;
-  }, fetch, () => liveUser() === userId), [config, client, userId, liveUser]);
+  }, fetch, () => liveUser() === userId, access), [config, client, userId, liveUser, access]);
   const key = useMemo(() => ["mobile", config.environment, userId, "field"], [config.environment, userId]);
   // Asked rarely: most dispatchers have no deliveries, and production has them off.
   const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), enabled, staleTime: 600_000,
@@ -47,7 +49,7 @@ export function useDeliverySession({ config, client, userId, liveUser, active, e
   useEffect(() => () => location.dispose(), [location]);
   const list = useQuery({ queryKey: [...key, "deliveries"], enabled: enabled && Boolean(verifiedMember), queryFn: ({ signal }) => api.list(signal),
     refetchInterval: active ? 30_000 : false });
-  const memberId = enabled ? deliveryMember(me.data, me.error, list.error) : null;
+  const memberId = enabled && !accessError ? deliveryMember(me.data, me.error, list.error) : null;
   useEffect(() => { location.setMember(memberId); }, [location, memberId]);
   const commands = useMemo(() => memberId ? new DeliveryCommands(createDeliveryCommandStorage(), {
     environment: config.environment, apiOrigin: config.apiOrigin, projectUrl: config.supabaseUrl, userId, memberId,
@@ -56,17 +58,17 @@ export function useDeliverySession({ config, client, userId, liveUser, active, e
   useEffect(() => { if (commands && writable) void commands.load(); }, [commands, writable]);
   useEffect(() => () => commands?.dispose(), [commands]);
   // A position still being sent for another account, or for nobody, stops here.
-  const settled = me.isSuccess || refused || me.isError && !canUseDeliveryCache(me.error);
+  const settled = me.isSuccess || refused || Boolean(accessError) || me.isError && !canUseDeliveryCache(me.error);
   useEffect(() => { if (settled) void location.reconcile(memberId); }, [settled, memberId, location]);
   // The delivery this pristavovač took. Until the list loads, nothing changes. Each
   // fresh list checks again, so sending that stopped on its own starts again.
-  const sharing = me.isPending ? undefined : deliverySharing(memberId, list.data, list.error);
+  const sharing = me.isPending && !accessError ? undefined : deliverySharing(memberId, list.data, list.error);
   const checked = list.dataUpdatedAt;
   useEffect(() => {
     if (sharing === undefined) return;
     // Expo Go sends only while the app is open; the native app also in the background.
     void location.follow(location.mode === "foreground" && !active ? null : sharing);
   }, [location, active, sharing, checked]);
-  return { api, key, me, memberId, list, location, commands, error: me.error ?? list.error,
+  return { api, key, me, memberId, list, location, commands, error: accessError ?? me.error ?? list.error,
     refresh: () => { void me.refetch(); if (me.data) void list.refetch(); } };
 }

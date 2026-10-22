@@ -13,7 +13,7 @@ stabilný TEST, nie o schválenie produkcie.
 | Nesúvisiaca potvrdená revízia mohla vyzerať ako úspech. | Mobil aj server vyžadujú `committedRevision = expectedRevision + 1` a aktuálnu revíziu aspoň takú vysokú ako potvrdenú. |
 | Staršie GET mohlo po úspešnom kroku vrátiť obrazovku späť. | Detail ani zápis do cache neprepíše vyššiu revíziu nižšou. Rovnaká revízia stále obnovuje napr. GPS. |
 | Potvrdenie starého dialógu alebo rozpracovaného dôvodu pracovalo so starou kartou. | Pred odoslaním sa znovu kontroluje otvorený detail, popredie a revízia aj publikovaná verzia. Zmenenú kartu treba skontrolovať a potvrdiť znova. |
-| Cache identity prežila odmietnutý zoznam alebo vypnutie modulu. | Odmietnutie alebo neoveriteľná odpoveď skryje celý terénny pracovný priestor a ukončí používanie starého zdieľania polohy. Bežný výpadok stále umožní čítať posledný známy stav. |
+| Cache identity prežila odmietnutý zoznam alebo vypnutie modulu. | Odmietnutie alebo neoveriteľná odpoveď skryje celý terénny pracovný priestor a ukončí používanie starého zdieľania polohy. Bežný výpadok stále umožní čítať posledný známy stav. Odmietnutie príkazu, detailu alebo sledovania sa prenesie do celej relácie hneď; staršie rozpracované čítanie ho nemôže zrušiť. |
 | Počas prípravy odhlásenia bolo možné začať ďalší krok. | Zápisy aj ručné spustenie polohy sú zablokované hneď pri začatí odhlásenia. Neskorá odpoveď sa po zmene účtu nepoužije. Pri zlyhaní odhlásenia zostáva neistý krok obnoviteľný. |
 
 ## Ukladanie a hranice
@@ -42,12 +42,12 @@ Pred opravou päť nových mobilných a dva serverové prípady reprodukovali
 konkrétne chyby. Ďalšie testy pokrývajú prípravu pred transportom, dvojité
 ťuknutie, reštart kontroléra, presné opakovanie, oddelenie účtov, nečitateľné
 úložisko, zlyhanie zápisu/uzavretia, stratu prístupu a prerušené odhlásenie.
-Pridaných je 36 mobilných a dva serverové regresné prípady. Celé existujúce
-balíky prešli: 1 283 mobilných, 8 425 serverových Vitest a 76 kontrol Node;
+Pridaných je 40 mobilných a dva serverové regresné prípady. Celé existujúce
+balíky prešli: 1 287 mobilných, 8 425 serverových Vitest a 76 kontrol Node;
 typy, mobilný lint, iOS/Android export a `expo install --check` prešli.
 Nasadený `dev` SHA zaznamenáva handoff konkrétneho PR.
 
-Skutočný vstup aplikácie prešiel 18 scenármi v prehliadači na šírkach 390 a 320 b so
+Skutočný vstup aplikácie prešiel 20 scenármi v prehliadači na šírkach 390 a 320 b so
 syntetickým API, autentifikáciou a natívnymi portmi. Zahŕňa zápis s následne
 stratenou odpoveďou, návrat zo zoznamu, obnovu účtu bez automatického POST,
 chybu úložiska, starý dialóg, oneskorené GET, 409 s novou kontrolou, odobratie
