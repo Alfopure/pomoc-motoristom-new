@@ -58,7 +58,7 @@ export function DockTabBar({ tabs, selected, badges, showAdd, onSelect, onAdd }:
               style={({ pressed }) => [s.item, pressed && !on && s.pressed]}>
               <View style={s.icon}><TabGlyph tab={item} size={24} color={on ? palette.label : palette.secondaryLabel} />
                 {badge > 0 && <View style={s.badge}><Badge count={badge} /></View>}</View>
-              <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={[s.label, on && s.labelOn]}>{tabLabel(item)}</Text>
+              <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8} maxFontSizeMultiplier={1.3} style={[s.label, on && s.labelOn]}>{tabLabel(item)}</Text>
             </Pressable>;
           })}
         </View>

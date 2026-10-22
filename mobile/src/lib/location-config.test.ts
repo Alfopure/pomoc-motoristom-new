@@ -13,10 +13,10 @@ const forbiddenPermissions = ["android.permission.ACCESS_BACKGROUND_LOCATION", "
 
 afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); });
 
-describe("resolved foreground location permissions", () => {
+describe("resolved location permissions: foreground, and background only for a pristavovač's delivery", () => {
   it.each([
     { voice: false, go: false }, { voice: true, go: false }, { voice: false, go: true },
-  ])("keeps location foreground-only and preserves voice/OTA ($voice, $go)", async ({ voice, go }) => {
+  ])("allows iOS background location for deliveries, keeps Android foreground-only and preserves voice/OTA ($voice, $go)", async ({ voice, go }) => {
     vi.stubEnv("APP_VARIANT", "test"); vi.stubEnv("EXPO_PUBLIC_APP_ENV", "test");
     vi.stubEnv("EXPO_PUBLIC_VOICE_PROOF", voice ? "1" : "0"); vi.stubEnv("MOBILE_EXPO_GO_PREVIEW", go ? "1" : "0");
     const config = (await import("../../app.config")).default;
@@ -29,12 +29,13 @@ describe("resolved foreground location permissions", () => {
       projectRoot, platforms: ["ios", "android"], introspect: true, ignoreExistingNativeFiles: true,
     });
     const plist = resolved.ios?.infoPlist;
-    expect(plist?.NSLocationWhenInUseUsageDescription).toContain("iba na váš pokyn");
+    expect(plist?.NSLocationWhenInUseUsageDescription).toContain("na váš pokyn");
     expect(plist?.NSLocationWhenInUseUsageDescription).toContain("počas pristavenia");
-    for (const key of ["NSLocationAlwaysUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription", "NSMotionUsageDescription"]) {
-      expect(plist).not.toHaveProperty(key);
-    }
-    expect(plist?.UIBackgroundModes ?? []).toEqual(voice ? ["audio", "voip"] : []);
+    // Always only for the delivery the pristavovač accepted, with the reason in plain words.
+    expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Počas pristavenia, ktoré ste prijali");
+    expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Po skončení pristavenia prestane");
+    for (const key of ["NSLocationAlwaysUsageDescription", "NSMotionUsageDescription"]) expect(plist).not.toHaveProperty(key);
+    expect([...plist?.UIBackgroundModes ?? []].sort()).toEqual(voice ? ["audio", "location", "voip"] : ["location"]);
     expect(plist?.LinkaNativeVoiceEnabled).toBe(voice ? true : undefined);
     const manifest = resolved._internal?.modResults?.android?.manifest as import("expo/config-plugins").AndroidConfig.Manifest.AndroidManifest;
     const permissions = manifest.manifest["uses-permission"] ?? [];

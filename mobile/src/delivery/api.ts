@@ -41,7 +41,7 @@ export function parseDelivery(value: unknown): MobileDelivery {
 export type DeliveryApi = ReturnType<typeof createDeliveryApi>;
 export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<string | null>, transport: MobileTransport = fetch) {
   let memberId: string | null = null;
-  async function request(path: string, init: { method: "GET" | "POST"; body?: unknown; signal?: AbortSignal; timeout?: number }): Promise<Record<string, unknown>> {
+  async function request(path: string, init: { method: "GET" | "POST" | "DELETE"; body?: unknown; signal?: AbortSignal; timeout?: number }): Promise<Record<string, unknown>> {
     const token = await getToken();
     if (!token) throw new MobileApiError("Prihlásenie vypršalo. Prihláste sa znova.", 401);
     const controller = new AbortController(), abort = () => controller.abort();
@@ -90,6 +90,17 @@ export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<
       const delivery = parseDelivery(body.delivery);
       if (delivery.id !== deliveryId.toLowerCase() || body.commandId !== input.commandId || !integer(body.committedRevision)) throw invalid();
       return delivery;
+    },
+    /** The secret for sending this delivery's position in the background; kept only in the Keychain. */
+    tracker: async (deliveryId: string): Promise<{ token: string; expiresAt: string }> => {
+      if (!id(deliveryId)) throw new MobileApiError("Pristavenie sa nenašlo.", 404);
+      const body = await request("deliveries/" + deliveryId + "/tracker", { method: "POST" });
+      if (typeof body.token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(body.token) || !date(body.expiresAt)) throw invalid();
+      return { token: body.token, expiresAt: body.expiresAt };
+    },
+    untrack: async (deliveryId: string): Promise<void> => {
+      if (!id(deliveryId)) return;
+      await request("deliveries/" + deliveryId + "/tracker", { method: "DELETE", timeout: 4_000 });
     },
     /** Whether it was kept, and whether the delivery still takes this pristavovač's position. */
     position: async (deliveryId: string, input: MobileDeliveryPositionInput): Promise<{ stored: boolean; active: boolean }> => {

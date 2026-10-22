@@ -458,6 +458,11 @@ export type MobileDeliveryReceipt = MobileFieldScope & { delivery: MobileDeliver
 export type MobileDeliveryPositionInput = { lat: number; lng: number; accuracy: number | null; recordedAt: string };
 /** `active` false: the delivery no longer takes this pristavovač's position, so the phone stops. */
 export type MobileDeliveryPositionReceipt = MobileFieldScope & { stored: boolean; active: boolean };
+/** A secret for sending the position in the background; shown once, kept only on the phone. */
+export type MobileDeliveryTracker = MobileFieldScope & { token: string; expiresAt: string };
+/** Readings the phone kept since its last send (also while offline), oldest first. */
+export type MobileDeliveryTrackInput = { positions: MobileDeliveryPositionInput[] };
+export type MobileDeliveryTrackReceipt = { ok: true; apiVersion: 1; environment: MobileEnvironment; stored: number; active: boolean };
 /** Current-link retrieval has no immutable mutation receipt in the existing RPC. */
 export type MobileHandoffRecovered = MobileScope & {
   kind: "link";

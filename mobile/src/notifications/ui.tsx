@@ -15,8 +15,11 @@ const SWITCHES: readonly { type: MobilePushType; title: string; subtitle: string
   { type: "callbacks_unclaimed", title: "Spätné volania bez dispečera", subtitle: "Požiadavka po termíne, ktorú nikto neprevzal" },
   { type: "handoffs", title: "Pristavenia", subtitle: "Nové pristavenie od dispečera" },
 ];
-/** A dispatcher's kinds; a pristavovač has only deliveries. */
+/** A dispatcher's kinds; a pristavovač has only deliveries; someone with both roles both. */
 const DISPATCH: readonly MobilePushType[] = ["tasks", "task_due", "cases", "callbacks_mine", "callbacks_unclaimed"];
+export function pushKinds(dispatch: boolean, delivery: boolean): MobilePushType[] {
+  return [...(dispatch ? DISPATCH : []), ...(delivery ? ["handoffs" as const] : [])];
+}
 
 /** Účet → Notifikácie: switched on by the operator, then one switch per kind. */
 export function NotificationSettings({ settings, kinds = DISPATCH }: { settings: PushSettings; kinds?: readonly MobilePushType[] }) {
@@ -35,7 +38,8 @@ export function NotificationSettings({ settings, kinds = DISPATCH }: { settings:
         : view.status === "denied" ? <>
           <Row first title="Otvoriť nastavenia telefónu" tone="link" onPress={openSettings} />
           <Row title="Skúsiť znova" subtitle="Po povolení v nastaveniach" tone="link" disabled={view.busy} onPress={() => { void settings.enable(); }} />
-        </> : <Row first title={view.status === "off" ? "Zapnúť notifikácie" : "Skúsiť znova"} subtitle={view.status === "off" ? (kinds.includes("handoffs") ? "Nové pristavenia aj pri zamknutom telefóne" : "Úlohy, prípady a spätné volania aj pri zamknutom telefóne") : null}
+        </> : <Row first title={view.status === "off" ? "Zapnúť notifikácie" : "Skúsiť znova"} subtitle={view.status === "off" ? (!kinds.includes("tasks") ? "Nové pristavenia aj pri zamknutom telefóne"
+          : kinds.includes("handoffs") ? "Úlohy, prípady, spätné volania a pristavenia aj pri zamknutom telefóne" : "Úlohy, prípady a spätné volania aj pri zamknutom telefóne") : null}
           tone="link" disabled={view.busy} onPress={() => { void settings.enable(); }} />}
     </Group>}
     {informational && view.message ? <Text style={s.note}>{view.message}</Text>

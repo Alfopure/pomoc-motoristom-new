@@ -1,4 +1,5 @@
 import type { MobileDeliveryPositionInput } from "../../../src/lib/mobile-api";
+import type { LocationSharing, SharingState } from "./sharing";
 
 /** The phone's location, as far as this app uses it: asked only for a delivery the
  * pristavovač accepted, and only while the app is open (Expo Go and v1). */
@@ -7,13 +8,14 @@ export type LocationSource = {
   request: () => Promise<"granted" | "denied" | "undetermined">;
   watch: (onPosition: (position: MobileDeliveryPositionInput) => void) => Promise<{ remove: () => void }>;
 };
-export type TrackerState = { status: "off" | "sharing" | "denied" | "error"; lastSentAt: number | null };
+export type TrackerState = SharingState;
 
-/** Sends where the pristavovač is to the dispatcher during one accepted delivery,
- * at most every 20 seconds; the server keeps only what arrives during the delivery
- * and says when to stop (a closed or cancelled delivery). */
-export class DeliveryTracker {
-  private state: TrackerState = { status: "off", lastSentAt: null };
+/** Expo Go and Android: sends where the pristavovač is to the dispatcher during one
+ * accepted delivery while the app is open, at most every 20 seconds; the server
+ * keeps only what arrives during the delivery and says when to stop. */
+export class DeliveryTracker implements LocationSharing {
+  readonly mode = "foreground" as const;
+  private state: TrackerState = { status: "off", lastSentAt: null, background: null };
   private listeners = new Set<() => void>();
   private watcher: { remove: () => void } | null = null;
   private target: string | null = null;
@@ -61,6 +63,10 @@ export class DeliveryTracker {
       if (!active && this.target === target) this.stop();
     } catch { /* The next reading tries again; a lost one is not repeated. */ } finally { this.sending = false; }
   }
+  /** Nothing outlives the open app here. */
+  setMember() { /* the session's own token identifies the pristavovač */ }
+  async reconcile() { /* foreground only */ }
+  async forget() { this.stop(); }
   stop() {
     this.target = null;
     this.watcher?.remove();

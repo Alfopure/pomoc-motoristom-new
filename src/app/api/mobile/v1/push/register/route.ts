@@ -6,12 +6,12 @@ import { registerMobilePush } from "@/server/mobile/push";
 
 export const runtime = "nodejs";
 /** Registers this installation for push notifications or changes its switches;
- * for a dispatcher or a pristavovač. */
+ * for a dispatcher, a pristavovač or someone who is both. */
 export async function POST(request: Request) {
   try {
-    const person = await requireMobilePerson(request);
-    const owner = person.kind === "field" ? { organizationId: person.actor.organizationId, memberId: person.actor.memberId } : person.actor;
+    const { dispatcher, field } = await requireMobilePerson(request);
+    const owner = { organizationId: (dispatcher ?? field)!.organizationId, profileId: dispatcher?.profileId ?? null, memberId: field?.memberId ?? null };
     const result = await registerMobilePush(createSupabaseAdminClient(), owner, await readMobileJsonBody(request));
-    return mobileJson({ ...(person.kind === "field" ? fieldScope(person.actor) : mobileScope(person.actor)), ...result });
+    return mobileJson({ ...(dispatcher ? mobileScope(dispatcher) : fieldScope(field!)), ...result });
   } catch (error) { return mobileError(error, "Upozornenia sa nepodarilo uložiť."); }
 }

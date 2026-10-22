@@ -79,7 +79,9 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   a voľbu aj prepínače si telefón pamätá pre ďalšie prihlásenie toho istého účtu;
   registráciu, ktorú odhlásenie nestihlo zrušiť, zruší ďalšie prihlásenie na tom
   telefóne. V Expo Go funguje na iPhone, na Androide nie.
-- **Pristavovač (F6):** dispečer v Odovzdaní prípadu vyberie v časti Komu
+- **Pristavovač (F6):** Pristavenia sú samostatný modul roly pristavovač v tej istej
+  kostre (pristavovač: Prehľad · Pristavenia · Moduly; dispečer s oboma rolami ho
+  má medzi modulmi). Dispečer v Odovzdaní prípadu vyberie v časti Komu
   pristavovača (alebo iného príjemcu iba s odkazom) a čakajúce odovzdanie vie
   poslať do aplikácie aj dodatočne; pri odovzdaní vidí značku V aplikácii a polohu
   pristavovača s odkazom na mapu. Pristavovač je člen odťahovej služby s rolou
@@ -87,12 +89,17 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   `mobile_no_dispatch_profile`); aplikácia mu ukáže iba Pristavenia: zoznam,
   detail s popisom hore a mapou dole (react-native-maps, Apple Maps bez kľúča),
   kroky Prijať → Vyrážam → Som na mieste → Auto odovzdané, čas príchodu,
-  Odmietnuť/Problém, Zavolať a navigáciu. Polohu (expo-location v popredí,
-  najviac raz za 20 s) posiela od vlastného kroku v aplikácii (`tracking`),
-  kým je pristavenie otvorené; server po skončení odpovie `active: false`.
+  Odmietnuť/Problém, Zavolať a navigáciu. Polohu posiela od vlastného kroku
+  v aplikácii (`tracking`), kým je pristavenie otvorené; server po skončení
+  odpovie `active: false`. V zostavenej aplikácii pre iPhone beží úloha
+  `pm-delivery-location` (expo-task-manager, `startLocationUpdatesAsync`, povolenie
+  „Vždy“, `UIBackgroundModes: location`) aj na pozadí a posiela kľúčom pristavenia
+  na `/api/mobile/v1/field/track` (bez prihlásenia; kľúč v Keychain, polohy bez
+  signálu v súbore najviac 12 h). V Expo Go a na Androide iba s otvorenou aplikáciou.
   Routy `/api/mobile/v1/field/{me,deliveries,deliveries/[id],…/commands,…/position}`
   fungujú, iba keď má projekt `MOBILE_DELIVERY_ENABLED=true` a databáza migráciu
-  `20261022100000_mobile_delivery_handoffs.sql`; inak 503 `delivery_unavailable`.
+  `20261022100000_mobile_delivery_handoffs.sql` a `20261022180000_mobile_delivery_background.sql`;
+  inak 503 `delivery_unavailable`.
 - **Vydanie:** názov Dispatching, ikona a úvodná obrazovka (`assets/`, TEST a DEV
   s pásom), manifest súkromia pre iOS. Pri štarte sa aplikácia bez prihlásenia
   opýta `/api/mobile/v1/app-status` (najviac 2,5 s, potom pokračuje); ak je jej

@@ -79,6 +79,7 @@ class DeliveryHandoffContract(unittest.TestCase):
         cls.db.execute(statement("create or replace function app_private.towing_authorize(", "end $$;"))
         cls.db.execute(sql(ROOT / "supabase/migrations/20261020210000_mobile_push_devices.sql"))
         cls.db.execute(sql(ROOT / "supabase/migrations/20261022100000_mobile_delivery_handoffs.sql"))
+        cls.db.execute(sql(ROOT / "supabase/migrations/20261022180000_mobile_delivery_background.sql"))
         cls.members = {}
         for key, roles, org in [("pavol", ["delivery"], ORG), ("peter", ["delivery", "driver"], ORG), ("vodic", ["driver"], ORG), ("cudzi", ["delivery"], OTHER_ORG)]:
             user, member = str(uuid.uuid4()), str(uuid.uuid4())
@@ -86,8 +87,8 @@ class DeliveryHandoffContract(unittest.TestCase):
             cls.db.execute("""insert into motorist_towing_memberships(id,organization_id,auth_user_id,display_name,email,roles,capabilities)
               values(%s,%s,%s,%s,%s,%s,app_private.towing_capabilities(%s))""", (member, org, user, key.capitalize(), key + "@example.test", roles, roles))
             cls.members[key] = {"id": member, "user": user, "org": org}
-        # Not offered for the app: an account that is also a dispatcher (it opens the
-        # dispatcher app) and one whose linked office profile is disabled.
+        # A dispatcher who also delivers (one app with both modules), and one whose
+        # linked office profile is disabled (not offered).
         for key, status in [("dvojity", "active"), ("kancelaria", "disabled")]:
             user, member, profile = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
             cls.db.execute("insert into auth.users values(%s)", (user,))
@@ -167,8 +168,9 @@ class DeliveryHandoffContract(unittest.TestCase):
 
     def test_02_dispatcher_lists_delivery_members_of_own_organization(self):
         members = self.app(self.new_case(), "members")["members"]
-        # Without the delivery role, from another organization, also a dispatcher, or with a disabled office profile: not offered.
-        self.assertEqual([m["displayName"] for m in members], ["Pavol", "Peter"])
+        # Without the delivery role, from another organization or with a disabled office profile: not offered.
+        # A dispatcher who also delivers is offered: the one app shows them both modules.
+        self.assertEqual([m["displayName"] for m in members], ["Dvojity", "Pavol", "Peter"])
         self.assertTrue(all(set(m) == {"id", "displayName", "lastPhone"} for m in members))
         self.sent("pavol")
         last = {m["displayName"]: m["lastPhone"] for m in self.app(self.new_case(), "members")["members"]}
@@ -190,8 +192,8 @@ class DeliveryHandoffContract(unittest.TestCase):
         other_case, other = self.issue()
         self.rejected("22023", lambda: self.app(other_case, "assign", {"handoffId": other["id"], "memberId": self.members["vodic"]["id"], "commandId": str(uuid.uuid4())}))
         self.rejected("22023", lambda: self.app(other_case, "assign", {"handoffId": other["id"], "memberId": self.members["cudzi"]["id"], "commandId": str(uuid.uuid4())}))
-        for key in ["dvojity", "kancelaria"]:
-            self.rejected("22023", lambda: self.app(other_case, "assign", {"handoffId": other["id"], "memberId": self.members[key]["id"], "commandId": str(uuid.uuid4())}))
+        self.rejected("22023", lambda: self.app(other_case, "assign", {"handoffId": other["id"], "memberId": self.members["kancelaria"]["id"], "commandId": str(uuid.uuid4())}))
+        self.assertTrue(self.app(other_case, "assign", {"handoffId": other["id"], "memberId": self.members["dvojity"]["id"], "commandId": str(uuid.uuid4())})["assigned"])
         self.rejected("P0002", lambda: self.app(self.new_case(), "assign", {"handoffId": other["id"], "memberId": self.members["pavol"]["id"], "commandId": str(uuid.uuid4())}))
         # Recorded as an ordinary update without the name: the link holder reads it too.
         events = self.db.execute("select action,comment,actor_profile_id from motorist_handoff_events where handoff_id=%s and actor_profile_id is not null and action<>'issue'", (handoff["id"],)).fetchall()
@@ -302,14 +304,12 @@ class DeliveryHandoffContract(unittest.TestCase):
             self.assertEqual(client.execute("select motorist_handoff_positions_prune()").fetchone()[0], 1)
         self.assertEqual(self.db.execute("select count(*) from motorist_handoff_positions where handoff_id=%s", (handoff["id"],)).fetchone()[0], 1)
 
-    def test_11_push_devices_belong_to_exactly_one_person(self):
+    def test_11_push_devices_belong_to_a_person(self):
         member = self.members["pavol"]
         self.db.execute("""insert into motorist_mobile_push_devices(organization_id,member_id,environment,installation_id,expo_push_token,platform)
           values(%s,%s,'test',gen_random_uuid(),'ExponentPushToken[pavolpavolpavol]','ios')""", (ORG, member["id"]))
         self.rejected("23514", lambda: self.db.execute("""insert into motorist_mobile_push_devices(organization_id,environment,installation_id,expo_push_token,platform)
           values(%s,'test',gen_random_uuid(),'ExponentPushToken[nobodynobodynob]','ios')""", (ORG,)))
-        self.rejected("23514", lambda: self.db.execute("""insert into motorist_mobile_push_devices(organization_id,profile_id,member_id,environment,installation_id,expo_push_token,platform)
-          values(%s,%s,%s,'test',gen_random_uuid(),'ExponentPushToken[bothbothbothbot]','ios')""", (ORG, A, member["id"])))
 
     def test_13_closed_deliveries_keep_no_customer_data(self):
         case, handoff = self.sent("pavol")
@@ -348,6 +348,73 @@ class DeliveryHandoffContract(unittest.TestCase):
         self.assertEqual(status, ("expired", True))
         self.assertNotIn(handoff["id"], [h["id"] for h in self.member("pavol", "list")["handoffs"]])
         self.rejected("P0002", lambda: self.member("pavol", "read", {"handoffId": handoff["id"]}))
+
+    def test_17_background_secret_sends_batches_until_the_delivery_ends(self):
+        case, handoff = self.sent("pavol")
+        secret = lambda: digest("tracker-" + uuid.uuid4().hex)
+        first = secret()
+        self.rejected("PT409", lambda: self.member("pavol", "tracker", {"handoffId": handoff["id"], "tokenHash": first}))
+        state = self.step("pavol", handoff, "accept")["handoff"]
+        self.rejected("22023", lambda: self.member("pavol", "tracker", {"handoffId": handoff["id"], "tokenHash": "x"}))
+        self.assertIn("expiresAt", self.member("pavol", "tracker", {"handoffId": handoff["id"], "tokenHash": first}))
+        now = self.db.execute("select now()").fetchone()[0]
+        reading = lambda when, lat=49.0: {"lat": lat, "lng": 18.0, "accuracy": 20, "recordedAt": when.isoformat()}
+        track = lambda token, batch: self.db.execute("select motorist_handoff_track(%s,%s::jsonb)", (token, json.dumps(batch))).fetchone()[0]
+        from datetime import timedelta
+        # Kept while offline: two readings 15 s apart are stored, one from before the step is not.
+        batch = [reading(now - timedelta(minutes=30)), reading(now + timedelta(seconds=1), 49.1), reading(now + timedelta(seconds=16), 49.2)]
+        self.assertEqual(track(first, batch), {"stored": 2, "active": True})
+        self.assertEqual(track(first, [reading(now + timedelta(seconds=20))]), {"stored": 0, "active": True})
+        self.rejected("22023", lambda: track(first, []))
+        self.rejected("22023", lambda: track(first, [{**reading(now), "lat": 91}]))
+        self.assertEqual(track(digest("unknown"), [reading(now)]), {"stored": 0, "active": False})
+        # A new secret replaces the old one; logout revokes it.
+        second = secret()
+        self.member("pavol", "tracker", {"handoffId": handoff["id"], "tokenHash": second})
+        self.assertEqual(track(first, [reading(now + timedelta(seconds=40))]), {"stored": 0, "active": False})
+        self.assertEqual(track(second, [reading(now + timedelta(seconds=40))])["active"], True)
+        self.assertEqual(self.member("pavol", "untrack", {"handoffId": handoff["id"]}), {"revoked": True})
+        self.assertEqual(track(second, [reading(now + timedelta(seconds=60))])["active"], False)
+        # The end of the delivery stops the phone and revokes the secret.
+        third = secret()
+        self.member("pavol", "tracker", {"handoffId": handoff["id"], "tokenHash": third})
+        for action in ["en_route", "arrived", "complete"]:
+            state = self.step("pavol", state, action)["handoff"]
+        self.assertEqual(track(third, [reading(now + timedelta(seconds=80))]), {"stored": 0, "active": False})
+        self.assertIsNotNone(self.db.execute("select revoked_at from motorist_handoff_trackers where token_hash=%s", (third,)).fetchone()[0])
+        # Only the server may call it.
+        with self.client() as client:
+            self.rejected("42501", lambda: client.execute("select motorist_handoff_track(%s,'[]'::jsonb)", (third,)))
+            self.rejected("42501", lambda: client.execute("select * from motorist_handoff_trackers"))
+
+    def test_18_lost_access_stops_the_background_secret(self):
+        case, handoff = self.sent("peter")
+        self.step("peter", handoff, "accept")
+        token = digest("tracker-" + uuid.uuid4().hex)
+        self.member("peter", "tracker", {"handoffId": handoff["id"], "tokenHash": token})
+        now = self.db.execute("select now()").fetchone()[0]
+        self.db.execute("update motorist_towing_memberships set active=false where id=%s", (self.members["peter"]["id"],))
+        try:
+            result = self.db.execute("select motorist_handoff_track(%s,%s::jsonb)", (token, json.dumps([{"lat": 49, "lng": 18, "accuracy": None, "recordedAt": now.isoformat()}]))).fetchone()[0]
+            self.assertEqual(result, {"stored": 0, "active": False})
+        finally:
+            self.db.execute("update motorist_towing_memberships set active=true where id=%s", (self.members["peter"]["id"],))
+
+    def test_19_one_phone_may_belong_to_both_roles_and_old_secrets_go(self):
+        member = self.members["dvojity"]
+        profile = self.db.execute("select office_profile_id from motorist_towing_memberships where id=%s", (member["id"],)).fetchone()[0]
+        self.db.execute("""insert into motorist_mobile_push_devices(organization_id,profile_id,member_id,environment,installation_id,expo_push_token,platform)
+          values(%s,%s,%s,'test',gen_random_uuid(),'ExponentPushToken[bothrolesphone]','ios')""", (ORG, profile, member["id"]))
+        self.rejected("23514", lambda: self.db.execute("""insert into motorist_mobile_push_devices(organization_id,environment,installation_id,expo_push_token,platform)
+          values(%s,'test',gen_random_uuid(),'ExponentPushToken[nobodyatallxx]','ios')""", (ORG,)))
+        case, handoff = self.sent("pavol")
+        self.step("pavol", handoff, "accept")
+        token = digest("old-" + uuid.uuid4().hex)
+        self.member("pavol", "tracker", {"handoffId": handoff["id"], "tokenHash": token})
+        self.db.execute("update motorist_handoff_trackers set revoked_at=now()-interval '31 days' where token_hash=%s", (token,))
+        with self.client("service_role") as client:
+            client.execute("select motorist_handoff_positions_prune()")
+        self.assertIsNone(self.db.execute("select id from motorist_handoff_trackers where token_hash=%s", (token,)).fetchone())
 
     def test_14_position_only_from_the_pristavovac_who_took_a_step(self):
         case, handoff = self.sent("pavol")

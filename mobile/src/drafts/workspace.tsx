@@ -3,7 +3,7 @@ import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "r
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { MobileDraftScope, MobileMe } from "../../../src/lib/mobile-api";
+import type { MobileDraftScope, MobileMe, MobilePushType } from "../../../src/lib/mobile-api";
 import { createMobileApi, MobileApiError } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 import type { LogoutState } from "../lib/logout";
@@ -58,7 +58,11 @@ type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe;
   renderLayer: (layer: ShellLayer, scope: ShellScope | null, notice: string | null, open: ShellOpeners | null) => ReactNode;
   bar: { customized: boolean; onEdit: () => void; onReset: () => void };
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; hasCall: boolean; onLogout: () => void; onLogoutWithoutSaving: () => void;
-  push: PushSettings };
+  push: PushSettings;
+  /** The account's notification kinds: dispatch, and deliveries for someone who also delivers. */
+  pushKinds?: readonly MobilePushType[];
+  /** Shown under the name: the dispatch role and, if any, pristavovač. */
+  roleLabel?: string };
 const operationViews: readonly DispatchView[] = ["cases", "tasks", "account"];
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Prístup ku konceptom sa nepodarilo overiť.";
 
@@ -182,7 +186,8 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
   // A tapped notification opens its task, case or the callbacks, once the organization is verified here.
   const tap = useSyncExternalStore(pushTaps.subscribe, pushTaps.snapshot, pushTaps.snapshot);
   useEffect(() => {
-    if (!tap || !current()) return;
+    // Deliveries open in Pristavenia, under the pristavovač's own id.
+    if (!tap || tap.target.kind === "delivery" || !current()) return;
     const target = pushTaps.take(verified.profileId);
     if (target?.kind === "task") { setTaskRequest({ taskId: target.id, nonce: ++request.current }); onView("tasks"); }
     else if (target?.kind === "case") { setCaseRequest({ kind: "detail", id: target.id, nonce: ++request.current }); onView("cases"); }
@@ -305,10 +310,10 @@ function Account(props: Props) {
       <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
         <Text numberOfLines={2} style={account.name}>{profile.displayName}</Text>
         {profile.email ? <Text numberOfLines={1} style={account.detail}>{profile.email}</Text> : null}
-        <Text style={account.detail}>{roleNames[profile.role]}</Text>
+        <Text style={account.detail}>{props.roleLabel ?? roleNames[profile.role]}</Text>
       </View>
     </View></Group>
-    <NotificationSettings settings={props.push} />
+    <NotificationSettings settings={props.push} kinds={props.pushKinds} />
     <SectionHeader title="Prostredie" />
     <Group>
       <InfoRow first label="Dispečing" value={props.config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"} />

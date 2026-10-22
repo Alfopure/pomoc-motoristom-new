@@ -13,6 +13,8 @@
  *  - `user-bearer` — verified Supabase user JWT + active organization profile; no cookies or machine secrets.
  *  - `field-bearer` — verified Supabase user JWT + active field membership with the needed capability;
  *    no dispatch profile, cookies or machine secrets (pristavovač in the mobile app).
+ *  - `delivery-tracker` — a per-delivery secret issued to the pristavovač over `field-bearer`
+ *    (`Authorization: Tracker …`, only its hash stored); it only adds positions to that open delivery.
  *
  * `role` je vyplnené LEN tam, kde route reálne používa role-gate (inak member-level prístup).
  *
@@ -20,7 +22,7 @@
  * musí byť importovateľný z testov (route-auth-registry.test.ts, route-auth.test.ts).
  */
 
-export type RouteAuthClass = "public" | "bearer" | "dual" | "session" | "user-bearer" | "field-bearer";
+export type RouteAuthClass = "public" | "bearer" | "dual" | "session" | "user-bearer" | "field-bearer" | "delivery-tracker";
 
 export type MotoristRole = "dispatcher" | "senior_dispatcher" | "manager" | "admin";
 
@@ -51,6 +53,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/field/deliveries/[id]": { class: "field-bearer", note: "One own delivery; opening marks it seen." },
   "mobile/v1/field/deliveries/[id]/commands": { class: "field-bearer", note: "Own delivery steps with revision, receipts and dispatcher notice, as the public link." },
   "mobile/v1/field/deliveries/[id]/position": { class: "field-bearer", note: "Position only during an accepted own delivery; throttled, kept 30 days." },
+  "mobile/v1/field/deliveries/[id]/tracker": { class: "field-bearer", note: "Issues or revokes the secret for background positions of an own delivery the pristavovač took a step in." },
+  "mobile/v1/field/track": { class: "delivery-tracker", note: "Background positions by the per-delivery secret (hash lookup); answers only stored count and whether to go on." },
   "mobile/v1/diagnostics/errors": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Masked app error report; one structured runtime log line, no database write." },
   "mobile/v1/drafts/scope": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Private verified organization scope for account-bound device drafts and expected-organization fencing." },
   "mobile/v1/tasks": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Bounded current-actor assigned or reviewer task overview; no arbitrary actor selection." },
