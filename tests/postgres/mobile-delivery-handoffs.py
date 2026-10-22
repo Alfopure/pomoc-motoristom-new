@@ -43,7 +43,7 @@ class DeliveryHandoffContract(unittest.TestCase):
             admin.execute("create database " + cls.name)
         cls.db = psycopg.connect(dbname=cls.name, autocommit=True, **LOCAL)
         cls.db.execute(sql(ROOT / "tests/postgres/task-workspace-fixture.sql"))
-        cls.db.execute("alter table motorist_profiles add column access_status text not null default 'active'; drop table motorist_task_reminders")
+        cls.db.execute("alter table motorist_profiles add column access_status text not null default 'active', add column kind text not null default 'human'; drop table motorist_task_reminders")
         cls.db.execute("""create function app_private.motorist_is_org_member(org uuid) returns boolean language sql stable security definer set search_path=public,pg_temp as $$
         select exists(select 1 from motorist_profiles p where p.organization_id=org and p.user_id=auth.uid() and p.active) $$;
         create function public.motorist_set_updated_at() returns trigger language plpgsql as $$ begin new.updated_at=now(); return new; end $$;""")
@@ -86,6 +86,16 @@ class DeliveryHandoffContract(unittest.TestCase):
             cls.db.execute("""insert into motorist_towing_memberships(id,organization_id,auth_user_id,display_name,email,roles,capabilities)
               values(%s,%s,%s,%s,%s,%s,app_private.towing_capabilities(%s))""", (member, org, user, key.capitalize(), key + "@example.test", roles, roles))
             cls.members[key] = {"id": member, "user": user, "org": org}
+        # Not offered for the app: an account that is also a dispatcher (it opens the
+        # dispatcher app) and one whose linked office profile is disabled.
+        for key, status in [("dvojity", "active"), ("kancelaria", "disabled")]:
+            user, member, profile = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+            cls.db.execute("insert into auth.users values(%s)", (user,))
+            cls.db.execute("insert into motorist_profiles(id,organization_id,user_id,role,display_name,access_status) values(%s,%s,%s,%s,%s,%s)",
+                           (profile, ORG, user, "dispatcher" if key == "dvojity" else "viewer", key.capitalize(), status))
+            cls.db.execute("""insert into motorist_towing_memberships(id,organization_id,auth_user_id,display_name,email,roles,capabilities,office_profile_id)
+              values(%s,%s,%s,%s,%s,array['delivery'],app_private.towing_capabilities(array['delivery']),%s)""", (member, ORG, user, key.capitalize(), key + "@example.test", profile))
+            cls.members[key] = {"id": member, "user": user, "org": ORG}
 
     @classmethod
     def tearDownClass(cls):
@@ -157,6 +167,7 @@ class DeliveryHandoffContract(unittest.TestCase):
 
     def test_02_dispatcher_lists_delivery_members_of_own_organization(self):
         members = self.app(self.new_case(), "members")["members"]
+        # Without the delivery role, from another organization, also a dispatcher, or with a disabled office profile: not offered.
         self.assertEqual([m["displayName"] for m in members], ["Pavol", "Peter"])
         self.assertTrue(all(set(m) == {"id", "displayName", "lastPhone"} for m in members))
         self.sent("pavol")
@@ -166,17 +177,25 @@ class DeliveryHandoffContract(unittest.TestCase):
     def test_03_assign_is_idempotent_and_limited(self):
         case, handoff = self.issue()
         command = {"handoffId": handoff["id"], "memberId": self.members["pavol"]["id"], "commandId": str(uuid.uuid4())}
-        first = self.app(case, "assign", command)
+        self.rejected("PT409", lambda: self.app(case, "assign", {**command, "expectedRevision": 7}))
+        first = self.app(case, "assign", {**command, "expectedRevision": 1})
         self.assertTrue(first["assigned"])
-        self.assertEqual(first["handoff"]["recipientMemberId"], self.members["pavol"]["id"])
+        self.assertNotIn("recipientMemberId", first["handoff"])
+        self.assertEqual(self.app(case, "app")["handoffs"], [{"handoffId": handoff["id"], "memberId": self.members["pavol"]["id"], "position": None}])
         self.assertFalse(self.app(case, "assign", command)["assigned"])
         self.rejected("PT409", lambda: self.app(case, "assign", {**command, "memberId": self.members["peter"]["id"]}))
+        # The same pristavovač again after they accepted: nothing changes, no error.
+        self.step("pavol", first["handoff"], "accept")
+        self.assertFalse(self.app(case, "assign", command)["assigned"])
         other_case, other = self.issue()
         self.rejected("22023", lambda: self.app(other_case, "assign", {"handoffId": other["id"], "memberId": self.members["vodic"]["id"], "commandId": str(uuid.uuid4())}))
         self.rejected("22023", lambda: self.app(other_case, "assign", {"handoffId": other["id"], "memberId": self.members["cudzi"]["id"], "commandId": str(uuid.uuid4())}))
+        for key in ["dvojity", "kancelaria"]:
+            self.rejected("22023", lambda: self.app(other_case, "assign", {"handoffId": other["id"], "memberId": self.members[key]["id"], "commandId": str(uuid.uuid4())}))
         self.rejected("P0002", lambda: self.app(self.new_case(), "assign", {"handoffId": other["id"], "memberId": self.members["pavol"]["id"], "commandId": str(uuid.uuid4())}))
-        events = self.db.execute("select action,comment,actor_profile_id from motorist_handoff_events where handoff_id=%s and action='app'", (handoff["id"],)).fetchall()
-        self.assertEqual(events, [("app", "Pavol", uuid.UUID(A))])
+        # Recorded as an ordinary update without the name: the link holder reads it too.
+        events = self.db.execute("select action,comment,actor_profile_id from motorist_handoff_events where handoff_id=%s and actor_profile_id is not null and action<>'issue'", (handoff["id"],)).fetchall()
+        self.assertEqual(events, [("update", "Odoslané do aplikácie pristavovača", uuid.UUID(A))])
 
     def test_04_only_dispatchers_may_use_the_dispatch_side(self):
         case, handoff = self.issue()
@@ -216,6 +235,7 @@ class DeliveryHandoffContract(unittest.TestCase):
         self.assertNotIn("recipientPhone", view)
         self.assertNotIn("PRIVATE", json.dumps(view))
         self.assertIsNone(view["replacementPosition"])
+        self.assertFalse(view["tracking"])
 
     def test_07_assigned_replacement_car_position_while_open(self):
         case = self.new_case()
@@ -261,20 +281,22 @@ class DeliveryHandoffContract(unittest.TestCase):
         case, handoff = self.sent("pavol")
         now = self.db.execute("select now()").fetchone()[0]
         ping = lambda when, lat=49.0, lng=18.0, **extra: self.member("pavol", "position", {"handoffId": handoff["id"], "lat": lat, "lng": lng, "accuracy": 12, "recordedAt": when.isoformat(), **extra})
-        self.assertFalse(ping(now)["stored"])
+        self.assertEqual(ping(now), {"stored": False, "active": False})
         state = self.step("pavol", handoff, "accept")["handoff"]
-        self.assertTrue(ping(now)["stored"])
-        self.assertFalse(ping(now)["stored"])
-        self.assertFalse(ping(now.replace(year=now.year - 1))["stored"])
+        self.assertTrue(state["tracking"])
+        self.assertEqual(ping(now), {"stored": True, "active": True})
+        self.assertEqual(ping(now), {"stored": False, "active": True})
+        self.assertEqual(ping(now.replace(year=now.year - 1)), {"stored": False, "active": True})
         self.rejected("22023", lambda: ping(now, lat=95))
         self.db.execute("update motorist_handoff_positions set recorded_at=recorded_at-interval '1 minute' where handoff_id=%s", (handoff["id"],))
         self.assertTrue(ping(now, lat=49.5)["stored"])
-        positions = self.app(case, "positions")["positions"]
-        self.assertEqual([(p["handoffId"], round(p["lat"], 1)) for p in positions], [(handoff["id"], 49.5)])
+        entries = self.app(case, "app")["handoffs"]
+        self.assertEqual([(e["handoffId"], round(e["position"]["lat"], 1), e["position"]["accuracy"]) for e in entries], [(handoff["id"], 49.5, 12)])
         for action in ["en_route", "arrived", "complete"]:
             state = self.step("pavol", state, action)["handoff"]
-        # A last reading after the delivery is quietly not stored.
-        self.assertFalse(ping(now.replace(microsecond=0))["stored"])
+        # After the delivery the phone is told to stop and the dispatcher no longer sees a position.
+        self.assertEqual(ping(now.replace(microsecond=0)), {"stored": False, "active": False})
+        self.assertIsNone(self.app(case, "app")["handoffs"][0]["position"])
         self.db.execute("update motorist_handoff_positions set received_at=now()-interval '31 days' where handoff_id=%s and lat<49.2", (handoff["id"],))
         with self.client("service_role") as client:
             self.assertEqual(client.execute("select motorist_handoff_positions_prune()").fetchone()[0], 1)
@@ -288,6 +310,62 @@ class DeliveryHandoffContract(unittest.TestCase):
           values(%s,'test',gen_random_uuid(),'ExponentPushToken[nobodynobodynob]','ios')""", (ORG,)))
         self.rejected("23514", lambda: self.db.execute("""insert into motorist_mobile_push_devices(organization_id,profile_id,member_id,environment,installation_id,expo_push_token,platform)
           values(%s,%s,%s,'test',gen_random_uuid(),'ExponentPushToken[bothbothbothbot]','ios')""", (ORG, A, member["id"])))
+
+    def test_13_closed_deliveries_keep_no_customer_data(self):
+        case, handoff = self.sent("pavol")
+        accepted = self.step("pavol", handoff, "accept")["handoff"]
+        self.step("pavol", accepted, "blocked", comment="Klient nedvíha")
+        self.internal(case, "revoke", {"commandId": str(uuid.uuid4()), "handoffId": handoff["id"], "expectedRevision": accepted["revision"] + 1, "comment": "Klient PRIVATE zrušil"})
+        view = self.member("pavol", "read", {"handoffId": handoff["id"]})["handoff"]
+        self.assertEqual(view["status"], "cancelled")
+        self.assertIsNone(view["published"])
+        self.assertIsNone(view["replacementPosition"])
+        self.assertFalse(view["tracking"])
+        self.assertNotIn("PRIVATE", json.dumps(view))
+        self.assertIn("Klient nedvíha", [e["comment"] for e in view["events"]])
+        listed = {h["id"]: h for h in self.member("pavol", "list")["handoffs"]}
+        self.assertIsNone(listed[handoff["id"]]["published"])
+        # Expired by time: the same, though the link would also refuse it.
+        case2, other = self.sent("pavol")
+        self.db.execute("update motorist_case_handoffs set expires_at=now()-interval '1 minute' where id=%s", (other["id"],))
+        expired = self.member("pavol", "read", {"handoffId": other["id"]})["handoff"]
+        self.assertEqual((expired["status"], expired["published"]), ("expired", None))
+        # A day after closing it is gone from the list and cannot be opened.
+        self.db.execute("update motorist_case_handoffs set updated_at=now()-interval '25 hours' where id=%s", (handoff["id"],))
+        self.db.execute("update motorist_case_handoffs set expires_at=now()-interval '25 hours' where id=%s", (other["id"],))
+        self.rejected("P0002", lambda: self.member("pavol", "read", {"handoffId": handoff["id"]}))
+        self.rejected("P0002", lambda: self.member("pavol", "read", {"handoffId": other["id"]}))
+        ids = [h["id"] for h in self.member("pavol", "list")["handoffs"]]
+        self.assertNotIn(handoff["id"], ids)
+        self.assertNotIn(other["id"], ids)
+
+    def test_14_position_only_from_the_pristavovac_who_took_a_step(self):
+        case, handoff = self.sent("pavol")
+        token = self.db.execute("select token_hash from motorist_case_handoffs where id=%s", (handoff["id"],)).fetchone()[0]
+        with self.client("service_role") as client:
+            session = digest("session-" + uuid.uuid4().hex)
+            opened = client.execute("select motorist_public_handoff('session',%s,%s::jsonb)", (token, json.dumps({"sessionHash": session}))).fetchone()[0]["handoff"]
+            accept = {"handoffId": handoff["id"], "commandId": str(uuid.uuid4()), "action": "accept", "expectedRevision": opened["revision"], "publishedVersion": opened["publishedVersion"]}
+            client.execute("select motorist_public_handoff('command',%s,%s::jsonb)", (session, json.dumps(accept)))
+        now = self.db.execute("select now()").fetchone()[0]
+        ping = lambda: self.member("pavol", "position", {"handoffId": handoff["id"], "lat": 49.0, "lng": 18.0, "accuracy": None, "recordedAt": now.isoformat()})
+        view = self.member("pavol", "read", {"handoffId": handoff["id"]})["handoff"]
+        # Accepted through the link: the app does not share this pristavovač's position.
+        self.assertEqual((view["status"], view["tracking"]), ("accepted", False))
+        self.assertEqual(ping(), {"stored": False, "active": False})
+        state = self.step("pavol", view, "en_route")["handoff"]
+        self.assertTrue(state["tracking"])
+        self.assertEqual(ping(), {"stored": True, "active": True})
+        # Another member never shares a position for it.
+        self.rejected("P0002", lambda: self.member("peter", "position", {"handoffId": handoff["id"], "lat": 49.0, "lng": 18.0, "accuracy": None, "recordedAt": now.isoformat()}))
+
+    def test_15_dispatch_view_keeps_its_fields(self):
+        case, handoff = self.sent("pavol")
+        self.step("pavol", handoff, "accept")
+        grant = self.internal(case, "context")["handoffs"][0]
+        self.assertEqual(set(grant), {"id", "status", "revision", "publishedVersion", "recipientName", "expiresAt", "createdAt", "openedAt", "eta", "createdBy",
+                                      "publishedAt", "published", "events", "recipientPhone", "canRenew", "tokenGeneration", "recoverable"})
+        self.assertTrue(set(e["action"] for e in grant["events"]) <= {"issue", "update", "accept"})
 
     def test_12_public_link_still_works_beside_the_app(self):
         case, handoff = self.sent("pavol")

@@ -289,9 +289,18 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   alebo Problém s dôvodom; Zavolať, navigácia k autu a na miesto. Po skončení
   telefón údaje klienta nezobrazuje. Notifikácia Nové pristavenie (vypínač
   Pristavenia v Účte).
-- Poloha: o povolenie aplikácia požiada až po prijatí; posiela ju najviac raz
-  za 20 s, iba s otvorenou aplikáciou. Server ju prijme iba počas otvoreného
-  pristavenia a maže ju po 30 dňoch (pomocná úloha existujúceho cronu).
+- Poloha: o povolenie aplikácia požiada až po prijatí (alebo inom vlastnom
+  kroku pristavovača v aplikácii; neskôr aj tlačidlom Zdieľať polohu
+  s dispečerom); posiela ju najviac raz za 20 s, iba s otvorenou aplikáciou.
+  Server ju prijme iba od pristavovača, ktorý v aplikácii urobil krok, a iba
+  počas otvoreného pristavenia; potom telefónu povie, aby prestal. Maže ju po
+  30 dňoch (pomocná úloha existujúceho cronu, aj pri vypnutom prepínači).
+- Po skončení, zrušení alebo vypršaní pristavenia telefón nedostane údaje
+  klienta ani polohu auta; po dni pristavenie zo zoznamu zmizne a nedá sa otvoriť.
+- V časti Komu sú iba pristavovači, ktorí sa môžu prihlásiť do aplikácie
+  pristavovača (bez dispečerského profilu a so zapnutým prístupom).
+- Staršia verzia servera s touto migráciou funguje ďalej (údaje odovzdania sa
+  pre ňu nemenia), nová verzia bez migrácie výber pristavovača neukáže.
 - Zapnutie v prostredí: migrácia `20261022100000_mobile_delivery_handoffs.sql`
   (až po migrácii push tabuľky; na TEST čaká na schválenie majiteľa) a
   `MOBILE_DELIVERY_ENABLED=true` v projekte Vercel; na Preview vetiev vypnuté vždy.

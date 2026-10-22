@@ -15,11 +15,15 @@ describe("delivery steps", () => {
     expect(nextStep(delivery({ expiresAt: "2026-10-22T09:59:00Z" }), NOW)).toBeNull();
   });
 
-  it("shares position only between accepting and finishing", () => {
-    expect(sharesPosition(delivery(), NOW)).toBe(false);
-    for (const status of ["accepted", "en_route", "arrived"] as const) expect(sharesPosition(delivery({ status }), NOW)).toBe(true);
-    expect(sharesPosition(delivery({ status: "completed" }), NOW)).toBe(false);
-    expect(sharesPosition(delivery({ status: "accepted", expiresAt: "2026-10-22T09:00:00Z" }), NOW)).toBe(false);
+  it("shares position only for a delivery this pristavovač took, until it closes", () => {
+    expect(sharesPosition(delivery({ tracking: true }), NOW)).toBe(false);
+    for (const status of ["accepted", "en_route", "arrived"] as const) {
+      expect(sharesPosition(delivery({ status, tracking: true }), NOW)).toBe(true);
+      // Accepted through the link by someone else: not this phone's position.
+      expect(sharesPosition(delivery({ status, tracking: false }), NOW)).toBe(false);
+    }
+    expect(sharesPosition(delivery({ status: "completed", tracking: true }), NOW)).toBe(false);
+    expect(sharesPosition(delivery({ status: "accepted", tracking: true, expiresAt: "2026-10-22T09:00:00Z" }), NOW)).toBe(false);
     expect(isOpen(delivery({ status: "rejected" }), NOW)).toBe(false);
   });
 });

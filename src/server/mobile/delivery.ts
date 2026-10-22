@@ -40,27 +40,33 @@ function position(value: unknown): MobileDelivery["replacementPosition"] {
 /** Every field the phone shows is checked; customer data only while the delivery is open. */
 export function parseDelivery(value: unknown): MobileDelivery {
   const item = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : unconfirmed();
-  const allowed = ["id", "status", "revision", "publishedVersion", "recipientName", "expiresAt", "createdAt", "openedAt", "eta", "createdBy", "publishedAt", "published", "events", "caseNumber", "replacementPosition"];
+  const allowed = ["id", "status", "revision", "publishedVersion", "expiresAt", "createdAt", "openedAt", "eta", "createdBy", "published", "events", "caseNumber", "replacementPosition", "tracking"];
   if (Object.keys(item).some(key => !allowed.includes(key))) unconfirmed();
   const integer = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 1 && v <= 2_147_483_647;
   const date = (v: unknown, nullable = false) => nullable && v === null || typeof v === "string" && isHistoryTimestamp(v);
   if (typeof item.id !== "string" || !isUuid(item.id) || typeof item.status !== "string" || !(handoffStates as readonly string[]).includes(item.status)
     || !integer(item.revision) || !integer(item.publishedVersion) || typeof item.caseNumber !== "string" || item.caseNumber.length > 160
     || !date(item.expiresAt) || !date(item.createdAt) || !date(item.openedAt, true) || !date(item.eta, true)
-    || item.createdBy != null && (typeof item.createdBy !== "string" || item.createdBy.length > 320)) unconfirmed();
+    || item.createdBy != null && (typeof item.createdBy !== "string" || item.createdBy.length > 320) || typeof item.tracking !== "boolean") unconfirmed();
+  const open = ["offered", "accepted", "en_route", "arrived"].includes(item.status) && Date.parse(item.expiresAt as string) > Date.now();
   return {
     id: item.id.toLowerCase(), status: item.status as MobileDelivery["status"], revision: item.revision as number, publishedVersion: item.publishedVersion as number,
     caseNumber: item.caseNumber, expiresAt: item.expiresAt as string, createdAt: item.createdAt as string, openedAt: item.openedAt as string | null,
     eta: item.eta as string | null, createdBy: (item.createdBy as string | null | undefined) ?? null,
-    card: item.published === null || item.published === undefined ? null : parseHandoffSnapshot(item.published),
-    events: parseHandoffEvents(item.events ?? []), replacementPosition: position(item.replacementPosition),
+    // The database already withholds them once the delivery closes; never pass them on regardless.
+    card: !open || item.published === null || item.published === undefined ? null : parseHandoffSnapshot(item.published),
+    events: parseHandoffEvents(item.events ?? []), replacementPosition: open ? position(item.replacementPosition) : null,
+    tracking: open && item.tracking === true,
   };
 }
 
 export async function loadDeliveries(actor: MobileFieldActor): Promise<MobileDelivery[]> {
   const data = await call(actor, "list", {}) as { handoffs?: unknown } | null;
   if (!Array.isArray(data?.handoffs) || data.handoffs.length > 100) unconfirmed();
-  return data.handoffs.map(parseDelivery);
+  // One delivery that cannot be shown must not hide the others.
+  const deliveries = data.handoffs.flatMap(item => { try { return [parseDelivery(item)]; } catch { return []; } });
+  if (deliveries.length < data.handoffs.length) console.warn(JSON.stringify({ event: "mobile.delivery", skipped: data.handoffs.length - deliveries.length }));
+  return deliveries;
 }
 function deliveryId(value: string): string {
   if (!isUuid(value)) throw new MutationError("Pristavenie sa nenašlo.", 404);
@@ -100,10 +106,11 @@ export function readDeliveryPosition(value: unknown): MobileDeliveryPositionInpu
     || typeof body.recordedAt !== "string" || !isHistoryTimestamp(body.recordedAt)) throw new MutationError("Neplatná poloha.", 400);
   return { lat: body.lat, lng: body.lng, accuracy: body.accuracy as number | null, recordedAt: new Date(body.recordedAt).toISOString() };
 }
-/** Stored only during an accepted delivery; the database decides and throttles. */
-export async function recordDeliveryPosition(actor: MobileFieldActor, id: string, value: unknown): Promise<{ stored: boolean }> {
+/** Stored only while the pristavovač who took the delivery in the app is on it; the
+ * database decides and throttles. `active` false tells the phone to stop. */
+export async function recordDeliveryPosition(actor: MobileFieldActor, id: string, value: unknown): Promise<{ stored: boolean; active: boolean }> {
   const handoffId = deliveryId(id), input = readDeliveryPosition(value);
-  const data = await call(actor, "position", { handoffId, ...input }) as { stored?: unknown } | null;
-  if (typeof data?.stored !== "boolean") unconfirmed();
-  return { stored: data.stored };
+  const data = await call(actor, "position", { handoffId, ...input }) as { stored?: unknown; active?: unknown } | null;
+  if (typeof data?.stored !== "boolean" || typeof data.active !== "boolean") unconfirmed();
+  return { stored: data.stored, active: data.active };
 }

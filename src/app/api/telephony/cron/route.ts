@@ -149,18 +149,20 @@ async function runPauseEndingWarningMaterialisation(organizationId: string): Pro
 /** The overdue-callback push starts only this early in a run (120 s limit). */
 const MOBILE_PUSH_LATEST_START_MS = 75_000;
 
-/** Overdue callbacks to the dispatchers' phones. Off unless MOBILE_PUSH_ENABLED;
- * each callback deadline is announced once, so a repeated tick sends nothing. */
+/** Overdue callbacks to the dispatchers' phones (off unless MOBILE_PUSH_ENABLED; each
+ * callback deadline is announced once, so a repeated tick sends nothing) and the
+ * hourly upkeep, which deletes old delivery positions in any operating deployment. */
 async function runMobilePushMaterialisation(organizationId: string, cronStartedAt: number): Promise<TelephonyCronJobResult> {
   const job = "notifications.mobile-push";
-  const [{ mobilePushEnabled }, { mobileDeliveryEnabled }] = await Promise.all([import("@/server/mobile/push"), import("@/server/mobile/field-auth")]);
-  if (!mobilePushEnabled() && !mobileDeliveryEnabled()) return { job, status: "disabled", detail: { reason: "push_disabled" } };
+  const [{ canOperateTelephony }, { mobilePushEnabled }] = await Promise.all([import("@/lib/app-environment"), import("@/server/mobile/push")]);
+  // Push needs an operating deployment too, so nothing at all runs on a Preview.
+  if (!canOperateTelephony()) return { job, status: "disabled", detail: { reason: "push_disabled" } };
   // Late in a slow run the next tick announces the same callbacks; the run must end in time.
   if (Date.now() - cronStartedAt > MOBILE_PUSH_LATEST_START_MS) return { job, status: "skipped", detail: { reason: "cron_budget" } };
   const { createSupabaseAdminClient } = await import("@/lib/supabase/admin");
   const { runMobileCallbackPush, runMobilePushUpkeep } = await import("@/server/mobile/push-events");
   const admin = createSupabaseAdminClient();
-  const result = await runMobileCallbackPush(admin, organizationId, new Date());
+  const result = mobilePushEnabled() ? await runMobileCallbackPush(admin, organizationId, new Date()) : { status: "disabled" as const, detail: { reason: "push_disabled" } };
   const upkeep = await runMobilePushUpkeep(admin, organizationId, new Date());
   return { job, status: result.status, detail: { ...result.detail, ...(upkeep ? { upkeep } : {}) } };
 }

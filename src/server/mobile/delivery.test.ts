@@ -24,9 +24,9 @@ const card = { caseNumber: "PM-2026-0042", action: "Pristavenie náhradného voz
   replacement: { needed: true, category: "", requestedType: "", preferences: [], status: "assigned", deliveryPlace: "Hlavná 1, Žilina", vehicle: { make: "VW", model: "Golf", plate: "ZA999AB" } },
   incident: { description: "", passengersCount: null, access: "" }, caseCreatedAt: at, firstCallAt: null };
 function view(overrides: Record<string, unknown> = {}) {
-  return { id: GRANT, status: "offered", revision: 1, publishedVersion: 1, recipientName: "Pavol", expiresAt: later, createdAt: at, openedAt: at, eta: null, createdBy: "Jana", publishedAt: at,
-    published: card, events: [{ id: id(8), action: "app", comment: "Pavol", actor: "Dispečing", createdAt: at }], caseNumber: "PM-2026-0042",
-    replacementPosition: { lat: 49.21, lng: 18.74, recordedAt: at }, ...overrides };
+  return { id: GRANT, status: "offered", revision: 1, publishedVersion: 1, expiresAt: later, createdAt: at, openedAt: at, eta: null, createdBy: "Jana",
+    published: card, events: [{ id: id(8), action: "update", comment: "Odoslané do aplikácie pristavovača", actor: "Dispečing", createdAt: at }], caseNumber: "PM-2026-0042",
+    replacementPosition: { lat: 49.21, lng: 18.74, recordedAt: at }, tracking: false, ...overrides };
 }
 const actor = { userId: USER, memberId: MEMBER, organizationId: ORG, displayName: "Pavol", email: null, version: 3 };
 const stableTest = { MOBILE_DELIVERY_ENABLED: "true", MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev", VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",
@@ -72,17 +72,26 @@ describe("pristavovač identity", () => {
 });
 
 describe("pristavovač deliveries", () => {
-  it("shows the card while open and translates the history for older apps", () => {
-    const parsed = parseDelivery(view());
-    expect(parsed).toMatchObject({ id: GRANT, caseNumber: "PM-2026-0042", card: { replacement: { deliveryPlace: "Hlavná 1, Žilina" } }, replacementPosition: { lat: 49.21, lng: 18.74 } });
-    expect(parsed.events[0]).toMatchObject({ action: "update", comment: "Odoslané do aplikácie: Pavol" });
+  it("shows the card while open and nothing of the customer once it closes", () => {
+    const parsed = parseDelivery(view({ status: "accepted", tracking: true }));
+    expect(parsed).toMatchObject({ id: GRANT, caseNumber: "PM-2026-0042", card: { replacement: { deliveryPlace: "Hlavná 1, Žilina" } }, replacementPosition: { lat: 49.21, lng: 18.74 }, tracking: true });
+    expect(parsed.events[0]).toMatchObject({ action: "update", comment: "Odoslané do aplikácie pristavovača" });
     expect(parseDelivery(view({ status: "completed", published: null, events: [], replacementPosition: null })).card).toBeNull();
-    for (const patch of [{ extra: 1 }, { status: "other" }, { revision: 0 }, { caseNumber: 7 }, { expiresAt: "soon" }]) expect(() => parseDelivery(view(patch))).toThrow();
+    // Even if a closed or expired delivery came with data, the phone does not get it.
+    for (const patch of [{ status: "cancelled" }, { status: "expired" }, { status: "accepted", expiresAt: "2026-01-01T00:00:00.000000+00:00" }]) {
+      expect(parseDelivery(view({ ...patch, tracking: true }))).toMatchObject({ card: null, replacementPosition: null, tracking: false });
+    }
+    for (const patch of [{ extra: 1 }, { status: "other" }, { revision: 0 }, { caseNumber: 7 }, { expiresAt: "soon" }, { tracking: "yes" }, { recipientName: "Pavol" }]) expect(() => parseDelivery(view(patch))).toThrow();
   });
 
   it("lists and reads through the membership-checked function only", async () => {
     mocks.rpc.mockResolvedValueOnce({ data: { handoffs: [view()] }, error: null });
     await expect(loadDeliveries(actor)).resolves.toHaveLength(1);
+    // One delivery that cannot be shown does not hide the others.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mocks.rpc.mockResolvedValueOnce({ data: { handoffs: [view({ status: "other" }), view({ id: id(9) })] }, error: null });
+    await expect(loadDeliveries(actor)).resolves.toMatchObject([{ id: id(9) }]);
+    expect(warn).toHaveBeenCalledOnce();
     expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_member_handoff", { p_user_id: USER, p_organization_id: ORG, p_membership_version: 3, p_action: "list", p_input: {} });
     mocks.rpc.mockResolvedValueOnce({ data: { handoff: view() }, error: null });
     await expect(readDelivery(actor, GRANT.toUpperCase())).resolves.toMatchObject({ id: GRANT });
@@ -108,9 +117,13 @@ describe("pristavovač deliveries", () => {
     await expect(commandDelivery(actor, GRANT, step)).rejects.toMatchObject({ status: 409 });
   });
 
-  it("sends a bounded position and reports whether it was kept", async () => {
+  it("sends a bounded position and reports whether it was kept and should go on", async () => {
+    mocks.rpc.mockResolvedValueOnce({ data: { stored: true, active: true }, error: null });
+    await expect(recordDeliveryPosition(actor, GRANT, { lat: 49.2, lng: 18.7, accuracy: 12, recordedAt: at })).resolves.toEqual({ stored: true, active: true });
+    mocks.rpc.mockResolvedValueOnce({ data: { stored: false, active: false }, error: null });
+    await expect(recordDeliveryPosition(actor, GRANT, { lat: 49.2, lng: 18.7, accuracy: 12, recordedAt: at })).resolves.toEqual({ stored: false, active: false });
     mocks.rpc.mockResolvedValueOnce({ data: { stored: true }, error: null });
-    await expect(recordDeliveryPosition(actor, GRANT, { lat: 49.2, lng: 18.7, accuracy: 12, recordedAt: at })).resolves.toEqual({ stored: true });
+    await expect(recordDeliveryPosition(actor, GRANT, { lat: 49.2, lng: 18.7, accuracy: 12, recordedAt: at })).rejects.toMatchObject({ status: 503 });
     expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_member_handoff", expect.objectContaining({ p_action: "position", p_input: { handoffId: GRANT, lat: 49.2, lng: 18.7, accuracy: 12, recordedAt: "2026-10-22T08:00:00.000Z" } }));
     for (const bad of [{ lat: 91, lng: 0, accuracy: null, recordedAt: at }, { lat: 1, lng: 0, accuracy: -1, recordedAt: at }, { lat: 1, lng: 0, accuracy: null, recordedAt: "now" }, { lat: 1, lng: 0, accuracy: null, recordedAt: at, speed: 3 }]) {
       await expect(recordDeliveryPosition(actor, GRANT, bad)).rejects.toMatchObject({ status: 400 });
@@ -132,7 +145,7 @@ describe("dispatcher sends to the app", () => {
   const dispatcher = { userId: id(20), profileId: DISPATCHER, organizationId: ORG, displayName: "Jana", role: "dispatcher" as const };
   const grant = (overrides: Record<string, unknown> = {}) => ({ id: GRANT, status: "offered", revision: 1, publishedVersion: 1, recipientName: "Pavol", recipientPhone: "+421905000111",
     expiresAt: later, createdAt: at, openedAt: null, eta: null, createdBy: "Jana", publishedAt: at, canRenew: true, recoverable: false, tokenGeneration: 1,
-    published: card, events: [], recipientMemberId: null, ...overrides });
+    published: card, events: [], ...overrides });
   function session(handler: (name: string, args: Record<string, unknown>) => unknown) {
     const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => handler(name, args));
     return { rpc, session: { actor: dispatcher, client: { rpc } as unknown as SupabaseClient<Database> } };
@@ -155,10 +168,10 @@ describe("dispatcher sends to the app", () => {
   it("issues, sends to the app once and notifies the pristavovač's phone", async () => {
     const { rpc, session: s } = session(name => name === "motorist_case_handoff"
       ? { data: { handoff: grant(), commandId: COMMAND, committedRevision: 1, tokenAccepted: false }, error: null }
-      : { data: { handoff: grant({ recipientMemberId: MEMBER }), assigned: true, memberId: MEMBER }, error: null });
+      : { data: { handoff: grant(), assigned: true, memberId: MEMBER }, error: null });
     const result = await commandMobileCaseHandoff(s, new Request("https://test.dispecing.linkapomoci.sk"), CASE, issue);
     expect(result).toMatchObject({ kind: "mutation", delivery: { status: "sent", memberId: MEMBER } });
-    expect(rpc).toHaveBeenCalledWith("motorist_case_handoff_app", expect.objectContaining({ p_action: "assign", p_input: { handoffId: GRANT, memberId: MEMBER, commandId: COMMAND } }));
+    expect(rpc).toHaveBeenCalledWith("motorist_case_handoff_app", expect.objectContaining({ p_action: "assign", p_input: { handoffId: GRANT, memberId: MEMBER, commandId: COMMAND, expectedRevision: 1 } }));
     expect(rpc.mock.calls.find(([name]) => name === "motorist_case_handoff")?.[1].p_input).not.toHaveProperty("recipientMemberId");
     expect(mocks.queue).toHaveBeenCalledOnce();
     await mocks.queue.mock.calls[0][0]();
@@ -172,9 +185,10 @@ describe("dispatcher sends to the app", () => {
       ? { data: { handoff: grant(), commandId: COMMAND, committedRevision: 1, tokenAccepted: false }, error: null }
       : { data: null, error: { code: "22023" } });
     await expect(commandMobileCaseHandoff(s, new Request("https://test.dispecing.linkapomoci.sk"), CASE, issue)).resolves.toMatchObject({ kind: "mutation", delivery: { status: "failed" } });
-    const repeated = session(() => ({ data: { handoff: grant({ recipientMemberId: MEMBER }), assigned: false, memberId: MEMBER }, error: null }));
+    const repeated = session(() => ({ data: { handoff: grant(), assigned: false, memberId: MEMBER }, error: null }));
     await expect(commandMobileCaseHandoff(repeated.session, new Request("https://x"), CASE, { action: "deliver", commandId: COMMAND, handoffId: GRANT, expectedRevision: 1, recipientMemberId: MEMBER }))
       .resolves.toEqual({ kind: "delivery", caseId: CASE, handoffId: GRANT, commandId: COMMAND, memberId: MEMBER, sent: true, currentRevision: 1 });
+    expect(repeated.rpc).toHaveBeenCalledWith("motorist_case_handoff_app", expect.objectContaining({ p_input: expect.objectContaining({ expectedRevision: 1 }) }));
     expect(mocks.queue).not.toHaveBeenCalled();
     const taken = session(() => ({ data: null, error: { code: "PT409" } }));
     await expect(commandMobileCaseHandoff(taken.session, new Request("https://x"), CASE, { action: "deliver", commandId: COMMAND, handoffId: GRANT, expectedRevision: 1, recipientMemberId: MEMBER }))
@@ -188,15 +202,19 @@ describe("dispatcher sends to the app", () => {
     expect(rpc).not.toHaveBeenCalled();
   });
 
-  it("lists pristavovači and their last position beside the handoffs", async () => {
-    const { session: s } = session((name, args) => {
-      if (name === "motorist_case_handoff") return { data: { preview: card, previewVersion: "a".repeat(64), handoffs: [grant({ recipientMemberId: MEMBER })], enhanced: false }, error: null };
+  it("lists pristavovači, which handoffs are in the app and where the pristavovač is", async () => {
+    const second = id(11);
+    const { rpc, session: s } = session((name, args) => {
+      if (name === "motorist_case_handoff") return { data: { preview: card, previewVersion: "a".repeat(64), handoffs: [grant(), grant({ id: second, status: "offered" })], enhanced: false }, error: null };
       if (args.p_action === "members") return { data: { members: [{ id: MEMBER, displayName: "Pavol", lastPhone: "+421905000111" }] }, error: null };
-      return { data: { positions: [{ handoffId: GRANT, lat: 49.3, lng: 18.8, accuracy: 15, recordedAt: at }] }, error: null };
+      return { data: { handoffs: [{ handoffId: GRANT, memberId: MEMBER, position: { lat: 49.3, lng: 18.8, accuracy: 15, recordedAt: at } },
+        { handoffId: second.toUpperCase(), memberId: MEMBER, position: null }, { handoffId: "x", memberId: MEMBER, position: null }] }, error: null };
     });
     const result = await getMobileCaseHandoffs(s, CASE);
+    expect(rpc).toHaveBeenCalledWith("motorist_case_handoff_app", expect.objectContaining({ p_action: "app" }));
     expect(result.delivery).toEqual({ members: [{ id: MEMBER, displayName: "Pavol", lastPhone: "+421905000111" }] });
     expect(result.handoffs[0].app).toEqual({ memberId: MEMBER, lastPosition: { lat: 49.3, lng: 18.8, accuracy: 15, recordedAt: at } });
+    expect(result.handoffs[1].app).toEqual({ memberId: MEMBER, lastPosition: null });
     // Before the delivery migration the screen stays as it was.
     const old = session((name) => name === "motorist_case_handoff"
       ? { data: { preview: card, previewVersion: "a".repeat(64), handoffs: [grant()], enhanced: false }, error: null } : { data: null, error: { code: "PGRST202" } });

@@ -30,6 +30,9 @@ import { pushTaps } from "./src/notifications/taps";
 import { FieldWorkspace } from "./src/delivery/ui";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
+/** The server's answer "signed in, but not a dispatcher": a pristavovač. Kept as the
+ * query's data, so a later failed check on a weak signal does not drop their screen. */
+const FIELD_ONLY = { fieldOnly: true } as const;
 
 export default function App() {
   const [generation, setGeneration] = useState(0);
@@ -221,10 +224,13 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   const key = useMemo(() => ["mobile", config.environment, userId], [config.environment, userId]);
   // First authenticated snapshot must also load during a PushKit cold launch.
   // Periodic reads still stop when iOS suspends the app.
-  const me = useQuery({ queryKey: [...key, "me"], queryFn: ({ signal }) => api.me(signal), refetchInterval: active ? 30_000 : false });
+  const me = useQuery({ queryKey: [...key, "me"], queryFn: async ({ signal }) => {
+    try { return await api.me(signal); }
+    catch (error) { if (error instanceof MobileApiError && error.code === "mobile_no_dispatch_profile") return FIELD_ONLY; throw error; }
+  }, refetchInterval: query => !active ? false : query.state.data === FIELD_ONLY ? 300_000 : 30_000 });
   // Signed in without a dispatch profile: a pristavovač, who gets the deliveries instead.
-  const fieldOnly = me.error instanceof MobileApiError && me.error.code === "mobile_no_dispatch_profile";
-  const identity = usableMobileIdentity(me.data, me.error);
+  const fieldOnly = me.data === FIELD_ONLY;
+  const identity = usableMobileIdentity(me.data && !("fieldOnly" in me.data) ? me.data : undefined, me.error);
   const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   const push = useMemo(() => new PushSettings(createPushDevice(config.environment, userId), createPushApi(config, async () => {
     if (liveUser() !== userId) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);

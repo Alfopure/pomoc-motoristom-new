@@ -102,17 +102,18 @@ export function Handoffs({ draft, active, onBack }: {
   const preview0 = state.context?.preview;
   const members = state.context?.delivery?.members ?? [], memberId = state.input.recipientMemberId;
   const memberName = (id: string) => members.find(member => member.id === id)?.displayName ?? null;
-  // Where the pristavovač is: refreshed every 30 s while one is under way and this screen is open.
-  const tracking = active && !showForm && !state.error && Boolean(state.context?.handoffs.some(grant => grant.app && grant.status !== 'offered' && live(grant)));
+  // Acceptance, steps and where the pristavovač is: re-read quietly every 30 s while a
+  // handoff is open and this screen is shown; a failed read waits for the next one.
+  const following = active && !showForm && Boolean(state.context?.handoffs.some(live));
   useEffect(() => {
-    if (!tracking)
+    if (!following)
       return;
     const timer = setInterval(() => {
       if (!draft.busy)
-        void draft.refresh();
+        void draft.refresh(true);
     }, 30_000);
     return () => clearInterval(timer);
-  }, [tracking, draft]);
+  }, [following, draft]);
   const openPosition = (position: { lat: number; lng: number }) => {
     setShareError(null);
     void Linking.openURL(positionUrl(position)).catch(() => setShareError('Mapu sa nepodarilo otvoriť.'));
@@ -131,7 +132,7 @@ export function Handoffs({ draft, active, onBack }: {
         {state.receipt && <Card>
           <Text accessibilityRole="alert" style={styles.subheading}>Odovzdanie uložené</Text>
           <Text style={styles.text}>{actions[state.receipt.action]} · potvrdená revízia {state.receipt.committedRevision}</Text>
-          {state.receipt.delivery?.status === 'sent' && <Text style={styles.text}>{'Pristavovač ' + (memberName(state.receipt.delivery.memberId) ?? '') + ' ho má v aplikácii a dostal notifikáciu.'}</Text>}
+          {state.receipt.delivery?.status === 'sent' && <Text style={styles.text}>{'Pristavovač ' + (memberName(state.receipt.delivery.memberId) ?? '') + ' ho má v aplikácii. Ak má zapnuté notifikácie, príde mu aj upozornenie.'}</Text>}
           {state.receipt.delivery?.status === 'failed' && <Text style={styles.text}>Do aplikácie pristavovača sa ho nepodarilo poslať. Odkaz funguje; pošlite ho znova nižšie alebo odkaz zdieľajte.</Text>}
           {state.receipt.link.status === 'unavailable' && <Text style={styles.text}>Uloženie je potvrdené, odkaz sa nepodarilo získať.</Text>}
           {state.status === 'saved' && state.pending && ['issue', 'renew'].includes(state.pending.action) && !state.link && <Button
@@ -144,7 +145,7 @@ export function Handoffs({ draft, active, onBack }: {
         </Card>}
         {state.error && <ErrorNotice message={state.error} />}
         {shareError && <ErrorNotice message={shareError} />}
-        {delivered && <Card><Text accessibilityRole="alert" style={styles.text}>{'Odovzdanie pre ' + delivered.recipientName + ' je v aplikácii pristavovača ' + (memberName(state.delivered!.memberId) ?? '') + '. Dostal notifikáciu.'}</Text></Card>}
+        {delivered && <Card><Text accessibilityRole="alert" style={styles.text}>{'Odovzdanie pre ' + delivered.recipientName + ' je v aplikácii pristavovača ' + (memberName(state.delivered!.memberId) ?? '') + '. Ak má zapnuté notifikácie, príde mu aj upozornenie.'}</Text></Card>}
         {state.status === 'uncertain' && <Card>
           <Text style={styles.text}>Pôvodná požiadavka a jej náhľad sú zachované. Novú požiadavku zatiaľ nevytvárajte.</Text>
           <Button label="Overiť pôvodné odovzdanie" disabled={draft.busy} onPress={() => {
@@ -181,7 +182,7 @@ export function Handoffs({ draft, active, onBack }: {
 
       {showForm && selected && <>
         {selected.action === 'issue' && (members.length > 0 || memberId) && <FormSection title="Komu"
-          footer={memberId ? 'Pristavovač ho uvidí vo svojej aplikácii a dostane notifikáciu. Odkaz môžete okrem toho zdieľať.' : 'Kolega bez aplikácie dostane iba odkaz, ktorý mu pošlete sami.'}>
+          footer={memberId ? 'Pristavovač ho uvidí vo svojej aplikácii, s notifikáciou, ak ju má zapnutú. Odkaz môžete okrem toho zdieľať.' : 'Kolega bez aplikácie dostane iba odkaz, ktorý mu pošlete sami.'}>
           {members.map(member => <SelectRow key={member.id} label={member.displayName} detail="Pristavovač · v aplikácii" selected={memberId === member.id} disabled={locked}
             onPress={() => draft.edit(memberId === member.id ? {} : { recipientMemberId: member.id, recipientName: member.displayName, recipientPhone: member.lastPhone ?? '' })} />)}
           <SelectRow key="link" label="Iný príjemca" detail="Iba odkaz" selected={!memberId} disabled={locked}

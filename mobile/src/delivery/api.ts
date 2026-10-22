@@ -19,7 +19,7 @@ export function parseDelivery(value: unknown): MobileDelivery {
   const v = object(value);
   if (!id(v.id) || !STATES.includes(v.status as string) || !integer(v.revision) || !integer(v.publishedVersion) || !text(v.caseNumber, 160)
     || !date(v.expiresAt) || !date(v.createdAt) || !(v.openedAt === null || date(v.openedAt)) || !(v.eta === null || date(v.eta))
-    || !(v.createdBy === null || text(v.createdBy, 320)) || !Array.isArray(v.events) || v.events.length > 200) throw invalid();
+    || !(v.createdBy === null || text(v.createdBy, 320)) || !Array.isArray(v.events) || v.events.length > 200 || typeof v.tracking !== "boolean") throw invalid();
   const events = v.events.map(item => {
     const e = object(item);
     if (!id(e.id) || !text(e.action, 40) || !text(e.comment, 1000) || !text(e.actor, 320) || !date(e.createdAt)) throw invalid();
@@ -34,7 +34,7 @@ export function parseDelivery(value: unknown): MobileDelivery {
   return {
     id: v.id.toLowerCase(), status: v.status as MobileDelivery["status"], revision: v.revision, publishedVersion: v.publishedVersion, caseNumber: v.caseNumber,
     expiresAt: v.expiresAt, createdAt: v.createdAt, openedAt: v.openedAt as string | null, eta: v.eta as string | null, createdBy: v.createdBy as string | null,
-    card: v.card === null ? null : parseSnapshot(v.card), events, replacementPosition: position,
+    card: v.card === null ? null : parseSnapshot(v.card), events, replacementPosition: position, tracking: v.tracking,
   };
 }
 
@@ -91,10 +91,11 @@ export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<
       if (delivery.id !== deliveryId.toLowerCase() || body.commandId !== input.commandId || !integer(body.committedRevision)) throw invalid();
       return delivery;
     },
-    position: async (deliveryId: string, input: MobileDeliveryPositionInput): Promise<boolean> => {
+    /** Whether it was kept, and whether the delivery still takes this pristavovač's position. */
+    position: async (deliveryId: string, input: MobileDeliveryPositionInput): Promise<{ stored: boolean; active: boolean }> => {
       const body = await request("deliveries/" + deliveryId + "/position", { method: "POST", body: input, timeout: 10_000 });
-      if (typeof body.stored !== "boolean") throw invalid();
-      return body.stored;
+      if (typeof body.stored !== "boolean" || typeof body.active !== "boolean") throw invalid();
+      return { stored: body.stored, active: body.active };
     },
   };
 }

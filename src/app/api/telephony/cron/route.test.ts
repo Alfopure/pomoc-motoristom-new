@@ -177,6 +177,14 @@ describe("GET /api/telephony/cron", () => {
     consoleError.mockRestore();
   });
 
+  it("runs no phone job at all on a working-branch Preview", async () => {
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("MOBILE_PUSH_ENABLED", "true");
+    const body = await (await GET(cronRequest(SECRET))).json();
+    expect(body.jobs.find((job: {job: string}) => job.job === "notifications.mobile-push")).toMatchObject({ status: "disabled", detail: { reason: "push_disabled" } });
+    expect(runMobileCallbackPush).not.toHaveBeenCalled();
+  });
+
   it("alerts phones about overdue callbacks only where push is switched on, as an auxiliary job", async () => {
     vi.stubEnv("MOBILE_PUSH_ENABLED", "true");
     runMobileCallbackPush.mockResolvedValueOnce({ status: "ok", detail: { overdue: 2, sent: 3, failed: 0 } });

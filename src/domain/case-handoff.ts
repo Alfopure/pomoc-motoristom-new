@@ -1,7 +1,7 @@
 export const handoffStates = ["offered", "accepted", "en_route", "arrived", "completed", "rejected", "cancelled", "expired"] as const;
 export type HandoffState = typeof handoffStates[number];
 export const handoffLabels: Record<HandoffState, string> = { offered: "Čaká na prijatie", accepted: "Prijaté", en_route: "Na ceste", arrived: "Na mieste", completed: "Dokončené", rejected: "Odmietnuté", cancelled: "Zrušené", expired: "Platnosť skončila" };
-export const handoffEventLabels: Record<string, string> = { issue: "Odovzdanie vytvorené", publish: "Údaje aktualizované", renew: "Odkaz obnovený", extend: "Platnosť predĺžená", recover: "Odkaz opätovne získaný", accept: "Prijaté", reject: "Odmietnuté", en_route: "Na ceste", arrived: "Na mieste", complete: "Dokončené", update: "Aktualizácia", blocked: "Problém pri realizácii", revoke: "Zrušené", app: "Odoslané do aplikácie" };
+export const handoffEventLabels: Record<string, string> = { issue: "Odovzdanie vytvorené", publish: "Údaje aktualizované", renew: "Odkaz obnovený", extend: "Platnosť predĺžená", recover: "Odkaz opätovne získaný", accept: "Prijaté", reject: "Odmietnuté", en_route: "Na ceste", arrived: "Na mieste", complete: "Dokončené", update: "Aktualizácia", blocked: "Problém pri realizácii", revoke: "Zrušené" };
 export type HandoffPlace = { address: string; lat: number | null; lng: number | null };
 export type HandoffPublished = {
   caseNumber: string; action: string;

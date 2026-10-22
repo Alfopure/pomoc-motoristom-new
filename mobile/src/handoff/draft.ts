@@ -123,15 +123,18 @@ export class HandoffDraft {
     this.set({ loading: false });
     this.expire();
   }
-  async refresh() {
-    if (this.disposed)
+  /** `quiet`: a background re-read (e.g. where the pristavovač is). It waits for any
+   * running read or action, shows no loading and leaves errors as they are. */
+  async refresh(quiet = false) {
+    if (this.disposed || quiet && (this.readAbort || this.sending || this.state.loading || this.state.delivering || this.state.recovering))
       return;
     this.readAbort?.abort();
     const controller = new AbortController();
     this.readAbort = controller;
     const read = ++this.read;
     const wasConflict = this.state.status === 'conflict';
-    this.set({ loading: true });
+    if (!quiet)
+      this.set({ loading: true });
     try {
       const context = await this.api.context(this.caseId, controller.signal);
       if (this.disposed || read !== this.read)
@@ -140,11 +143,11 @@ export class HandoffDraft {
       const cached = this.state.link, grant = context.handoffs.find(h => h.id === cached?.handoffId);
       const link = cached && grant && active(grant) && grant.revision === cached.currentRevision && Date.parse(cached.expiresAt) > Date.now() ? cached : null;
       this.set({
-        now: Date.now(), context, link, error: null, canRebase: wasConflict && this.state.status === 'conflict'
+        now: Date.now(), context, link, ...(quiet ? {} : { error: null }), canRebase: wasConflict && this.state.status === 'conflict'
       });
     }
     catch (error) {
-      if (this.disposed || read !== this.read || controller.signal.aborted)
+      if (this.disposed || read !== this.read || controller.signal.aborted || quiet)
         return;
       if (error instanceof MobileApiError && [401, 403, 409].includes(error.status)) {
         this.epoch++;
@@ -155,7 +158,8 @@ export class HandoffDraft {
     finally {
       if (read === this.read) {
         this.readAbort = null;
-        this.set({ loading: false });
+        if (!quiet)
+          this.set({ loading: false });
       }
     }
   }

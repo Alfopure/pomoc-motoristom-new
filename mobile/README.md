@@ -88,7 +88,8 @@ prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
   detail s popisom hore a mapou dole (react-native-maps, Apple Maps bez kľúča),
   kroky Prijať → Vyrážam → Som na mieste → Auto odovzdané, čas príchodu,
   Odmietnuť/Problém, Zavolať a navigáciu. Polohu (expo-location v popredí,
-  najviac raz za 20 s) posiela iba po prijatí, kým je pristavenie otvorené.
+  najviac raz za 20 s) posiela od vlastného kroku v aplikácii (`tracking`),
+  kým je pristavenie otvorené; server po skončení odpovie `active: false`.
   Routy `/api/mobile/v1/field/{me,deliveries,deliveries/[id],…/commands,…/position}`
   fungujú, iba keď má projekt `MOBILE_DELIVERY_ENABLED=true` a databáza migráciu
   `20261022100000_mobile_delivery_handoffs.sql`; inak 503 `delivery_unavailable`.

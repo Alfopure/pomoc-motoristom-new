@@ -445,6 +445,8 @@ export type MobileDelivery = {
   events: HandoffEvent[];
   /** GPS of the assigned replacement car while the delivery is open. */
   replacementPosition: { lat: number; lng: number; recordedAt: string } | null;
+  /** This pristavovač shares their position: from their own first step in the app until it closes. */
+  tracking: boolean;
 };
 export type MobileDeliveries = MobileFieldScope & { deliveries: MobileDelivery[] };
 export type MobileDeliveryDetail = MobileFieldScope & { delivery: MobileDelivery };
@@ -454,7 +456,8 @@ export type MobileDeliveryCommand = {
 };
 export type MobileDeliveryReceipt = MobileFieldScope & { delivery: MobileDelivery; commandId: string; committedRevision: number };
 export type MobileDeliveryPositionInput = { lat: number; lng: number; accuracy: number | null; recordedAt: string };
-export type MobileDeliveryPositionReceipt = MobileFieldScope & { stored: boolean };
+/** `active` false: the delivery no longer takes this pristavovač's position, so the phone stops. */
+export type MobileDeliveryPositionReceipt = MobileFieldScope & { stored: boolean; active: boolean };
 /** Current-link retrieval has no immutable mutation receipt in the existing RPC. */
 export type MobileHandoffRecovered = MobileScope & {
   kind: "link";

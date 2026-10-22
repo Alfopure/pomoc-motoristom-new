@@ -5,7 +5,8 @@ import type { Database } from "@/lib/supabase/database.types";
 import { callbackDeadline, CALLBACK_OVERDUE_MINUTES } from "@/lib/telephony/callback-queue";
 import { isUuid } from "@/lib/telephony/uuid";
 import { claimedEvents, claimPushes, deliverPushNotices, mobilePushEnabled, pruneMobilePush, pushRecipients, queueMobilePush, releaseClaims, sendMobilePush, type PushClaim, type PushDevice, type PushNotice, type PushTransport } from "./push";
-import { missingSchema, mobileDeliveryEnabled } from "./field-auth";
+import { canOperateTelephony } from "@/lib/app-environment";
+import { missingSchema } from "./field-auth";
 
 /** The events that reach a dispatcher's phone. Each text names at most a case
  * number and a time; titles of tasks, names and phone numbers stay in the app. */
@@ -161,12 +162,13 @@ export async function runMobileCallbackPush(admin: Admin, organizationId: string
 }
 
 /** Cron step, once an hour: forgets silent phones, old announcements and delivery
- * positions older than 30 days. */
+ * positions older than 30 days. Positions go even while deliveries are switched
+ * off, as the privacy policy promises; a database without them is fine. */
 export async function runMobilePushUpkeep(admin: Admin, organizationId: string, now = new Date()) {
   if (now.getUTCMinutes() >= 5) return null;
   const pushed = mobilePushEnabled() ? await pruneMobilePush(admin, organizationId, now) : null;
   let positions = 0;
-  if (mobileDeliveryEnabled()) {
+  if (canOperateTelephony()) {
     const pruned = await admin.rpc("motorist_handoff_positions_prune");
     if (pruned.error && !missingSchema(pruned.error.code)) throw new Error("position upkeep unavailable");
     positions = typeof pruned.data === "number" ? pruned.data : 0;

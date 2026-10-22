@@ -56,10 +56,10 @@ describe("pristavovač API", () => {
     await expect(api.command(ID, input)).rejects.toMatchObject({ status: 502 });
   });
 
-  it("sends a position and reads whether it was kept", async () => {
+  it("sends a position and reads whether it was kept and should go on", async () => {
     const position = { lat: 49.2, lng: 18.7, accuracy: 15, recordedAt: "2026-10-22T10:00:00Z" };
-    const { api, transport } = client({ body: { ...scope, stored: true } }, { body: { ...scope, stored: "yes" } });
-    expect(await api.position(ID, position)).toBe(true);
+    const { api, transport } = client({ body: { ...scope, stored: true, active: true } }, { body: { ...scope, stored: true } });
+    expect(await api.position(ID, position)).toEqual({ stored: true, active: true });
     expect(JSON.parse(call(transport)[1].body as string)).toEqual(position);
     await expect(api.position(ID, position)).rejects.toMatchObject({ status: 502 });
   });
@@ -82,7 +82,7 @@ describe("delivery trust boundary", () => {
   });
   it.each([
     { status: "lost" }, { revision: 0 }, { expiresAt: "soon" }, { events: "none" }, { replacementPosition: { lat: 91, lng: 0, recordedAt: "2026-10-22T10:00:00Z" } },
-    { card: { ...delivery().card, secret: true } }, { events: [{ id: "x", action: "accept", comment: "", actor: "", createdAt: "2026-10-22T10:00:00Z" }] },
+    { card: { ...delivery().card, secret: true } }, { events: [{ id: "x", action: "accept", comment: "", actor: "", createdAt: "2026-10-22T10:00:00Z" }] }, { tracking: "yes" }, { tracking: undefined },
   ])("rejects a malformed delivery %#", change => {
     expect(() => parseDelivery({ ...delivery(), ...change })).toThrow(MobileApiError);
   });

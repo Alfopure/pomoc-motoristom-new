@@ -14,9 +14,10 @@ const OPEN = ["offered", "accepted", "en_route", "arrived"];
 export function isOpen(delivery: Pick<MobileDelivery, "status" | "expiresAt">, now = Date.now()): boolean {
   return OPEN.includes(delivery.status) && Date.parse(delivery.expiresAt) > now;
 }
-/** The pristavovač's position goes to the dispatcher only between accepting and finishing. */
-export function sharesPosition(delivery: Pick<MobileDelivery, "status" | "expiresAt">, now = Date.now()): boolean {
-  return isOpen(delivery, now) && delivery.status !== "offered";
+/** The pristavovač's position goes to the dispatcher from their own first step in the
+ * app (the server says so in `tracking`) until the delivery closes. */
+export function sharesPosition(delivery: Pick<MobileDelivery, "status" | "expiresAt" | "tracking">, now = Date.now()): boolean {
+  return isOpen(delivery, now) && delivery.status !== "offered" && delivery.tracking;
 }
 
 export type DeliveryStep = { action: MobileDeliveryAction; label: string; confirm: string | null };

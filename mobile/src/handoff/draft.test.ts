@@ -377,3 +377,43 @@ describe('handoff to a pristavovač in the app', () => {
     expect(draft.snapshot().status).toBe('editing');
   });
 });
+
+describe('quiet re-reading of the handoff screen', () => {
+  it('updates the handoffs without a loading state and keeps a shown error', async () => {
+    const members = { members: [{ id: '77777777-7777-4777-8777-777777777777', displayName: 'MOCK', lastPhone: null }] };
+    const { api, draft } = setup({ ...withGrant(), delivery: members });
+    await draft.refresh();
+    api.command.mockRejectedValueOnce(new MobileApiError('Pristavovač už nie je dostupný.', 409));
+    await draft.deliver(grantId, '77777777-7777-4777-8777-777777777777');
+    expect(draft.snapshot().error).toBe('Pristavovač už nie je dostupný.');
+    const accepted = { ...withGrant(), delivery: members };
+    accepted.handoffs[0] = { ...accepted.handoffs[0], status: 'accepted' };
+    api.context.mockResolvedValueOnce(accepted);
+    const states: boolean[] = [];
+    draft.subscribe(() => states.push(draft.snapshot().loading));
+    await draft.refresh(true);
+    expect(draft.snapshot().context?.handoffs[0].status).toBe('accepted');
+    expect(draft.snapshot().error).toBe('Pristavovač už nie je dostupný.');
+    expect(states).not.toContain(true);
+  });
+  it('keeps what it showed when a quiet read fails', async () => {
+    const { api, draft } = setup(withGrant());
+    await draft.refresh();
+    api.context.mockRejectedValueOnce(new MobileApiError('offline', 0));
+    await draft.refresh(true);
+    expect(draft.snapshot()).toMatchObject({ error: null, loading: false });
+    expect(draft.snapshot().context?.handoffs).toHaveLength(1);
+  });
+  it('waits while a read or a send to the app runs', async () => {
+    const { api, draft } = setup({ ...withGrant(), delivery: { members: [{ id: '77777777-7777-4777-8777-777777777777', displayName: 'MOCK', lastPhone: null }] } });
+    await draft.refresh();
+    const answer = deferred<Awaited<ReturnType<HandoffApi['command']>>>();
+    api.command.mockImplementationOnce(() => answer.promise);
+    const sending = draft.deliver(grantId, '77777777-7777-4777-8777-777777777777');
+    await draft.refresh(true);
+    expect(api.context).toHaveBeenCalledTimes(1);
+    answer.resolve({ ...receipt(), kind: 'delivery', memberId: '77777777-7777-4777-8777-777777777777', sent: true } as unknown as Awaited<ReturnType<HandoffApi['command']>>);
+    await sending;
+    expect(draft.snapshot().delivered).toEqual({ handoffId: grantId, memberId: '77777777-7777-4777-8777-777777777777' });
+  });
+});

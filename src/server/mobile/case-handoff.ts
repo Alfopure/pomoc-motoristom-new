@@ -1,6 +1,6 @@
 import "server-only";
 import { handoffEventLabels, handoffStates, type HandoffPublished } from "@/domain/case-handoff";
-import { MOBILE_HANDOFF_MAX_EVENTS, MOBILE_HANDOFF_MAX_GRANTS, type MobileCaseHandoffs, type MobileDeliveryMember, type MobileDeliveryPosition, type MobileHandoffDelivered, type MobileHandoffGrant, type MobileHandoffInput, type MobileHandoffLink, type MobileHandoffMutation, type MobileHandoffRecovered, type MobileScope } from "@/lib/mobile-api";
+import { MOBILE_HANDOFF_MAX_EVENTS, MOBILE_HANDOFF_MAX_GRANTS, type MobileCaseHandoffs, type MobileDeliveryMember, type MobileHandoffApp, type MobileHandoffDelivered, type MobileHandoffGrant, type MobileHandoffInput, type MobileHandoffLink, type MobileHandoffMutation, type MobileHandoffRecovered, type MobileScope } from "@/lib/mobile-api";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { isHistoryTimestamp } from "@/lib/telephony/call-history-query";
 import { isUuid } from "@/lib/telephony/uuid";
@@ -95,8 +95,7 @@ function snapshot(value: unknown): HandoffPublished {
   // Every returned field is validated; never shorten a preview then publish unseen text.
   return item as unknown as HandoffPublished;
 }
-/** History for the phone. "Sent to the app" travels as an update with its text, so an
- * app that predates deliveries still reads the history. */
+/** History for the phone; sending to the app is recorded as an ordinary update. */
 export function parseHandoffEvents(value: unknown): MobileHandoffGrant["events"] {
   if (!Array.isArray(value)) schema();
   if (value.length > MOBILE_HANDOFF_MAX_EVENTS) oversized();
@@ -109,12 +108,11 @@ export function parseHandoffEvents(value: unknown): MobileHandoffGrant["events"]
     text(event.comment, 1000);
     text(event.actor, 320);
     timestamp(event.createdAt);
-    const parsed = event as MobileHandoffGrant["events"][number];
-    return parsed.action === "app" ? { ...parsed, action: "update", comment: ("Odoslané do aplikácie: " + parsed.comment).slice(0, 1000) } : parsed;
+    return event as MobileHandoffGrant["events"][number];
   });
 }
 function grant(value: unknown): MobileHandoffGrant {
-  const item = record(value, ["id", "status", "revision", "publishedVersion", "recipientName", "recipientPhone", "expiresAt", "createdAt", "openedAt", "eta", "createdBy", "publishedAt", "canRenew", "recoverable", "tokenGeneration", "published", "events", "recipientMemberId"]);
+  const item = record(value, ["id", "status", "revision", "publishedVersion", "recipientName", "recipientPhone", "expiresAt", "createdAt", "openedAt", "eta", "createdBy", "publishedAt", "canRenew", "recoverable", "tokenGeneration", "published", "events"]);
   if (typeof item.id !== "string" || !isUuid(item.id)) schema();
   choice(item.status, handoffStates);
   integer(item.revision);
@@ -129,14 +127,12 @@ function grant(value: unknown): MobileHandoffGrant {
   if (item.publishedAt !== undefined) timestamp(item.publishedAt, true);
   if (typeof item.canRenew !== "boolean" || (item.recoverable !== undefined && typeof item.recoverable !== "boolean")) schema();
   if (item.tokenGeneration !== undefined) integer(item.tokenGeneration);
-  if (item.recipientMemberId != null && (typeof item.recipientMemberId !== "string" || !isUuid(item.recipientMemberId))) schema();
   const events = parseHandoffEvents(item.events);
   return { id: item.id, status: item.status as MobileHandoffGrant["status"], revision: item.revision, publishedVersion: item.publishedVersion,
     recipientName: item.recipientName, recipientPhone: item.recipientPhone, expiresAt: item.expiresAt as string, createdAt: item.createdAt as string,
     openedAt: item.openedAt as string | null, eta: item.eta as string | null, createdBy: item.createdBy as string | null | undefined ?? null,
     publishedAt: item.publishedAt as string | null | undefined ?? null, canRenew: item.canRenew, recoverable: item.recoverable === true,
-    published: item.published === null ? null : snapshot(item.published), events,
-    app: typeof item.recipientMemberId === "string" ? { memberId: item.recipientMemberId.toLowerCase(), lastPosition: null } : null };
+    published: item.published === null ? null : snapshot(item.published), events, app: null };
 }
 export async function getMobileCaseHandoffs(session: HandoffSession, caseId: string): Promise<Omit<MobileCaseHandoffs, keyof MobileScope>> {
   const data = record(await getCaseHandoffContext(caseId, session), ["preview", "previewVersion", "handoffs", "enhanced"]);
@@ -145,36 +141,41 @@ export async function getMobileCaseHandoffs(session: HandoffSession, caseId: str
   const handoffs = data.handoffs.map(grant);
   if (new Set(handoffs.map(item => item.id)).size !== handoffs.length) schema();
   const delivery = await deliveryContext(session, caseId);
-  if (delivery) for (const item of handoffs) if (item.app) item.app = { ...item.app, lastPosition: delivery.positions.get(item.id) ?? null };
+  if (delivery) for (const item of handoffs) item.app = delivery.app.get(item.id) ?? null;
   return { caseId, previewVersion: data.previewVersion, preview: snapshot(data.preview), handoffs, enhanced: data.enhanced,
     ...(delivery ? { delivery: { members: delivery.members } } : {}) };
 }
-/** Who can receive in the app and where they are. Optional: a database without
- * deliveries, or a failed read, simply leaves the screen as it was. */
-async function deliveryContext(session: HandoffSession, caseId: string): Promise<{ members: MobileDeliveryMember[]; positions: Map<string, MobileDeliveryPosition> } | null> {
+/** Who can receive in the app, which handoffs are in someone's app and where that
+ * pristavovač is. Optional: a database without deliveries, or a failed read, simply
+ * leaves the screen as it was. */
+async function deliveryContext(session: HandoffSession, caseId: string): Promise<{ members: MobileDeliveryMember[]; app: Map<string, MobileHandoffApp> } | null> {
   if (!mobileDeliveryEnabled()) return null;
   const scope = { p_organization_id: session.actor.organizationId, p_actor_id: session.actor.profileId, p_case_id: caseId, p_input: {} };
   try {
-    const [members, positions] = await Promise.all([
+    const [members, assigned] = await Promise.all([
       session.client.rpc("motorist_case_handoff_app", { ...scope, p_action: "members" }),
-      session.client.rpc("motorist_case_handoff_app", { ...scope, p_action: "positions" }),
+      session.client.rpc("motorist_case_handoff_app", { ...scope, p_action: "app" }),
     ]);
-    if (members.error || positions.error) return null;
-    const list = (members.data as { members?: unknown } | null)?.members, points = (positions.data as { positions?: unknown } | null)?.positions;
-    if (!Array.isArray(list) || !Array.isArray(points) || list.length > 200) return null;
+    if (members.error || assigned.error) return null;
+    const list = (members.data as { members?: unknown } | null)?.members, entries = (assigned.data as { handoffs?: unknown } | null)?.handoffs;
+    if (!Array.isArray(list) || !Array.isArray(entries) || list.length > 200) return null;
     const parsed: MobileDeliveryMember[] = list.flatMap(item => {
       const member = item as Record<string, unknown>;
       return typeof member.id === "string" && isUuid(member.id) && typeof member.displayName === "string" && member.displayName.length <= 160
         && (member.lastPhone === null || typeof member.lastPhone === "string" && member.lastPhone.length <= 30)
         ? [{ id: member.id.toLowerCase(), displayName: member.displayName, lastPhone: member.lastPhone as string | null }] : [];
     });
-    const located = new Map<string, MobileDeliveryPosition>();
-    for (const item of points) {
-      const point = item as Record<string, unknown>;
-      if (typeof point.handoffId !== "string" || typeof point.lat !== "number" || typeof point.lng !== "number" || typeof point.recordedAt !== "string" || !isHistoryTimestamp(point.recordedAt)) continue;
-      located.set(point.handoffId, { lat: point.lat, lng: point.lng, accuracy: typeof point.accuracy === "number" ? point.accuracy : null, recordedAt: point.recordedAt });
+    const app = new Map<string, MobileHandoffApp>();
+    for (const item of entries) {
+      const entry = item as Record<string, unknown>, point = entry.position as Record<string, unknown> | null | undefined;
+      if (typeof entry.handoffId !== "string" || !isUuid(entry.handoffId) || typeof entry.memberId !== "string" || !isUuid(entry.memberId)) continue;
+      const located = point && typeof point.lat === "number" && Number.isFinite(point.lat) && Math.abs(point.lat) <= 90 && typeof point.lng === "number" && Number.isFinite(point.lng)
+        && Math.abs(point.lng) <= 180 && typeof point.recordedAt === "string" && isHistoryTimestamp(point.recordedAt)
+        ? { lat: point.lat, lng: point.lng, accuracy: typeof point.accuracy === "number" && Number.isFinite(point.accuracy) && point.accuracy >= 0 ? point.accuracy : null, recordedAt: point.recordedAt }
+        : null;
+      app.set(entry.handoffId.toLowerCase(), { memberId: entry.memberId.toLowerCase(), lastPosition: located });
     }
-    return { members: parsed, positions: located };
+    return { members: parsed, app };
   } catch { return null; }
 }
 function deliveryError(error: { code?: string }): MutationError {
@@ -186,9 +187,9 @@ function deliveryError(error: { code?: string }): MutationError {
   return new MutationError("Odoslanie do aplikácie sa nepodarilo overiť. Skúste znova.", 503, "delivery_unconfirmed");
 }
 /** Sends a confirmed handoff to a pristavovač in the app; the first time also to their phone. */
-async function sendToApp(session: HandoffSession, caseId: string, handoffId: string, memberId: string, commandId: string): Promise<{ currentRevision: number }> {
+async function sendToApp(session: HandoffSession, caseId: string, handoffId: string, memberId: string, commandId: string, expectedRevision: number): Promise<{ currentRevision: number }> {
   const { data, error } = await session.client.rpc("motorist_case_handoff_app", { p_organization_id: session.actor.organizationId, p_actor_id: session.actor.profileId,
-    p_case_id: caseId, p_action: "assign", p_input: { handoffId, memberId, commandId } });
+    p_case_id: caseId, p_action: "assign", p_input: { handoffId, memberId, commandId, expectedRevision } });
   if (error) throw deliveryError(error);
   const result = data as { assigned?: unknown; memberId?: unknown; handoff?: { id?: unknown; revision?: unknown; published?: unknown } } | null;
   if (typeof result?.memberId !== "string" || result.memberId.toLowerCase() !== memberId || result.handoff?.id !== handoffId
@@ -242,7 +243,7 @@ export async function commandMobileCaseHandoff(session: HandoffSession, request:
   const memberId = "recipientMemberId" in command ? command.recipientMemberId : undefined;
   if (memberId && !mobileDeliveryEnabled()) throw deliveryUnavailable();
   if (command.action === "deliver") {
-    const sent = await sendToApp(session, caseId, command.handoffId, command.recipientMemberId, command.commandId);
+    const sent = await sendToApp(session, caseId, command.handoffId, command.recipientMemberId, command.commandId, command.expectedRevision);
     return { kind: "delivery", caseId, handoffId: command.handoffId, commandId: command.commandId, memberId: command.recipientMemberId, sent: true, currentRevision: sent.currentRevision };
   }
   try {
@@ -270,7 +271,7 @@ export async function commandMobileCaseHandoff(session: HandoffSession, request:
     // The handoff exists either way; a failed send to the app is reported, the link still works.
     let delivery: MobileHandoffMutation["delivery"];
     if (command.action === "issue" && memberId) {
-      try { await sendToApp(session, caseId, receipt.handoff.id, memberId, command.commandId); delivery = { status: "sent", memberId }; }
+      try { await sendToApp(session, caseId, receipt.handoff.id, memberId, command.commandId, expectedCommit); delivery = { status: "sent", memberId }; }
       catch { delivery = { status: "failed", memberId }; }
     }
     return { kind: "mutation", caseId, handoffId: receipt.handoff.id, commandId: command.commandId, action: command.action,

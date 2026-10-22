@@ -84,6 +84,19 @@ describe("pristavovač location", () => {
     expect(device.source.watch).toHaveBeenCalledOnce();
   });
 
+  it("stops when the server says the delivery no longer takes the position", async () => {
+    const device = phone(), send = vi.fn(async () => false), tracker = new DeliveryTracker(device.source, send);
+    await tracker.follow(A);
+    device.emit();
+    await flush();
+    expect(send).toHaveBeenCalledOnce();
+    expect(device.remove).toHaveBeenCalledOnce();
+    expect(tracker.snapshot().status).toBe("off");
+    device.emit();
+    await flush();
+    expect(send).toHaveBeenCalledOnce();
+  });
+
   it("drops a watch that started after the delivery ended", async () => {
     const device = phone(), tracker = new DeliveryTracker(device.source, vi.fn());
     const starting = tracker.follow(A);

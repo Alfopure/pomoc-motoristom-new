@@ -10,7 +10,8 @@ export type LocationSource = {
 export type TrackerState = { status: "off" | "sharing" | "denied" | "error"; lastSentAt: number | null };
 
 /** Sends where the pristavovač is to the dispatcher during one accepted delivery,
- * at most every 20 seconds; the server keeps only what arrives during the delivery. */
+ * at most every 20 seconds; the server keeps only what arrives during the delivery
+ * and says when to stop (a closed or cancelled delivery). */
 export class DeliveryTracker {
   private state: TrackerState = { status: "off", lastSentAt: null };
   private listeners = new Set<() => void>();
@@ -19,7 +20,7 @@ export class DeliveryTracker {
   private starting: Promise<void> | null = null;
   private sending = false;
   private disposed = false;
-  constructor(private source: LocationSource, private send: (deliveryId: string, position: MobileDeliveryPositionInput) => Promise<unknown>,
+  constructor(private source: LocationSource, private send: (deliveryId: string, position: MobileDeliveryPositionInput) => Promise<boolean>,
     private clock: () => number = Date.now, private minInterval = 20_000) {}
   snapshot = () => this.state;
   subscribe = (notify: () => void) => { this.listeners.add(notify); return () => { this.listeners.delete(notify); }; };
@@ -55,8 +56,9 @@ export class DeliveryTracker {
     if (!target || this.sending || this.state.lastSentAt !== null && now - this.state.lastSentAt < this.minInterval) return;
     this.sending = true;
     try {
-      await this.send(target, position);
+      const active = await this.send(target, position);
       this.update({ lastSentAt: now });
+      if (!active && this.target === target) this.stop();
     } catch { /* The next reading tries again; a lost one is not repeated. */ } finally { this.sending = false; }
   }
   stop() {

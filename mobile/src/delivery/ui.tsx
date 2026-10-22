@@ -53,9 +53,13 @@ export function FieldWorkspace(props: Props) {
   const memberId = me.data?.memberId ?? null;
   const list = useQuery({ queryKey: [...key, "deliveries"], enabled: Boolean(memberId), queryFn: ({ signal }) => api.list(signal), refetchInterval: active ? 30_000 : false });
   const [view, setView] = useState<Screen>({ kind: "list" });
-  const tracker = useMemo(() => new DeliveryTracker(phoneLocation, (id, position) => api.position(id, position)), [api]);
+  const tracker = useMemo(() => new DeliveryTracker(phoneLocation, async (id, position) => {
+    try { return (await api.position(id, position)).active; }
+    // A delivery that is gone, or an account without access any more: stop sharing.
+    catch (error) { if (error instanceof MobileApiError && [403, 404].includes(error.status)) return false; throw error; }
+  }), [api]);
   useEffect(() => () => tracker.dispose(), [tracker]);
-  // Position goes to the dispatcher for the accepted delivery while the app is open.
+  // Position goes to the dispatcher for the delivery this pristavovač took, while the app is open.
   const sharing = (list.data ?? []).find(delivery => sharesPosition(delivery)) ?? null;
   useEffect(() => { void tracker.follow(active && sharing ? sharing.id : null); }, [tracker, active, sharing]);
   useEffect(() => { if (active && memberId) void push.resume(); }, [active, memberId, push]);
@@ -124,8 +128,9 @@ function DeliveryRow({ delivery, first, onOpen }: { delivery: MobileDelivery; fi
     {!first && <View style={s.separator} />}
     <View style={s.icon}><Car size={20} strokeWidth={2.2} color={palette.blueText} accessible={false} /></View>
     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-      <View style={s.rowHead}><Text numberOfLines={2} style={s.rowTitle}>{deliveryTitle(delivery)}</Text><Tag text={deliveryStatusLabels[delivery.status]} tone={deliveryStatusTones[delivery.status]} /></View>
-      <Text numberOfLines={1} style={s.rowDetail}>{"Prípad " + delivery.caseNumber + (delivery.card?.scheduledAt ? " · " + timeLabel(delivery.card.scheduledAt) : "")}</Text>
+      <Text numberOfLines={2} style={s.rowTitle}>{deliveryTitle(delivery)}</Text>
+      <View style={s.rowHead}><Tag text={deliveryStatusLabels[delivery.status]} tone={deliveryStatusTones[delivery.status]} />
+        <Text numberOfLines={1} style={[s.rowDetail, { flexShrink: 1 }]}>{"Prípad " + delivery.caseNumber + (delivery.card?.scheduledAt ? " · " + timeLabel(delivery.card.scheduledAt) : "")}</Text></View>
       {place ? <Text numberOfLines={2} style={s.rowDetail}>{"Pristavenie: " + place}</Text> : null}
     </View>
     <Text style={s.chevron}>›</Text>
@@ -149,8 +154,8 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
       queryClient.setQueryData(detailKey, next);
       setReason(null);
       onChanged();
-      // Location is asked right after accepting, when its purpose is clear.
-      if (action === "accept") void tracker.follow(next.id, true);
+      // Location is asked right after their own step, when its purpose is clear.
+      if (next.tracking && (action === "accept" || action === "en_route" || action === "arrived")) void tracker.follow(next.id, true);
     } catch (failure) {
       setError(failure instanceof MobileApiError ? failure.message : "Krok sa nepodarilo potvrdiť. Skúste znova.");
       if (failure instanceof MobileApiError && failure.status === 409) void query.refetch();
@@ -180,7 +185,7 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
       {open && card && <ActionBar actions={[
         { icon: Phone, label: "Zavolať", accessibilityLabel: "Zavolať klientovi", disabled: !dialable(phone), onPress: () => { if (phone) void Linking.openURL("tel:" + phone.replace(/[^\d+]/g, "")).catch(() => setError("Hovor sa nepodarilo začať.")); } },
         { icon: Car, label: "K autu", accessibilityLabel: "Navigovať k náhradnému autu", disabled: !carTarget, onPress: () => navigate(carTarget) },
-        { icon: Navigation, label: "Pristavenie", accessibilityLabel: "Navigovať na miesto pristavenia", disabled: !place, onPress: () => navigate(place) },
+        { icon: Navigation, label: "Na miesto", accessibilityLabel: "Navigovať na miesto pristavenia", disabled: !place, onPress: () => navigate(place) },
         { icon: AlertTriangle, label: delivery.status === "offered" ? "Odmietnuť" : "Problém", accessibilityLabel: delivery.status === "offered" ? "Odmietnuť pristavenie" : "Nahlásiť problém",
           onPress: () => setReason({ action: delivery.status === "offered" ? "reject" : "blocked", text: "" }) },
       ]} />}
@@ -203,6 +208,13 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
           onPress={() => { void run("update", { eta: new Date(Date.now() + minutes * 60_000).toISOString() }); }} style={({ pressed }) => [s.chip, pressed && { opacity: 0.6 }]}>
           <Text style={s.chipText}>{"o " + minutes + " min"}</Text></Pressable>)}</View>
       </>}
+      {open && delivery.status !== "offered" && <Text style={s.note}>{!delivery.tracking ? "Poloha sa zatiaľ neposiela. Začne sa posielať, keď potvrdíte ďalší krok v aplikácii."
+        : location.status === "sharing" ? "Vaša poloha sa posiela dispečingu, kým je pristavenie otvorené a aplikácia zapnutá."
+          : location.status === "denied" ? "Poloha nie je povolená. Dispečer neuvidí, kde ste. Povoliť ju môžete v nastaveniach telefónu."
+            : "Poloha sa zatiaľ neposiela."}</Text>}
+      {open && delivery.tracking && (location.status === "off" || location.status === "error") && <View style={formLayout.actions}>
+        <Button label="Zdieľať polohu s dispečerom" secondary onPress={() => { void tracker.follow(delivery.id, true); }} /></View>}
+      {location.status === "denied" && open && delivery.tracking && <View style={formLayout.actions}><Button label="Otvoriť nastavenia telefónu" secondary onPress={() => { void Linking.openSettings().catch(() => undefined); }} /></View>}
       {card && <>
         <SectionHeader title="Čo treba urobiť" />
         <Group>
@@ -221,10 +233,6 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
           {card.assistance?.name ? <InfoRow label="Asistenčná služba" value={card.assistance.name} detail={card.assistance.reference || null} /> : null}
         </Group>
       </>}
-      {open && delivery.status !== "offered" && <Text style={s.note}>{location.status === "sharing" ? "Vaša poloha sa posiela dispečingu, kým je pristavenie otvorené a aplikácia zapnutá."
-        : location.status === "denied" ? "Poloha nie je povolená. Dispečer neuvidí, kde ste. Povoliť ju môžete v nastaveniach telefónu."
-          : "Poloha sa zatiaľ neposiela."}</Text>}
-      {location.status === "denied" && open && <View style={formLayout.actions}><Button label="Otvoriť nastavenia telefónu" secondary onPress={() => { void Linking.openSettings().catch(() => undefined); }} /></View>}
       {delivery.events.length > 0 && <>
         <SectionHeader title="História" />
         <Group>{delivery.events.map((event, index) => <InfoRow key={event.id} first={index === 0} label={timeLabel(event.createdAt) + " · " + event.actor}
@@ -274,7 +282,7 @@ const s = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: space.m, paddingHorizontal: space.m, paddingVertical: 10, minHeight: 64, backgroundColor: palette.card },
   separator: { position: "absolute", top: 0, left: 60, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
   icon: { width: 36, height: 36, borderRadius: 18, backgroundColor: palette.blueSoft, alignItems: "center", justifyContent: "center" },
-  rowHead: { flexDirection: "row", alignItems: "center", gap: space.s },
+  rowHead: { flexDirection: "row", alignItems: "center", gap: 6 },
   rowTitle: { ...type.rowTitle, color: palette.label, flexShrink: 1 },
   rowDetail: { ...type.subhead, color: palette.secondaryLabel },
   chevron: { fontSize: 20, color: palette.tertiaryLabel },
