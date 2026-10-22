@@ -34,7 +34,9 @@ describe("resolved location permissions: foreground, and background only for a p
     // Always only for the delivery the pristavovač accepted, with the reason in plain words.
     expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Počas pristavenia, ktoré ste prijali");
     expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Po skončení pristavenia prestane");
-    for (const key of ["NSLocationAlwaysUsageDescription", "NSMotionUsageDescription"]) expect(plist).not.toHaveProperty(key);
+    expect(plist).not.toHaveProperty("NSLocationAlwaysUsageDescription");
+    // Required by App Store Connect for the linked Core Motion code; the app never asks.
+    expect(plist?.NSMotionUsageDescription).toBe("Aplikácia údaje o pohybe telefónu nepoužíva a o prístup k nim nežiada.");
     expect([...plist?.UIBackgroundModes ?? []].sort()).toEqual(voice ? ["audio", "location", "voip"] : ["location"]);
     expect(plist?.LinkaNativeVoiceEnabled).toBe(voice ? true : undefined);
     const manifest = resolved._internal?.modResults?.android?.manifest as import("expo/config-plugins").AndroidConfig.Manifest.AndroidManifest;

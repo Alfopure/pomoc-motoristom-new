@@ -25,20 +25,28 @@ async function resolvedIos(variant: "test" | "production", voice: boolean) {
   return resolved.ios ?? {};
 }
 
+// App Store Connect rejects a binary whose linked code can reach these without a text
+// (ITMS-90683), even when the app never asks; the first TestFlight upload failed on motion.
+function purposeTexts(plist: Record<string, unknown> | undefined) {
+  for (const key of ["NSCameraUsageDescription", "NSPhotoLibraryUsageDescription", "NSMicrophoneUsageDescription", "NSMotionUsageDescription", "NSFaceIDUsageDescription",
+    "NSLocationWhenInUseUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription"]) expect(plist?.[key], key).toMatch(/^Aplikácia|^Počas/);
+}
+
 describe("the iOS app as App Store Connect receives it", () => {
-  it("TestFlight TEST build: calls, the delivery location and push, nothing unused", async () => {
+  it("TestFlight TEST build: calls, the delivery location and push, no unused background mode", async () => {
     const ios = await resolvedIos("test", true);
     expect(ios.bundleIdentifier).toBe("sk.linkapomoci.dispecing.test");
     expect([...ios.infoPlist?.UIBackgroundModes ?? []].sort()).toEqual(["audio", "location", "voip"]);
     // The TEST app's App Store provisioning profile carries production push.
     expect(ios.entitlements).toEqual({ "aps-environment": "production" });
     expect(ios.infoPlist).toMatchObject({ CFBundleDisplayName: "Dispatching TEST", ITSAppUsesNonExemptEncryption: false });
-    expect(ios.infoPlist).not.toHaveProperty("NSFaceIDUsageDescription");
+    purposeTexts(ios.infoPlist);
   }, 30_000);
 
   it.each(["test", "production"] as const)("%s build without calls keeps only the delivery location in the background", async variant => {
     const ios = await resolvedIos(variant, false);
     expect(ios.infoPlist?.UIBackgroundModes).toEqual(["location"]);
-    for (const key of ["NSFaceIDUsageDescription", "NSMicrophoneUsageDescription", "LinkaNativeVoiceEnabled"]) expect(ios.infoPlist).not.toHaveProperty(key);
+    expect(ios.infoPlist).not.toHaveProperty("LinkaNativeVoiceEnabled");
+    purposeTexts(ios.infoPlist);
   }, 30_000);
 });

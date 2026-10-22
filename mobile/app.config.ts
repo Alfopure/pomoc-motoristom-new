@@ -25,6 +25,10 @@ const accessed = [["UserDefaults", "CA92.1"], ["FileTimestamp", "C617.1"], ["Sys
   NSPrivacyAccessedAPIType: "NSPrivacyAccessedAPICategory" + kind, NSPrivacyAccessedAPITypeReasons: [reason],
 }));
 
+// The calling module is linked into every iOS build, so App Store Connect wants the
+// microphone text in each one (ITMS-90683); only the voice build asks for it.
+const microphoneUse = "Aplikácia potrebuje mikrofón na telefonovanie.";
+
 const config: ExpoConfig = {
   name: "Dispatching" + (variant === "production" ? "" : variant === "test" ? " TEST" : " DEV"),
   slug: "linka-pomoci-dispecing",
@@ -40,11 +44,8 @@ const config: ExpoConfig = {
     // Only HTTPS and standard WebRTC call encryption (DTLS-SRTP in the Telnyx library) are used.
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,
-      ...(voiceProof ? {
-        LinkaNativeVoiceEnabled: true,
-        UIBackgroundModes: ["audio", "voip"],
-        NSMicrophoneUsageDescription: "Aplikácia potrebuje mikrofón na telefonovanie.",
-      } : {}),
+      NSMicrophoneUsageDescription: microphoneUse,
+      ...(voiceProof ? { LinkaNativeVoiceEnabled: true, UIBackgroundModes: ["audio", "voip"] } : {}),
     },
     ...(voiceProof ? { entitlements: { "aps-environment": "production" } } : {}),
   },
@@ -52,20 +53,23 @@ const config: ExpoConfig = {
     "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.FOREGROUND_SERVICE_LOCATION", "android.permission.ACTIVITY_RECOGNITION", "com.google.android.gms.permission.ACTIVITY_RECOGNITION"] },
   // Work notices (tasks, cases, overdue callbacks) through the Expo push service; the
   // voice build keeps its own production APNs entitlement, which the plugin respects.
-  // No Face ID text: the app never asks for biometrics. Background fetch is unused.
-  plugins: [["expo-secure-store", { faceIDPermission: false }], "./plugins/with-no-background-fetch.cjs", ["expo-splash-screen", { image: "./assets/splash-icon.png", imageWidth: 180, resizeMode: "contain", backgroundColor: "#F2F2F7" }],
+  // The secure store links Face ID; App Store Connect may want its text although the app never
+  // asks for biometrics (ITMS-90683), so it says so. Background fetch is unused.
+  plugins: [["expo-secure-store", { faceIDPermission: "Aplikácia Face ID nepoužíva a o prístup k nemu nežiada." }], "./plugins/with-no-background-fetch.cjs", ["expo-splash-screen", { image: "./assets/splash-icon.png", imageWidth: 180, resizeMode: "contain", backgroundColor: "#F2F2F7" }],
     ["expo-notifications", { defaultChannel: "default" }],
     "./plugins/with-draft-secure-store.cjs", ...(voiceProof ? ["./plugins/with-telnyx-reconnect-guard.cjs"] : []), ["expo-image-picker", {
     photosPermission: "Aplikácia potrebuje prístup k vybranej fotografii na priloženie k prípadu.",
     cameraPermission: "Aplikácia potrebuje fotoaparát na odfotografovanie prílohy prípadu.",
-    microphonePermission: voiceProof ? "Aplikácia potrebuje mikrofón na telefonovanie." : false,
+    microphonePermission: microphoneUse,
   }], ["expo-location", {
     locationWhenInUsePermission: "Aplikácia použije polohu telefónu na váš pokyn pri výbere miesta zásahu a počas pristavenia, ktoré ste prijali, aby dispečer videl, kde ste.",
     locationAlwaysPermission: false,
     // A pristavovač's position goes on with the app in the background or closed, only while
     // their accepted delivery is open; iOS shows the blue location indicator meanwhile.
     locationAlwaysAndWhenInUsePermission: "Počas pristavenia, ktoré ste prijali, posiela aplikácia dispečingu vašu polohu aj na pozadí a pri zamknutom telefóne, aby dispečer videl, kde ste. Po skončení pristavenia prestane.",
-    motionUsagePermission: false,
+    // expo-location links Core Motion; App Store Connect requires this text although the app
+    // never asks for motion data (ITMS-90683 on the first TestFlight upload, 22. 10. 2026).
+    motionUsagePermission: "Aplikácia údaje o pohybe telefónu nepoužíva a o prístup k nim nežiada.",
     isIosBackgroundLocationEnabled: true,
     isAndroidBackgroundLocationEnabled: false,
     isAndroidForegroundServiceEnabled: false,

@@ -17,7 +17,8 @@ Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 | APNs kľúč pre bežné notifikácie cez Expo (`QHWZM8VN44`, production, iba téma TEST aplikácie) | nahratý v Expo |
 | VoIP Services certifikát `35S4MJY4Z3` (do 21. 11. 2027) a TEST Telnyx iOS push credential | pripojené na TEST credential connection |
 | Prepínače `MOTORIST_NATIVE_VOICE_TEST_ENABLED` a `MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED` | zapnuté iba v dedikovanom TEST projekte (cieľ Production) |
-| Prvý TestFlight build | 0.1.0 (17) z `dev` `03389c58` |
+| Prvý TestFlight build | 0.1.0 (17) z `dev` `03389c58` Apple odmietol (ITMS-90683: chýbal text pre pohyb) |
+| Ďalší build | z opravy textov povolení (pohyb, Face ID, mikrofón vo všetkých buildoch) |
 
 APNs kľúč, Telnyx push credential a prepínače sú mimo buildu; menia sa bez
 nového buildu. Fyzicky na iPhone zatiaľ nič overené nie je (pozri Akceptácia).
@@ -40,6 +41,14 @@ buildom pre TestFlight bolo 16). Free plán Expo má 15 iOS buildov mesačne,
 cd mobile
 npx eas-cli@24.12.1 build --platform ios --profile testflight --non-interactive --no-wait
 ```
+
+Pred nahratím skontrolovať texty povolení. App Store Connect odmietne binárku,
+ktorej pripojený kód siaha na citlivé rozhranie bez textu v Info.plist, aj keď ho
+aplikácia nikdy nevyžiada (ITMS-90683). `expo-location` obsahuje Core Motion,
+`expo-secure-store` Face ID a hlasový modul s WebRTC mikrofón. Test
+`mobile/src/lib/ios-store-config.test.ts` ich vyžaduje vo všetkých buildoch. Stav
+nahratia aj s chybami ukazuje App Store Connect API `GET /v1/apps/{id}/buildUploads`;
+odmietnutý build sa v zozname buildov neobjaví.
 
 ## Nahratie do TestFlightu
 

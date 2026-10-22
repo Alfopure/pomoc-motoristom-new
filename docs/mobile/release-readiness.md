@@ -115,8 +115,10 @@ schválení Apple je osobitne v [iPhone TEST postupe](iphone-voice-test.md).
   [postupu](iphone-voice-test.md#zapojenie-po-schválení-apple).
 - **Pozadie iba na určený účel** (2.5.4): `voip` a `audio` len pre hovory;
   každý PushKit push hlási hovor do CallKit (máme).
-- **Popisy oprávnení** v Info.plist: fotoaparát, fotky, poloha (máme),
-  mikrofón (zatiaľ iba v TEST voice variante).
+- **Popisy oprávnení** v Info.plist: fotoaparát, fotky, poloha, mikrofón
+  (vo všetkých buildoch, hlasový modul je pripojený vždy), pohyb a Face ID
+  (knižnice ich obsahujú, aplikácia o ne nežiada); bez nich App Store Connect
+  build odmietne (ITMS-90683).
 - **Privacy manifest** (dôvody pre UserDefaults, časy súborov, čas od štartu,
   voľné miesto): doplniť do `app.config.ts`; chýbajúce dôvody Apple vráti
   e-mailom po nahratí.
