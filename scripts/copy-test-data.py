@@ -29,7 +29,8 @@ HERE = Path(os.environ.get("TEST_COPY_WORKSPACE", REPOSITORY / ".context" / "iso
 SOURCE = "ifpaeegaesdmljfkdvcn"
 TEST_REF = "nzpnqdstvkfncflgqlny"
 SOURCE_ORG = "reqzkjhaquxbbhhalcmm"
-TEST_ORG = "rwhghkvusmdnaexjvrum"
+# Since 2026-10-18 TEST shares the Pro organization; the pinned refs keep the two projects apart.
+TEST_ORG = "reqzkjhaquxbbhhalcmm"
 FORBIDDEN = "sjcsrygkkmersoczpunh"
 PAGE_SIZE = 100
 INLINE_REQUEST_LIMIT = 4 * 1024 * 1024

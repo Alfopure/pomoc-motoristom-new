@@ -86,7 +86,7 @@ class CopySafetyTests(unittest.TestCase):
 
     def test_target_project_organization_must_match(self):
         with patch.object(copy_db, "api", return_value={
-            "id": copy_db.TEST_REF, "organization_id": copy_db.SOURCE_ORG, "status": "ACTIVE_HEALTHY"
+            "id": copy_db.TEST_REF, "organization_id": "rwhghkvusmdnaexjvrum", "status": "ACTIVE_HEALTHY"
         }):
             with self.assertRaises(copy_db.CopyError):
                 copy_db.assert_project(copy_db.TEST_REF, writing=True)
