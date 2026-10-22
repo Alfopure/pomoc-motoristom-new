@@ -1,7 +1,6 @@
-import { useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
-import { randomUUID } from "expo-crypto";
 import { AlertTriangle, Car, Navigation, Phone } from "lucide-react-native";
 import type { MobileDelivery, MobileDeliveryAction } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
@@ -17,10 +16,11 @@ import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import { Button, ErrorNotice, Loading, styles } from "../ui";
 import type { DeliveryApi } from "./api";
 import { DeliveryMap } from "./map";
-import { agoLabel, canUseDeliveryCache, deliveryPlace, deliveryPoints, deliveryStatusLabels, deliveryStatusTones, deliveryTitle, isOpen, nextStep, replacementCar, sortDeliveries, timeLabel, visibleDelivery } from "./model";
+import { agoLabel, canUseDeliveryCache, deliveryPlace, deliveryPoints, deliveryStatusLabels, deliveryStatusTones, deliveryTitle, isOpen, newestDelivery, nextStep, replacementCar, sortDeliveries, timeLabel, visibleDelivery } from "./model";
 import { useDeliveryTime } from "./use-delivery-time";
 import type { DeliverySession } from "./session";
 import type { LocationSharing, SharingState } from "./sharing";
+import type { DeliveryCommands, DeliveryCommandsView, PendingDeliveryCommand } from "./commands";
 
 /** Pristavenia inside the app: the list, and one delivery with what to do on top
  * and the map below. In a delivery the shell's top bar leads back to the list. */
@@ -35,11 +35,12 @@ export function DeliveryModule({ session, active, visible, openRequest }: {
   const back = () => setSelected(null);
   useShellBack(visible && selected !== null, "Pristavenia", back);
   useAndroidBack(active && visible && selected !== null, back);
-  if (!session.memberId) return <View style={styles.content}>{session.me.isPending ? <Loading label="Overujem prístup k pristaveniam…" />
-    : <ErrorNotice message={session.me.error instanceof MobileApiError ? session.me.error.message : "Pristavenia sa nepodarilo načítať."} onRetry={() => { void session.me.refetch(); }} />}</View>;
+  if (!session.memberId || !session.commands) return <View style={styles.content}>{session.me.isPending ? <Loading label="Overujem prístup k pristaveniam…" />
+    : <ErrorNotice message={session.error instanceof MobileApiError ? session.error.message : "Pristavenia sa nepodarilo načítať."} onRetry={session.refresh} />}</View>;
   return selected ? <DeliveryDetail key={selected} api={session.api} id={selected} active={active && visible} queryKey={session.key} tracker={session.location}
+    commands={session.commands}
     onChanged={() => { void queryClient.invalidateQueries({ queryKey: [...session.key, "deliveries"] }); }} />
-    : <DeliveryList query={session.list} active={active && visible} onOpen={setSelected} />;
+    : <DeliveryList query={session.list} commands={session.commands} active={active && visible} onOpen={setSelected} />;
 }
 
 /** What the pristavovač reads about their position, for the app they have. */
@@ -53,12 +54,19 @@ function locationNote(tracking: boolean, location: SharingState, mode: LocationS
     : "Poloha sa posiela, aj keď je aplikácia na pozadí, ale po jej zatvorení sa zastaví. V nastaveniach telefónu povoľte polohu „Vždy“.";
 }
 
-function DeliveryList({ query, active, onOpen }: { query: UseQueryResult<MobileDelivery[]>; active: boolean; onOpen: (id: string) => void }) {
+function DeliveryList({ query, commands, active, onOpen }: { query: UseQueryResult<MobileDelivery[]>; commands: DeliveryCommands; active: boolean; onOpen: (id: string) => void }) {
   const now = useDeliveryTime(active);
+  const commandState = useSyncExternalStore(commands.subscribe, commands.snapshot, commands.snapshot);
   const usable = canUseDeliveryCache(query.error);
   const deliveries = sortDeliveries(usable ? (query.data ?? []).map(delivery => visibleDelivery(delivery, now)) : [], now);
   const open = deliveries.filter(delivery => isOpen(delivery)), done = deliveries.filter(delivery => !isOpen(delivery));
   return <ScrollView contentContainerStyle={formLayout.content}>
+    <CommandStorageNotice commands={commands} state={commandState} />
+    {commandState.pending.length > 0 && <>
+      <SectionHeader title="Nepotvrdené kroky" detail={String(commandState.pending.length)} />
+      <View style={formLayout.actions}>{commandState.pending.map(record => <Button key={record.deliveryId} secondary
+        label={"Overiť krok: " + commandLabels[record.command.action]} onPress={() => onOpen(record.deliveryId)} />)}</View>
+    </>}
     {query.isError && <View style={formLayout.notices}><ErrorNotice message={query.error instanceof MobileApiError ? query.error.message : "Pristavenia sa nepodarilo načítať."} onRetry={() => { void query.refetch(); }} /></View>}
     {query.isPending ? <Loading label="Načítavam pristavenia…" /> : usable && <>
       <SectionHeader title="Na vybavenie" detail={open.length ? String(open.length) : null} />
@@ -90,35 +98,44 @@ export function DeliveryRow({ delivery, first, onOpen }: { delivery: MobileDeliv
   </Pressable>;
 }
 
-function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api: DeliveryApi; id: string; active: boolean; queryKey: readonly string[]; tracker: LocationSharing; onChanged: () => void }) {
+function DeliveryDetail({ api, id, active, queryKey, tracker, commands, onChanged }: { api: DeliveryApi; id: string; active: boolean; queryKey: readonly string[]; tracker: LocationSharing; commands: DeliveryCommands; onChanged: () => void }) {
   const queryClient = useQueryClient();
   const detailKey = useMemo(() => [...queryKey, "delivery", id], [queryKey, id]);
-  const query = useQuery({ queryKey: detailKey, queryFn: ({ signal }) => api.read(id, signal), refetchInterval: active ? 15_000 : false });
+  const query = useQuery({ queryKey: detailKey, queryFn: ({ signal }) => api.read(id, signal), refetchInterval: active ? 15_000 : false,
+    structuralSharing: (previous, next) => newestDelivery(previous as MobileDelivery | undefined, next as MobileDelivery) });
+  const commandState = useSyncExternalStore(commands.subscribe, commands.snapshot, commands.snapshot);
+  const pending = commandState.pending.find(record => record.deliveryId === id);
   const location = useSyncExternalStore(tracker.subscribe, tracker.snapshot, tracker.snapshot);
   const { height } = useWindowDimensions();
-  const [busy, setBusy] = useState<MobileDeliveryAction | null>(null), [error, setError] = useState<string | null>(null);
-  const [reason, setReason] = useState<{ action: "reject" | "blocked"; text: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [reason, setReason] = useState<{ action: "reject" | "blocked"; text: string; revision: number; publishedVersion: number } | null>(null);
   const now = useDeliveryTime(active);
-  const running = useRef(false);
-  const delivery = query.data && canUseDeliveryCache(query.error) ? visibleDelivery(query.data, now) : undefined;
-  async function run(action: MobileDeliveryAction, extra: { comment?: string; eta?: string | null } = {}) {
-    if (!delivery || running.current || !isOpen(delivery)) return;
-    running.current = true;
-    setBusy(action); setError(null);
-    try {
-      const next = await api.command(delivery.id, { commandId: randomUUID(), action, expectedRevision: delivery.revision, publishedVersion: delivery.publishedVersion, ...extra });
-      queryClient.setQueryData(detailKey, next);
-      setReason(null);
-      onChanged();
-      // Location is asked right after their own step, when its purpose is clear.
-      if (next.tracking && (action === "accept" || action === "en_route" || action === "arrived")) void tracker.follow(next.id, true);
-    } catch (failure) {
-      setError(failure instanceof MobileApiError ? failure.message : "Krok sa nepodarilo potvrdiť. Skúste znova.");
-      if (failure instanceof MobileApiError && failure.status === 409) void query.refetch();
-    } finally { running.current = false; setBusy(null); }
+  const delivery = query.data && canUseDeliveryCache(query.error) && canUseDeliveryCache(pending?.failure) ? visibleDelivery(query.data, now) : undefined;
+  const latest = useRef<{ delivery: MobileDelivery | undefined; active: boolean }>({ delivery: undefined, active: false });
+  useLayoutEffect(() => { latest.current = { delivery, active }; return () => { latest.current = { delivery: undefined, active: false }; }; }, [delivery, active]);
+  const blocked = !commandState.enabled || !commandState.ready || commandState.busy || Boolean(pending);
+  function applied(next: MobileDelivery, action?: MobileDeliveryAction) {
+    queryClient.setQueryData<MobileDelivery>(detailKey, previous => newestDelivery(previous, next));
+    onChanged();
+    if (next.tracking && (action === "accept" || action === "en_route" || action === "arrived")) void tracker.follow(next.id, true);
   }
-  if (query.isPending) return <Loading label="Načítavam pristavenie…" />;
-  if (!delivery) return <View style={styles.content}><ErrorNotice message={query.error instanceof MobileApiError ? query.error.message : "Pristavenie sa nepodarilo načítať."} onRetry={() => { void query.refetch(); }} /></View>;
+  async function run(action: MobileDeliveryAction, extra: { comment?: string; eta?: string | null } = {}, expected = delivery) {
+    const fresh = latest.current.delivery;
+    if (!fresh || !latest.current.active || blocked || !isOpen(fresh)) return;
+    if (!expected || fresh.revision !== expected.revision || fresh.publishedVersion !== expected.publishedVersion) {
+      setError("Údaje pristavenia sa zmenili. Skontrolujte aktuálny stav a potvrďte krok znova."); setReason(null); return;
+    }
+    setError(null);
+    const next = await commands.start(fresh, action, extra);
+    if (next) {
+      applied(next, action);
+      setReason(null);
+    } else if (latest.current.active) void query.refetch();
+  }
+  const recovery = <><CommandStorageNotice commands={commands} state={commandState} />
+    {pending && <CommandRecovery commands={commands} record={pending} busy={commandState.busy || !commandState.enabled} onResult={applied} />}</>;
+  if (query.isPending) return <ScrollView contentContainerStyle={styles.content}>{recovery}<Loading label="Načítavam pristavenie…" /></ScrollView>;
+  if (!delivery) return <ScrollView contentContainerStyle={styles.content}>{recovery}<ErrorNotice message={query.error instanceof MobileApiError ? query.error.message : "Pristavenie sa nepodarilo načítať."} onRetry={() => { void query.refetch(); }} /></ScrollView>;
   const card = delivery.card, step = nextStep(delivery), open = isOpen(delivery);
   const car = replacementCar(delivery), place = deliveryPlace(delivery), phone = card?.contact.phone ?? null;
   const navigate = (target: string | null) => { if (target) void Linking.openURL(directionsUrl(target)).catch(() => setError("Navigáciu sa nepodarilo otvoriť.")); };
@@ -134,6 +151,7 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
       <DetailHeader title={deliveryTitle(delivery)} subtitle={"Prípad " + delivery.caseNumber + (card ? " · " + card.action : "")}
         tags={<Tag text={deliveryStatusLabels[delivery.status]} tone={deliveryStatusTones[delivery.status]} />}
         meta={(delivery.createdBy ? "Poslal " + delivery.createdBy + " · " : "") + timeLabel(delivery.createdAt)} />
+      {recovery}
       {(error || query.isError || !card) && <View style={formLayout.notices}>
         {error && <ErrorNotice message={error} />}
         {query.isError && <ErrorNotice message="Údaje sa nepodarilo obnoviť. Zobrazený je posledný načítaný stav." onRetry={() => { void query.refetch(); }} />}
@@ -144,30 +162,30 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
         { icon: Car, label: "K autu", accessibilityLabel: "Navigovať k náhradnému autu", disabled: !carTarget, onPress: () => navigate(carTarget) },
         { icon: Navigation, label: "Na miesto", accessibilityLabel: "Navigovať na miesto pristavenia", disabled: !place, onPress: () => navigate(place) },
         { icon: AlertTriangle, label: delivery.status === "offered" ? "Odmietnuť" : "Problém", accessibilityLabel: delivery.status === "offered" ? "Odmietnuť pristavenie" : "Nahlásiť problém",
-          onPress: () => setReason({ action: delivery.status === "offered" ? "reject" : "blocked", text: "" }) },
+          disabled: blocked, onPress: () => setReason({ action: delivery.status === "offered" ? "reject" : "blocked", text: "", revision: delivery.revision, publishedVersion: delivery.publishedVersion }) },
       ]} />}
-      {reason && open && <>
+      {reason && open && !pending && <>
         <FormSection title={reason.action === "reject" ? "Odmietnuť pristavenie" : "Nahlásiť problém"} footer="Dispečer dostane upozornenie s vaším dôvodom.">
           <Field label="Dôvod" value={reason.text} onChangeText={text => setReason({ ...reason, text })} multiline maxLength={1000} autoFocus />
         </FormSection>
         <View style={formLayout.actions}>
-          <Button primary label={busy === reason.action ? "Odosielam…" : reason.action === "reject" ? "Odmietnuť" : "Odoslať problém"} disabled={!reason.text.trim() || Boolean(busy)}
-            onPress={() => { void run(reason.action, { comment: reason.text.trim() }); }} />
-          <Button label="Zrušiť" secondary disabled={Boolean(busy)} onPress={() => setReason(null)} />
+          <Button primary label={reason.action === "reject" ? "Odmietnuť" : "Odoslať problém"} disabled={!reason.text.trim() || blocked}
+            onPress={() => { void run(reason.action, { comment: reason.text.trim() }, { ...delivery, revision: reason.revision, publishedVersion: reason.publishedVersion }); }} />
+          <Button label="Zrušiť" secondary disabled={commandState.busy} onPress={() => setReason(null)} />
         </View>
       </>}
-      {step && !reason && <View style={formLayout.actions}>
-        <Button primary label={busy === step.action ? "Ukladám…" : step.label} disabled={Boolean(busy)} onPress={confirmStep} />
+      {step && !reason && !pending && <View style={formLayout.actions}>
+        <Button primary label={step.label} disabled={blocked} onPress={confirmStep} />
       </View>}
-      {open && (delivery.status === "accepted" || delivery.status === "en_route") && !reason && <>
+      {open && (delivery.status === "accepted" || delivery.status === "en_route") && !reason && !pending && <>
         <SectionHeader title="Čas príchodu" detail={delivery.eta ? "do " + timeLabel(delivery.eta) : null} />
-        <View style={s.chips}>{[15, 30, 60].map(minutes => <Pressable key={minutes} accessibilityRole="button" accessibilityLabel={"Príchod o " + minutes + " minút"} disabled={Boolean(busy)}
+        <View style={s.chips}>{[15, 30, 60].map(minutes => <Pressable key={minutes} accessibilityRole="button" accessibilityLabel={"Príchod o " + minutes + " minút"} disabled={blocked}
           onPress={() => { void run("update", { eta: new Date(Date.now() + minutes * 60_000).toISOString() }); }} style={({ pressed }) => [s.chip, pressed && { opacity: 0.6 }]}>
           <Text style={s.chipText}>{"o " + minutes + " min"}</Text></Pressable>)}</View>
       </>}
       {open && delivery.status !== "offered" && <Text style={s.note}>{locationNote(delivery.tracking, location, tracker.mode)}</Text>}
       {open && delivery.tracking && (location.status === "off" || location.status === "error") && <View style={formLayout.actions}>
-        <Button label="Zdieľať polohu s dispečerom" secondary onPress={() => { void tracker.follow(delivery.id, true); }} /></View>}
+        <Button label="Zdieľať polohu s dispečerom" secondary disabled={!commandState.enabled} onPress={() => { void tracker.follow(delivery.id, true); }} /></View>}
       {open && delivery.tracking && (location.status === "denied" || location.status === "sharing" && location.background === "whenInUse") && <View style={formLayout.actions}>
         <Button label="Otvoriť nastavenia telefónu" secondary onPress={() => { void Linking.openSettings().catch(() => undefined); }} /></View>}
       {card && <>
@@ -196,6 +214,39 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, onChanged }: { api
     </ScrollView>
     {/* The map reaches under the floating bar; its legend stays above it. */}
     {card && <DeliveryMap points={deliveryPoints(delivery)} showsUser={location.status === "sharing"} height={mapHeight + NAVIGATION_CONTENT_BOTTOM} inset={NAVIGATION_CONTENT_BOTTOM} />}
+  </View>;
+}
+
+const commandLabels: Record<MobileDeliveryAction, string> = {
+  accept: "Prijať pristavenie", reject: "Odmietnuť pristavenie", en_route: "Vyrážam", arrived: "Som na mieste", complete: "Auto odovzdané", update: "Čas príchodu", blocked: "Nahlásiť problém",
+};
+function CommandStorageNotice({ commands, state }: { commands: DeliveryCommands; state: DeliveryCommandsView }) {
+  if (state.ready && !state.error && Platform.OS !== "web") return null;
+  return <View style={formLayout.notices}>
+    {!state.ready && !state.error && <Text style={styles.muted}>Overujem uložené kroky…</Text>}
+    {state.error && <ErrorNotice message={state.error} onRetry={!state.ready ? () => { void commands.load(); } : undefined} />}
+    {Platform.OS === "web" && <Text style={styles.muted}>V prehliadači zostávajú nepotvrdené kroky iba do zatvorenia stránky. Na prácu v teréne použite aplikáciu v telefóne.</Text>}
+  </View>;
+}
+function CommandRecovery({ commands, record, busy, onResult }: {
+  commands: DeliveryCommands; record: PendingDeliveryCommand; busy: boolean; onResult: (next: MobileDelivery, action?: MobileDeliveryAction) => void;
+}) {
+  return <View style={formLayout.notices}>
+    <Text style={styles.label}>{"Krok: " + commandLabels[record.command.action]}</Text>
+    <Text style={styles.muted}>{record.status === "sending" ? "Čakám na potvrdenie servera…"
+      : record.status === "confirmed" ? record.message
+        : record.status === "rejected" ? "Server požiadavku odmietol. Načítajte aktuálny stav pristavenia a skontrolujte ho pred ďalším krokom."
+          : "Potvrdenie kroku neprišlo. Krok už mohol byť uložený. Overte ho týmto tlačidlom; ďalší krok bude dostupný po vyriešení výsledku."}</Text>
+    {record.message && record.status !== "confirmed" && <Text style={styles.muted}>{record.message}</Text>}
+    <Button label={busy ? "Overujem…" : "Overiť rovnaký krok"} disabled={busy} onPress={() => {
+      void commands.retry(record.deliveryId).then(next => { if (next) onResult(next, record.command.action); });
+    }} />
+    {record.status === "rejected" && <>
+      <Button secondary label="Načítať aktuálny stav" disabled={busy} onPress={() => {
+        void commands.review(record.deliveryId).then(next => { if (next) onResult(next); });
+      }} />
+      {record.reviewed && <Button secondary label="Uzavrieť odmietnutý krok" disabled={busy} onPress={() => { void commands.dismiss(record.deliveryId); }} />}
+    </>}
   </View>;
 }
 

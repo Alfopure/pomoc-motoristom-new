@@ -4,6 +4,10 @@ Aktualizované 22. 10. 2026 po prvých fyzických skúškach majiteľa. Aktuáln
 [audit spoľahlivosti a plán](reliability-audit-2026-10-22.md) obsahuje zistenia,
 rozsah opráv a otvorené skúšky. Podrobná história F1–F6 je nižšie.
 
+Pokračovanie auditu: [nepotvrdené kroky pristavení a strata prístupu](delivery-recovery-2026-10-22.md).
+Nový mobilný zdroj sa nesmie zamieňať s nainštalovaným buildom 19; na ďalší
+TestFlight build treba doplniť kapacitu zostavenia (iOS Free 15/15, Xcode chýba).
+
 ## Aktuálny stav
 
 | Oblasť | Stav |

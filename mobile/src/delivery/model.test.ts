@@ -45,6 +45,7 @@ describe("what the pristavovač reads", () => {
     for (const status of [0, 500, 503, 504]) expect(canUseDeliveryCache(new MobileApiError("temporary", status))).toBe(true);
     for (const status of [401, 403, 404, 409, 502]) expect(canUseDeliveryCache(new MobileApiError("refused", status))).toBe(false);
     expect(canUseDeliveryCache(new Error("unexpected failure"))).toBe(false);
+    expect(canUseDeliveryCache(new MobileApiError("disabled", 503, "delivery_unavailable"))).toBe(false);
   });
   it("names the car to take and the place to bring it", () => {
     expect(replacementCar(delivery())).toBe("VW Golf · ZA999AB");

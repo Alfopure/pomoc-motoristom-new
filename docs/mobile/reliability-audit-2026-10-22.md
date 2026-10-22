@@ -1,5 +1,9 @@
 # Spoľahlivosť mobilnej aplikácie – 22. 10. 2026
 
+Ďalšie kolo na pokyn „pokračuj ešte ďalej“: [obnova nepotvrdených krokov
+pristavenia](delivery-recovery-2026-10-22.md). Nižšie je zachovaný rozsah a
+výsledok prvého kola PR #492; build 19 ďalšie mobilné opravy ešte neobsahuje.
+
 ## Východiskový stav
 
 Majiteľ 22. 10. potvrdil, že sa pri ďalších skúškach dovolal aj cez zamknutý
@@ -35,7 +39,7 @@ testy, typy, lint a export, existujúca serverová brána cez Preview PR do `dev
 kontrola stabilného TEST nasadenia a nový identifikovaný TestFlight build,
 pokiaľ je dostupná build kapacita.
 
-## Implementované a overené
+## Implementované a overené v PR #492
 
 Všetky opravy z tabuľky sú v tomto vydaní implementované. Pridaných je 19
 regresných prípadov; pri prvom spustení pred opravami 11 z nich preukázalo

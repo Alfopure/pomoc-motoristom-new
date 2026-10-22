@@ -15,7 +15,8 @@ const OPEN = ["offered", "accepted", "en_route", "arrived"];
 /** A temporary connection failure can leave the last known delivery on screen.
  * Lost authority or an untrusted answer must hide the cached customer data. */
 export function canUseDeliveryCache(error: unknown): boolean {
-  return !error || error instanceof MobileApiError && (error.status === 0 || error.status >= 500 && error.status <= 599 && error.status !== 502);
+  return !error || error instanceof MobileApiError && error.code !== "delivery_unavailable"
+    && (error.status === 0 || error.status >= 500 && error.status <= 599 && error.status !== 502);
 }
 
 /** Expiration also applies while offline, before the server can send a redacted
@@ -23,6 +24,11 @@ export function canUseDeliveryCache(error: unknown): boolean {
 export function visibleDelivery(delivery: MobileDelivery, now = Date.now()): MobileDelivery {
   if (isOpen(delivery, now)) return delivery;
   return { ...delivery, status: OPEN.includes(delivery.status) ? "expired" : delivery.status, card: null, replacementPosition: null, tracking: false };
+}
+
+/** A read started before a confirmed step must not roll that step back. */
+export function newestDelivery(previous: MobileDelivery | undefined, next: MobileDelivery): MobileDelivery {
+  return previous?.id === next.id && previous.revision > next.revision ? previous : next;
 }
 
 export function isOpen(delivery: Pick<MobileDelivery, "status" | "expiresAt">, now = Date.now()): boolean {

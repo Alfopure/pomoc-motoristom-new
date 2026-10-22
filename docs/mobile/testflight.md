@@ -20,6 +20,7 @@ Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 | Prvý TestFlight build | 0.1.0 (17) z `dev` `03389c58` Apple odmietol (ITMS-90683: chýbal text pre pohyb) |
 | Prvý úspešný TestFlight build | 0.1.0 (18) z `dev` `47882b1a`: interné testovanie od 22. 10. 2026 |
 | Najnovší zostavený TestFlight build | 0.1.0 (19) z `dev` `ecbe6d1a`, EAS `a0e05eed-cd26-4245-a635-d071fb262ebc`: zostavený, podpísaná IPA overená; dostupnosť pred inštaláciou overiť v TestFlighte |
+| Ďalšie opravy pristavení | [Obnova nepotvrdených krokov](delivery-recovery-2026-10-22.md) potrebuje nový build. Build 19 ich neobsahuje; Free iOS cloud kapacita je vyčerpaná (15/15, kontrola 22. 10. 21:06 UTC), plný Xcode na Macu chýba. |
 | Interní testeri | skupina „Team (Expo)“ s prístupom ku všetkým buildom; držiteľ účtu pozvaný 22. 10. 2026 |
 
 APNs kľúč, Telnyx push credential a prepínače sú mimo buildu; menia sa bez

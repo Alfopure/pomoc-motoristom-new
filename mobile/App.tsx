@@ -244,7 +244,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   })), [config, client, userId, liveUser]);
   useEffect(() => () => push.dispose(), [push]);
   // Pristavenia: a pristavovač alone, or a dispatcher who also delivers (one app, both modules).
-  const delivery = useDeliverySession({ config, client, userId, liveUser, active, enabled: Boolean(identity) || fieldOnly });
+  const delivery = useDeliverySession({ config, client, userId, liveUser, active, enabled: Boolean(identity) || fieldOnly, writable: !logoutBusy && !logoutState.busy });
   // A phone switched on earlier refreshes its registration quietly at start and on return.
   const verifiedProfile = identity?.profileId ?? null, verifiedMember = delivery.memberId;
   useEffect(() => { if (active && (verifiedProfile || verifiedMember)) void push.resume(); }, [active, verifiedProfile, verifiedMember, push]);
@@ -286,7 +286,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} />;
   if (fieldOnly && delivery.me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup k pristaveniam…" /></>;
   if (fieldOnly) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
-    <ErrorNotice message={errorMessage(delivery.me.error)} onRetry={() => { void delivery.me.refetch(); }} />
+    <ErrorNotice message={errorMessage(delivery.error)} onRetry={delivery.refresh} />
     {logoutState.message && <ErrorNotice message={logoutState.message} />}
     {logoutError && <ErrorNotice message={logoutError} />}
     <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={logoutBusy || logoutState.busy} secondary />

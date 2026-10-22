@@ -97,7 +97,7 @@ export async function commandDelivery(actor: MobileFieldActor, id: string, value
   const data = await call(actor, "command", { ...command }) as { handoff?: unknown; commandId?: unknown; committedRevision?: unknown } | null;
   const delivery = parseDelivery(data?.handoff);
   if (delivery.id !== handoffId || data?.commandId !== command.commandId || typeof data.committedRevision !== "number" || !Number.isSafeInteger(data.committedRevision)
-    || data.committedRevision < 1 || delivery.revision < data.committedRevision) unconfirmed();
+    || data.committedRevision !== command.expectedRevision! + 1 || delivery.revision < data.committedRevision) unconfirmed();
   return { delivery, commandId: command.commandId, committedRevision: data.committedRevision };
 }
 
