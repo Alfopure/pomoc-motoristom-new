@@ -62,6 +62,11 @@ describe("native voice boundaries", () => {
     await expect(authorizeNativeOffer(deps, actor, offer)).rejects.toMatchObject({ status: 409 });
     h.setPresence(actor.profileId, { offer_token: "old-reservation" }); expect(await authorizeNativeOffer(deps, actor, offer)).toMatchObject({ sessionId });
   });
+  it("matches the stored lower-case leg ID that the iOS SDK reports in upper case", async () => {
+    const { deps, h } = fixture(); const leg = "6fa67170-ce19-11f1-b24a-02420a1f0b69";
+    h.db.update("motorist_call_legs", { telnyx_call_leg_id: leg }, () => true);
+    expect(await authorizeNativeOffer(deps, actor, { deviceSessionId: lease, providerLegId: leg.toUpperCase() })).toMatchObject({ sessionId, callControlId: "exact-native-leg" });
+  });
   it("permits a bounded retry when an SDK invite precedes the persisted dial response", async () => {
     const { deps, h, offer } = fixture(); const leg = h.rows("motorist_call_legs")[0];
     h.db.delete("motorist_call_legs", () => true);
@@ -69,6 +74,32 @@ describe("native voice boundaries", () => {
     h.db.seed("motorist_call_legs", [leg]);
     h.db.update("motorist_call_sessions", { direction: "outbound", answered_by_profile_id: actor.profileId }, () => true);
     expect(await authorizeNativeOffer(deps, actor, offer)).toMatchObject({ sessionId, callControlId: "exact-native-leg" });
+  });
+  it("authorizes the phone's own side of the dialed operator leg through its signed provider session", async () => {
+    // Telnyx bridges the dialed operator leg into the credential connection; the SDK INVITE names that second leg.
+    const { deps, h } = fixture(); const deviceLeg = "6fef5278-ce19-11f1-a9dd-02420a1f201f";
+    const connection = deps.config?.configured ? deps.config.credentialConnectionId : null;
+    h.db.update("motorist_call_sessions", { direction: "outbound", telnyx_session_id: "provider-session", called_number: "+421900000009", metadata: { environment: deps.environment } }, () => true);
+    const initiated = (change: Record<string, unknown> = {}) => ({ event_id: "evt-" + Math.random(), organization_id: ORG, event_type: "call.initiated",
+      call_session_id: "provider-session", call_leg_id: deviceLeg, connection_id: connection, payload: { direction: "incoming", to: "native-test" }, ...change });
+    // The iOS SDK reports the leg ID through Swift's upper-case UUID string.
+    const offer = { deviceSessionId: lease, providerLegId: deviceLeg.toUpperCase() };
+    await expect(authorizeNativeOffer(deps, actor, offer)).rejects.toMatchObject({ status: 409, code: "native_offer_pending" });
+    for (const foreign of [{ connection_id: "another-connection" }, { organization_id: "00000000-0000-4000-8000-0000000000ff" },
+      { payload: { direction: "incoming", to: "someone-else" } }, { payload: { direction: "outgoing", to: "native-test" } }]) {
+      h.db.seed("motorist_telnyx_webhook_events", [initiated(foreign)]);
+      await expect(authorizeNativeOffer(deps, actor, offer)).rejects.toMatchObject({ status: 409, code: "native_offer_pending" });
+    }
+    h.db.seed("motorist_telnyx_webhook_events", [initiated()]);
+    expect(await authorizeNativeOffer(deps, actor, offer)).toMatchObject({ sessionId, callControlId: "exact-native-leg", direction: "outbound", role: "caller" });
+    // A second open operator leg to this phone in the same provider call is ambiguous.
+    const leg = h.rows("motorist_call_legs")[0];
+    const second = "00000000-0000-4000-8000-000000000075";
+    h.db.seed("motorist_call_legs", [{ ...leg, id: second, telnyx_call_control_id: "second-leg", telnyx_call_leg_id: "00000000-0000-4000-8000-000000000076" }]);
+    await expect(authorizeNativeOffer(deps, actor, offer)).rejects.toMatchObject({ status: 409, code: "native_offer_pending" });
+    h.db.delete("motorist_call_legs", row => row.id === second);
+    h.db.update("motorist_call_legs", { ended_at: h.now().toISOString() }, () => true);
+    await expect(authorizeNativeOffer(deps, actor, offer)).rejects.toMatchObject({ status: 409, code: "native_offer_pending" });
   });
   it.each(["error", "unregistered"])("allows the current owner to recover from %s without reviving a revoked lease", async registration_state => {
     const { deps, h } = fixture(); h.db.update("motorist_operator_mobile_devices", { registration_state }, () => true);
