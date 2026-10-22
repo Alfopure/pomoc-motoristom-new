@@ -18,7 +18,8 @@ Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 | VoIP Services certifikát `35S4MJY4Z3` (do 21. 11. 2027) a TEST Telnyx iOS push credential | pripojené na TEST credential connection |
 | Prepínače `MOTORIST_NATIVE_VOICE_TEST_ENABLED` a `MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED` | zapnuté iba v dedikovanom TEST projekte (cieľ Production) |
 | Prvý TestFlight build | 0.1.0 (17) z `dev` `03389c58` Apple odmietol (ITMS-90683: chýbal text pre pohyb) |
-| Ďalší build | z opravy textov povolení (pohyb, Face ID, mikrofón vo všetkých buildoch) |
+| Aktuálny TestFlight build | 0.1.0 (18) z `dev` `47882b1a`: spracovaný bez chýb, interné testovanie, platí do 20. 1. 2027 |
+| Interní testeri | skupina „Team (Expo)“ s prístupom ku všetkým buildom; držiteľ účtu pozvaný 22. 10. 2026 |
 
 APNs kľúč, Telnyx push credential a prepínače sú mimo buildu; menia sa bez
 nového buildu. Fyzicky na iPhone zatiaľ nič overené nie je (pozri Akceptácia).
