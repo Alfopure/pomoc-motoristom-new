@@ -187,7 +187,8 @@ async function isPendingNativeTransfer(
 export async function authorizeNativeOffer(deps: TelephonyRuntimeDeps, actor: MotoristActor, body: Record<string, unknown>) {
   const device = await requireNativeLease(deps, actor, body.deviceSessionId);
   const controlId = typeof body.callControlId === "string" && body.callControlId.length <= 2048 ? body.callControlId : null;
-  const legId = typeof body.providerLegId === "string" && isUuid(body.providerLegId) ? body.providerLegId : null;
+  // Swift's UUID.uuidString is upper case; Telnyx IDs are stored as received, in lower case.
+  const legId = typeof body.providerLegId === "string" && isUuid(body.providerLegId) ? body.providerLegId.toLowerCase() : null;
   if ((!controlId && !legId) || (controlId && legId)) throw new MutationError("Chýba identita ponuky hovoru.", 400);
   let query = deps.admin.from("motorist_call_legs").select("*").eq("organization_id", actor.organizationId)
     .eq("profile_id", actor.profileId).is("ended_at", null);
