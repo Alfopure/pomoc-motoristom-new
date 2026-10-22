@@ -127,6 +127,12 @@ describe("pristavovač deliveries", () => {
     await expect(commandDelivery(actor, GRANT, step)).rejects.toMatchObject({ status: 409 });
   });
 
+  it.each([[1, 2], [3, 3]])("does not confirm unrelated committed revision %s (current %s)", async (committedRevision, revision) => {
+    const step = { commandId: COMMAND, action: "accept", expectedRevision: 1, publishedVersion: 1 };
+    mocks.rpc.mockResolvedValueOnce({ data: { handoff: view({ status: "accepted", revision }), commandId: COMMAND, committedRevision }, error: null });
+    await expect(commandDelivery(actor, GRANT, step)).rejects.toMatchObject({ status: 503 });
+  });
+
   it("sends a bounded position and reports whether it was kept and should go on", async () => {
     mocks.rpc.mockResolvedValueOnce({ data: { stored: true, active: true }, error: null });
     await expect(recordDeliveryPosition(actor, GRANT, { lat: 49.2, lng: 18.7, accuracy: 12, recordedAt: at })).resolves.toEqual({ stored: true, active: true });

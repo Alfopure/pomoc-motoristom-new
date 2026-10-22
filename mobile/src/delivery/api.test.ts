@@ -56,6 +56,19 @@ describe("pristavovač API", () => {
     await expect(api.command(ID, input)).rejects.toMatchObject({ status: 502 });
   });
 
+  it.each([[1, 2], [3, 3], [2, 1]])("rejects an unrelated receipt revision %s with current revision %s", async (committedRevision, revision) => {
+    const input = { commandId: "33333333-3333-4333-8333-333333333333", action: "accept" as const, expectedRevision: 1, publishedVersion: 1 };
+    const { api } = client({ body: { ...scope, delivery: delivery({ revision }), commandId: input.commandId, committedRevision } });
+    await expect(api.command(ID, input)).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("withholds a reply that arrives after the account has departed", async () => {
+    let current = true;
+    const transport = vi.fn(async () => { current = false; return new Response(JSON.stringify({ ...scope, deliveries: [delivery()] })); });
+    const api = createDeliveryApi(config, async () => "MOCK", transport, () => current);
+    await expect(api.list()).rejects.toMatchObject({ status: 401 });
+  });
+
   it("sends a position and reads whether it was kept and should go on", async () => {
     const position = { lat: 49.2, lng: 18.7, accuracy: 15, recordedAt: "2026-10-22T10:00:00Z" };
     const { api, transport } = client({ body: { ...scope, stored: true, active: true } }, { body: { ...scope, stored: true } });

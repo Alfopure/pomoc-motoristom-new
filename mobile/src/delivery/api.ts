@@ -39,10 +39,15 @@ export function parseDelivery(value: unknown): MobileDelivery {
 }
 
 export type DeliveryApi = ReturnType<typeof createDeliveryApi>;
-export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<string | null>, transport: MobileTransport = fetch) {
+export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<string | null>, transport: MobileTransport = fetch, current: () => boolean = () => true) {
   let memberId: string | null = null;
+  function requireCurrent() {
+    if (!current()) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
+  }
   async function request(path: string, init: { method: "GET" | "POST" | "DELETE"; body?: unknown; signal?: AbortSignal; timeout?: number }): Promise<Record<string, unknown>> {
+    requireCurrent();
     const token = await getToken();
+    requireCurrent();
     if (!token) throw new MobileApiError("Prihlásenie vypršalo. Prihláste sa znova.", 401);
     const controller = new AbortController(), abort = () => controller.abort();
     if (init.signal?.aborted) abort();
@@ -55,6 +60,7 @@ export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<
       });
       let body: unknown;
       try { body = await response.json(); } catch { throw invalid(); }
+      requireCurrent();
       const record = object(body);
       if (!response.ok) {
         throw new MobileApiError(text(record.error, 1000) ? record.error : "Pristavenia sa nepodarilo načítať.", response.status, typeof record.code === "string" ? record.code : undefined);
@@ -88,7 +94,8 @@ export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<
     command: async (deliveryId: string, input: MobileDeliveryCommand): Promise<MobileDelivery> => {
       const body = await request("deliveries/" + deliveryId + "/commands", { method: "POST", body: input });
       const delivery = parseDelivery(body.delivery);
-      if (delivery.id !== deliveryId.toLowerCase() || body.commandId !== input.commandId || !integer(body.committedRevision)) throw invalid();
+      if (delivery.id !== deliveryId.toLowerCase() || body.commandId !== input.commandId || !integer(body.committedRevision)
+        || body.committedRevision !== input.expectedRevision + 1 || delivery.revision < body.committedRevision) throw invalid();
       return delivery;
     },
     /** The secret for sending this delivery's position in the background; kept only in the Keychain. */
