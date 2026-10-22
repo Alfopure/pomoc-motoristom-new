@@ -22,7 +22,8 @@ describe("readings from the location service", () => {
   it("takes only usable positions", () => {
     expect(toReading({ timestamp: NOW, coords: { latitude: 49.2, longitude: 18.7, accuracy: 15 } })).toEqual([{ lat: 49.2, lng: 18.7, accuracy: 15, recordedAt: at(0) }]);
     expect(toReading({ timestamp: NOW, coords: { latitude: 49.2, longitude: 18.7, accuracy: -1 } })[0].accuracy).toBeNull();
-    for (const bad of [null, {}, { timestamp: NOW, coords: { latitude: 91, longitude: 0 } }, { timestamp: "now", coords: { latitude: 1, longitude: 1 } }]) expect(toReading(bad)).toEqual([]);
+    for (const bad of [null, {}, { timestamp: NOW, coords: { latitude: 91, longitude: 0 } }, { timestamp: "now", coords: { latitude: 1, longitude: 1 } },
+      { timestamp: Number.MAX_VALUE, coords: { latitude: 1, longitude: 1 } }]) expect(toReading(bad)).toEqual([]);
   });
   it("keeps half a day, oldest first, each moment once, 20 s apart", () => {
     const merged = mergeReadings([reading(-60), reading(-43_300)], [reading(-60, 49.3), reading(-50), reading(0), reading(600)], NOW);
@@ -60,6 +61,25 @@ describe("the background task", () => {
     await expect(deliverReadings(value, [reading(0)], NOW)).resolves.toBe("kept");
     expect(saved.queue).toEqual([reading(-30), reading(0)]);
     expect(saved.stopped).toBe(false);
+  });
+  it("persists new readings before starting the network request", async () => {
+    const { deps: value, saved } = deps(state, [reading(-30)]);
+    vi.mocked(value.send).mockImplementation(async () => {
+      expect(saved.queue).toEqual([reading(-30), reading(0)]);
+      throw new Error("interrupted transport");
+    });
+    await expect(deliverReadings(value, [reading(0)], NOW)).resolves.toBe("kept");
+    expect(saved.queue).toEqual([reading(-30), reading(0)]);
+  });
+  it("persists each acknowledged batch before sending the next one", async () => {
+    const kept = Array.from({ length: 250 }, (_, index) => reading(-20 * (250 - index)));
+    const { deps: value, saved } = deps(state, kept);
+    vi.mocked(value.send).mockResolvedValueOnce("ok").mockImplementationOnce(async () => {
+      expect(saved.queue).toEqual(kept.slice(100));
+      throw new Error("background execution interrupted");
+    });
+    await expect(deliverReadings(value, [], NOW)).resolves.toBe("kept");
+    expect(saved.queue).toEqual(kept.slice(100));
   });
   it("after a long time without signal sends a hundred at a time, a few hundred per run", async () => {
     const kept = Array.from({ length: 650 }, (_, index) => reading(-20 * (650 - index)));

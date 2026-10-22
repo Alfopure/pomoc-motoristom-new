@@ -13,7 +13,8 @@ import { palette, radius, space, type } from "../design/tokens";
 import { ErrorNotice, styles } from "../ui";
 import { NAVIGATION_CONTENT_BOTTOM, navigationContentBottom } from "../ui/theme";
 import { DeliveryModule, DeliveryRow } from "../delivery/module";
-import { isOpen, sortDeliveries } from "../delivery/model";
+import { canUseDeliveryCache, isOpen, sortDeliveries, visibleDelivery } from "../delivery/model";
+import { useDeliveryTime } from "../delivery/use-delivery-time";
 import type { DeliverySession } from "../delivery/session";
 import type { SharingState } from "../delivery/sharing";
 import type { PushSettings } from "../notifications/settings";
@@ -91,8 +92,9 @@ export function FieldShell(props: Props) {
   }, [memberId, pins, available]);
   // A delivery opened in the module owns Back first; then the account and Moduly.
   useAndroidBack(active && (nav.account || nav.tab === "moduly" && nav.opened !== null && !moduleBack), back);
-  const deliveries = sortDeliveries(session.list.data ?? []);
-  const open = deliveries.filter(delivery => isOpen(delivery));
+  const now = useDeliveryTime(active);
+  const deliveries = sortDeliveries(canUseDeliveryCache(session.list.error) ? (session.list.data ?? []).map(delivery => visibleDelivery(delivery, now)) : [], now);
+  const open = deliveries.filter(delivery => isOpen(delivery, now));
   const status = locationStatus(location, open.length);
   const tabs = barTabs(pins);
   const showAdd = pins.length < Math.min(PIN_LIMIT, available.length);
@@ -145,7 +147,7 @@ function FieldHome({ open, location, status, tip, onDismissTip, onOpen, onModule
     {Boolean(error) && <View style={formLayout.notices}><ErrorNotice message="Pristavenia sa nepodarilo načítať." onRetry={onRefresh} /></View>}
     <SectionHeader title="Na vybavenie" detail={open.length ? String(open.length) : null} />
     {open.length ? <Group>{open.map((delivery, index) => <DeliveryRow key={delivery.id} delivery={delivery} first={index === 0} onOpen={onOpen} />)}</Group>
-      : <Text style={s.empty}>Teraz nemáte žiadne pristavenie. Keď vám ho dispečer pošle, príde aj notifikácia.</Text>}
+      : <Text style={s.empty}>{error ? "Zoznam pristavení sa nepodarilo overiť. Skúste obnoviť údaje." : "Teraz nemáte žiadne pristavenie. Keď vám ho dispečer pošle, príde aj notifikácia."}</Text>}
     <Group style={{ marginTop: space.l }}><Row first title="Všetky pristavenia" subtitle="Aj dokončené za posledný deň" tone="link" onPress={onModule} trailing={<Text style={s.chevron}>›</Text>} /></Group>
     {tip && <View style={s.tip}>
       <ModulesMark size={30} />

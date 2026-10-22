@@ -52,7 +52,8 @@ import type { PushSettings } from "../notifications/settings";
 import { pushTaps } from "../notifications/taps";
 import { pushKinds } from "../notifications/ui";
 import { DeliveryModule } from "../delivery/module";
-import { deliveryStatusLabels, isOpen, sortDeliveries } from "../delivery/model";
+import { canUseDeliveryCache, deliveryStatusLabels, isOpen, sortDeliveries, visibleDelivery } from "../delivery/model";
+import { useDeliveryTime } from "../delivery/use-delivery-time";
 import type { DeliverySession } from "../delivery/session";
 
 type Props = {
@@ -153,7 +154,9 @@ export function DispatchShell(props: Props) {
     const pending = setTimeout(consume, 0);
     return () => { unsubscribe(); clearTimeout(pending); };
   }, [memberId, pins, available]);
-  const deliveries = sortDeliveries(delivery?.list.data ?? []), openDeliveries = deliveries.filter(item => isOpen(item));
+  const deliveryNow = useDeliveryTime(active && Boolean(delivery));
+  const deliveries = sortDeliveries(canUseDeliveryCache(delivery?.list.error) ? (delivery?.list.data ?? []).map(item => visibleDelivery(item, deliveryNow)) : [], deliveryNow);
+  const openDeliveries = deliveries.filter(item => isOpen(item, deliveryNow));
 
   const go = (next: ShellState) => { setCallSelection(null); setShell(next); };
   const navigate = (id: ModuleId, hovory?: HovoryView) => go(openModule(nav, pins, id, hovory));

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { delivery } from "./fixtures";
-import { agoLabel, deliveryPlace, deliveryPoints, deliveryTitle, isOpen, nextStep, positionUrl, replacementCar, sharesPosition, sortDeliveries } from "./model";
+import { MobileApiError } from "../lib/api";
+import { agoLabel, canUseDeliveryCache, deliveryPlace, deliveryPoints, deliveryTitle, isOpen, nextStep, positionUrl, replacementCar, sharesPosition, sortDeliveries, visibleDelivery } from "./model";
 
 const NOW = Date.parse("2026-10-22T10:00:00Z");
 
@@ -29,6 +30,22 @@ describe("delivery steps", () => {
 });
 
 describe("what the pristavovač reads", () => {
+  it("hides cached customer and GPS data at expiry and after closing, including offline", () => {
+    const active = delivery({ status: "en_route", tracking: true, replacementPosition: { lat: 49.2, lng: 18.7, recordedAt: "2026-10-22T09:00:00Z" } });
+    expect(visibleDelivery(active, NOW)).toBe(active);
+    for (const closed of [active, { ...active, status: "completed" as const }]) {
+      expect(visibleDelivery(closed, Date.parse(active.expiresAt))).toMatchObject({ card: null, replacementPosition: null, tracking: false });
+    }
+    expect(visibleDelivery(active, Date.parse(active.expiresAt)).status).toBe("expired");
+    expect(visibleDelivery(active, NOW).card).not.toBeNull();
+  });
+
+  it("keeps old data only for temporary failures, never for revoked access or malformed replies", () => {
+    expect(canUseDeliveryCache(null)).toBe(true);
+    for (const status of [0, 500, 503, 504]) expect(canUseDeliveryCache(new MobileApiError("temporary", status))).toBe(true);
+    for (const status of [401, 403, 404, 409, 502]) expect(canUseDeliveryCache(new MobileApiError("refused", status))).toBe(false);
+    expect(canUseDeliveryCache(new Error("unexpected failure"))).toBe(false);
+  });
   it("names the car to take and the place to bring it", () => {
     expect(replacementCar(delivery())).toBe("VW Golf · ZA999AB");
     expect(deliveryTitle(delivery())).toBe("VW Golf · ZA999AB");

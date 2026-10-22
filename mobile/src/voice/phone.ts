@@ -61,6 +61,9 @@ export class DispatchPhone {
   private connecting: Promise<void> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
+  /** The operator requested connection, including a native phone restored at launch.
+   * Kept across temporary failures before the first provider token exists. */
+  private connectionRequested = false;
   private pendingDial: { requestId: string; target: PhoneDialTarget; uncertain: boolean } | null = null;
   /** The message of a failed call status read; the next good read clears it. */
   private monitorError: string | null = null;
@@ -129,7 +132,7 @@ export class DispatchPhone {
   connect(takeover = false): Promise<void> {
     if (this.state.cancelingAttempt) return Promise.resolve();
     if (takeover && (this.state.call || this.state.termination || this.state.dialing || this.pendingDial || this.outgoingIntent || this.authorizing.size)) return Promise.resolve();
-    this.reconnectAttempts = 0;
+    this.connectionRequested = true; this.reconnectAttempts = 0;
     return this.connectAttempt(takeover);
   }
   private connectAttempt(takeover = false, automatic = false): Promise<void> {
@@ -171,6 +174,10 @@ export class DispatchPhone {
         }
       } catch (error) {
         if (this.current(generation)) {
+          // A refusal needs a deliberate action. In particular, recovery never
+          // takes the phone from another device or repeats an untrusted reply.
+          if (error instanceof MobileApiError && error.status !== 0 && error.status !== 408 && error.status !== 429
+            && !(error.status >= 500 && error.status <= 599 && error.status !== 502)) this.connectionRequested = false;
           this.update({ registration: "error", takeoverRequired: error instanceof MobileApiError && error.status === 409 });
           this.fail(error);
         }
@@ -189,15 +196,16 @@ export class DispatchPhone {
     return this.connecting;
   }
   setForeground(value: boolean) {
+    if (value && !this.foreground) this.reconnectAttempts = 0;
     this.foreground = value; this.schedule();
     if (value) void this.refreshDiagnostics();
-    if (value && this.token) {
+    if (value && this.token && this.connectionRequested) {
       if (this.state.registration !== "registered" && !this.state.call && !this.outgoingIntent) void this.connect();
       else void this.touch();
     }
   }
   private idleForRecovery() {
-    return !this.stopped && this.foreground && this.token && !this.state.call
+    return !this.stopped && this.native && this.foreground && this.connectionRequested && !this.state.call
       && !this.state.termination && !this.pendingDial && !this.outgoingIntent && !this.state.dialing
       && this.authorizing.size === 0 && this.state.registration !== "registered" && !this.state.takeoverRequired;
   }
@@ -668,6 +676,7 @@ export class DispatchPhone {
       ? "Telefonovanie v tejto TEST aplikácii ešte nie je aktivované." : error.message : "Telefonovanie sa nepodarilo pripraviť.";
     this.update({ error: message });
     if (error instanceof MobileApiError && ([401, 403, 502].includes(error.status) || ["native_lease_stale", "native_voice_disabled"].includes(error.code ?? ""))) {
+      this.connectionRequested = false;
       if (this.pendingDial && this.state.dialing) this.pendingDial.uncertain = true;
       const ownedSession = this.state.call && (this.state.call.outgoing || this.state.call.connected) ? this.state.call.sessionId : this.outgoingIntent?.sessionId;
       this.generation += 1;
@@ -778,6 +787,7 @@ export class DispatchPhone {
     try { await this.api.presence(this.token.deviceSessionId, status); } catch (error) { this.fail(error); throw error; }
   }
   async disconnect() {
+    this.connectionRequested = false;
     this.generation += 1; this.token = null; this.pendingDial = null; this.pendingHold = null; this.nativeMediaSync = null; this.outgoingIntent = null; this.pendingInvites.clear(); this.schedule();
     await this.native?.disconnect();
     const leaseId = this.leaseId ?? await this.leases?.load();

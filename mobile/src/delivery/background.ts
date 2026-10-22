@@ -26,7 +26,7 @@ export function toReading(value: unknown): Reading[] {
   const location = value as { timestamp?: unknown; coords?: { latitude?: unknown; longitude?: unknown; accuracy?: unknown } } | null;
   const lat = location?.coords?.latitude, lng = location?.coords?.longitude, accuracy = location?.coords?.accuracy, time = location?.timestamp;
   if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180
-    || typeof time !== "number" || !Number.isFinite(time)) return [];
+    || typeof time !== "number" || !Number.isFinite(time) || !Number.isFinite(new Date(time).getTime())) return [];
   return [{ lat, lng, accuracy: typeof accuracy === "number" && Number.isFinite(accuracy) && accuracy >= 0 && accuracy <= 100_000 ? accuracy : null, recordedAt: new Date(time).toISOString() }];
 }
 
@@ -76,16 +76,19 @@ export async function deliverReadings(deps: TaskDeps, incoming: readonly Reading
   if (!state || Date.parse(state.expiresAt) <= now) { await halt(deps); return "stopped"; }
   let queue = mergeReadings(await deps.queue.load(), incoming, now);
   if (!queue.length) return "idle";
-  if (now - deps.sentAt() < GAP_MS && queue.length <= BATCH) { await deps.queue.save(queue); return "kept"; }
+  // iOS may suspend or end the task during any network request. The new readings
+  // must already be durable; only acknowledged batches leave the waiting list.
+  await deps.queue.save(queue);
+  if (now - deps.sentAt() < GAP_MS && queue.length <= BATCH) return "kept";
   for (let round = 0; round < ROUNDS && queue.length; round++) {
     const batch = queue.slice(0, BATCH);
-    const result = await deps.send(state, batch);
+    const result = await deps.send(state, batch).catch(() => "retry" as const);
     if (result === "stop") { await halt(deps); return "stopped"; }
-    if (result === "retry") { await deps.queue.save(queue); return "kept"; }
+    if (result === "retry") return "kept";
     deps.markSent(now);
     queue = queue.slice(batch.length);
+    await deps.queue.save(queue);
   }
-  await deps.queue.save(queue);
   return "sent";
 }
 async function halt(deps: Pick<TaskDeps, "store" | "queue" | "stopUpdates">) {

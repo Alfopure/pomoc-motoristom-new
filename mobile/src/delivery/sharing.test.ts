@@ -103,6 +103,38 @@ describe("background sharing of the pristavovač's position", () => {
     expect(nobody.source.permission).not.toHaveBeenCalled();
   });
 
+  it("stops the previous delivery before trying a different one, even when the new request fails", async () => {
+    const switched = setup({ stored: kept(A), running: true });
+    switched.issue.mockRejectedValueOnce(new Error("offline"));
+    await switched.tracker.follow(B);
+    expect(switched.running()).toBe(false);
+    expect(switched.saved()).toBeNull();
+    expect(switched.queue()).toEqual([]);
+    expect(switched.tracker.snapshot().status).toBe("error");
+  });
+
+  it("never reuses a tracker from another server or environment", async () => {
+    const foreign = setup({ stored: { ...kept(A), environment: "production", apiOrigin: "https://dispecing.linkapomoci.sk" }, running: true });
+    await foreign.tracker.reconcile(ME);
+    expect(foreign.running()).toBe(false); expect(foreign.saved()).toBeNull();
+    const restored = setup({ stored: { ...kept(A), apiOrigin: "https://other.invalid" }, running: true });
+    await restored.tracker.follow(A);
+    expect(restored.issue).toHaveBeenCalledWith(A);
+    expect(restored.saved()?.apiOrigin).toBe("https://test.dispecing.linkapomoci.sk");
+  });
+
+  it.each(["dispose", "member change"])("abandons an unfinished start after %s", async reason => {
+    const f = setup();
+    let finish!: (value: { token: string; expiresAt: string }) => void;
+    f.issue.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const following = f.tracker.follow(A);
+    await vi.waitFor(() => expect(f.issue).toHaveBeenCalled());
+    if (reason === "dispose") f.tracker.dispose(); else f.tracker.setMember(OTHER);
+    finish({ token: "a".repeat(43), expiresAt: "2099-01-01T00:00:00Z" });
+    await following;
+    expect(f.running()).toBe(false); expect(f.saved()).toBeNull();
+  });
+
   it("lets a late logout of one account not undo the next account's start", async () => {
     const first = setup({ stored: kept(A), running: true });
     const second = setup();
