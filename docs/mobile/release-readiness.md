@@ -179,7 +179,7 @@ Slovensko.
 | Telnyx a APNs pre produkčný hlas | vývoj, schválenie majiteľ | po TEST akceptácii |
 | Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | hotové; push na TEST zapnutý, APNs kľúč v Expo |
 | Pristavovač v aplikácii (F6) | vývoj, schválenie majiteľa | na TEST vrátane migrácií (22. 10. 2026) |
-| TEST build cez interný TestFlight | vývoj | build 0.1.0 (17) z `dev` `03389c58`, hlas a VoIP push zapnuté na TEST ([postup](testflight.md)) |
+| TEST build cez interný TestFlight | vývoj | 0.1.0 (18) z `dev` `47882b1a` v TestFlighte od 22. 10. 2026; hlas a VoIP push zapnuté na TEST ([postup](testflight.md)) |
 | Texty do App Store, poznámky pre review, snímky | vývoj, schválenie majiteľ | chýba |
 
 ## 6. Poradie
