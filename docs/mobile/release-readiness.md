@@ -1,6 +1,7 @@
 # Pripravenosť mobilnej aplikácie na nasadenie (iPhone)
 
-Stav k 19. 10. 2026, zdroj `dev` `aa68c9e` (TEST, Expo Go). Dokument spisuje,
+Stav k 19. 10. 2026, zdroj `dev` `aa68c9e` (TEST, Expo Go), doplnený 22. 10. 2026
+(Apple účet, TestFlight, F3 a F6 na TEST). Dokument spisuje,
 čo aplikácia vie, čo chýba na každodenné používanie, čo vyžaduje Apple, čo
 potrebujeme pripraviť my a v akom poradí. Postup natívneho telefonovania po
 schválení Apple je osobitne v [iPhone TEST postupe](iphone-voice-test.md).
@@ -10,9 +11,10 @@ schválení Apple je osobitne v [iPhone TEST postupe](iphone-voice-test.md).
 - **Dnes:** aplikácia funguje v Expo Go proti TEST serveru. Dispečer v nej
   vie pracovať s prípadmi, úlohami a spätnými volaniami; telefonovať z nej
   zatiaľ nevie a dostáva iba upozornenia viditeľné pri otvorenej aplikácii.
-- **Hneď po licencii (asi 1 deň):** podpísaný TEST build na konkrétne iPhony
-  (Ad Hoc) alebo cez interný TestFlight, bez App Review. Vhodné na pilot
-  a na prvé fyzické skúšky telefonovania.
+- **TestFlight (pripravené 22. 10. 2026):** Apple účet je aktívny; TEST aplikácia
+  má App ID, kartu v App Store Connect aj podpis. Build ide cez interný TestFlight
+  bez App Review podľa [postupu](testflight.md). Vhodné na pilot a na prvé
+  fyzické skúšky telefonovania a polohy pristavovača.
 - **Ostrá prevádzka bez telefonovania:** treba vydať server s mobilným API na
   produkciu, doplniť povinné náležitosti pre Apple a prejsť App Review.
 - **Ostrá prevádzka s telefonovaním:** naviac fyzicky overiť hovory na iPhone
@@ -71,9 +73,10 @@ schválení Apple je osobitne v [iPhone TEST postupe](iphone-voice-test.md).
 ### Dôležité pre pohodlné používanie
 
 8. **Push notifikácie** (nová úloha, spätné volanie po termíne, priradený
-   prípad) sú v kóde hotové (F3). Na TEST čakajú na tabuľku zariadení
-   (migrácia `20261020210000_mobile_push_devices.sql`) a prepínač
-   `MOBILE_PUSH_ENABLED`; produkcia ich zapne až so svojím vydaním.
+   prípad) sú v kóde hotové (F3). Na TEST sú od 22. 10. 2026 zapnuté (migrácia
+   `20261020210000_mobile_push_devices.sql` a prepínač `MOBILE_PUSH_ENABLED`);
+   do iPhonu ich doručí build z TestFlightu, keď bude v Expo APNs kľúč.
+   Produkcia ich zapne až so svojím vydaním.
 9. **Hlásenie pádov** (napr. Sentry pre React Native), aby sme o chybe
    vedeli skôr než od používateľa.
 10. **Aktualizácie:** natívny build dnes nepreberá OTA aktualizácie, každá
@@ -164,7 +167,7 @@ Slovensko.
 
 | Položka | Kto | Stav |
 | --- | --- | --- |
-| Schválené Apple členstvo (typ: organizácia / jednotlivec) | majiteľ | čaká |
+| Schválené Apple členstvo (typ: organizácia / jednotlivec) | majiteľ | aktívne od 22. 10. 2026 (MICT s. r. o., tím `792TJPXTL3`) |
 | Vydavateľ a názov v App Store („Linka pomoci“ vs. „Pomoc Motoristom“) | majiteľ | rozhodnúť |
 | Zásady ochrany súkromia pre mobil a stránka podpory (text, prevádzkovateľ) | majiteľ + vývoj | chýba |
 | Ikona a spúšťacia obrazovka (z existujúcej značky) | vývoj, schválenie majiteľ | chýba |
@@ -172,8 +175,9 @@ Slovensko.
 | Produkčné migrácie (zoznam v časti 3) | vývoj, schválenie majiteľ | čaká |
 | Účet pre kontrolu Apple v organizácii majiteľa (rozhodnutie 20. 10. 2026) | majiteľ | pred odoslaním |
 | Telnyx a APNs pre produkčný hlas | vývoj, schválenie majiteľ | po TEST akceptácii |
-| Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | hotové; push čaká na migráciu a prepínač na TEST |
-| Pristavovač v aplikácii (F6) | vývoj, schválenie majiteľa | na TEST; čaká na migráciu na TEST |
+| Push notifikácie, hlásenie pádov, kontrola verzie | vývoj | hotové; push na TEST zapnutý, doručenie čaká na APNs kľúč |
+| Pristavovač v aplikácii (F6) | vývoj, schválenie majiteľa | na TEST vrátane migrácií (22. 10. 2026) |
+| TEST build cez interný TestFlight | vývoj, APNs kľúč a VoIP certifikát majiteľ | pripravené ([postup](testflight.md)) |
 | Texty do App Store, poznámky pre review, snímky | vývoj, schválenie majiteľ | chýba |
 
 ## 6. Poradie
@@ -191,8 +195,8 @@ Slovensko.
 
 **V deň licencie (asi 1 deň)**
 
-1. App ID, push, APNs kľúč, Telnyx TEST push credential.
-2. Podpísaný TEST build na registrované iPhony a interný TestFlight.
+1. App ID a podpis (hotové 22. 10. 2026), APNs kľúč, Telnyx TEST push credential.
+2. TEST build cez interný TestFlight ([postup](testflight.md)).
 3. Začiatok fyzickej akceptácie telefonovania.
 
 **Ostrá prevádzka**
@@ -229,7 +233,7 @@ príchode licencie už iba overovať a opravovať, nie pridávať funkcie.
 - **Zastaviť nahrávanie** – zákazníkom sľubujeme, že na požiadanie ho
   dispečer zastaví; bez toho mobil nemôže ostro prijímať zákaznícke hovory.
 
-**F3 – Push notifikácie** (v kóde hotové 21. 10. 2026; na TEST čaká migrácia a prepínač)
+**F3 – Push notifikácie** (na TEST zapnuté 22. 10. 2026; doručenie do iPhonu čaká na APNs kľúč)
 - Nová úloha pre mňa, vrátená alebo na kontrolu; termín úlohy.
 - Spätné volanie po termíne (moje prevzaté, nepridelené).
 - Prípad priradený mne.
@@ -270,7 +274,7 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   - Telefonovanie z produkčnej aplikácie je vypnuté (natívny hlas funguje len
     pod TEST identifikátorom aplikácie); zapnutie je samostatné rozhodnutie.
 
-**F6 – Pristavovač v aplikácii** (na TEST od 22. 10. 2026: PR #482; čaká migrácia na TEST)
+**F6 – Pristavovač v aplikácii** (na TEST od 22. 10. 2026: PR #482 a #484, migrácie aplikované)
 - Požiadavka majiteľa z 22. 10. 2026: dispečer odovzdá prípad pristavovačovi
   aj priamo v aplikácii (nielen odkazom v SMS), pristavovač v nej vidí prípad,
   kam ísť a ktoré auto zobrať – popis hore, mapa dole – a dispečer vidí, kde je.
@@ -307,17 +311,18 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   30 dňoch (pomocná úloha existujúceho cronu, aj pri vypnutom prepínači).
 - Po skončení, zrušení alebo vypršaní pristavenia telefón nedostane údaje
   klienta ani polohu auta; po dni pristavenie zo zoznamu zmizne a nedá sa otvoriť.
-- V časti Komu sú iba pristavovači, ktorí sa môžu prihlásiť do aplikácie
-  pristavovača (bez dispečerského profilu a so zapnutým prístupom).
+- V časti Komu sú iba pristavovači, ktorí sa môžu prihlásiť do aplikácie:
+  zapnutý prístup s rolou Pristavovač v aktívnej organizácii; kto má aj
+  dispečerský profil, musí ho mať aktívny (vidí potom oba moduly).
 - Staršia verzia servera s touto migráciou funguje ďalej (údaje odovzdania sa
   pre ňu nemenia), nová verzia bez migrácie výber pristavovača neukáže.
 - Zapnutie v prostredí: migrácie `20261022100000_mobile_delivery_handoffs.sql`
   a `20261022180000_mobile_delivery_background.sql` (v tomto poradí, až po
-  migrácii push tabuľky; na TEST čakajú na schválenie majiteľa) a
+  migrácii push tabuľky; na TEST aplikované 22. 10. 2026) a
   `MOBILE_DELIVERY_ENABLED=true` v projekte Vercel (dedikovaný TEST projekt ho má
   od 22. 10. 2026, iba cieľ Production); na Preview vetiev vypnuté vždy.
 - Známe obmedzenia: poloha na pozadí sa dá overiť až v zostavenej aplikácii
-  (po licencii Apple); Android má zatiaľ iba polohu s otvorenou aplikáciou;
+  (build z TestFlightu); Android má zatiaľ iba polohu s otvorenou aplikáciou;
   mapa ukáže iba miesta so súradnicami; odťahy dostanú obdobnú, samostatnú
   časť neskôr.
 
@@ -332,7 +337,7 @@ Android vydanie.
 
 1. Upratanie vydania: súpis 51 PR, kontrola produkčnej databázy čítaním,
    schválené migrácie, jedno pripravené vydanie na produkciu.
-2. V deň licencie: App ID, push, APNs, TEST build na iPhony, akceptácia hovorov.
+2. TestFlight: TEST build, APNs, akceptácia hovorov a pristavovača ([postup](testflight.md)).
 3. Ostrá prevádzka: účet pre kontrolu Apple, produkčný build, review, nezaradená distribúcia.
 
 ## Zdroje

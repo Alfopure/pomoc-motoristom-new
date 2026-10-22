@@ -140,8 +140,8 @@ priamo v artefakte, spolu s podpisom a entitlementmi.
 ## Zapojenie po schválení Apple
 
 1. V správnom Apple tíme registrovať `sk.linkapomoci.dispecing.test`, zapnúť
-   Push Notifications a pripraviť signing pre interný TEST build na iPhone.
-   Neskorší produkčný App ID `sk.linkapomoci.dispecing` bude mať vlastnú
+   Push Notifications a pripraviť signing pre interný TEST build na iPhone
+   (hotové 22. 10. 2026: tím `792TJPXTL3`, App Store profil pre TestFlight). Neskorší produkčný App ID `sk.linkapomoci.dispecing` bude mať vlastnú
    konfiguráciu a vydanie. Existujúce Alfo identifikátory nemeníme.
 2. Vytvoriť **VoIP Services** certifikát pre TEST App ID. Pripnúť ho cez
    samostatný TEST Telnyx iOS push credential na overenú TEST credential
@@ -149,10 +149,12 @@ priamo v artefakte, spolu s podpisom a entitlementmi.
    zhodný s interným EAS buildom a provider resource provenance. Nemeniť
    produkčnú connection. Súkromný kľúč/certifikát nepatrí do Git, mobilného
    bundle, verejných EAS premenných ani bežného Preview.
-3. Dokončiť `eas build --platform ios --profile voice-test` a nainštalovať
-   podpísaný build. Overiť jeho source SHA, TEST API/Supabase, bundle ID,
-   entitlement `aps-environment=production`, `audio`/`voip` background modes,
-   natívny modul a vypnuté OTA. App Store publikovanie zatiaľ nie je potrebné.
+3. Dokončiť `eas build --platform ios --profile testflight` a nainštalovať
+   build cez interný TestFlight podľa [postupu](testflight.md) (`voice-test`
+   je Ad Hoc a potreboval by registrované zariadenia). Overiť jeho source SHA,
+   TEST API/Supabase, bundle ID, entitlement `aps-environment=production`,
+   `audio`/`voip`/`location` background modes, natívny modul a vypnuté OTA.
+   Verejné App Store publikovanie zatiaľ nie je potrebné.
 4. Iba v **Production target dedikovaného TEST Vercel projektu** nastaviť
    `MOTORIST_NATIVE_VOICE_TEST_ENABLED=true`, nasadiť aktuálne `dev` afresh
    a overiť canonical health/SHA. Pripojiť TEST operátora v mobile; overiť
