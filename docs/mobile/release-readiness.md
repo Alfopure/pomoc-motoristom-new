@@ -6,20 +6,20 @@ rozsah opráv a otvorené skúšky. Podrobná história F1–F6 je nižšie.
 
 Pokračovanie auditu: [nepotvrdené kroky pristavení a strata prístupu](delivery-recovery-2026-10-22.md).
 Nový mobilný zdroj sa nesmie zamieňať s nainštalovaným buildom 19.
-[Lokálny Xcode build](local-ios-build.md) už prešiel ako 0.1.0 (21);
-podpísaná IPA obsahuje aj opravy PR #494. Apple potvrdil dostupnosť
-v internom TestFlighte (`VALID`, `IN_BETA_TESTING`).
-Majiteľ následne nahlásil **pád buildu 21 pri štarte na iOS 27**; crash log
-potvrdil chýbajúci UIKit scene lifecycle pri SDK 27. Oprava zapína
-oficiálny Expo scene support, ale vyžaduje nový build a overenie spustenia.
-Build 21 sa preto nepovažuje za funkčne akceptovaný.
+[Lokálny Xcode build](local-ios-build.md) **0.1.0 (22)** obsahuje opravy
+PR #494 aj opravu pádu pri štarte z PR #496. Apple potvrdil dostupnosť
+v internom TestFlighte (`VALID`, `IN_BETA_TESTING`). Release simulátor
+iOS 27 overil skutočne viditeľné prihlásenie v štyroch scenároch;
+kontrolná verzia s pôvodným lifecycle zopakovala presnú UIKit chybu.
+Build 21 sa pre pád pri štarte nepoužíva. Fyzická akceptácia aktualizácie
+a živých integrácií je samostatná.
 
 ## Aktuálny stav
 
 | Oblasť | Stav |
 | --- | --- |
-| Distribúcia TEST | **Dispatching TEST 0.1.0 (21)**, zdroj `0cc412c6`: lokálny build, 32 kontrol podpísanej IPA; Apple `VALID`, `IN_BETA_TESTING`, existujúca interná skupina má build. OTA vypnuté. |
-| Server TEST s opravami spoľahlivosti | Overený aplikačný zdroj `dev` `0cc412c6`, https://test.dispecing.linkapomoci.sk; health, metadáta nasadenia a 115 HTTP kontrol prešli. Aktuálny deployment/commit čítať z `/api/health/live`; následná aktualizácia dokumentácie aplikačný zdroj nemení. |
+| Distribúcia TEST | **Dispatching TEST 0.1.0 (22)**, zdroj `988a5890`: lokálny build, 34 kontrol IPA a štyri natívne scenáre štartu; Apple `VALID`, `IN_BETA_TESTING`, existujúca interná skupina má build. OTA vypnuté. |
+| Server TEST s opravami spoľahlivosti | Aplikačný zdroj `dev` `988a5890`, https://test.dispecing.linkapomoci.sk; overené health a metadáta dedikovaného nasadenia. Aktuálny deployment/commit čítať z `/api/health/live`; následná aktualizácia dokumentácie aplikačný zdroj nemení. |
 | Telefonovanie | Natívny Telnyx/CallKit/PushKit, TEST hlas a VoIP push zapnuté; serverové opravy #489–#491 sú na TEST a fungujú aj s buildom 18. |
 | Fyzická skúška | Majiteľ potvrdil úspešné dovolanie aj pri zamknutom mobile. Ostatné kombinácie sa neoznačujú za overené bez samostatnej skúšky. |
 | Apple | Aktívny účet MICT s. r. o.; TEST App ID, App Store Connect, podpis, Expo APNs a Telnyx TEST VoIP credential pripravené. |
@@ -33,9 +33,9 @@ Build 21 sa preto nepovažuje za funkčne akceptovaný.
 
 ## Čo zostáva pred každodennou prevádzkou
 
-1. Overiť nový build podľa auditu: opravy sú na stabilnom TEST v `0cc412c6`,
-   podpísaný build 21 je overený a aktualizuje sa cez TestFlight podľa
-   [postupu](testflight.md). Serverový deploy nezmení JavaScript v
+1. Overiť nový build podľa auditu: opravy sú na stabilnom TEST v `988a5890`,
+   podpísaný build 22 prešiel aj natívnym overením štartu a aktualizuje sa
+   cez TestFlight podľa [postupu](testflight.md). Serverový deploy nezmení JavaScript v
    nainštalovanom builde, keďže OTA sú vypnuté.
 2. Na fyzickom iPhone prejsť [akceptáciu hovorov](iphone-voice-test.md#akceptácia-na-fyzickom-iphone):
    príjem v popredí, na pozadí a pri zamknutí, obojsmerný zvuk, výpadok siete,

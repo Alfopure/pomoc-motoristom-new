@@ -13,10 +13,26 @@ Pred ďalším odovzdaním overiť scenár spustenia zo skutočného Release
 simulátorového buildu alebo na fyzickom iPhone. Manifest bez presunutia
 React Native štartu do scene delegate nestačí; oficiálny plugin robí oboje.
 
-Prvý takto doručený build je **0.1.0 (21)** zo zdroja `dev` `0cc412c6`.
-Apple 23. 10. 2026 potvrdil `VALID`, `IN_BETA_TESTING` a prístup existujúcej
-internej skupiny. Podpis a obsah IPA prešli 32 nezávislými kontrolami;
-časovanie a SHA-256 sú v [zázname vydania](testflight.md#build-21--obnova-nepotvrdeného-kroku).
+Aktuálny lokálny build je **0.1.0 (22)** zo zdroja `dev` `988a5890`.
+Apple potvrdil `VALID`, `IN_BETA_TESTING` a prístup existujúcej internej
+skupiny. Prešlo 34 kontrol IPA aj štyri skutočné scenáre štartu v Release
+simulátore iOS 27; pôvodná kontrolná verzia zopakovala nahlásený pád.
+Build 21 sa pre tento pád nepoužíva. Časovanie, SHA-256 a rozsah skúšky
+sú v [zázname vydania](testflight.md#build-22--oprava-pádu-pri-štarte-na-ios-27).
+
+Pri Release skúške v simulátore ponechať `CODE_SIGNING_ALLOWED=YES` a
+`CODE_SIGN_IDENTITY=-`, cieľ `generic/platform=iOS Simulator`. Xcode vloží
+oprávnenia aj do Mach-O sekcie `__TEXT,__entitlements` alebo `__ents_der`;
+overiť cez `otool -l <app>/DispatchingTEST`. Vypnuté podpisovanie môže
+spôsobiť chybu SecureStore pri načítaní prihlásenia. Dodatočný `codesign`
+tieto linkovacie sekcie nedoplní. Ide iba o simulátor; distribučná IPA
+naďalej používa existujúci App Store certifikát a profil.
+
+V overenej inštalácii Xcode 27.1 je grafické rozhranie simulátora v
+`/Applications/Xcode.app/Contents/Applications/DeviceHub.app`; otvoriť cez
+`open -a /Applications/Xcode.app/Contents/Applications/DeviceHub.app`.
+Staršia cesta k `Simulator.app` v tejto inštalácii neexistuje. Dostupné
+runtimy a konkrétne zariadenie overiť cez `xcrun simctl list -j`.
 
 ## Nástroje a identita
 
@@ -118,8 +134,12 @@ cez `xcrun altool --help` z konkrétneho Xcode. Apple API kľúč má vlastný
 súkromný adresár (`API_PRIVATE_KEYS_DIR`), nikdy nepatrí do zdrojov.
 
 Na pripravenom Macu `tooling/local-mac-upload.mjs <run-directory> <dev-sha>
-<build-number>` vyžaduje úspešný verification receipt, znovu overí SHA-256
-IPA a cez Apple API skontroluje TEST appku aj neprítomnosť rovnakého čísla.
+<build-number> <startup-smoke.json>` vyžaduje úspešný verification receipt
+**aj natívny startup receipt**: kontrolná verzia s pôvodným lifecycle, štyri
+úspešné scenáre a mobilný zdroj zhodný s nahrávaným commitom. Pri zmene
+mobilného zdroja treba zostaviť a spustiť nový Release simulátor; starý
+receipt sa nesmie vydávať za skúšku novej binárky. Helper znovu overí
+SHA-256 IPA a cez Apple API TEST appku aj neprítomnosť rovnakého čísla.
 Potom spustí Apple `altool` a uchová samostatný upload receipt. Po
 prerušenom uploade najprv zistiť stav konkrétneho Apple uploadu; helper
 nedovolí bez preverenia prepísať záznam ani nahrať rovnaký build druhýkrát.
