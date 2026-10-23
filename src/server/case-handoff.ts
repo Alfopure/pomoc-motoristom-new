@@ -79,7 +79,7 @@ export function validateHandoffCommand(input: Record<string, unknown>, external 
 }
 export type HandoffSession = { actor: MotoristActor; client: SupabaseClient<Database> };
 export type ResolvedHandoffLink = { handoff: HandoffReceipt["handoff"]; url: string };
-async function handoffSession(): Promise<HandoffSession> {
+export async function handoffSession(): Promise<HandoffSession> {
   const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
   return { actor, client: await createSupabaseServerClient() };
 }
@@ -142,7 +142,9 @@ export async function prepareCaseHandoffCommand(request: Request, caseId: string
 export async function commandCaseHandoff(request: Request, caseId: string): Promise<HandoffReceipt> {
   const input = await readHandoffBody(request);
   const session = await handoffSession();
-  const command = validateHandoffCommand(input);
+  return executeCaseHandoffCommand(request, caseId, validateHandoffCommand(input), session);
+}
+export async function executeCaseHandoffCommand(request: Request, caseId: string, command: HandoffCommand, session: HandoffSession): Promise<HandoffReceipt> {
   if (command.action === "recover") {
     const recovered = await recoverCaseHandoffLink(caseId, String(command.handoffId), command.commandId, session);
     return { ...recovered, commandId: command.commandId, committedRevision: recovered.handoff.revision };

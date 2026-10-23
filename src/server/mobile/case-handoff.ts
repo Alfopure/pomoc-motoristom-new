@@ -140,15 +140,16 @@ export async function getMobileCaseHandoffs(session: HandoffSession, caseId: str
   if (data.handoffs.length > MOBILE_HANDOFF_MAX_GRANTS) oversized();
   const handoffs = data.handoffs.map(grant);
   if (new Set(handoffs.map(item => item.id)).size !== handoffs.length) schema();
-  const delivery = await deliveryContext(session, caseId);
+  const delivery = await getHandoffDeliveryContext(session, caseId);
   if (delivery) for (const item of handoffs) item.app = delivery.app.get(item.id) ?? null;
   return { caseId, previewVersion: data.previewVersion, preview: snapshot(data.preview), handoffs, enhanced: data.enhanced,
     ...(delivery ? { delivery: { members: delivery.members } } : {}) };
 }
 /** Who can receive in the app, which handoffs are in someone's app and where that
  * pristavovač is. Optional: a database without deliveries, or a failed read, simply
- * leaves the screen as it was. */
-async function deliveryContext(session: HandoffSession, caseId: string): Promise<{ members: MobileDeliveryMember[]; app: Map<string, MobileHandoffApp> } | null> {
+ * leaves the screen as it was. Strict web reads reject partial identities so an
+ * unavailable assignment cannot appear unassigned. Mobile keeps its optional fallback. */
+export async function getHandoffDeliveryContext(session: HandoffSession, caseId: string, strict = false): Promise<{ members: MobileDeliveryMember[]; app: Map<string, MobileHandoffApp> } | null> {
   if (!mobileDeliveryEnabled()) return null;
   const scope = { p_organization_id: session.actor.organizationId, p_actor_id: session.actor.profileId, p_case_id: caseId, p_input: {} };
   try {
@@ -165,10 +166,15 @@ async function deliveryContext(session: HandoffSession, caseId: string): Promise
         && (member.lastPhone === null || typeof member.lastPhone === "string" && member.lastPhone.length <= 30)
         ? [{ id: member.id.toLowerCase(), displayName: member.displayName, lastPhone: member.lastPhone as string | null }] : [];
     });
+    if (strict && (parsed.length !== list.length || new Set(parsed.map(member => member.id)).size !== parsed.length)) return null;
     const app = new Map<string, MobileHandoffApp>();
     for (const item of entries) {
       const entry = item as Record<string, unknown>, point = entry.position as Record<string, unknown> | null | undefined;
-      if (typeof entry.handoffId !== "string" || !isUuid(entry.handoffId) || typeof entry.memberId !== "string" || !isUuid(entry.memberId)) continue;
+      if (typeof entry.handoffId !== "string" || !isUuid(entry.handoffId) || typeof entry.memberId !== "string" || !isUuid(entry.memberId)) {
+        if (strict) return null;
+        continue;
+      }
+      if (strict && app.has(entry.handoffId.toLowerCase())) return null;
       const located = point && typeof point.lat === "number" && Number.isFinite(point.lat) && Math.abs(point.lat) <= 90 && typeof point.lng === "number" && Number.isFinite(point.lng)
         && Math.abs(point.lng) <= 180 && typeof point.recordedAt === "string" && isHistoryTimestamp(point.recordedAt)
         ? { lat: point.lat, lng: point.lng, accuracy: typeof point.accuracy === "number" && Number.isFinite(point.accuracy) && point.accuracy >= 0 ? point.accuracy : null, recordedAt: point.recordedAt }
@@ -188,13 +194,14 @@ function deliveryError(error: { code?: string; message?: string }): MutationErro
   return new MutationError("Odoslanie do aplikácie sa nepodarilo overiť. Skúste znova.", 503, "delivery_unconfirmed");
 }
 /** Sends a confirmed handoff to a pristavovač in the app; the first time also to their phone. */
-async function sendToApp(session: HandoffSession, caseId: string, handoffId: string, memberId: string, commandId: string, expectedRevision: number): Promise<{ currentRevision: number }> {
+export async function sendHandoffToApp(session: HandoffSession, caseId: string, handoffId: string, memberId: string, commandId: string, expectedRevision: number): Promise<{ currentRevision: number }> {
+  if (!mobileDeliveryEnabled()) throw deliveryUnavailable();
   const { data, error } = await session.client.rpc("motorist_case_handoff_app", { p_organization_id: session.actor.organizationId, p_actor_id: session.actor.profileId,
     p_case_id: caseId, p_action: "assign", p_input: { handoffId, memberId, commandId, expectedRevision } });
   if (error) throw deliveryError(error);
   const result = data as { assigned?: unknown; memberId?: unknown; handoff?: { id?: unknown; revision?: unknown; published?: unknown } } | null;
-  if (typeof result?.memberId !== "string" || result.memberId.toLowerCase() !== memberId || result.handoff?.id !== handoffId
-    || typeof result.handoff.revision !== "number" || !Number.isSafeInteger(result.handoff.revision)) throw deliveryError({});
+  if (typeof result?.assigned !== "boolean" || typeof result.memberId !== "string" || result.memberId.toLowerCase() !== memberId || result.handoff?.id !== handoffId
+    || typeof result.handoff.revision !== "number" || !Number.isSafeInteger(result.handoff.revision) || result.handoff.revision < expectedRevision || result.handoff.revision > 2_147_483_647) throw deliveryError({});
   if (result.assigned === true) {
     const card = result.handoff.published as { caseNumber?: unknown; action?: unknown } | null | undefined;
     const known = typeof card?.caseNumber === "string" && typeof card.action === "string";
@@ -223,7 +230,7 @@ export function parseMobileHandoffInput(value: unknown): MobileHandoffInput {
   const member = typeof recipientMemberId === "string" ? { recipientMemberId: recipientMemberId.toLowerCase() } : {};
   if (action === "deliver") {
     if (!member.recipientMemberId || typeof rest.commandId !== "string" || !isUuid(rest.commandId) || typeof rest.handoffId !== "string" || !isUuid(rest.handoffId)
-      || typeof rest.expectedRevision !== "number" || !Number.isSafeInteger(rest.expectedRevision) || rest.expectedRevision < 1) throw new MutationError("Neplatná požiadavka odovzdania.", 400);
+      || typeof rest.expectedRevision !== "number" || !Number.isSafeInteger(rest.expectedRevision) || rest.expectedRevision < 1 || rest.expectedRevision > 2_147_483_647) throw new MutationError("Neplatná požiadavka odovzdania.", 400);
     return { action: "deliver", commandId: rest.commandId.toLowerCase(), handoffId: rest.handoffId.toLowerCase(), expectedRevision: rest.expectedRevision, recipientMemberId: member.recipientMemberId };
   }
   return { ...validateHandoffCommand(rest), ...member } as MobileHandoffInput;
@@ -244,7 +251,7 @@ export async function commandMobileCaseHandoff(session: HandoffSession, request:
   const memberId = "recipientMemberId" in command ? command.recipientMemberId : undefined;
   if (memberId && !mobileDeliveryEnabled()) throw deliveryUnavailable();
   if (command.action === "deliver") {
-    const sent = await sendToApp(session, caseId, command.handoffId, command.recipientMemberId, command.commandId, command.expectedRevision);
+    const sent = await sendHandoffToApp(session, caseId, command.handoffId, command.recipientMemberId, command.commandId, command.expectedRevision);
     return { kind: "delivery", caseId, handoffId: command.handoffId, commandId: command.commandId, memberId: command.recipientMemberId, sent: true, currentRevision: sent.currentRevision };
   }
   try {
@@ -272,7 +279,7 @@ export async function commandMobileCaseHandoff(session: HandoffSession, request:
     // The handoff exists either way; a failed send to the app is reported, the link still works.
     let delivery: MobileHandoffMutation["delivery"];
     if (command.action === "issue" && memberId) {
-      try { await sendToApp(session, caseId, receipt.handoff.id, memberId, command.commandId, expectedCommit); delivery = { status: "sent", memberId }; }
+      try { await sendHandoffToApp(session, caseId, receipt.handoff.id, memberId, command.commandId, expectedCommit); delivery = { status: "sent", memberId }; }
       catch { delivery = { status: "failed", memberId }; }
     }
     return { kind: "mutation", caseId, handoffId: receipt.handoff.id, commandId: command.commandId, action: command.action,
