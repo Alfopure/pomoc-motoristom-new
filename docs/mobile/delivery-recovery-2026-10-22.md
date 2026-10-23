@@ -63,11 +63,14 @@ HTTP smoke dokladá zdravie a autentifikačné hranice, nie fyzický mobilný kr
 TestFlight **0.1.0 (19), zdroj `ecbe6d1a`, tieto nové mobilné opravy neobsahuje**.
 OTA je vypnuté. Samotné nasadenie TEST servera JavaScript v iPhone nezmení.
 
-Expo API 22. 10. 2026 o 21:06 UTC potvrdilo plán Free a **15/15 použitých iOS
-cloud buildov**. Na Macu nie je plný Xcode (ani v `/Applications`, ani v
-`~/Applications`), aktívne sú Command Line Tools. Nový identifikovaný
-TestFlight build preto čaká na dostupnú build kapacitu alebo Xcode. Platený
-plán nebol objednaný a neoznačujeme nové správanie za doručené do buildu 19.
+Blokovanie kapacitou z 22. 10. je vyriešené [lokálnym Xcode buildom](local-ios-build.md).
+Majiteľ nainštaloval a spustil Xcode; 23. 10. sa na Macu zostavil build
+**0.1.0 (21)** z `dev` `0cc412c649a15a9071fd3c42d525884fe3b07e4d`.
+Podpísaná IPA prešla 32 nezávislými kontrolami vrátane vložených nových
+opráv a TEST identity. Apple potvrdil `VALID`, `IN_BETA_TESTING`
+a prístup existujúcej internej skupiny „Team (Expo)“; build je dostupný
+cez TestFlight. Free iOS cloud kvóta Expo zostáva 15/15;
+platený plán ani nový Expo projekt neboli potrebné. Build 19 sa nemení.
 
 Po doručení nového buildu na TEST účte:
 

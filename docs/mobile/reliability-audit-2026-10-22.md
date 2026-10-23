@@ -3,6 +3,8 @@
 Ďalšie kolo na pokyn „pokračuj ešte ďalej“: [obnova nepotvrdených krokov
 pristavenia](delivery-recovery-2026-10-22.md). Nižšie je zachovaný rozsah a
 výsledok prvého kola PR #492; build 19 ďalšie mobilné opravy ešte neobsahuje.
+Aktuálny [TestFlight build 21](testflight.md#build-21--obnova-nepotvrdeného-kroku)
+už obsahuje obidve kolá a bol doručený lokálne cez Xcode 23. 10. 2026.
 
 ## Východiskový stav
 

@@ -4,7 +4,7 @@ Cieľ: TEST aplikácia v iPhone cez interný TestFlight, bez App Review. Je to T
 variant (TEST server, TEST databáza, telefonovanie zapnuté v aplikácii, OTA vypnuté).
 Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 
-## Stav prípravy (22. 10. 2026)
+## Stav prípravy (23. 10. 2026)
 
 | Položka | Stav |
 | --- | --- |
@@ -19,8 +19,9 @@ Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 | Prepínače `MOTORIST_NATIVE_VOICE_TEST_ENABLED` a `MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED` | zapnuté iba v dedikovanom TEST projekte (cieľ Production) |
 | Prvý TestFlight build | 0.1.0 (17) z `dev` `03389c58` Apple odmietol (ITMS-90683: chýbal text pre pohyb) |
 | Prvý úspešný TestFlight build | 0.1.0 (18) z `dev` `47882b1a`: interné testovanie od 22. 10. 2026 |
-| Najnovší zostavený TestFlight build | 0.1.0 (19) z `dev` `ecbe6d1a`, EAS `a0e05eed-cd26-4245-a635-d071fb262ebc`: zostavený, podpísaná IPA overená; dostupnosť pred inštaláciou overiť v TestFlighte |
-| Ďalšie opravy pristavení | [Obnova nepotvrdených krokov](delivery-recovery-2026-10-22.md) potrebuje nový build. Build 19 ich neobsahuje; Free iOS cloud kapacita je vyčerpaná (15/15, kontrola 22. 10. 21:06 UTC), plný Xcode na Macu chýba. |
+| Najnovší TestFlight build | **0.1.0 (21)** z `dev` `0cc412c6`, lokálne cez Xcode 27.1; podpísaná IPA prešla 32 kontrolami. Apple 23. 10. 2026 potvrdil `VALID`, `IN_BETA_TESTING` a prístup existujúcej internej skupiny. |
+| Ďalšie opravy pristavení | [Obnova nepotvrdených krokov](delivery-recovery-2026-10-22.md) je zabalená v builde 21. Build 19 ich neobsahuje; OTA je vypnuté. |
+| Kapacita zostavenia | Free iOS cloud kapacita Expo je vyčerpaná (15/15). Plný Xcode aj potrebné nástroje sú na Macu pripravené; [lokálny postup](local-ios-build.md) kvótu cloudových buildov nepotrebuje. Platený plán nebol objednaný. |
 | Interní testeri | skupina „Team (Expo)“ s prístupom ku všetkým buildom; držiteľ účtu pozvaný 22. 10. 2026 |
 
 APNs kľúč, Telnyx push credential a prepínače sú mimo buildu; menia sa bez
@@ -54,6 +55,11 @@ aplikácia nikdy nevyžiada (ITMS-90683). `expo-location` obsahuje Core Motion,
 `mobile/src/lib/ios-store-config.test.ts` ich vyžaduje vo všetkých buildoch. Stav
 nahratia aj s chybami ukazuje App Store Connect API `GET /v1/apps/{id}/buildUploads`;
 odmietnutý build sa v zozname buildov neobjaví.
+
+Od 23. 10. je pripravený aj [lokálny build cez Xcode](local-ios-build.md).
+Príkaz má rovnaký profil a pridáva `--local`; verzovanie zostáva vzdialené
+v EAS. Pokus 20 zastal na chýbajúcom Apple WWDR G3 na čerstvom Macu,
+po doplnení oficiálneho medziľahlého certifikátu prešiel build 21.
 
 ## Nahratie do TestFlightu
 
@@ -91,6 +97,8 @@ EXPO_ASC_API_KEY_PATH=… EXPO_ASC_KEY_ID=… EXPO_ASC_ISSUER_ID=… EXPO_APPLE_
 
 ## Build 19 – opravy spoľahlivosti
 
+Historické vydanie; nasledujúci build 21 obsahuje aj tieto opravy.
+
 Zdroj `ecbe6d1ac876156e01f92697f47da96c2bdd3685` (PR #492). Nový build
 obsahuje obnovu prvého pripojenia po výpadku, kontrolu povolenia notifikácií
 po návrate z Nastavení, zrušenie oneskorenej push registrácie po odhlásení,
@@ -103,8 +111,8 @@ Overené: 1 247 mobilných testov, typy/lint, CI vrátane iOS a Android exportu,
 Podpísaná IPA má správny TEST App ID, server, databázu, podpis, hlasové
 režimy a popisy oprávnení; zabalený JavaScript obsahuje nové opravy.
 
-V TestFlighte aktualizovať **Dispatching TEST na 0.1.0 (19)**. Build 18
-si tieto opravy nestiahne, pretože OTA sú vypnuté. Skúsiť návrat po výpadku
+Tieto opravy boli doručené v builde 19 a zostávajú aj v aktuálnom builde 21.
+Build 18 si ich nestiahne, pretože OTA sú vypnuté. Skúsiť návrat po výpadku
 siete, zmenu notifikácií v Nastaveniach a pristavenie pri slabom signále.
 Reálne audio, podržanie/prepojenie, push doručenie a pohyb telefónu zostávajú
 podľa [akceptačného plánu](reliability-audit-2026-10-22.md) samostatné skúšky.
@@ -118,6 +126,37 @@ Krátka skúška nového buildu (iba TEST účty a vlastné skúšobné pristave
 | Po pripojení zopakovať úspešný hovor pri zamknutom telefóne. | Prijatie, obojstranný zvuk a zavesenie; samotné zvonenie neoznačiť za celý úspešný hovor. |
 | Prijať skúšobné pristavenie, povoliť polohu, chvíľu ísť bez signálu a potom obnoviť spojenie. | Dispečer dostane čakajúce polohy; čerstvosť polohy na jeho obrazovke sa obnoví. |
 | Dokončiť alebo zrušiť pristavenie a overiť obidva pohľady. | Údaje klienta sa skryjú a telefón prestane zdieľať polohu tohto pristavenia. |
+
+## Build 21 – obnova nepotvrdeného kroku
+
+Zdroj `0cc412c649a15a9071fd3c42d525884fe3b07e4d` (PR #494). Obsahuje
+[presnú obnovu nepotvrdených krokov](delivery-recovery-2026-10-22.md),
+ochranu pred starými odpoveďami a dialógmi, okamžitú stratu prístupu
+a zastavenie nových krokov počas odhlásenia. Zachováva opravy buildu 19.
+
+Lokálny EAS build cez Xcode 27.1, SDK iOS 27.1, Node 24.22.1,
+CocoaPods 1.17.0 a Fastlane 2.241.1 prešiel 23. 10. 2026 od 06:05:07
+do 06:12:31 UTC (7 min 24 s vrátane prípravy natívnych závislostí).
+IPA má 21 274 649 bajtov; SHA-256
+`5589d4fc918fe6412eef09ba417b2c1a664a6718bfe7df6277e4495e91176bb2`.
+
+Nezávislá kontrola IPA overila 32 podmienok vrátane striktného podpisu
+a frameworkov, existujúceho profilu, App ID, tímu, push entitlementu,
+TEST API a Supabase, vypnutých OTA a vloženého JavaScriptu s obnovou
+pripojenia aj novým uložením kroku a tlačidlom „Overiť rovnaký krok“.
+Čistý Git zdroj bol overený pred aj po zostavení. Upload ide cez Apple
+`altool` priamo z Macu; Expo cloud build ani nový Expo projekt netreba.
+
+Apple upload `ffb7ed24-81e5-412e-bc89-e4a5a9935364` prijal bez chyby
+23. 10. o 06:15:17 UTC. O 06:18:35 UTC bolo overené `COMPLETE`,
+`VALID`, `IN_BETA_TESTING`, bez chýb či upozornení a s konkrétnym buildom
+v existujúcej skupine „Team (Expo)“. Slovenské „What to Test“ je uložené
+pri tomto builde. IPA, symboly dSYM a záznamy kontrol sú uchované súkromne.
+
+V TestFlighte aktualizovať na **0.1.0 (21)** a prejsť
+[postup skúšky pristavení](delivery-recovery-2026-10-22.md#natívne-vydanie-a-postup-skúšky).
+Kompilácia a kontrola podpisu nenahrádzajú fyzické skúšky Keychain,
+reštartu iPhone, živého zvuku, push a pohybu telefónu.
 
 ## Hranice
 
