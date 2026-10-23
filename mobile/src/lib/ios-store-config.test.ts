@@ -4,7 +4,6 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExpoConfig } from "expo/config";
 import type { ExportedConfig } from "expo/config-plugins";
 
 const require = createRequire(import.meta.url);
@@ -54,7 +53,7 @@ describe("the iOS app as App Store Connect receives it", () => {
     const contents = execFileSync("tar", ["-xOf", template, "package/ios/HelloWorld/AppDelegate.swift"], { encoding: "utf8" });
     const appDelegateMod = exp.mods?.ios?.appDelegate;
     expect(appDelegateMod).toBeTypeOf("function");
-    const result = await appDelegateMod!({ ...exp, modResults: { language: "swift", contents }, modRawConfig: exp,
+    const result = await appDelegateMod!({ ...exp, modResults: { path: join(projectRoot, "ios/AppDelegate.swift"), language: "swift", contents }, modRawConfig: exp,
       modRequest: { projectRoot, platformProjectRoot: join(projectRoot, "ios"), platform: "ios", modName: "appDelegate", introspect: false } });
     const generated = result.modResults.contents;
     expect(generated).toContain("class AppDelegate: ExpoAppDelegate, ExpoReactNativeFactoryProvider");
