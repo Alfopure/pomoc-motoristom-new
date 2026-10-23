@@ -1,19 +1,21 @@
 # Pripravenosť mobilnej aplikácie na nasadenie (iPhone)
 
-Aktualizované 22. 10. 2026 po prvých fyzických skúškach majiteľa. Aktuálny
+Aktualizované 23. 10. 2026 po lokálnom Xcode builde. Aktuálny
 [audit spoľahlivosti a plán](reliability-audit-2026-10-22.md) obsahuje zistenia,
 rozsah opráv a otvorené skúšky. Podrobná história F1–F6 je nižšie.
 
 Pokračovanie auditu: [nepotvrdené kroky pristavení a strata prístupu](delivery-recovery-2026-10-22.md).
-Nový mobilný zdroj sa nesmie zamieňať s nainštalovaným buildom 19; na ďalší
-TestFlight build treba doplniť kapacitu zostavenia (iOS Free 15/15, Xcode chýba).
+Nový mobilný zdroj sa nesmie zamieňať s nainštalovaným buildom 19.
+[Lokálny Xcode build](local-ios-build.md) už prešiel ako 0.1.0 (21);
+podpísaná IPA obsahuje aj opravy PR #494. Apple potvrdil dostupnosť
+v internom TestFlighte (`VALID`, `IN_BETA_TESTING`).
 
 ## Aktuálny stav
 
 | Oblasť | Stav |
 | --- | --- |
-| Distribúcia TEST | Dispatching TEST 0.1.0 (19), zdroj `ecbe6d1a`: podpísaná IPA overená, dostupnosť overiť v TestFlighte. OTA vypnuté. |
-| Server TEST s opravami spoľahlivosti | `dev` `ecbe6d1a`, https://test.dispecing.linkapomoci.sk; overené health, metadáta nasadenia a 115 HTTP kontrol. |
+| Distribúcia TEST | **Dispatching TEST 0.1.0 (21)**, zdroj `0cc412c6`: lokálny build, 32 kontrol podpísanej IPA; Apple `VALID`, `IN_BETA_TESTING`, existujúca interná skupina má build. OTA vypnuté. |
+| Server TEST s opravami spoľahlivosti | Overený aplikačný zdroj `dev` `0cc412c6`, https://test.dispecing.linkapomoci.sk; health, metadáta nasadenia a 115 HTTP kontrol prešli. Aktuálny deployment/commit čítať z `/api/health/live`; následná aktualizácia dokumentácie aplikačný zdroj nemení. |
 | Telefonovanie | Natívny Telnyx/CallKit/PushKit, TEST hlas a VoIP push zapnuté; serverové opravy #489–#491 sú na TEST a fungujú aj s buildom 18. |
 | Fyzická skúška | Majiteľ potvrdil úspešné dovolanie aj pri zamknutom mobile. Ostatné kombinácie sa neoznačujú za overené bez samostatnej skúšky. |
 | Apple | Aktívny účet MICT s. r. o.; TEST App ID, App Store Connect, podpis, Expo APNs a Telnyx TEST VoIP credential pripravené. |
@@ -27,8 +29,8 @@ TestFlight build treba doplniť kapacitu zostavenia (iOS Free 15/15, Xcode chýb
 
 ## Čo zostáva pred každodennou prevádzkou
 
-1. Overiť nový build podľa auditu: opravy sú na stabilnom TEST v `ecbe6d1a`,
-   podpísaný build 19 je overený a aktualizuje sa cez TestFlight podľa
+1. Overiť nový build podľa auditu: opravy sú na stabilnom TEST v `0cc412c6`,
+   podpísaný build 21 je overený a aktualizuje sa cez TestFlight podľa
    [postupu](testflight.md). Serverový deploy nezmení JavaScript v
    nainštalovanom builde, keďže OTA sú vypnuté.
 2. Na fyzickom iPhone prejsť [akceptáciu hovorov](iphone-voice-test.md#akceptácia-na-fyzickom-iphone):
