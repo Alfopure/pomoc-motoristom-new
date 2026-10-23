@@ -9,6 +9,10 @@ Nový mobilný zdroj sa nesmie zamieňať s nainštalovaným buildom 19.
 [Lokálny Xcode build](local-ios-build.md) už prešiel ako 0.1.0 (21);
 podpísaná IPA obsahuje aj opravy PR #494. Apple potvrdil dostupnosť
 v internom TestFlighte (`VALID`, `IN_BETA_TESTING`).
+Majiteľ následne nahlásil **pád buildu 21 pri štarte na iOS 27**; crash log
+potvrdil chýbajúci UIKit scene lifecycle pri SDK 27. Oprava zapína
+oficiálny Expo scene support, ale vyžaduje nový build a overenie spustenia.
+Build 21 sa preto nepovažuje za funkčne akceptovaný.
 
 ## Aktuálny stav
 

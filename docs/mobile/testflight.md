@@ -4,6 +4,14 @@ Cieľ: TEST aplikácia v iPhone cez interný TestFlight, bez App Review. Je to T
 variant (TEST server, TEST databáza, telefonovanie zapnuté v aplikácii, OTA vypnuté).
 Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 
+**Hlásený problém buildu 21 (23. 10. 2026):** na iOS 27 padá pri štarte,
+pred načítaním JavaScriptu. TestFlight crash feedback ukazuje
+`___UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption_block_invoke`.
+Apple processing a kontrola podpisu tento runtime problém neodhalili.
+Oprava zapína oficiálne `expo-build-properties` 57.0.22 s
+`ios.enableSceneSupport=true`; nový natívny build a spustenie na iOS 27
+sú potrebné pred označením opravy za doručenú. OTA sú vypnuté.
+
 ## Stav prípravy (23. 10. 2026)
 
 | Položka | Stav |

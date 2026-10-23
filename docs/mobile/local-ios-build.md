@@ -5,6 +5,14 @@ Používa rovnaký profil `testflight`, Expo projekt, Apple App ID a podpis ako
 cloudový build. Nahratie do TestFlightu je ďalší krok; samotná IPA ešte
 neznamená dostupný build na iPhone.
 
+Pri Xcode 27 musí konfigurácia SDK 57 zapnúť `enableSceneSupport` cez
+`expo-build-properties` (v tejto aplikácii 57.0.22). Samotná úspešná
+kompilácia, podpis a Apple `VALID` nezaručujú štart: majiteľ nahlásil pád
+buildu 21 na iOS 27 a crash log potvrdil chýbajúci scene lifecycle.
+Pred ďalším odovzdaním overiť scenár spustenia zo skutočného Release
+simulátorového buildu alebo na fyzickom iPhone. Manifest bez presunutia
+React Native štartu do scene delegate nestačí; oficiálny plugin robí oboje.
+
 Prvý takto doručený build je **0.1.0 (21)** zo zdroja `dev` `0cc412c6`.
 Apple 23. 10. 2026 potvrdil `VALID`, `IN_BETA_TESTING` a prístup existujúcej
 internej skupiny. Podpis a obsah IPA prešli 32 nezávislými kontrolami;
@@ -143,6 +151,8 @@ Pri podobnej chybe najprv odlíšiť chýbajúci reťazec od poškodeného p12
 alebo chyby hesla; samotná hláška nedokazuje nesprávne heslo.
 
 Zdroje: [Expo lokálne buildy](https://docs.expo.dev/build-reference/local-builds/),
+[Expo scene support](https://docs.expo.dev/versions/v57.0.0/sdk/build-properties/#pluginconfigtypeios),
+[Apple scene lifecycle](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle),
 [Apple WWDR](https://developer.apple.com/support/expiration/),
 [Apple certifikáty](https://www.apple.com/certificateauthority/),
 [Apple upload](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/).
