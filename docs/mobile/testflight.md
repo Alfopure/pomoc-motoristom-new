@@ -21,7 +21,14 @@ Podpis, natívne scenáre, artefakty a neoverené skúšky sú v
 [zázname buildu 22](#build-22--oprava-pádu-pri-štarte-na-ios-27).
 Žiadosť o externé beta schválenie sa týmto neodoslala.
 
-## Stav prípravy (23. 10. 2026)
+**Mobilná fáza 1, 24. 10. 2026:** build **0.1.0 (23)** zo zdroja
+`f3926dc4` je podpísaný, prešiel 34 kontrolami IPA aj vizuálnym overením
+štyroch scenárov štartu. Apple o **18:18 UTC** potvrdil `VALID`,
+`IN_BETA_TESTING` a dostupnosť v existujúcej skupine Team (Expo).
+Rozsah a dôkazy sú v
+[zázname buildu 23](#build-23--mobilná-fáza-1).
+
+## Stav prípravy (24. 10. 2026)
 
 | Položka | Stav |
 | --- | --- |
@@ -36,8 +43,8 @@ Podpis, natívne scenáre, artefakty a neoverené skúšky sú v
 | Prepínače `MOTORIST_NATIVE_VOICE_TEST_ENABLED` a `MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED` | zapnuté iba v dedikovanom TEST projekte (cieľ Production) |
 | Prvý TestFlight build | 0.1.0 (17) z `dev` `03389c58` Apple odmietol (ITMS-90683: chýbal text pre pohyb) |
 | Prvý úspešný TestFlight build | 0.1.0 (18) z `dev` `47882b1a`: interné testovanie od 22. 10. 2026 |
-| Najnovší TestFlight build | **0.1.0 (22)** z `dev` `988a5890` (PR #496), lokálne cez Xcode 27.1; 34 kontrol IPA a štyri natívne scenáre štartu prešli. Apple potvrdil `VALID`, `IN_BETA_TESTING` a prístup existujúcej internej skupiny. |
-| Ďalšie opravy pristavení | [Obnova nepotvrdených krokov](delivery-recovery-2026-10-22.md) je zachovaná aj v builde 22. Build 19 ich neobsahuje; OTA je vypnuté. |
+| Najnovší TestFlight build | **0.1.0 (23)** z `dev` `f3926dc4` (PR #507), lokálne cez Xcode 27.1: flotila do 1 000 vozidiel, Obnoviť prístupy a Uložiť a odovzdať. 34 kontrol IPA a čerstvé vizuálne overenie štyroch scenárov štartu prešli. Apple potvrdil `VALID`, `IN_BETA_TESTING` a prístup existujúcej internej skupiny. |
+| Ďalšie opravy pristavení | [Obnova nepotvrdených krokov](delivery-recovery-2026-10-22.md) je zachovaná aj v builde 23. Build 19 ich neobsahuje; OTA je vypnuté. |
 | Kapacita zostavenia | Free iOS cloud kapacita Expo je vyčerpaná (15/15). Plný Xcode aj potrebné nástroje sú na Macu pripravené; [lokálny postup](local-ios-build.md) kvótu cloudových buildov nepotrebuje. Platený plán nebol objednaný. |
 | Interní testeri | skupina „Team (Expo)“ s prístupom ku všetkým buildom; držiteľ účtu pozvaný 22. 10. 2026 |
 
@@ -114,7 +121,7 @@ EXPO_ASC_API_KEY_PATH=… EXPO_ASC_KEY_ID=… EXPO_ASC_ISSUER_ID=… EXPO_APPLE_
 
 ## Build 19 – opravy spoľahlivosti
 
-Historické vydanie; aktuálny build 22 obsahuje aj tieto opravy.
+Historické vydanie; aktuálny build 23 obsahuje aj tieto opravy.
 
 Zdroj `ecbe6d1ac876156e01f92697f47da96c2bdd3685` (PR #492). Nový build
 obsahuje obnovu prvého pripojenia po výpadku, kontrolu povolenia notifikácií
@@ -230,6 +237,50 @@ Slovenské „What to Test“ je uložené a spätne overené pri tomto builde.
 Aktualizovať v TestFlighte na **0.1.0 (22)**. Fyzický iPhone má ešte
 potvrdiť otvorenie po aktualizácii a opakovať hovory pri zamknutí, push
 a polohu podľa akceptačného postupu. Simulátor tieto integrácie nepotvrdzuje.
+
+## Build 23 – mobilná fáza 1
+
+Zdroj `f3926dc4e04909df1d823036e2c713dd05d5316a`,
+[PR #507](https://github.com/Alfopure/pomoc-motoristom-new/pull/507).
+Web a API s týmto rozsahom sú na https://test.dispecing.linkapomoci.sk.
+Build 23 obsahuje [prvú fázu](../rollout/mobile-phase-one-2026-10-24.md):
+flotilu do 1 000 vozidiel, **Obnoviť prístupy** dostupné aj pri skrytom
+module Pristavenia a **Uložiť a odovzdať** s výslovným potvrdením príjemcu.
+Obnova konceptu po reštarte aj ochrana pred duplicitným uložením sú zachované.
+Mobilné priradenie hovoru zostáva cez existujúce **Po hovore**.
+
+Podpísaná IPA má **21 276 682 bajtov**, SHA-256
+`cf611b3b81ac8aca8404a7c762fe271d8c1bc4b110eeeaaaaa8872df7611e5a1`.
+Všetkých 34 kontrol podpisu, konfigurácie a obsahu prešlo. V skutočnom
+zabalenom JavaScripte sú overené aj texty nových akcií. TEST App ID,
+server, databáza, podpis a vypnuté OTA zostávajú rovnaké.
+
+Čerstvý Release simulátor zo zdroja `f3926dc4` overil viditeľné prihlásenie
+pri studenom štarte, návrate z pozadia a dvoch reštartoch. Hashe
+nainštalovanej binárky, Info.plist aj JavaScriptu sa zhodujú so zostaveným
+simulátorovým artefaktom. Štyri snímky boli prenesené s kontrolou hashov
+a samostatne vizuálne skontrolované; nejde o potvrdenie iba podľa živého procesu.
+Jedna pôvodná snímka reštartu ukázala ešte obnovovanie prihlásenia a nebola
+označená ako PASS. Opakovaný reštart doložil prihlásenie po 20 aj 60 sekundách;
+pôvodné snímky a výsledky zostali zachované. Overenie sa uzavrelo
+24. 10. o **18:14 UTC**. Predtým bolo potrebné obnoviť neaktívnu službu
+CoreSimulator po zaseknutých systémových príkazoch.
+
+Historická negatívna kontrola zo zdroja `96afa6f6` zostáva identifikovaná
+ako starší beh. Jej binárka, Info.plist a crash report boli overené podľa
+hashov a relevantné natívne vstupy sú nezmenené; nejde o nový negatívny beh.
+
+Apple upload skončil bez chyby **24. 10. o 18:16:02 UTC**.
+O **18:18:41 UTC** Apple potvrdil build
+`f81bc730-ebeb-4d96-8a97-8b5941537ae7`, `VALID`, `IN_BETA_TESTING`
+a dostupnosť v existujúcej internej skupine **Team (Expo)**.
+Aktuálna verzia na aktualizáciu cez TestFlight je **0.1.0 (23)**;
+samotné nasadenie servera staršiu nainštalovanú binárku nezmení.
+
+Spoločný fyzický test majiteľ odložil pokynom „test bude potom“.
+[Jednoduchý checklist](phase-one-acceptance.md) preto zostáva nevyplnený.
+Simulátor nepotvrdzuje skutočný push, obojsmerný zvuk, GPS pri pohybe
+a zamknutí ani zastavenie sledovania. Produkcia nebola vydaná.
 
 ## Hranice
 

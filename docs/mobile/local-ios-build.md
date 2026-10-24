@@ -13,12 +13,14 @@ Pred ďalším odovzdaním overiť scenár spustenia zo skutočného Release
 simulátorového buildu alebo na fyzickom iPhone. Manifest bez presunutia
 React Native štartu do scene delegate nestačí; oficiálny plugin robí oboje.
 
-Aktuálny lokálny build je **0.1.0 (22)** zo zdroja `dev` `988a5890`.
-Apple potvrdil `VALID`, `IN_BETA_TESTING` a prístup existujúcej internej
-skupiny. Prešlo 34 kontrol IPA aj štyri skutočné scenáre štartu v Release
-simulátore iOS 27; pôvodná kontrolná verzia zopakovala nahlásený pád.
-Build 21 sa pre tento pád nepoužíva. Časovanie, SHA-256 a rozsah skúšky
-sú v [zázname vydania](testflight.md#build-22--oprava-pádu-pri-štarte-na-ios-27).
+Aktuálny lokálny build je **0.1.0 (23)** zo zdroja `dev` `f3926dc4`.
+Apple 24. 10. o 18:18 UTC potvrdil `VALID`, `IN_BETA_TESTING` a prístup
+existujúcej internej skupiny. Mobilná fáza 1 prešla 34 kontrolami IPA
+a čerstvým vizuálnym overením štyroch scenárov v Release simulátore
+iOS 27. Historická negatívna kontrola z overovania buildu 22 zostala oddelená
+a jej hashe aj nezmenené natívne vstupy boli znovu overené.
+Build 21 sa pre pád pri štarte nepoužíva. Časovanie, SHA-256 a rozsah sú v
+[zázname buildu 23](testflight.md#build-23--mobilná-fáza-1).
 
 Pri Release skúške v simulátore ponechať `CODE_SIGNING_ALLOWED=YES` a
 `CODE_SIGN_IDENTITY=-`, cieľ `generic/platform=iOS Simulator`. Xcode vloží
@@ -149,6 +151,15 @@ overiť konkrétne číslo, `processingState=VALID`, interný stav
 `IN_BETA_TESTING` a prístup existujúcej skupiny „Team (Expo)“. Nepridávať
 ďalších testerov ani pozvánky. Výsledok uploadu bez týchto kontrol ešte
 nedokladá dostupnosť cez TestFlight.
+
+Ak Vision/OCR alebo systémový príkaz simulátora prekročí časový limit,
+výsledok sa neoznačuje za pád appky ani za úspešný štart. Zachovať
+neúspešný beh a najprv overiť stav konkrétneho procesu a zariadenia.
+Alternatívou OCR sú čerstvé snímky štyroch scenárov, kontrola PID a hashov
+a samostatné vizuálne potvrdenie skutočného prihlasovania. Taká kontrola
+vytvorí vlastný záznam s odkazmi na pôvodné dôkazy; pôvodné výsledky sa
+neprepisujú. Reštart CoreSimulator služby prichádza do úvahy po overení,
+že nie je aktívny žiadny simulátor ani iný skúšobný beh.
 
 ## Chyba podpisu pri prvom builde
 

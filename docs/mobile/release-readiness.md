@@ -1,25 +1,34 @@
 # Pripravenosť mobilnej aplikácie na nasadenie (iPhone)
 
-Aktualizované 23. 10. 2026 po lokálnom Xcode builde. Aktuálny
+Aktualizované 24. 10. 2026 po internom vydaní mobilnej fázy 1. Aktuálny
 [audit spoľahlivosti a plán](reliability-audit-2026-10-22.md) obsahuje zistenia,
 rozsah opráv a otvorené skúšky. Podrobná história F1–F6 je nižšie.
 
 Pokračovanie auditu: [nepotvrdené kroky pristavení a strata prístupu](delivery-recovery-2026-10-22.md).
-Nový mobilný zdroj sa nesmie zamieňať s nainštalovaným buildom 19.
-[Lokálny Xcode build](local-ios-build.md) **0.1.0 (22)** obsahuje opravy
-PR #494 aj opravu pádu pri štarte z PR #496. Apple potvrdil dostupnosť
+Nový mobilný zdroj sa nesmie zamieňať so staršou nainštalovanou binárkou.
+[Lokálny Xcode build](local-ios-build.md) **0.1.0 (23)** obsahuje opravy
+PR #494, opravu pádu pri štarte z PR #496 aj prvú fázu z PR #507.
+Apple potvrdil dostupnosť
 v internom TestFlighte (`VALID`, `IN_BETA_TESTING`). Release simulátor
-iOS 27 overil skutočne viditeľné prihlásenie v štyroch scenároch;
-kontrolná verzia s pôvodným lifecycle zopakovala presnú UIKit chybu.
+iOS 27 overil skutočne viditeľné prihlásenie v štyroch scenároch.
+Historická kontrolná verzia s pôvodným lifecycle má zachovaný crash
+s presnou UIKit chybou; jej hashe a nezmenené natívne vstupy boli overené.
 Build 21 sa pre pád pri štarte nepoužíva. Fyzická akceptácia aktualizácie
 a živých integrácií je samostatná.
+
+Mobilná fáza 1 je na TESTe v `f3926dc4` (PR #507): úplná podporovaná
+flotila do 1 000 vozidiel, obnova prístupov a Uložiť a odovzdať na webe
+aj mobile. Podpísaný build **23** prešiel 34 kontrolami IPA aj čerstvým
+vizuálnym overením štartu. Apple potvrdil dostupnosť v TestFlighte
+24. 10. o 18:18 UTC. Spoločný fyzický test je odložený podľa pokynu majiteľa;
+[checklist prvej fázy](phase-one-acceptance.md) je pripravený.
 
 ## Aktuálny stav
 
 | Oblasť | Stav |
 | --- | --- |
-| Distribúcia TEST | **Dispatching TEST 0.1.0 (22)**, zdroj `988a5890`: lokálny build, 34 kontrol IPA a štyri natívne scenáre štartu; Apple `VALID`, `IN_BETA_TESTING`, existujúca interná skupina má build. OTA vypnuté. |
-| Server TEST s opravami spoľahlivosti | Aplikačný zdroj `dev` `988a5890`, https://test.dispecing.linkapomoci.sk; overené health a metadáta dedikovaného nasadenia. Aktuálny deployment/commit čítať z `/api/health/live`; následná aktualizácia dokumentácie aplikačný zdroj nemení. |
+| Distribúcia TEST | **Dispatching TEST 0.1.0 (23)**, zdroj `f3926dc4`: lokálny build, 34 kontrol IPA a štyri čerstvo vizuálne overené natívne scenáre štartu; Apple `VALID`, `IN_BETA_TESTING`, existujúca interná skupina má build. OTA vypnuté. |
+| Server TEST s prvou fázou | Funkčný rozsah `dev` `f3926dc4`, https://test.dispecing.linkapomoci.sk; overené health a metadáta dedikovaného nasadenia. Aktuálny deployment/commit čítať z `/api/health/live`; následná aktualizácia dokumentácie aplikačný zdroj nemení. |
 | Telefonovanie | Natívny Telnyx/CallKit/PushKit, TEST hlas a VoIP push zapnuté; serverové opravy #489–#491 sú na TEST a fungujú aj s buildom 18. |
 | Fyzická skúška | Majiteľ potvrdil úspešné dovolanie aj pri zamknutom mobile. Ostatné kombinácie sa neoznačujú za overené bez samostatnej skúšky. |
 | Apple | Aktívny účet MICT s. r. o.; TEST App ID, App Store Connect, podpis, Expo APNs a Telnyx TEST VoIP credential pripravené. |
@@ -33,10 +42,11 @@ a živých integrácií je samostatná.
 
 ## Čo zostáva pred každodennou prevádzkou
 
-1. Overiť nový build podľa auditu: opravy sú na stabilnom TEST v `988a5890`,
-   podpísaný build 22 prešiel aj natívnym overením štartu a aktualizuje sa
+1. Pri spoločnom teste použiť novú verziu: prvá fáza je na stabilnom TEST v `f3926dc4`,
+   podpísaný build 23 prešiel aj natívnym overením štartu a aktualizuje sa
    cez TestFlight podľa [postupu](testflight.md). Serverový deploy nezmení JavaScript v
-   nainštalovanom builde, keďže OTA sú vypnuté.
+   nainštalovanom builde, keďže OTA sú vypnuté. [Checklist prvej fázy](phase-one-acceptance.md)
+   zostáva odložený a nevyplnený podľa pokynu majiteľa.
 2. Na fyzickom iPhone prejsť [akceptáciu hovorov](iphone-voice-test.md#akceptácia-na-fyzickom-iphone):
    príjem v popredí, na pozadí a pri zamknutí, obojsmerný zvuk, výpadok siete,
    súbeh web/mobil, podržanie, prepojenie, zastavenie nahrávania a ukončenie.
