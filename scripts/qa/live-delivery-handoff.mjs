@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import { chromium as playwright } from 'playwright-core';
 import { expect } from '@playwright/test';
 import chromium from '@sparticuz/chromium';
-import { cleanupFixtures, provisionFixtures, validateQaEnv } from './live-delivery-core.mjs';
+import { cleanupFixtures, isCaseLiveReadBody, provisionFixtures, validateQaEnv } from './live-delivery-core.mjs';
 
 // Opt-in build check, never a public endpoint. Ordinary user sessions perform
 // every handoff operation; the admin client only prepares and removes fixtures.
@@ -96,6 +96,12 @@ try {
       const req = route.request(), url = new URL(req.url());
       if (url.origin === config.supabaseUrl && url.pathname.startsWith('/auth/v1/')) return route.continue();
       if (url.origin !== config.origin || url.pathname.startsWith('/api/telephony/')) return route.abort();
+      // This POST is a read: it confirms the access lease for the case list.
+      // Blocking it correctly hides all protected case controls in the app.
+      if (req.method() === 'POST' && url.pathname === '/api/cases/live') {
+        try { return isCaseLiveReadBody(req.postDataJSON()) ? route.continue() : route.abort(); }
+        catch { return route.abort(); }
+      }
       // Only this fixture's handoff is writable through the UI. Phone/SMS,
       // presence, account settings and unrelated cases cannot be mutated.
       if (!['GET', 'HEAD'].includes(req.method()) &&

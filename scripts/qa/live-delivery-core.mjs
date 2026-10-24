@@ -6,6 +6,18 @@ const ORIGIN = 'https://test.dispecing.linkapomoci.sk';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const validated = new WeakSet();
 const first = (...values) => values.find(value => value?.trim());
+
+/** The case-live POST is a read: its manifest contains only revision numbers. */
+export function isCaseLiveReadBody(value) {
+  const plainObject = object => object !== null && typeof object === 'object' && !Array.isArray(object)
+    && [Object.prototype, null].includes(Object.getPrototypeOf(object));
+  if (!plainObject(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 1 || keys[0] !== 'versions' || !plainObject(value.versions)) return false;
+  return Reflect.ownKeys(value.versions).every(key => typeof key === 'string' && UUID.test(key)
+    && Number.isSafeInteger(value.versions[key]) && value.versions[key] > 0);
+}
+
 function requireValue(condition, label) {
   if (!condition) throw new Error(`Delivery QA guard refused: ${label}`);
 }

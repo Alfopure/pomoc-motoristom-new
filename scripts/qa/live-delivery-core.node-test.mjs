@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertOwnAccessToken, assertOwnedFields, cleanupFixtures, deriveFixtureId, fixturePlan, fixtureProvenance, provisionFixtures, validateQaEnv } from './live-delivery-core.mjs';
+import { assertOwnAccessToken, assertOwnedFields, cleanupFixtures, deriveFixtureId, fixturePlan, fixtureProvenance, isCaseLiveReadBody, provisionFixtures, validateQaEnv } from './live-delivery-core.mjs';
 
 const RUN = '2a65537e-48ae-4d2c-8307-103c53082abe';
 const SHA = 'a'.repeat(40);
@@ -12,6 +12,21 @@ const environment = () => ({
   SUPABASE_PROJECT_REF: 'nzpnqdstvkfncflgqlny', EXPECTED_SUPABASE_PROJECT_REF: 'nzpnqdstvkfncflgqlny',
   SUPABASE_URL: 'https://nzpnqdstvkfncflgqlny.supabase.co', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test',
   SUPABASE_SECRET_KEY: 'sb_secret_test', APP_BASE_URL: 'https://test.dispecing.linkapomoci.sk',
+});
+
+test('case-live read body allows only empty initialization or a valid revision manifest', () => {
+  assert.equal(isCaseLiveReadBody({}), false);
+  assert.equal(isCaseLiveReadBody({ versions: {} }), true);
+  assert.equal(isCaseLiveReadBody({ versions: { [RUN]: 1, '64091e63-0092-42ea-96f9-152dc3476013': Number.MAX_SAFE_INTEGER } }), true);
+  for (const body of [null, [], 'body', 1, new Date(), { action: 'update' }, { versions: {}, action: 'update' },
+    { versions: null }, { versions: [] }, { versions: 1 }, { versions: new Date() },
+    { versions: { invalid: 1 } }, { versions: { [RUN]: {} } }, { versions: { [RUN]: [] } },
+    { versions: { [RUN]: null } }, { versions: { [RUN]: '1' } }, { [Symbol('action')]: 'update' }]) {
+    assert.equal(isCaseLiveReadBody(body), false);
+  }
+  for (const revision of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
+    assert.equal(isCaseLiveReadBody({ versions: { [RUN]: revision } }), false);
+  }
 });
 
 test('explicit isolated TEST build produces immutable run or cleanup configuration', () => {
