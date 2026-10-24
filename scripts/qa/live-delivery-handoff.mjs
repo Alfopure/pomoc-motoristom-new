@@ -127,13 +127,16 @@ try {
     check(Array.isArray(empty.deliveries) && empty.deliveries.length === 0);
     pass('web authentication, CSRF and empty private work list');
 
-    stage = 'web handoff selector';
+    stage = 'find own case in web list';
     await page.getByRole('textbox', { name: 'Hľadať podľa čísla prípadu, telefónu, EČV alebo mesta', exact: true }).fill(fixtures.case.caseNumber);
-    await page.getByTestId('dispatch-case-list').locator('[data-case-number]').filter({ hasText: fixtures.case.caseNumber })
-      .getByRole('button', { name: fixtures.case.caseNumber, exact: true }).click();
+    stage = 'open own case detail';
+    await page.getByRole('button', { name: `Detail prípadu ${fixtures.case.caseNumber}`, exact: true }).click();
+    stage = 'expand handoff panel';
     await page.getByRole('button', { name: /Odovzdať prípad/ }).click();
+    stage = 'select app recipient';
     await page.getByRole('combobox', { name: 'Príjemca odovzdania', exact: true }).selectOption(fixtures.recipient.memberId);
     await page.getByRole('textbox', { name: /^Telefón pristavovača/ }).fill(fixtures.contact.phone);
+    stage = 'issue handoff from web';
     const issuedResponse = page.waitForResponse(response => new URL(response.url()).pathname === handoffPath && response.request().method() === 'POST');
     await page.getByRole('button', { name: 'Odovzdať do aplikácie', exact: true }).click();
     const issued = await issuedResponse;

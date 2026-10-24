@@ -12,22 +12,47 @@ Najskôr prejde pracovná vetva existujúcim Preview a PR do `dev`. Počkajte na
 READY deployment dedikovaného TESTu a overte jeho Git SHA cez Vercel metadáta
 a `/api/health/live`. QA vyžaduje rovnaký commit aj na kanonickej adrese.
 
-Z čistého checkoutu aktuálneho `dev`, s Vercel tokenom iba v prostredí procesu,
-sa vytvorí nový build **výhradne projektu `pomoc-motoristom-test`**:
+Nový build vzniká z Git zdroja **výhradne projektu `pomoc-motoristom-test`**.
+Samotný `vercel deploy` z checkoutu má síce Git metadáta, ale pri overení
+neposkytol systémové Git premenné potrebné existujúcim kontrolám. Nevypĺňajte
+ich ručne. Použite Git source request s presným aktuálnym SHA a jednorazovými
+build premennými. Vercel token zostáva iba v prostredí CLI procesu.
 
-```sh
-vercel deploy --project prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk \
-  --scope alfopures-projects --prod --yes --no-wait \
-  --build-env LIVE_DELIVERY_QA=1 \
-  --build-env LIVE_DELIVERY_QA_RUN_ID=<nove-uuid> \
-  --build-env LIVE_DELIVERY_QA_EXPECTED_SHA=<aktualny-dev-sha>
+Do lokálneho, necommitovaného JSON súboru pripravte nasledujúce telo; oba SHA
+nahraďte rovnakým aktuálnym `dev` commitom, UUID je pre každý beh nové:
+
+```json
+{
+  "name": "pomoc-motoristom-test",
+  "project": "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",
+  "target": "production",
+  "gitSource": {
+    "type": "github", "repoId": 1354589389,
+    "ref": "dev", "sha": "<aktualny-dev-sha>"
+  },
+  "build": { "env": {
+    "LIVE_DELIVERY_QA": "1",
+    "LIVE_DELIVERY_QA_RUN_ID": "<nove-uuid>",
+    "LIVE_DELIVERY_QA_EXPECTED_SHA": "<aktualny-dev-sha>"
+  } }
+}
 ```
 
-`--prod` označuje Production target samostatného TEST projektu. Nepoužívajte
-ho na produkčný dispatching projekt. Nepridávajte tieto prepínače do trvalých
-projektových premenných. Neprepisujte systémové `VERCEL_*` hodnoty, aby prešli
-kontroly. Ak CLI neposkytne skutočný Git ref/SHA, overenie skončí pred zápismi.
+```sh
+vercel api '/v13/deployments?forceNew=1' --method POST \
+  --scope alfopures-projects --input .context/live-delivery-qa-request.json --raw
+```
+
+`target: production` označuje target samostatného TEST projektu. Nepoužívajte
+produkčný dispatching projekt. Nepridávajte QA prepínače do trvalých projektových
+premenných. Neprepisujte systémové `VERCEL_*` hodnoty, aby prešli kontroly.
+Chýbajúci skutočný Git ref/SHA zastaví overenie pred zápismi.
 Bežný build bez explicitného opt-inu žiadne živé QA nespúšťa.
+
+Pole `build.env` používa [oficiálny Vercel CLI](https://github.com/vercel/vercel/blob/c628be7835e03a965b93e9cf9e2bd5ac2acbf5eb/packages/cli/src/commands/deploy/index.ts#L1463),
+aktuálna verejná OpenAPI schéma ho však neuvádza. Git kombinácia bola prijatá
+a build klonoval presné `dev` SHA; samotné prijatie requestu nepreukazuje
+vykonanie QA. Rozhodujú výsledky a cleanup v build logu.
 
 Pôvodný build gate (testy, typecheck, browser regresie, build) zostáva zachovaný.
 Citlivé TEST kľúče používa iba build vo svojom prostredí; nevypisujú sa ani sa
@@ -56,15 +81,18 @@ Pri `cleanup-required` alebo prerušenom builde použite **aktuálny** čistý `
 checkout, rovnaké UUID a pôvodné SHA fixture. Nové SHA identifikuje vykonávaný
 kód, pôvodné SHA identifikuje výhradne odstraňované fixture:
 
-```sh
-vercel deploy --project prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk \
-  --scope alfopures-projects --prod --yes --no-wait \
-  --build-env LIVE_DELIVERY_QA=1 \
-  --build-env LIVE_DELIVERY_QA_MODE=cleanup \
-  --build-env LIVE_DELIVERY_QA_RUN_ID=<povodne-uuid> \
-  --build-env LIVE_DELIVERY_QA_EXPECTED_SHA=<aktualny-dev-sha> \
-  --build-env LIVE_DELIVERY_QA_FIXTURE_SHA=<povodne-fixture-sha>
+```json
+{
+  "LIVE_DELIVERY_QA": "1",
+  "LIVE_DELIVERY_QA_MODE": "cleanup",
+  "LIVE_DELIVERY_QA_RUN_ID": "<povodne-uuid>",
+  "LIVE_DELIVERY_QA_EXPECTED_SHA": "<aktualny-dev-sha>",
+  "LIVE_DELIVERY_QA_FIXTURE_SHA": "<povodne-fixture-sha>"
+}
 ```
+
+Tieto hodnoty vložte do `build.env` rovnakého Git source requestu; jeho
+`gitSource.sha` je aktuálny `dev`, nie pôvodné fixture SHA.
 
 Cleanup je opakovateľný a neprehľadáva historické dáta podľa voľného prefixu.
 Nepoužívajte historický deployment ani starý zdroj na obnovenie TESTu.
