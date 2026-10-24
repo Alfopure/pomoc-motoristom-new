@@ -104,6 +104,7 @@ try {
     });
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
+    await page.bringToFront();
     qaPage = page;
     page.on('pageerror', error => {
       // Only classifications and owned chunk names; never arbitrary messages.
@@ -154,6 +155,7 @@ try {
     // those async callbacks or manufacturing authentication cookies.
     await page.goto(config.origin, { waitUntil: 'domcontentloaded' });
     stage = 'interactive dispatcher workspace';
+    await page.bringToFront();
     await expect(page.getByTestId('dispatch-console')).toHaveAttribute('data-hydrated', 'true', { timeout: 60_000 });
     await page.getByRole('textbox', { name: 'Hľadať podľa čísla prípadu, telefónu, EČV alebo mesta', exact: true })
       .waitFor({ state: 'visible', timeout: 30_000 });
@@ -268,6 +270,7 @@ try {
         loginVisible: await qaPage.getByRole('heading', { name: 'Prihlásenie', exact: true }).isVisible(),
         errorBoundaryVisible: await qaPage.getByRole('heading', { name: 'Obrazovku sa nepodarilo zobraziť', exact: true }).isVisible(),
         documentState: await qaPage.evaluate(() => document.readyState),
+        visibilityState: await qaPage.evaluate(() => document.visibilityState),
         consoleLayout: await qaPage.getByTestId('dispatch-console').evaluate(element => {
           const ancestors = [];
           for (let node = element; node && ancestors.length < 6; node = node.parentElement) {
