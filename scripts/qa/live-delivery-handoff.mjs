@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import { chromium as playwright } from 'playwright-core';
+import { expect } from '@playwright/test';
 import chromium from '@sparticuz/chromium';
 import { cleanupFixtures, provisionFixtures, validateQaEnv } from './live-delivery-core.mjs';
 
@@ -102,17 +103,33 @@ try {
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
-    // Capture the normal browser's own token only to revoke its session later.
-    page.on('response', async response => {
-      if (response.url().startsWith(`${config.supabaseUrl}/auth/v1/token`) && response.ok()) {
-        try { const data = await response.json(); if (data.user?.id === fixtures.dispatcher.userId) fixtures.dispatcher.accessToken = data.access_token; }
-        catch { /* No response bodies are logged. */ }
-      }
-    });
     await page.goto(config.origin, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('textbox', { name: 'Email', exact: true }).fill(fixtures.dispatcher.email);
+    stage = 'interactive login form';
+    const emailInput = page.getByRole('textbox', { name: 'Email', exact: true });
+    const forgotPassword = `/auth/forgot-password?${new URLSearchParams({ email: fixtures.dispatcher.email })}`;
+    // SSR inputs may be visible before React attaches handlers. The link is
+    // derived from React's email state, so its update proves interactivity.
+    await expect(async () => {
+      await emailInput.fill('');
+      await emailInput.fill(fixtures.dispatcher.email);
+      await expect(page.getByRole('link', { name: 'Zabudnuté heslo', exact: true }))
+        .toHaveAttribute('href', forgotPassword, { timeout: 1_000 });
+    }).toPass({ timeout: 30_000 });
+    const closeInstall = page.getByRole('button', { name: 'Zavrieť ponuku inštalácie', exact: true });
+    if (await closeInstall.isVisible()) await closeInstall.click();
     await page.getByLabel('Heslo', { exact: true }).fill(fixtures.dispatcher.password);
+    stage = 'browser password exchange';
+    const signInResponse = page.waitForResponse(response =>
+      response.url().startsWith(`${config.supabaseUrl}/auth/v1/token`) && response.request().method() === 'POST');
     await page.getByRole('button', { name: 'Prihlásiť sa', exact: true }).click();
+    const signedIn = await signInResponse;
+    if (!signedIn.ok()) throw new QaFailure(`auth HTTP ${signedIn.status()}`);
+    const session = await signedIn.json();
+    check(session.user?.id === fixtures.dispatcher.userId && session.access_token);
+    fixtures.dispatcher.accessToken = session.access_token;
+    pass('browser password exchange');
+    stage = 'interactive dispatcher workspace';
+    await page.locator('[data-testid="dispatch-console"][data-hydrated="true"]').waitFor({ state: 'visible', timeout: 60_000 });
     await page.getByTestId('dispatch-case-list').waitFor({ state: 'visible', timeout: 60_000 });
     check(fixtures.dispatcher.accessToken);
     pass('dispatcher browser login with ordinary SSR cookies');
