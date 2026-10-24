@@ -154,8 +154,9 @@ try {
     // those async callbacks or manufacturing authentication cookies.
     await page.goto(config.origin, { waitUntil: 'domcontentloaded' });
     stage = 'interactive dispatcher workspace';
-    await page.locator('[data-testid="dispatch-console"][data-hydrated="true"]').waitFor({ state: 'visible', timeout: 60_000 });
-    await page.getByTestId('dispatch-case-list').waitFor({ state: 'visible', timeout: 60_000 });
+    await expect(page.getByTestId('dispatch-console')).toHaveAttribute('data-hydrated', 'true', { timeout: 60_000 });
+    await page.getByRole('textbox', { name: 'Hľadať podľa čísla prípadu, telefónu, EČV alebo mesta', exact: true })
+      .waitFor({ state: 'visible', timeout: 30_000 });
     check(fixtures.dispatcher.accessToken);
     pass('dispatcher browser login with ordinary SSR cookies');
 
@@ -267,6 +268,15 @@ try {
         loginVisible: await qaPage.getByRole('heading', { name: 'Prihlásenie', exact: true }).isVisible(),
         errorBoundaryVisible: await qaPage.getByRole('heading', { name: 'Obrazovku sa nepodarilo zobraziť', exact: true }).isVisible(),
         documentState: await qaPage.evaluate(() => document.readyState),
+        consoleLayout: await qaPage.getByTestId('dispatch-console').evaluate(element => {
+          const ancestors = [];
+          for (let node = element; node && ancestors.length < 6; node = node.parentElement) {
+            const style = getComputedStyle(node), rect = node.getBoundingClientRect();
+            ancestors.push({ tag: node.tagName, hidden: node.hidden, display: style.display, visibility: style.visibility,
+              contentVisibility: style.contentVisibility, width: rect.width, height: rect.height });
+          }
+          return ancestors;
+        }, undefined, { timeout: 1_000 }).catch(() => []),
         consoleCount: await qaPage.getByTestId('dispatch-console').count(),
         hydrated: await qaPage.getByTestId('dispatch-console').getAttribute('data-hydrated', { timeout: 1_000 }).catch(() => null),
         authCookieParts: (await context.cookies(config.origin)).filter(cookie => /^sb-.*-auth-token(?:\.\d+)?$/.test(cookie.name)).length,
