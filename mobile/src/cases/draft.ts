@@ -6,13 +6,14 @@ import { freezeCommand, placeSelection } from "./location";
 import { caseCreatedDraft, caseDraftInput, copyCaseDraft } from "./draft-codecs";
 import { customerCallNumber } from "../call-context/number";
 
-export type DraftState = { input: MobileCaseCreateInput; status: "editing" | "saving" | "uncertain" | "saved";
+export type CaseAfterSave = "detail" | "handoff";
+export type DraftState = { input: MobileCaseCreateInput; status: "editing" | "saving" | "uncertain" | "saved"; afterSave: CaseAfterSave;
   error: string | null; created: MobileCaseCreated | null; reviewAfter: number; reviewedList: boolean };
 
 /** A create request has no automatic retry. The draft outlives navigation;
  * only a verified POST result can replace it with the saved case identity. */
 export class CaseDraft {
-  private state: DraftState = { input: { priority: "normal", jobTypes: [] }, status: "editing", error: null, created: null, reviewAfter: 0, reviewedList: false };
+  private state: DraftState = { input: { priority: "normal", jobTypes: [] }, status: "editing", afterSave: "detail", error: null, created: null, reviewAfter: 0, reviewedList: false };
   private listeners = new Set<() => void>();
   private disposed = false;
   private rejected = false;
@@ -21,19 +22,21 @@ export class CaseDraft {
     const value = port?.load();
     if (port && value !== null) {
       try {
-        const v = draftObject(value); draftKeys(v, ["version", "input", "status", "submitted", "created"]);
-        if (![1, 2].includes(v.version as number) || !["editing", "saving", "uncertain", "saved"].includes(v.status as string)) throw new Error();
-        const input = caseDraftInput(v.input, v.version as number), submitted = v.submitted === null ? null : caseDraftInput(v.submitted, v.version as number);
+        const v = draftObject(value); draftKeys(v, ["version", "input", "status", "submitted", "created"], ["afterSave"]);
+        if (![1, 2, 3].includes(v.version as number) || !["editing", "saving", "uncertain", "saved"].includes(v.status as string)
+          || (v.version === 3 ? !["detail", "handoff"].includes(v.afterSave as string) : "afterSave" in v)) throw new Error();
+        const inputVersion = v.version === 3 ? 2 : v.version as number;
+        const input = caseDraftInput(v.input, inputVersion), submitted = v.submitted === null ? null : caseDraftInput(v.submitted, inputVersion);
         if ((v.status === "editing") !== (submitted === null) || (v.status === "saved") !== (v.created !== null)) throw new Error();
         const created = v.status === "saved" ? caseCreatedDraft(v.created, port) : null;
         const status = v.status === "saving" ? "uncertain" : v.status as DraftState["status"];
         this.submitted = submitted;
-        this.state = { input, status, created, reviewAfter: Date.now(), reviewedList: false,
+        this.state = { input, status, created, afterSave: v.version === 3 ? v.afterSave as CaseAfterSave : "detail", reviewAfter: Date.now(), reviewedList: false,
           error: status === "uncertain" ? "Prípad už môže existovať. Po obnove skontrolujte čerstvo načítaný zoznam pred ďalším pokusom." : null };
       } catch { this.rejected = true; port.reject(); this.state.error = "Uložený koncept prípadu sa nepodarilo overiť."; }
     }
   }
-  exportDraft() { return copyCaseDraft({ version: 2, input: this.state.input, status: this.state.status, submitted: this.submitted, created: this.state.created }); }
+  exportDraft() { return copyCaseDraft({ version: 3, input: this.state.input, status: this.state.status, submitted: this.submitted, created: this.state.created, afterSave: this.state.afterSave }); }
   snapshot = () => this.state;
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   private update(change: Partial<DraftState>, persist = true) {
@@ -70,11 +73,11 @@ export class CaseDraft {
   allowRetry() {
     if (!this.disposed && !this.rejected && this.state.status === "uncertain" && this.state.reviewedList && (!this.port || this.port.settled())) { this.submitted = null; this.update({ status: "editing", error: null }); }
   }
-  async submit() {
+  async submit(afterSave: CaseAfterSave = this.state.afterSave) {
     if (this.disposed || this.rejected || this.state.status !== "editing") return;
     const input = freezeCommand({ ...this.state.input, jobTypes: [...(this.state.input.jobTypes ?? [])] });
     this.submitted = copyCaseDraft(input);
-    this.update({ status: "saving", error: null, reviewAfter: 0, reviewedList: false }, false);
+    this.update({ status: "saving", afterSave, error: null, reviewAfter: 0, reviewedList: false }, false);
     let write: DraftWrite | undefined;
     try {
       if (this.port) {
@@ -103,7 +106,7 @@ export class CaseDraft {
     if (this.disposed || this.rejected || this.state.status !== "saved") return;
     if (this.port && !this.port.settled()) { this.update({ error: "Pred novým prípadom opravte miestne uloženie potvrdenia." }, false); return; }
     this.submitted = null;
-    this.update({ input: { priority: "normal", jobTypes: [] }, status: "editing", error: null, created: null, reviewAfter: 0, reviewedList: false });
+    this.update({ input: { priority: "normal", jobTypes: [] }, status: "editing", afterSave: "detail", error: null, created: null, reviewAfter: 0, reviewedList: false });
   }
   dispose() { this.disposed = true; this.listeners.clear(); }
 }

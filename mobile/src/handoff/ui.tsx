@@ -24,9 +24,10 @@ const actions: Record<Exclude<MobileHandoffInput['action'], 'recover' | 'deliver
 const explanations = {
   issue: 'Vytvoríte prístup k nižšie uvedeným údajom. Odkaz sa nikomu automaticky neodošle.', publish: 'Kolega uvidí presne tento náhľad namiesto predchádzajúcich údajov. Odkaz zostane rovnaký.', renew: 'Pôvodný odkaz a otvorené prístupy prestanú fungovať. Vznikne nový odkaz; zverejnené údaje sa nezmenia. Táto akcia môže znovu otvoriť časovo vypršané odovzdanie.', extend: 'Odkaz zostane rovnaký. Predĺženie môže znovu sprístupniť časovo vypršané odovzdanie; zverejnené údaje sa nezmenia.', revoke: 'Odkaz prestane fungovať. Dôvod bude uložený v histórii.'
 };
-export function Handoffs({ draft, active, onBack }: {
+export function Handoffs({ draft, active, startNew = false, onBack }: {
   draft: HandoffDraft;
   active: boolean;
+  startNew?: boolean;
   onBack: () => void;
 }) {
   const state = useSyncExternalStore(draft.subscribe, draft.snapshot, draft.snapshot), scroll = useRef<ScrollView>(null);
@@ -36,6 +37,7 @@ export function Handoffs({ draft, active, onBack }: {
   const [shareError, setShareError] = useState<string | null>(null), [expanded, setExpanded] = useState<string | null>(null), [sharing, setSharing] = useState(false);
   // The existing handoff whose pristavovač is being chosen.
   const [choosing, setChoosing] = useState<string | null>(null);
+  const started = useRef<HandoffDraft | null>(null);
   useEffect(() => {
     if (active) {
       draft.expire();
@@ -45,6 +47,15 @@ export function Handoffs({ draft, active, onBack }: {
       draft.pause();
     return () => draft.pause();
   }, [active, draft]);
+  useEffect(() => {
+    if (!active || !startNew || started.current === draft) return;
+    // The refresh above starts synchronously. Use its live state so a retained
+    // stale context cannot open a form before the fresh read has completed.
+    const current = draft.snapshot();
+    if (current.loading || !current.context || current.error) return;
+    started.current = draft;
+    if (current.status === 'editing' && !current.selected && !current.pending && current.context.handoffs.length === 0) draft.select('issue');
+  }, [active, startNew, draft, state.context, state.loading, state.error]);
   useEffect(() => {
     const sub = AppState.addEventListener('change', next => {
       if (next === 'active' && active) {

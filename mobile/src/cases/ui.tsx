@@ -16,7 +16,7 @@ import { MobileApiError } from "../lib/api";
 import { dialable, formatNumber, formatTime } from "../lib/display";
 import { Button, Card, ErrorNotice, Loading, NAVIGATION_CONTENT_BOTTOM, colors, styles } from "../ui";
 import type { CasesApi } from "./api";
-import { CaseDraft, type DraftState } from "./draft";
+import { CaseDraft, type CaseAfterSave, type DraftState } from "./draft";
 import { randomUUID } from "expo-crypto";
 import { CaseEdit } from "./edit";
 import { CaseEditor } from "./editor";
@@ -47,7 +47,7 @@ export type CaseOpenRequest = ({ kind: "case.owner" | "detail" | "case-create" |
   | { kind: "case-list"; id: null; shortcut: CaseShortcut }) & { nonce: number };
 const shortcuts: readonly CaseShortcut[] = ["open", "mine", "unassigned", "urgent"];
 type CallOffer = { number: string; nonce: number };
-type Page = { kind: "case.owner"; id: string; draft: CaseOwnerDraft } | { kind: "resume-edit"; id: string; nonce: number; initialError?: string; normalEntry?: boolean } | { kind: "handoffs"; id: string; draft: HandoffDraft } | { kind: "attachments"; id: string } | { kind: "tasks"; id: string; nonce?: number } | { kind: "list" } | { kind: "new"; callOffer?: CallOffer } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
+type Page = { kind: "case.owner"; id: string; draft: CaseOwnerDraft } | { kind: "resume-edit"; id: string; nonce: number; initialError?: string; normalEntry?: boolean } | { kind: "handoffs"; id: string; draft: HandoffDraft; startNew?: boolean } | { kind: "attachments"; id: string } | { kind: "tasks"; id: string; nonce?: number } | { kind: "list" } | { kind: "new"; callOffer?: CallOffer } | { kind: "detail"; id: string; note?: CaseNoteDraft } | { kind: "edit"; id: string; edit: CaseEdit } | { kind: "note"; id: string; draft: CaseNoteDraft };
 
 /** Kept mounted under the authenticated workspace across tab changes. Reads
  * pause when hidden; unsaved input and a confirmed created ID stay in memory. */
@@ -68,7 +68,7 @@ export function Cases({ api, environment, userId, profileId, active, visible = a
   }, [work, workStore]);
   const handoffs = useRef(new Map<string, HandoffDraft>());
   useEffect(() => { const retained = handoffs.current; return () => { for (const draft of retained.values()) draft.dispose(); }; }, []);
-  const openHandoffs = useCallback((id: string) => {
+  const openHandoffs = useCallback((id: string, startNew = false) => {
     let draft = handoffs.current.get(id);
     if (!draft) {
       draft = new HandoffDraft(
@@ -78,7 +78,7 @@ export function Cases({ api, environment, userId, profileId, active, visible = a
       );
       handoffs.current.set(id, draft);
     }
-    setPage({ kind: "handoffs", id, draft });
+    setPage({ kind: "handoffs", id, draft, startNew });
   }, [api.handoffs, queryClient, prefix, vault]);
   const owners = useRef(new Map<string, CaseOwnerDraft>());
   useEffect(() => { const retained = owners.current; return () => { for (const draft of retained.values()) draft.dispose(); }; }, []);
@@ -153,10 +153,16 @@ export function Cases({ api, environment, userId, profileId, active, visible = a
         .then(() => queryClient.invalidateQueries({ queryKey: [...prefix, "list"] }));
     }
   }, [state.status, queryClient, prefix]);
-  async function save() {
-    const created = await draft.submit();
+  function openCreated() {
+    const saved = draft.snapshot();
+    if (saved.status !== "saved" || !saved.created) return;
+    if (saved.afterSave === "handoff") openHandoffs(saved.created.caseId, true);
+    else showDetail(saved.created.caseId);
+  }
+  async function save(afterSave: CaseAfterSave) {
+    const created = await draft.submit(afterSave);
     if (created) {
-      showDetail(created.caseId);
+      openCreated();
       void queryClient.invalidateQueries({ queryKey: [...prefix, "overview"] });
       void queryClient.invalidateQueries({ queryKey: [...prefix, "list"] });
     }
@@ -211,7 +217,7 @@ export function Cases({ api, environment, userId, profileId, active, visible = a
   return <View style={{ flex: 1 }}>
     {page.kind === "case.owner" ? <CaseOwnerForm draft={page.draft} active={active} onBack={() => showDetail(page.id)} onSaved={edited} />
       : page.kind === "resume-edit" ? <ResumeCaseEditor key={page.nonce} api={api} id={page.id} active={active} initialError={page.initialError} onLoaded={page.normalEntry ? openEditor : resumeEditor} onBack={showList} />
-      : page.kind === "handoffs" ? <Handoffs draft={page.draft} active={active} onBack={() => showDetail(page.id)} />
+      : page.kind === "handoffs" ? <Handoffs draft={page.draft} active={active} startNew={page.startNew} onBack={() => showDetail(page.id)} />
       : page.kind === "attachments" ? <Attachments store={work} caseId={page.id} queryKey={prefix} active={active} visible={visible} onBack={() => showDetail(page.id)} />
       : page.kind === "tasks" ? <Tasks key={page.id + ":" + (page.nonce ?? "normal")} store={work} caseId={page.id} queryKey={prefix} profileId={profileId} active={active} onBack={() => showDetail(page.id)} />
       : page.kind === "list" ? <CaseList api={api} queryKey={prefix} active={active} ownership={ownership} category={category}
@@ -219,8 +225,8 @@ export function Cases({ api, environment, userId, profileId, active, visible = a
       onShortcut={value => selectFilters(caseShortcut(value))} onPriority={setPriority}
       onStatus={value => { setStatus(value); if (value && isClosedCaseStatus(value)) setCategory("all"); }} onSearch={setSearch} onOwnership={value => { setOwnership(value); setOwnerId(null); }}
       onOwner={id => { setOwnership("all"); setOwnerId(id); }} onCategory={value => { setCategory(value); setStatus(statusForCategory(status, value)); }} onOpen={showDetail}
-      onNew={showForm} draftState={state} onReviewed={requestedAt => draft.reviewList(requestedAt)} />
-      : page.kind === "new" ? <CaseForm api={api} active={active} visible={visible} draft={draft} state={state} onBack={showList} onSubmit={() => { void save(); }} callOffer={page.callOffer}
+      onNew={showForm} draftState={state} onOpenCreated={openCreated} onReviewed={requestedAt => draft.reviewList(requestedAt)} />
+      : page.kind === "new" ? <CaseForm api={api} active={active} visible={visible} draft={draft} state={state} onBack={showList} onSubmit={afterSave => { void save(afterSave); }} onOpenCreated={openCreated} callOffer={page.callOffer}
         onOfferDone={() => setPage(value => value.kind === "new" && value.callOffer?.nonce === page.callOffer?.nonce ? { kind: "new" } : value)} />
         : page.kind === "edit" ? <CaseEditor api={api} edit={page.edit} active={active} visible={visible} onSaved={edited} onBack={() => showDetail(page.id)} />
         : page.kind === "note" ? <CaseNoteForm active={active} draft={page.draft} onSaved={noteSaved} onBack={() => showDetail(page.id)} />
@@ -255,11 +261,11 @@ function ResumeCaseEditor({ api, id, active, initialError, onLoaded, onBack }: {
   </View>;
 }
 
-function CaseList({ api, queryKey, active, ownership, category, search, ownerId, status, priority, onStatus, onPriority, onShortcut, onOwner, onSearch, onOwnership, onCategory, onOpen, onNew, draftState, onReviewed }: {
+function CaseList({ api, queryKey, active, ownership, category, search, ownerId, status, priority, onStatus, onPriority, onShortcut, onOwner, onSearch, onOwnership, onCategory, onOpen, onNew, draftState, onOpenCreated, onReviewed }: {
   api: CasesApi; queryKey: string[]; active: boolean; ownership: MobileCaseFilter["ownership"]; category: MobileCaseFilter["category"]; search: string; ownerId: string | null; onOwner: (id: string | null) => void;
   status: MobileCaseFilter["status"]; priority: MobileCaseFilter["priority"]; onStatus: (value: MobileCaseFilter["status"]) => void; onPriority: (value: MobileCaseFilter["priority"]) => void; onShortcut: (value: CaseShortcut) => void;
   onSearch: (value: string) => void; onOwnership: (value: MobileCaseFilter["ownership"]) => void; onCategory: (value: MobileCaseFilter["category"]) => void;
-  onOpen: (id: string) => void; onNew: () => void; draftState: DraftState; onReviewed: (requestedAt: number) => void;
+  onOpen: (id: string) => void; onNew: () => void; draftState: DraftState; onOpenCreated: () => void; onReviewed: (requestedAt: number) => void;
 }) {
   const queryClient = useQueryClient();
   const ownerOverlay = usePhoneOverlay<boolean>(active);
@@ -287,6 +293,10 @@ function CaseList({ api, queryKey, active, ownership, category, search, ownerId,
     refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { if (active) { void query.refetch(); void queryClient.invalidateQueries({ queryKey: [...queryKey, "overview"] }); } }} />}>
     <Text accessibilityRole="header" style={styles.heading}>Prípady</Text>
     <Button label={draftState.status === "saving" ? "Ukladanie prípadu…" : draftState.status === "uncertain" ? "Overiť uloženie prípadu" : hasDraft ? "Rozpracovaný prípad" : "Nový prípad"} onPress={onNew} />
+    {draftState.status === "saved" && draftState.afterSave === "handoff" && draftState.created && <Card>
+      <Text style={styles.text}>Prípad {draftState.created.caseNumber} je uložený.</Text>
+      <Button label="Pokračovať v odovzdaní" onPress={onOpenCreated} />
+    </Card>}
     {draftState.status === "uncertain" && <Card><Text style={styles.text}>Skontrolujte, či sa váš prípad už uložil. Nájdete ho podľa mena, EČV alebo času vytvorenia.</Text>
       {draftState.reviewedList && <Text style={styles.muted}>Ak ho nenájdete, v rozpracovanom formulári môžete vedome povoliť opakovanie.</Text>}</Card>}
     <CaseOverview api={api} queryKey={queryKey} active={active} pendingFilter={pendingSearch || query.isFetching} onSelect={onShortcut} />
@@ -454,7 +464,7 @@ function CaseDetail({ api, queryKey, active, id, created, onBack, onHandoffs, on
     {active && item && mapTarget && <CaseMapFrame key={`${id}:view:${mapTarget}`} api={api} caseId={id} mode="view" target={mapTarget} seed={{ selection: null, address: "" }} onClose={mapOverlay.close} />}
   </ScrollView>;
 }
-function CaseForm({ api, draft, state, active, visible, onBack, onSubmit, callOffer, onOfferDone }: { api: CasesApi; active: boolean; visible: boolean; draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: () => void; callOffer?: CallOffer; onOfferDone: () => void }) {
+function CaseForm({ api, draft, state, active, visible, onBack, onSubmit, onOpenCreated, callOffer, onOfferDone }: { api: CasesApi; active: boolean; visible: boolean; draft: CaseDraft; state: DraftState; onBack: () => void; onSubmit: (afterSave: CaseAfterSave) => void; onOpenCreated: () => void; callOffer?: CallOffer; onOfferDone: () => void }) {
   const mapOverlay = usePhoneOverlay<"pickup" | "destination">(visible, active);
   const mapTarget = mapOverlay.value;
   const saving = state.status === "saving", uncertain = state.status === "uncertain";
@@ -477,7 +487,11 @@ function CaseForm({ api, draft, state, active, visible, onBack, onSubmit, callOf
         {state.error && <ErrorNotice message={state.error} />}
         {uncertain && <><Button label="Skontrolovať zoznam prípadov" onPress={back} secondary />
           {state.reviewedList && <Button label="Prípad som nenašiel – povoliť opakovanie" onPress={() => draft.allowRetry()} secondary />}</>}
-        <Button primary label={saving ? "Ukladám prípad…" : "Uložiť prípad"} disabled={saving || uncertain || state.status === "saved"} onPress={() => { Keyboard.dismiss(); onSubmit(); }} />
+        {state.status === "saved" && state.created ? <Button primary label={state.afterSave === "handoff" ? "Pokračovať v odovzdaní" : "Otvoriť uložený prípad"} onPress={onOpenCreated} /> : <>
+          <Button primary label={saving && state.afterSave === "handoff" ? "Ukladám prípad…" : "Uložiť a odovzdať"} disabled={saving || uncertain} onPress={() => { Keyboard.dismiss(); onSubmit("handoff"); }} />
+          <Button secondary label={saving && state.afterSave === "detail" ? "Ukladám prípad…" : "Uložiť prípad"} disabled={saving || uncertain} onPress={() => { Keyboard.dismiss(); onSubmit("detail"); }} />
+          <Text style={styles.muted}>Pri odovzdaní po uložení vyberiete príjemcu, skontrolujete údaje a potvrdíte odoslanie.</Text>
+        </>}
       </View>
       {mapTarget && state.status === "editing" && <CasePlacePicker key={`new:pick:${mapTarget}`} api={api} caseId={null} active={active} visible={visible} target={mapTarget}
         seed={{ selection: state.input[mapTarget] ?? null, address: state.input[mapTarget]?.address ?? state.input[mapTarget === "pickup" ? "manualPickupAddress" : "manualDestinationAddress"] ?? "" }}

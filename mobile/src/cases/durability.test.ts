@@ -28,6 +28,44 @@ async function fixture() {
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; };
 
 describe("case controllers using actual account vault", () => {
+  it("restores the saved case and handoff continuation after a late receipt without creating again", async () => {
+    const f = await fixture(), late = deferred<import("../../../src/lib/mobile-api").MobileCaseCreated>();
+    const created = { ...reply, caseId, caseNumber: "PM-SAVED", warnings: [] };
+    const api = { create: vi.fn(() => late.promise) };
+    const draft = new CaseDraft(api, f.vault.bind("case-create"));
+    draft.edit({ contactName: "Pristavenie" }); const save = draft.submit("handoff");
+    await vi.waitFor(() => expect(api.create).toHaveBeenCalledOnce());
+    draft.dispose(); f.vault.close(); late.resolve(created); await save;
+    const vault = await DraftVault.open(f.driver, f.scope, f.options);
+    const restored = new CaseDraft(api, vault.bind("case-create"));
+    expect(restored.snapshot()).toMatchObject({ status: "saved", afterSave: "handoff", created });
+    await restored.submit("handoff"); expect(api.create).toHaveBeenCalledOnce();
+    restored.dispose(); vault.close();
+  });
+  it("retains save-and-handoff intent across an uncertain create restart without automatic retry", async () => {
+    const f = await fixture(), api = { create: vi.fn().mockRejectedValue(new MobileApiError("Unknown", 0)) };
+    const draft = new CaseDraft(api, f.vault.bind("case-create"));
+    await draft.submit("handoff"); draft.dispose(); f.vault.close();
+    const vault = await DraftVault.open(f.driver, f.scope, f.options), restored = new CaseDraft(api, vault.bind("case-create"));
+    expect(restored.snapshot()).toMatchObject({ status: "uncertain", afterSave: "handoff", created: null, reviewedList: false });
+    await restored.submit(); restored.allowRetry(); expect(api.create).toHaveBeenCalledOnce();
+    expect(restored.snapshot().status).toBe("uncertain"); restored.dispose(); vault.close();
+  });
+  it.each([1, 2])("restores existing version %i create drafts with ordinary save destination", async version => {
+    const f = await fixture(), api = { create: vi.fn() }, port = f.vault.bind("case-create");
+    const input = { contactName: "Pôvodný koncept", ...(version === 2 ? { pickup: { label: "Miesto", address: "Adresa", lat: 48, lng: 17, provider: "manual" as const } } : {}) };
+    port.changed({ version, input, status: "editing", submitted: null, created: null }); await f.vault.flush();
+    const restored = new CaseDraft(api, f.vault.bind("case-create"));
+    expect(restored.snapshot()).toMatchObject({ status: "editing", afterSave: "detail", input });
+    expect(api.create).not.toHaveBeenCalled(); restored.dispose(); f.vault.close();
+  });
+  it.each([undefined, "send", { caseId }])("rejects an invalid persisted create continuation (%j)", async afterSave => {
+    const f = await fixture(), api = { create: vi.fn() }, port = f.vault.bind("case-create");
+    port.changed({ version: 3, input: {}, status: "editing", submitted: null, created: null, ...(afterSave === undefined ? {} : { afterSave }) }); await f.vault.flush();
+    const restored = new CaseDraft(api, f.vault.bind("case-create"));
+    expect(restored.snapshot().error).toBeTruthy(); await restored.submit("handoff");
+    expect(api.create).not.toHaveBeenCalled(); restored.dispose(); f.vault.close();
+  });
   it("restarts unknown owner assignment from actual WAL and records its exact late receipt after disposal", async () => {
     const f = await fixture(), late = deferred<import("../../../src/lib/mobile-api").MobileCaseOwnerAssigned>();
     const context = { ...reply, caseId, caseRevision: date, owner: { id: null, name: null, mine: false }, available: true, capabilities: { take: true, assign: true }, targets: [{ id: profileId, name: "Ja" }] };

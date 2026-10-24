@@ -7,7 +7,7 @@ import { MobileApiError } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 import { createDeliveryApi, type DeliveryApi } from "./api";
 import { canUseDeliveryCache } from "./model";
-import { DeliveryAccess, deliveryMember, deliverySharing } from "./access";
+import { DeliveryAccess, deliveryMember, deliveryRefused, deliverySharing, refreshDeliveryAccess, type DeliveryRefreshResult } from "./access";
 import { DeliveryCommands } from "./commands";
 import { createDeliveryCommandStorage } from "./command-storage";
 import { createLocationSharing } from "./native-sharing";
@@ -20,12 +20,8 @@ export type DeliverySession = {
   api: DeliveryApi; key: readonly string[];
   me: UseQueryResult<MobileFieldMe>; memberId: string | null;
   list: UseQueryResult<MobileDelivery[]>; location: LocationSharing;
-  commands: DeliveryCommands | null; error: unknown; refresh: () => void;
+  commands: DeliveryCommands | null; error: unknown; refresh: () => Promise<DeliveryRefreshResult>;
 };
-/** The server said this account has no Pristavenia here (no role, or switched off). */
-export function deliveryRefused(error: unknown): boolean {
-  return error instanceof MobileApiError && (error.status === 403 || error.status === 503 && error.code === "delivery_unavailable");
-}
 
 export function useDeliverySession({ config, client, userId, liveUser, active, enabled, writable }: {
   config: MobileConfig; client: SupabaseClient; userId: string; liveUser: () => string | null; active: boolean; enabled: boolean; writable: boolean;
@@ -71,5 +67,5 @@ export function useDeliverySession({ config, client, userId, liveUser, active, e
     void location.follow(location.mode === "foreground" && !active ? null : sharing);
   }, [location, active, sharing, checked]);
   return { api, key, me, memberId, list, location, commands, error: accessError ?? me.error ?? list.error,
-    refresh: () => { void me.refetch(); if (me.data) void list.refetch(); } };
+    refresh: () => refreshDeliveryAccess(() => me.refetch(), () => list.refetch()) };
 }

@@ -63,7 +63,8 @@ type MapWorkspaceProps = {
   workspaceMode: WorkspaceMode;
   onAssignAsset: (assetId: string) => void;
   onBackToCockpit: () => void;
-  onCaseCreated: (dispatchData: DispatchData, caseId: string, notice?: string) => void;
+  onCaseCreated: (dispatchData: DispatchData, caseId: string, notice?: string, openHandoff?: boolean) => void;
+  openHandoff?: boolean;
   onCollapse: () => void;
   onDataChange: (dispatchData: DispatchData) => void;
   onCaseChange?: (caseDetail: CaseDetailData) => void;
@@ -130,6 +131,7 @@ export function MapWorkspace({
   onAssignAsset,
   onBackToCockpit,
   onCaseCreated,
+  openHandoff,
   onCollapse,
   onDataChange,
   onCaseChange,
@@ -402,6 +404,7 @@ export function MapWorkspace({
               kind={workspaceKind}
               onBackToCockpit={onBackToCockpit}
               onCaseCreated={onCaseCreated}
+              openHandoff={openHandoff}
               onDataChange={onDataChange}
             onCaseChange={onCaseChange}
               onDial={onDial}

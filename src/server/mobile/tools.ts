@@ -107,5 +107,5 @@ export function projectToolFleet(data: FleetData, selection: MobileToolFleetFilt
   return { selection, assets: page, total: assets.length, nextOffset: selection.offset + page.length < assets.length ? selection.offset + page.length : null, snapshot: "stored", gpsLastSuccessAt: timestamp(data.commanderGpsLastSuccessAt) };
 }
 export async function fleetTool(actor: MotoristActor, selection: MobileToolFleetFilter, signal?: AbortSignal) {
-  return projectToolFleet(await loadFleetData(actor.organizationId, signal, { maxRows: 1000 }), selection);
+  return projectToolFleet(await loadFleetData(actor.organizationId, signal, { maxRows: MOBILE_TOOL_FLEET_MAX_ASSETS }), selection);
 }
