@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import { chromium as playwright } from 'playwright-core';
 import { expect } from '@playwright/test';
 import chromium from '@sparticuz/chromium';
-import { cleanupFixtures, isCaseLiveReadBody, provisionFixtures, validateQaEnv } from './live-delivery-core.mjs';
+import { cleanupFixtures, isCaseLiveReadBody, provisionFixtures, qaBrowserArgs, validateQaEnv } from './live-delivery-core.mjs';
 
 // Opt-in build check, never a public endpoint. Ordinary user sessions perform
 // every handoff operation; the admin client only prepares and removes fixtures.
@@ -90,7 +90,7 @@ try {
     // The browser child receives no admin, provider or deployment credentials.
     const browserEnv = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LD_LIBRARY_PATH'].flatMap(key =>
       process.env[key] ? [[key, process.env[key]]] : []));
-    browser = await playwright.launch({ executablePath, args: chromium.args, headless: true, env: browserEnv });
+    browser = await playwright.launch({ executablePath, args: qaBrowserArgs(chromium.args), headless: true, env: browserEnv });
     context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block' });
     await context.route('**/*', route => {
       const req = route.request(), url = new URL(req.url());

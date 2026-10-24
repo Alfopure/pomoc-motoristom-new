@@ -7,6 +7,11 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const validated = new WeakSet();
 const first = (...values) => values.find(value => value?.trim());
 
+/** Keep browser same-origin protections enabled so authenticated POSTs carry Origin. */
+export function qaBrowserArgs(args) {
+  return args.filter(arg => arg !== '--disable-web-security' && !arg.startsWith('--disable-web-security='));
+}
+
 /** The case-live POST is a read: its manifest contains only revision numbers. */
 export function isCaseLiveReadBody(value) {
   const plainObject = object => object !== null && typeof object === 'object' && !Array.isArray(object)
