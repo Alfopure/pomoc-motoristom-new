@@ -96,7 +96,7 @@ import styles from "./case-detail.module.css";
 type NewCaseFormProps = {
   call: DispatchCall;
   onClose: () => void;
-  onCreated: (dispatchData: DispatchData, caseId: string, notice?: string) => void;
+  onCreated: (dispatchData: DispatchData, caseId: string, notice?: string, openHandoff?: boolean) => void;
   partnerDirectory: PartnerDirectoryEntry[];
   commanderVehicles?: CommanderVehicleConnection[];
   onDirtyChange?: (dirty: boolean) => void;
@@ -215,6 +215,8 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   const [note, setNote] = useState("");
   const [draggedContactId, setDraggedContactId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const createInFlight = useRef(false);
+  const [saveUncertain, setSaveUncertain] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [commanderNotice, setCommanderNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -313,7 +315,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   ];
   const missingRequiredFields = formValidation.errors.filter((message) => !validationErrors.includes(message));
   const formReady = formValidation.valid;
-  const canSubmit = !isSaving;
+  const canSubmit = !isSaving && !saveUncertain;
   const hasVehicleInput = Boolean(
     licensePlate.trim() ||
       vin.trim() ||
@@ -504,13 +506,15 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
     setReplacementVehicleNeeded(needed);
   }
 
-  async function submitCase(): Promise<boolean> {
-    if (!canSubmit || collaborationState.hidden) {
+  async function submitCase(openHandoff = false): Promise<boolean> {
+    if (createInFlight.current || !canSubmit || collaborationState.hidden) {
       return false;
     }
 
+    createInFlight.current = true;
     setIsSaving(true);
     setError(null);
+    let createResponse: Response | null = null;
 
     const payload: CreateCaseInput = {
       contactName,
@@ -592,6 +596,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...payload, editorSessionId: editorPresence.sessionId() }),
       }, {}, value => Boolean(value?.caseId && value?.dispatchData));
+      createResponse = response;
 
       if (!response.ok || !result.caseId || !result.dispatchData) {
         throw new Error(result.error ?? "Prípad sa nepodarilo uložiť.");
@@ -621,7 +626,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
           const uploadError = uploadCaught instanceof Error ? uploadCaught.message : "Prílohy sa nepodarilo nahrať.";
           setIsDirty(false);
           onDirtyChange?.(false);
-          onCreated(result.dispatchData, result.caseId, `Prípad je uložený, ale prílohy sa nepodarilo nahrať: ${uploadError}`);
+          onCreated(result.dispatchData, result.caseId, `Prípad je uložený, ale prílohy sa nepodarilo nahrať: ${uploadError}`, openHandoff);
           resetTransientFields();
           return true;
         }
@@ -635,13 +640,19 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
       const warningNotice = noticeParts.join(" ");
       setIsDirty(false);
       onDirtyChange?.(false);
-      onCreated(nextDispatchData, result.caseId, warningNotice);
+      onCreated(nextDispatchData, result.caseId, warningNotice, openHandoff);
       resetTransientFields();
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Prípad sa nepodarilo uložiť.");
+      if (!createResponse || createResponse.ok || createResponse.status >= 500 || createResponse.headers.get("x-operation-committed") === "true") {
+        setSaveUncertain(true);
+        setError("Výsledok uloženia nie je potvrdený. Prípad už môže byť uložený; pred ďalším vytváraním overte zoznam prípadov. Odovzdanie sa neodoslalo.");
+      } else {
+        setError(caught instanceof Error ? caught.message : "Prípad sa nepodarilo uložiť.");
+      }
       return false;
     } finally {
+      createInFlight.current = false;
       setIsSaving(false);
     }
   }
@@ -1250,6 +1261,14 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
           <div className="grid gap-2 rounded-md border border-zinc-200 bg-white p-3 sm:flex sm:items-center sm:justify-end">
             <button type="button" onClick={closeForm} className="h-10 rounded-md border border-zinc-200 px-4 text-sm font-semibold text-zinc-700 hover:bg-zinc-50">
               Zrušiť
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitCase(true)}
+              disabled={!canSubmit || collaborationState.hidden}
+              className="h-10 rounded-md border border-zinc-200 px-4 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
+            >
+              Uložiť a odovzdať
             </button>
             <button
               type="button"

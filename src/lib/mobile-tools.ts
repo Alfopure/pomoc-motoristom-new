@@ -3,7 +3,7 @@ import type { MobileScope } from "./mobile-api";
 import type { VehicleLookupInput, VehicleQuery, VehicleSourceResult } from "./vehicle-lookup";
 
 export const MOBILE_TOOL_FLEET_PAGE_SIZE = 25;
-export const MOBILE_TOOL_FLEET_MAX_ASSETS = 200;
+export const MOBILE_TOOL_FLEET_MAX_ASSETS = 1000;
 export const MOBILE_TOOL_ROUTE_MAX_INTERMEDIATES = 25;
 export const MOBILE_TOOL_MAX_POLYLINE = 200_000;
 export const MOBILE_TOOL_FLEET_KINDS = ["tow_truck", "replacement_car"] as const;

@@ -30,7 +30,7 @@ describe("mobile dispatch tools transport", () => {
   it.each([
     { assets: [asset, asset], total: 2 }, { assets: [{ ...asset, point: { lat: 91, lng: 0 } }] },
     { assets: [{ ...asset, notes: "private" }] }, { assets: [{ ...asset, point: null }] },
-    { selection: { ...filter, q: "other" } }, { nextOffset: 0 }, { total: 201 },
+    { selection: { ...filter, q: "other" } }, { nextOffset: 0 }, { total: 1001 },
     { assets: [{ ...asset, gps: { ...asset.gps, positionTime: "invalid" } }] },
   ])("rejects incomplete or mismatched fleet data %j", async change => {
     await expect(setup({ ...fleet(), ...change }).api.fleet(filter)).rejects.toMatchObject({ status: 502 });
@@ -77,5 +77,47 @@ describe("mobile dispatch tools transport", () => {
     const assertion = expect(pending).rejects.toMatchObject({ status: 0, retryAfterSeconds: 5, message: expect.stringContaining("serveri") });
     await vi.advanceTimersByTimeAsync(12001); expect(transport.mock.calls[0][1]?.signal?.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(44000); await assertion; expect(transport).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("large fleet response contract", () => {
+  const rows = (count: number) => Array.from({ length: count }, (_, index) => ({
+    ...asset,
+    id: `11111111-1111-4111-8111-${String(index).padStart(12, "0")}`,
+    label: `Auto ${String(index).padStart(4, "0")}`,
+    licensePlate: `BA${String(index).padStart(4, "0")}AB`,
+  }));
+
+  it.each([298, 350, 1000])("accepts the complete sequence of pages for %i vehicles", async count => {
+    const assets = rows(count);
+    const ids: string[] = [];
+    for (let offset = 0; offset < count; offset += 25) {
+      const selection = { ...filter, offset };
+      const page = assets.slice(offset, offset + 25);
+      const body = { ...fleet(), selection, assets: page, total: count, nextOffset: offset + page.length < count ? offset + page.length : null };
+      const result = await setup(body).api.fleet(selection);
+      expect(result.total).toBe(count);
+      expect(result.assets).toEqual(page);
+      ids.push(...result.assets.map(row => row.id));
+    }
+    expect(ids).toEqual(assets.map(row => row.id));
+    expect(new Set(ids).size).toBe(count);
+  });
+
+  it("accepts an exact vehicle search beyond the old boundary and the final empty page", async () => {
+    const tail = { ...rows(350)[349], occupancy: "occupied", availabilityVerified: true, gps: { ...asset.gps, stale: true } };
+    const search = { ...filter, q: tail.licensePlate };
+    const found = await setup({ ...fleet(), selection: search, assets: [tail] }).api.fleet(search);
+    expect(found.assets).toEqual([tail]);
+    const selection = { ...filter, offset: 1000 };
+    await expect(setup({ ...fleet(), selection, assets: [], total: 1000 }).api.fleet(selection)).resolves.toMatchObject({ total: 1000, assets: [], nextOffset: null });
+  });
+
+  it("still rejects a snapshot or requested offset beyond the complete-read limit", async () => {
+    const { api, transport } = setup({ ...fleet(), assets: rows(25), total: 1001, nextOffset: 25 });
+    await expect(api.fleet(filter)).rejects.toMatchObject({ status: 502 });
+    transport.mockClear();
+    await expect(api.fleet({ ...filter, offset: 1001 })).rejects.toMatchObject({ status: 400 });
+    expect(transport).not.toHaveBeenCalled();
   });
 });

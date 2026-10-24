@@ -331,6 +331,7 @@ function DispatchConsoleContent({
   const [activeCaseId, setActiveCaseId] = useState(dispatchCases.find(isActiveDispatchCase)?.id ?? "");
   const [workspace, setWorkspace] = useState<DispatchWorkspaceState>({ kind: "cockpit", mode: "split" });
   const [newCaseCall, setNewCaseCall] = useState(incomingCall);
+  const [handoffCaseId, setHandoffCaseId] = useState<string | null>(null);
   const [callStatus, setCallStatus] = useState<CallStatus>(incomingCall.status);
   const [isAssigning, setIsAssigning] = useState(false);
   const [customerLocationFocus, setCustomerLocationFocus] = useState<CustomerLocationMapFocus>();
@@ -1823,8 +1824,9 @@ function DispatchConsoleContent({
     });
   }
 
-  function handleCaseCreated(nextData: DispatchData, caseId: string, notice?: string) {
+  function handleCaseCreated(nextData: DispatchData, caseId: string, notice?: string, openHandoff = false) {
     setDispatchData(nextData);
+    setHandoffCaseId(openHandoff ? caseId : null);
     setActiveCaseId(caseId);
     setActiveView("dispatch");
     setCenterView("map");
@@ -2563,6 +2565,7 @@ function DispatchConsoleContent({
             onAssignAsset={(assetId) => void handleAssignAsset(assetId)}
             onBackToCockpit={returnToCockpit}
             onCaseCreated={handleCaseCreated}
+            openHandoff={handoffCaseId === activeCaseId}
             onCollapse={collapseWorkspace}
             onDataChange={setDispatchData}
             onCaseChange={(detail) => setDispatchData(current => mergeCaseDetail(current, detail))}

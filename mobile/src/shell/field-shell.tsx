@@ -25,7 +25,7 @@ import { ShellBackStore } from "./back-store";
 import { DoneButton, EditBarContent } from "./edit-bar";
 import { todayLabel } from "./home";
 import { DELIVERY_ROLE_NAME, PIN_LIMIT, moduleAccess, moduleById, rolePins, type ModuleId } from "./modules";
-import { ModulesScreen } from "./modules-screen";
+import { ModulesScreen, type ModuleAccessRefresh } from "./modules-screen";
 import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, type ShellState, type ShellTab } from "./navigation";
 import { ModulesMark, Sheet, shellStyles, tabLabel } from "./parts";
 import { ShellPreferences, shellPreferencesKey } from "./preferences";
@@ -36,6 +36,7 @@ import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
 type Props = {
   config: MobileConfig; active: boolean; userId: string; session: DeliverySession; push: PushSettings;
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; onLogout: () => void;
+  accessRefresh: ModuleAccessRefresh;
 };
 const ACCOUNT_LINKS = [
   { title: "Ochrana súkromia", path: "/aplikacia/sukromie" },
@@ -108,9 +109,9 @@ export function FieldShell(props: Props) {
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(session.me.data?.member.displayName ?? "?")} onAccount={() => go({ ...nav, account: true })} left={left} />
     {view === "home" && <FieldHome open={open} location={location} status={status} tip={preferences.loaded && !preferences.tipDismissed}
       onDismissTip={() => prefs.dismissTip()} onOpen={openDelivery} onModule={() => navigate("pristavenia")} error={session.list.isError ? session.list.error : null}
-      onRefresh={() => { void session.list.refetch(); }} />}
+      onRefresh={() => { void props.accessRefresh.refresh(); }} />}
     {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={showAdd} badges={{ pristavenia: open.length }}
-      onOpen={id => navigate(id)} onMenu={() => setEditing(true)} onEdit={() => setEditing(true)} onAccount={() => go({ ...nav, account: true })} />}
+      onOpen={id => navigate(id)} onMenu={() => setEditing(true)} onEdit={() => setEditing(true)} onAccount={() => go({ ...nav, account: true })} accessRefresh={props.accessRefresh} />}
     {view === "account" && <FieldAccount {...props} name={session.me.data?.member.displayName ?? ""} email={session.me.data?.member.email ?? null} onEditBar={() => setEditing(true)} />}
     <View style={view === "deliveries" ? { flex: 1 } : { display: "none" }}>
       <DeliveryModule session={session} active={active} visible={view === "deliveries"} openRequest={openRequest} />

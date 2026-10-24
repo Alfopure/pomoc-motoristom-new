@@ -9,11 +9,11 @@ import { previewEditablePhone } from "@/lib/telephony/phone-entry";
 import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 import "./case-handoff.css";
 
-export function CaseHandoffPanel(props: { caseId: string; caseNumber: string; active?: boolean }) {
+export function CaseHandoffPanel(props: { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean }) {
   return <CaseHandoffSession key={props.caseId} {...props} />;
 }
-function CaseHandoffSession({ caseId, caseNumber, active = true }: { caseId: string; caseNumber: string; active?: boolean }) {
-  const [expanded, setExpanded] = useState(false), [context, setContext] = useState<HandoffContext | null>(null);
+function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpanded = false }: { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean }) {
+  const [expanded, setExpanded] = useState(initiallyExpanded), [context, setContext] = useState<HandoffContext | null>(null);
   const [name, setName] = useState(""), [phone, setPhone] = useState(""), [instructions, setInstructions] = useState(""), [scheduled, setScheduled] = useState(""), [hours, setHours] = useState(24);
   const [recipientMemberId, setRecipientMemberId] = useState(""), [deliveryMemberId, setDeliveryMemberId] = useState("");
   const [now, setNow] = useState(Date.now);
@@ -21,6 +21,11 @@ function CaseHandoffSession({ caseId, caseNumber, active = true }: { caseId: str
   const [link, setLink] = useState<{ id: string; url: string; phone: string; name: string; generation?: number } | null>(null), [smsOpen, setSmsOpen] = useState(false);
   const [smsIntent, setSmsIntent] = useState<{ phone: string; message: string } | null>(null);
   const inFlight = useRef(false), detailsDirty = useRef(false), sectionRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!active || !initiallyExpanded) return;
+    const frame = requestAnimationFrame(() => sectionRef.current?.scrollIntoView({ block: "start" }));
+    return () => cancelAnimationFrame(frame);
+  }, [active, initiallyExpanded]);
   const reader = useHandoffRead({
     enabled: active && expanded,
     read: signal => readHandoff<HandoffContext>(`/api/cases/${encodeURIComponent(caseId)}/handoffs`, signal),

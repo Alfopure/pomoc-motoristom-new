@@ -1,21 +1,27 @@
 import { useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { Pencil, Search, Star, UserRound } from "lucide-react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Pencil, RefreshCw, Search, Star, UserRound } from "lucide-react-native";
 import { palette, radius, space, type } from "../design/tokens";
 import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import { GROUPS, moduleById, type ModuleId } from "./modules";
 import type { ShellTab } from "./navigation";
 import { Group, Row, SectionHeader } from "../design/list";
 import { Badge, MiniBar, ModuleTile, shellStyles } from "./parts";
+import { ErrorNotice } from "../ui";
+
+export type ModuleAccessRefresh = {
+  busy: boolean; error: string | null; message: string | null; refresh: () => Promise<void>;
+};
 
 type Props = {
   available: ModuleId[]; pins: ModuleId[]; tabs: ShellTab[]; showAdd: boolean; badges: Partial<Record<ModuleId, number>>;
   onOpen: (id: ModuleId) => void; onMenu: (id: ModuleId) => void; onEdit: () => void; onAccount: () => void;
+  accessRefresh: ModuleAccessRefresh;
 };
 const fold = (value: string) => value.toLocaleLowerCase("sk").normalize("NFD").replace(/[̀-ͯ]/g, "");
 
 /** Every permitted module, like the iPhone Home Screen, plus the bar editor. */
-export function ModulesScreen({ available, pins, tabs, showAdd, badges, onOpen, onMenu, onEdit, onAccount }: Props) {
+export function ModulesScreen({ available, pins, tabs, showAdd, badges, onOpen, onMenu, onEdit, onAccount, accessRefresh }: Props) {
   const [query, setQuery] = useState("");
   const q = fold(query.trim());
   const matches = available.filter(id => !q || fold(moduleById(id).name + " " + moduleById(id).description).includes(q));
@@ -54,9 +60,15 @@ export function ModulesScreen({ available, pins, tabs, showAdd, badges, onOpen, 
     })}
     {q !== "" && matches.length === 0 && <Text style={s.note}>Žiadny modul pre „{query.trim()}“.</Text>}
     <SectionHeader title="Ostatné" />
-    <Group><Row first title="Účet a koncepty" subtitle="Prihlásenie, prostredie, uložené koncepty" onPress={onAccount}
+    <Group><Row first title={accessRefresh.busy ? "Obnovujem prístupy…" : "Obnoviť prístupy"} subtitle="Načíta dostupné moduly podľa vášho aktuálneho prístupu."
+      tone="link" disabled={accessRefresh.busy} onPress={() => { void accessRefresh.refresh(); }}
+      leading={<View style={[s.rowIcon, { backgroundColor: palette.fill }]}><RefreshCw size={16} color={palette.label} accessible={false} /></View>}
+      trailing={accessRefresh.busy ? <ActivityIndicator color={palette.secondaryLabel} /> : null} />
+      <Row title="Účet a koncepty" subtitle="Prihlásenie, prostredie, uložené koncepty" onPress={onAccount}
       leading={<View style={[s.rowIcon, { backgroundColor: palette.fill }]}><UserRound size={16} color={palette.label} accessible={false} /></View>}
       trailing={<Text style={s.chevron}>›</Text>} /></Group>
+    {accessRefresh.error ? <View style={s.refreshNotice}><ErrorNotice message={accessRefresh.error} onRetry={() => { void accessRefresh.refresh(); }} /></View>
+      : accessRefresh.message ? <Text accessibilityLiveRegion="polite" style={s.note}>{accessRefresh.message}</Text> : null}
     <Text style={s.note}>★ = modul je v lište. Ťuknutím modul otvoríte, podržaním ho pridáte do lišty alebo odoberiete.</Text>
   </ScrollView>;
 }
@@ -78,4 +90,5 @@ const s = StyleSheet.create({
   rowIcon: { width: 28, height: 28, borderRadius: radius.s, alignItems: "center", justifyContent: "center" },
   chevron: { fontSize: 20, color: palette.tertiaryLabel },
   note: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, paddingHorizontal: 22, paddingTop: space.m },
+  refreshNotice: { paddingHorizontal: space.l, paddingTop: space.m },
 });

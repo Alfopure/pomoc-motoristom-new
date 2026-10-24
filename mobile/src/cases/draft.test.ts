@@ -10,6 +10,37 @@ function fixture() {
   return { api, draft: new CaseDraft(api) };
 }
 describe("case draft save lifecycle", () => {
+  it("keeps save-and-handoff as local continuation and sends only one case create", async () => {
+    const f = fixture(); let resolve!: (value: MobileCaseCreated) => void;
+    vi.mocked(f.api.create).mockReturnValue(new Promise(done => { resolve = done; }));
+    f.draft.edit({ contactName: "Pristavenie", note: "Pokyny" });
+    const save = f.draft.submit("handoff"); const duplicate = f.draft.submit("detail");
+    expect(f.draft.snapshot()).toMatchObject({ status: "saving", afterSave: "handoff", created: null });
+    expect(f.api.create).toHaveBeenCalledExactlyOnceWith({ priority: "normal", jobTypes: [], contactName: "Pristavenie", note: "Pokyny" });
+    resolve(created); await Promise.all([save, duplicate]);
+    expect(f.draft.snapshot()).toMatchObject({ status: "saved", afterSave: "handoff", created });
+    await f.draft.submit("detail"); expect(f.api.create).toHaveBeenCalledOnce();
+    expect(f.draft.snapshot().afterSave).toBe("handoff");
+    f.draft.newDraft(); expect(f.draft.snapshot()).toMatchObject({ status: "editing", afterSave: "detail", created: null });
+  });
+  it("retains handoff continuation through an uncertain save until deliberate review and retry", async () => {
+    const f = fixture(); vi.mocked(f.api.create).mockRejectedValueOnce(new MobileApiError("Unknown", 503));
+    await f.draft.submit("handoff");
+    expect(f.draft.snapshot()).toMatchObject({ status: "uncertain", afterSave: "handoff", created: null });
+    await f.draft.submit("detail"); expect(f.api.create).toHaveBeenCalledOnce();
+    expect(f.draft.snapshot().afterSave).toBe("handoff");
+    f.draft.reviewList(f.draft.snapshot().reviewAfter + 1); f.draft.allowRetry(); await f.draft.submit();
+    expect(f.api.create).toHaveBeenCalledTimes(2);
+    expect(f.draft.snapshot()).toMatchObject({ status: "saved", afterSave: "handoff", created });
+  });
+  it("allows the user to choose ordinary save after a definitive failure without sending a handoff", async () => {
+    const f = fixture(); vi.mocked(f.api.create).mockRejectedValueOnce(new MobileApiError("Invalid", 400));
+    await f.draft.submit("handoff");
+    expect(f.draft.snapshot()).toMatchObject({ status: "editing", afterSave: "handoff", created: null });
+    await f.draft.submit("detail");
+    expect(f.draft.snapshot()).toMatchObject({ status: "saved", afterSave: "detail", created });
+    expect(f.api.create).toHaveBeenCalledTimes(2);
+  });
   it("blocks same-tick double taps and freezes the submitted input while saving", async () => {
     const f = fixture(); let resolve!: (value: MobileCaseCreated) => void;
     vi.mocked(f.api.create).mockReturnValue(new Promise(done => { resolve = done; }));

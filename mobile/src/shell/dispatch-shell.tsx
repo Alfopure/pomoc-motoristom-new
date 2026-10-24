@@ -27,7 +27,7 @@ import { DoneButton, EditBarContent } from "./edit-bar";
 import { HomeScreen, type HomeTarget } from "./home";
 import { SearchScreen } from "./search";
 import { AlertsScreen } from "../alerts/ui";
-import { ModulesScreen } from "./modules-screen";
+import { ModulesScreen, type ModuleAccessRefresh } from "./modules-screen";
 import { PIN_LIMIT, accessLabel, moduleAccess, moduleById, roleNames, rolePins, type ModuleId } from "./modules";
 import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, type DispatchView, type HovoryView, type ShellState, type ShellTab } from "./navigation";
 import { Group, Row } from "../design/list";
@@ -65,6 +65,8 @@ type Props = {
   push: PushSettings;
   /** Pristavenia of someone who dispatches and also delivers; null without that role. */
   delivery: DeliverySession | null;
+  /** Available even before the current account has a delivery membership. */
+  accessRefresh: ModuleAccessRefresh;
 };
 type ShellSheet = { kind: "edit" } | { kind: "pin"; id: ModuleId } | { kind: "menu"; id: ModuleId };
 const shellOwnedBack: readonly DispatchView[] = ["modules", "console", "history", "account", "search", "alerts"];
@@ -283,7 +285,7 @@ export function DispatchShell(props: Props) {
     {view === "history" && !callTarget && <History api={api} me={identity} queryKey={queryKey} active={active} category={category} onCategory={setCategory}
       search={search} onSearch={setSearch} onCallContext={openCallContext} onSelect={value => { setNumber(value); navigate("hovory", "console"); }} />}
     {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={pins.length < PIN_LIMIT} badges={{ hovory: waiting, pristavenia: openDeliveries.length }}
-      onOpen={id => navigate(id)} onMenu={id => sheet.open({ kind: "menu", id })} onEdit={() => sheet.open({ kind: "edit" })} onAccount={() => go({ ...nav, account: true })} />}
+      onOpen={id => navigate(id)} onMenu={id => sheet.open({ kind: "menu", id })} onEdit={() => sheet.open({ kind: "edit" })} onAccount={() => go({ ...nav, account: true })} accessRefresh={props.accessRefresh} />}
     <DraftWorkspace key={identity.profileId} config={config} client={props.client} identity={identity} userId={userId} liveUser={props.liveUser} active={active}
       view={view} onView={target => {
         if (target === "account") go({ ...nav, account: true });
@@ -309,7 +311,7 @@ export function DispatchShell(props: Props) {
           deliveries={delivery ? { count: delivery.list.data ? openDeliveries.length : null, onOpen: () => navigate("pristavenia"),
             detail: delivery.list.isError ? "Pristavenia nie sú dostupné" : openDeliveries.length ? deliveryStatusLabels[openDeliveries[0].status] : "Žiadne otvorené" } : null}
           onOpen={homeTarget} onCall={id => openCallContext({ kind: "session", id })}
-          onRefresh={() => { void Promise.allSettled([callbackSummary.refetch(), consoleQuery.refetch(), queryClient.invalidateQueries({ queryKey: [...queryKey, identity.profileId] })]); }} />;
+          onRefresh={() => { void Promise.allSettled([props.accessRefresh.refresh(), callbackSummary.refetch(), consoleQuery.refetch(), queryClient.invalidateQueries({ queryKey: [...queryKey, identity.profileId] })]); }} />;
       }}
       bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
