@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertOwnAccessToken, assertOwnedFields, cleanupFixtures, deriveFixtureId, fixturePlan, fixtureProvenance, isCaseLiveReadBody, provisionFixtures, validateQaEnv } from './live-delivery-core.mjs';
+import { createServer } from 'node:http';
+import { assertOwnAccessToken, assertOwnedFields, cleanupFixtures, deriveFixtureId, fixturePlan, fixtureProvenance, isCaseLiveReadBody, provisionFixtures, qaBrowserArgs, validateQaEnv } from './live-delivery-core.mjs';
 
 const RUN = '2a65537e-48ae-4d2c-8307-103c53082abe';
 const SHA = 'a'.repeat(40);
@@ -12,6 +13,58 @@ const environment = () => ({
   SUPABASE_PROJECT_REF: 'nzpnqdstvkfncflgqlny', EXPECTED_SUPABASE_PROJECT_REF: 'nzpnqdstvkfncflgqlny',
   SUPABASE_URL: 'https://nzpnqdstvkfncflgqlny.supabase.co', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test',
   SUPABASE_SECRET_KEY: 'sb_secret_test', APP_BASE_URL: 'https://test.dispecing.linkapomoci.sk',
+});
+
+test('QA browser arguments preserve normal options while enabling web security', () => {
+  const original = ['--no-sandbox', '--disable-web-security', '--disable-web-security=true', '--headless=new'];
+  assert.deepEqual(qaBrowserArgs(original), ['--no-sandbox', '--headless=new']);
+  assert.equal(original.length, 4);
+});
+
+test('bundled QA Chromium sends Origin and same-origin metadata on a same-origin POST', {
+  skip: process.platform !== 'linux' ? 'Bundled @sparticuz Chromium requires Linux' : false,
+  timeout: 30_000,
+}, async () => {
+  const [{ default: bundled }, { chromium }] = await Promise.all([
+    import('@sparticuz/chromium'), import('playwright-core'),
+  ]);
+  const server = createServer((request, response) => {
+    if (request.method === 'POST') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ origin: request.headers.origin, site: request.headers['sec-fetch-site'] }));
+    } else {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><title>Local QA origin regression</title>');
+    }
+  });
+  let browser;
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const executablePath = await bundled.executablePath();
+    const browserEnv = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'LD_LIBRARY_PATH', 'FONTCONFIG_PATH']
+      .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
+    browser = await chromium.launch({ executablePath, args: qaBrowserArgs(bundled.args), headless: true,
+      env: browserEnv, timeout: 20_000 });
+    const page = await browser.newPage();
+    await page.goto(origin, { timeout: 5_000 });
+    const observed = await page.evaluate(async () => {
+      const response = await fetch('/origin-probe', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ probe: true }),
+      });
+      return response.json();
+    });
+    assert.deepEqual(observed, { origin, site: 'same-origin' });
+  } finally {
+    try { await browser?.close(); }
+    finally {
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+    }
+  }
 });
 
 test('case-live read body allows only empty initialization or a valid revision manifest', () => {

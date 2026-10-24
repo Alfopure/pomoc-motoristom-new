@@ -63,6 +63,10 @@ autentifikovaný **čítací POST** `/api/cases/live` s telom `versions`; tým s
 potvrdzuje platný prístup k zoznamu prípadov. Bez neho aplikácia správne skryje
 pracovné údaje. API actor stále pochádza z bežnej cookie session.
 
+Chromium musí mať zapnutú webovú bezpečnosť: jeho serverless predvoľba
+`--disable-web-security` sa odstraňuje. S týmto argumentom browser neposiela
+`Origin` ani pri bežnom POST a správna CSRF ochrana odovzdanie odmietne.
+
 ## Účty, dáta a obnova
 
 Admin klient pripraví tri nové potvrdené Auth účty, jeden dispečerský profil,
