@@ -191,9 +191,44 @@ try {
     const issuedResponse = page.waitForResponse(response => new URL(response.url()).pathname === handoffPath && response.request().method() === 'POST');
     await page.getByRole('button', { name: 'Odovzdať do aplikácie', exact: true }).click();
     const issued = await issuedResponse;
-    check(issued.ok());
     const receipt = await issued.json();
-    check(receipt.delivery?.status === 'sent' && receipt.delivery.memberId === fixtures.recipient.memberId && receipt.handoff?.id);
+    const issueCode = typeof receipt.code === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(receipt.code) ? receipt.code : null;
+    console.log(JSON.stringify({ deliveryQa: 'issue-result', httpStatus: issued.status(), code: issueCode,
+      delivery: ['sent', 'failed'].includes(receipt.delivery?.status) ? receipt.delivery.status : 'absent',
+      handoffPresent: typeof receipt.handoff?.id === 'string' }));
+    if (!issued.ok()) throw new QaFailure(`issue HTTP ${issued.status()}`);
+    check(receipt.handoff?.id && receipt.delivery?.memberId === fixtures.recipient.memberId);
+    if (receipt.delivery.status === 'failed') {
+      // A confirmed issue and an unconfirmed assignment are separate outcomes.
+      // The real UI replays assignment with the same identity, never issue.
+      stage = 'recover same app assignment from web';
+      const retryResponse = page.waitForResponse(response => new URL(response.url()).pathname === handoffPath && response.request().method() === 'POST');
+      await page.getByRole('button', { name: 'Overiť výsledok tej istej požiadavky', exact: true }).click();
+      const retried = await retryResponse, retry = await retried.json();
+      console.log(JSON.stringify({ deliveryQa: 'assignment-retry-result', httpStatus: retried.status(), confirmed: retry.sent === true,
+        code: typeof retry.code === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(retry.code) ? retry.code : null }));
+      if (!retried.ok() || retry.sent !== true) {
+        // Diagnostic only, using the same ordinary user's authenticated RPC
+        // and exact idempotent command. It cannot turn this failed UI check
+        // into acceptance; all effects remain on our fixture and are removed.
+        const userClient = createClient(config.supabaseUrl, config.publicKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+          global: { headers: { Authorization: `Bearer ${fixtures.dispatcher.accessToken}` },
+            fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(20_000) }) },
+        });
+        clients.push(userClient);
+        running();
+        const probe = await userClient.rpc('motorist_case_handoff_app', { p_organization_id: config.organizationId,
+          p_actor_id: fixtures.dispatcher.profileId, p_case_id: fixtures.case.id, p_action: 'assign',
+          p_input: { handoffId: receipt.handoff.id, memberId: fixtures.recipient.memberId,
+            commandId: receipt.commandId, expectedRevision: receipt.committedRevision } });
+        console.error(JSON.stringify({ deliveryQa: 'assignment-rpc-diagnostic',
+          code: /^[a-zA-Z0-9_]{1,32}$/.test(probe.error?.code ?? '') ? probe.error.code : probe.error ? 'other' : 'no-error' }));
+        throw new QaFailure(`assignment retry HTTP ${retried.status()}`);
+      }
+      check(retry.commandId === receipt.commandId && retry.handoffId === receipt.handoff.id && retry.memberId === fixtures.recipient.memberId);
+      pass('unconfirmed assignment recovered with the same command');
+    } else check(receipt.delivery.status === 'sent');
     await page.getByText('V aplikácii', { exact: true }).waitFor({ state: 'visible' });
     const handoffId = receipt.handoff.id;
     pass('web selector sends confirmed handoff into recipient app');
