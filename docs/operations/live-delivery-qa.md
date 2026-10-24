@@ -58,7 +58,10 @@ Pôvodný build gate (testy, typecheck, browser regresie, build) zostáva zachov
 Citlivé TEST kľúče používa iba build vo svojom prostredí; nevypisujú sa ani sa
 neexportujú z Vercelu. Chromium dostáva obmedzené prostredie bez admin/provider
 kľúčov. Browser blokuje externé služby, telefonovanie, websockety a všetky
-zápisy okrem odovzdania vlastného skúšobného prípadu.
+zápisy okrem odovzdania vlastného skúšobného prípadu. Výslovne povoľuje aj
+autentifikovaný **čítací POST** `/api/cases/live` s telom `versions`; tým sa
+potvrdzuje platný prístup k zoznamu prípadov. Bez neho aplikácia správne skryje
+pracovné údaje. API actor stále pochádza z bežnej cookie session.
 
 ## Účty, dáta a obnova
 
