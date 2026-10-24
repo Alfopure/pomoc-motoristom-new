@@ -8,10 +8,12 @@ import { cleanupFixtures, provisionFixtures, validateQaEnv } from './live-delive
 // Opt-in build check, never a public endpoint. Ordinary user sessions perform
 // every handoff operation; the admin client only prepares and removes fixtures.
 let stage = 'environment guards';
-let config, fixtures, browser, context;
+let config, fixtures, browser, context, qaPage;
 let cleaning;
 const clients = [];
 const passed = [];
+const browserErrors = [];
+const failedResources = {};
 const stopping = new AbortController();
 class QaFailure extends Error {}
 function check(value) { if (!value) throw new QaFailure('assertion'); }
@@ -102,6 +104,22 @@ try {
     });
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
+    qaPage = page;
+    page.on('pageerror', error => {
+      // Only classifications and owned chunk names; never arbitrary messages.
+      const react = /Minified React error #(\d+)/.exec(error.message);
+      const chunk = /\/_next\/static\/chunks\/[a-zA-Z0-9_.-]+\.js/.exec(error.stack ?? '');
+      if (browserErrors.length < 10) browserErrors.push({
+        kind: ['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError'].includes(error.name) ? error.name : 'other',
+        ...(react ? { reactCode: react[1] } : {}), ...(chunk ? { chunk: chunk[0] } : {}),
+      });
+    });
+    page.on('requestfailed', req => {
+      const url = new URL(req.url());
+      const kind = url.origin === config.supabaseUrl ? (url.pathname.startsWith('/auth/v1/') ? 'auth' : 'supabase-other')
+        : url.origin === config.origin ? (url.pathname.startsWith('/_next/') ? 'app-assets' : 'app-request') : 'external';
+      failedResources[kind] = (failedResources[kind] ?? 0) + 1;
+    });
     page.setDefaultTimeout(30_000);
     await page.goto(config.origin, { waitUntil: 'domcontentloaded' });
     stage = 'interactive login form';
@@ -128,6 +146,13 @@ try {
     check(session.user?.id === fixtures.dispatcher.userId && session.access_token);
     fixtures.dispatcher.accessToken = session.access_token;
     pass('browser password exchange');
+    stage = 'persisted browser session';
+    await expect.poll(async () => (await context.cookies(config.origin))
+      .some(cookie => /^sb-.*-auth-token(?:\.\d+)?$/.test(cookie.name)), { timeout: 15_000 }).toBe(true);
+    // The password response precedes the SDK's cookie write and redirect.
+    // Start the workspace from its persisted ordinary session, without racing
+    // those async callbacks or manufacturing authentication cookies.
+    await page.goto(config.origin, { waitUntil: 'domcontentloaded' });
     stage = 'interactive dispatcher workspace';
     await page.locator('[data-testid="dispatch-console"][data-hydrated="true"]').waitFor({ state: 'visible', timeout: 60_000 });
     await page.getByTestId('dispatch-case-list').waitFor({ state: 'visible', timeout: 60_000 });
@@ -236,6 +261,19 @@ try {
     : /^Delivery QA [a-zA-Z_ :;-]+(?: failed \([a-zA-Z0-9_]+\))?$/.test(error?.message ?? '') ? error.message
       : error?.name === 'TimeoutError' ? 'browser timeout' : 'request or fixture check failed';
   console.error(JSON.stringify({ deliveryQa: 'failed', stage, reason }));
+  if (qaPage && !qaPage.isClosed()) {
+    try {
+      console.error(JSON.stringify({ deliveryQa: 'browser-state',
+        loginVisible: await qaPage.getByRole('heading', { name: 'Prihlásenie', exact: true }).isVisible(),
+        errorBoundaryVisible: await qaPage.getByRole('heading', { name: 'Obrazovku sa nepodarilo zobraziť', exact: true }).isVisible(),
+        documentState: await qaPage.evaluate(() => document.readyState),
+        consoleCount: await qaPage.getByTestId('dispatch-console').count(),
+        hydrated: await qaPage.getByTestId('dispatch-console').getAttribute('data-hydrated', { timeout: 1_000 }).catch(() => null),
+        authCookieParts: (await context.cookies(config.origin)).filter(cookie => /^sb-.*-auth-token(?:\.\d+)?$/.test(cookie.name)).length,
+        browserErrors, failedResources,
+      }));
+    } catch { /* Diagnostics must not prevent deterministic cleanup. */ }
+  }
   process.exitCode = 1;
 } finally {
   try { await cleanup(); }
