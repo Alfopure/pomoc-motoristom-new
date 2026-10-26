@@ -25,6 +25,7 @@ export function towingCompletionProblems(order: Pick<TowingOrder, 'fields' | 'at
   const errors: string[] = [];
   if (!fields.subjectDescription.trim()) errors.push('Doplňte predmet výkonu.');
   const start = Date.parse(fields.startedAt ?? ''); const end = Date.parse(fields.finishedAt ?? '');
+  if (fields.startSource === 'assignment') errors.push('Potvrďte skutočný začiatok výkonu; čas pridelenia nie je začiatok práce.');
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) errors.push('Doplňte platný začiatok a koniec výkonu.');
   const transport = ['tow', 'transport', 'relocation'].includes(fields.serviceType);
   if (fields.serviceType === 'storage' && !fields.parkingId) errors.push('Vyberte parkovisko uloženia.');

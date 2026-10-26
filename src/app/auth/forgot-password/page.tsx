@@ -13,5 +13,5 @@ export default async function ForgotPasswordPage({ searchParams }: ForgotPasswor
   const params = await searchParams;
   const email = Array.isArray(params.email) ? params.email[0] : params.email;
 
-  return <ForgotPasswordForm initialEmail={email ?? ""} towing={params.module === "towing"} />;
+  return <ForgotPasswordForm initialEmail={email ?? ""} towing={params.module === "towing"} partner={params.module === "partner"} />;
 }

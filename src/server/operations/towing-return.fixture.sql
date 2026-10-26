@@ -1,0 +1,53 @@
+-- Only A18: specialized towing owner, single return, stable receipts and inspection.
+begin;
+do $test$
+declare org uuid:=gen_random_uuid(); office uuid:=gen_random_uuid(); profile uuid:=gen_random_uuid(); member uuid:=gen_random_uuid();
+ driver uuid:=gen_random_uuid(); driver_member uuid:=gen_random_uuid(); asset uuid:=gen_random_uuid(); cycle uuid:=gen_random_uuid();
+ delivery uuid; tow uuid:=gen_random_uuid(); second_tow uuid:=gen_random_uuid(); tow_op uuid; second_op uuid;
+ link_command jsonb; submit_command jsonb; inspect_command jsonb; receipt jsonb; replay jsonb; result jsonb; cycle_revision bigint;
+begin
+ insert into auth.users(id) values(office),(driver);
+ insert into public.motorist_organizations(id) values(org);
+ insert into public.motorist_profiles(id,organization_id,user_id,role,display_name) values(profile,org,office,'dispatcher','Office');
+ insert into public.motorist_towing_memberships(id,organization_id,auth_user_id,display_name,roles,capabilities,office_profile_id,password_set_at) values(member,org,office,'Office',array['manager'],app_private.towing_capabilities(array['manager']),profile,now()),(driver_member,org,driver,'Driver',array['driver','delivery'],app_private.towing_capabilities(array['driver','delivery']),null,now());
+ insert into public.motorist_fleet_assets(id,organization_id,kind,label,status) values(asset,org,'replacement_car','Cycle asset','rented');
+ receipt:=public.motorist_operations_command(office,org,jsonb_build_object('commandId',gen_random_uuid(),'action','create','expectedRevision',0,'payload',jsonb_build_object('kind','delivery','fleetAssetId',asset,'from','Depot','to','Client')));
+ delivery:=(receipt->'operation'->>'id')::uuid; cycle:=(receipt->'operation'->>'cycleId')::uuid;
+ insert into public.motorist_towing_orders(id,organization_id,fields) values(tow,org,jsonb_build_object('serviceType','tow','subjectType','vehicle','subjectDescription','Returning replacement','pickup','Client','destination','Depot','branchId',gen_random_uuid(),'noContactReason','Office coordinates','startedAt',now()-interval '1 hour','finishedAt',now()+interval '1 minute','startSource','manual','photoException','Explicit fixture exception')),(second_tow,org,'{}');
+ select id into tow_op from public.motorist_operations where towing_order_id=tow;
+ select id into second_op from public.motorist_operations where towing_order_id=second_tow;
+ link_command:=jsonb_build_object('commandId',gen_random_uuid(),'operationId',tow_op,'action','link_towing_return','expectedRevision',1,'payload',jsonb_build_object('cycleId',cycle));
+ receipt:=public.motorist_operations_command(office,org,link_command);
+ replay:=public.motorist_operations_command(office,org,link_command);
+ if receipt<>replay then raise exception 'Link replay changed receipt'; end if;
+ if receipt->'operation'->'cycle'->>'returnOperationId'<>tow_op::text or receipt->'operation'->'cycle'->>'returnOperationOwner'<>'towing_order' then raise exception 'Wrong return owner projection'; end if;
+ if exists(select 1 from public.motorist_logistics_executions where operation_id=tow_op) then raise exception 'Towing work duplicated as logistics'; end if;
+ begin perform public.motorist_operations_command(office,org,jsonb_build_object('commandId',gen_random_uuid(),'operationId',second_op,'action','link_towing_return','expectedRevision',1,'payload',jsonb_build_object('cycleId',cycle))); raise exception 'Second towing return accepted'; exception when sqlstate 'PT409' then null; end;
+ begin perform public.motorist_operations_command(office,org,jsonb_build_object('commandId',gen_random_uuid(),'action','create','expectedRevision',0,'payload',jsonb_build_object('kind','collection','cycleId',cycle,'from','Client','to','Depot'))); raise exception 'Duplicate logistics collection accepted'; exception when sqlstate 'PT409' then null; end;
+ begin perform public.motorist_operations_command(office,org,jsonb_build_object('commandId',gen_random_uuid(),'operationId',delivery,'action','return','expectedRevision',1,'payload',jsonb_build_object('returnMode','collect'))); raise exception 'Generic return bypassed towing owner'; exception when sqlstate 'PT409' then null; end;
+ begin perform public.motorist_operations_command(driver,org,jsonb_build_object('commandId',gen_random_uuid(),'operationId',tow_op,'action','link_towing_return','expectedRevision',2,'payload',jsonb_build_object('cycleId',cycle))); raise exception 'Field linked owner'; exception when insufficient_privilege then null; end;
+ result:=public.motorist_operations_workspace(office,org,jsonb_build_object('ownerId',tow,'limit',1));
+ if jsonb_array_length(result->'operations')<>1 or result->'operations'->0->>'id'<>tow_op::text then raise exception 'Owner filter failed'; end if;
+ perform public.motorist_towing_command(office,org,1,jsonb_build_object('commandId',gen_random_uuid(),'type','assign','targetId',tow,'expectedRevision',2,'payload',jsonb_build_object('driverId',driver_member)));
+ perform public.motorist_towing_command(office,org,1,jsonb_build_object('commandId',gen_random_uuid(),'type','start','targetId',tow,'expectedRevision',3,'payload','{}'::jsonb));
+ submit_command:=jsonb_build_object('commandId',gen_random_uuid(),'type','submit','targetId',tow,'expectedRevision',4,'payload','{}'::jsonb);
+ receipt:=public.motorist_towing_command(office,org,1,submit_command);
+ select revision into cycle_revision from public.motorist_vehicle_use_cycles where id=cycle;
+ if cycle_revision<>3 or (select status from public.motorist_vehicle_use_cycles where id=cycle)<>'returned' then raise exception 'Towing submit did not return cycle exactly once'; end if;
+ replay:=public.motorist_towing_command(office,org,1,submit_command);
+ if receipt<>replay or (select revision from public.motorist_vehicle_use_cycles where id=cycle)<>cycle_revision then raise exception 'Submit replay changed cycle'; end if;
+ if exists(select 1 from public.motorist_cycle_return_owners where cycle_id=cycle) then raise exception 'Completed owner stayed active'; end if;
+ perform public.motorist_operations_command(office,org,jsonb_build_object('commandId',gen_random_uuid(),'operationId',tow_op,'action','evidence','expectedRevision',5,'payload',jsonb_build_object('stage','inspection','source','exception','observedAt',now(),'missingReason','Explicit inspection exception for fixture','note','Inspected on return')));
+ inspect_command:=jsonb_build_object('commandId',gen_random_uuid(),'operationId',tow_op,'action','inspect','expectedRevision',6,'payload',jsonb_build_object('note','Office inspection'));
+ receipt:=public.motorist_operations_command(office,org,inspect_command);
+ replay:=public.motorist_operations_command(office,org,inspect_command);
+ if receipt<>replay or (select revision from public.motorist_vehicle_use_cycles where id=cycle)<>4 or (select status from public.motorist_vehicle_use_cycles where id=cycle)<>'inspected' then raise exception 'Inspection replay changed cycle'; end if;
+ if (select work_status from public.motorist_towing_orders where id=tow)<>'submitted' then raise exception 'Generic context changed towing work status'; end if;
+ -- A cancellation releases only the return intent, not the cycle or its history.
+ update public.motorist_vehicle_use_cycles set status='open' where id=cycle;
+ perform public.motorist_operations_command(office,org,jsonb_build_object('commandId',gen_random_uuid(),'operationId',second_op,'action','link_towing_return','expectedRevision',1,'payload',jsonb_build_object('cycleId',cycle)));
+ perform public.motorist_towing_command(office,org,1,jsonb_build_object('commandId',gen_random_uuid(),'type','cancel','targetId',second_tow,'expectedRevision',2,'payload',jsonb_build_object('reason','Explicit fixture cancellation')));
+ if exists(select 1 from public.motorist_cycle_return_owners where cycle_id=cycle) or (select status from public.motorist_vehicle_use_cycles where id=cycle)<>'open' then raise exception 'Cancellation lost cycle or retained intent'; end if;
+ raise notice 'PASS: A18 single towing owner, stable link/submit/inspect receipts, duplicate logistics/towing prevention, office authorization, owner filter, physical return once, inspection once, cancellation releases intent';
+end $test$;
+rollback;

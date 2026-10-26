@@ -75,6 +75,10 @@ export function projectTowingDriverOrder(order: TowingOrder, actor: TowingMember
   for (const key of ['plate','vin','destination','contact','noContactReason','branchId','fleetAssetId','plannedAt','startedAt','finishedAt','startSource','driverNotes','performedQuantity','photoException','assistanceReference','parkingId','parkingName','parkingAddress','assistancePartnerName'] as const) {
     if (order.fields[key] !== undefined) Object.assign(fields, { [key]: order.fields[key] });
   }
+  for (const key of ['requester', 'customer', 'owner', 'recipient'] as const) {
+    const party = order.fields[key];
+    if (party) Object.assign(fields, { [key]: { name: party.name, ...(party.phone ? { phone: party.phone } : {}) } });
+  }
   return { id: order.id, number: order.number, sourceCaseId: null, revision: order.revision,
       assignmentGeneration: order.assignmentGeneration, driverId: order.driverId, workStatus: order.workStatus,
       billingStatus: order.billingStatus, paymentStatus: order.paymentStatus, fields,

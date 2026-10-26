@@ -1,0 +1,20 @@
+# Partnerský web a konzultácie
+
+Server-only partner module; it does not load dispatch data in `/partner`.
+
+- UI: `PartnersModule({caseId?})`, `CasePartnerPanel({caseId})`; consultation and assistance links use `/?case=<uuid>`.
+- APIs: office `GET/POST /api/partners`; partner list `GET /api/partners?portal=true`; authenticated output proxy `/api/partners/outputs/<id>?portal=true` (office omits `portal`). `preview=true` renders only the published fields.
+- RPCs: `motorist_partner_actor`, `motorist_partner_accept`, `motorist_partner_read`, `motorist_partner_command`, `motorist_partner_membership_command`, `motorist_partner_report`. All are service-role-only, invoker functions with fixed search paths and fresh actor checks. Tables have RLS enabled with no browser grants. Published output and receipt tables deny service-role UPDATE/DELETE.
+- Migration: `supabase/migrations/20261026190404_partner_consultations_and_portal.sql`; report requires the accompanying shared-dispatch operations migration before activating the module. Private bucket: `motorist-partner-documents`; no signed/public download URLs.
+- Invitations reuse only a verified existing organization account, or recover the deterministic account from its original invitation provenance. No dispatch profile is provisioned. Acceptance requires the latest unexpired invitation ID plus the authenticated matching user. Membership versions and shares are read anew for every portal read/download.
+- Prices start unset; publication and email are separate explicit actions. Email provider acceptance is not delivery. An uncertain original intent is never automatically resent. A new operator intent gets a new receipt.
+
+## Local validation
+
+Use a fresh **local-only** database with the standard `anon`, `authenticated`, `service_role` roles already installed. `testing/schema.sql` is a minimal local fixture, not an application migration. Run the fixture, migration, and `security.sql` with `psql -v ON_ERROR_STOP=1`. Assertions cover independent payer/reference, idempotency/content conflicts, two deliberate assistance intents, reduced explicit shares, org/version/share revocation, invitation generations/expiry, same field account without dispatch profile, public grants, and the 3-call / 1-consultation / 2-operation report. Test data rolls back.
+
+`pnpm exec vitest run src/server/partners/access.test.ts src/components/auth/login-destination.test.ts src/server/access-management.test.ts src/server/towing/memberships.test.ts` verifies provisioning provenance and existing auth regressions without contacting providers.
+
+## Remaining inputs and limits
+
+Actual partner contacts, recipient addresses and approved prices require owner input. The accident-report template is a separate blocked product input. No external invite, email or PDF delivery was exercised by local tests. Origin context is saved as a second explicit command after existing case creation; a failure shows a warning to finish the context in the saved case. The immutable context is never guessed from a line label or phone number. Portal lists are bounded to the latest 100 published versions; the office report aggregates all consultations independently of that display bound.

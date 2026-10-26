@@ -3,7 +3,7 @@ import type { TowingMember, TowingWorkspace } from '@/domain/towing/types';
 
 const mocks = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn(), select: vi.fn(), eq: vi.fn(), in: vi.fn() }));
 vi.mock('./client', () => ({ towingAdmin: () => mocks }));
-import { loadTowingWorkspace } from './service';
+import { loadTowingWorkspace, projectTowingDriverOrder } from './service';
 
 const actor: TowingMember = { id: 'member', userId: 'user', organizationId: 'organization', displayName: 'Fixture', roles: ['manager','driver'], capabilities: ['operate','price','drive'], active: true, version: 1 };
 function workspace(view: 'office' | 'driver' = 'office'): TowingWorkspace {
@@ -45,5 +45,23 @@ describe('persisted office pricing date', () => {
     mocks.rpc.mockResolvedValue({ data: workspace('driver'), error: null });
     expect((await loadTowingWorkspace(actor, 'driver')).orders[0]).not.toHaveProperty('taxDate');
     expect(mocks.from).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('driver operational contacts', () => {
+  it('retains minimal customer and requester contacts and assistance reference without billing identity', () => {
+    const order = workspace('driver').orders[0];
+    order.fields.requester = { name: 'Synthetic requester', phone: '+421900000000', email: 'private@example.invalid', companyId: 'private' };
+    order.fields.customer = { name: 'Synthetic customer', phone: '+421900000001', address: 'private address', taxId: 'private' };
+    order.fields.assistanceReference = 'SYNTHETIC-REF';
+    order.fields.assistancePartnerName = 'Synthetic assistance';
+    order.officeNotes = 'Internal only';
+    const result = projectTowingDriverOrder(order, actor);
+    expect(result.fields.requester).toEqual({ name: 'Synthetic requester', phone: '+421900000000' });
+    expect(result.fields.customer).toEqual({ name: 'Synthetic customer', phone: '+421900000001' });
+    expect(result.fields.assistanceReference).toBe('SYNTHETIC-REF');
+    expect(result.fields.assistancePartnerName).toBe('Synthetic assistance');
+    expect(result).not.toHaveProperty('officeNotes');
   });
 });

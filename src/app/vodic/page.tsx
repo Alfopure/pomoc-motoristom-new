@@ -1,9 +1,11 @@
+import { getPartnerAuthState } from '@/server/partners/auth';
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
-import { getTowingAuthState, towingEnabled } from "@/server/towing/auth";
+import { getTowingAuthState, towingEnabled, towingLoginDestination } from "@/server/towing/auth";
 import { TowingWorkspace } from "@/components/towing/TowingWorkspace";
 import { TowingUnavailable } from "@/components/towing/TowingUnavailable";
 import { MotoristLogin } from "@/components/auth/MotoristLogin";
+import { getDefaultMotoristAuthState } from "@/server/api-auth";
 import { getAppRelease } from "@/server/app-release";
 
 export const metadata: Metadata = { title: "Moje zákazky", manifest: "/vodic.webmanifest" };
@@ -16,7 +18,11 @@ export default async function DriverPage({ searchParams }: { searchParams: Promi
     if (auth.reason === "unauthenticated") return <MotoristLogin message={auth.message} returnTo="/vodic" appRelease={getAppRelease()} />;
     return <TowingUnavailable message={auth.message} />;
   }
-  if (!auth.actor.capabilities.includes("drive")) redirect("/zakazky");
+  if (!auth.actor.capabilities.includes("drive")) redirect(towingLoginDestination(auth.actor) ?? "/");
+  const dispatch = await getDefaultMotoristAuthState();
+  const canDispatch = dispatch.authorized && Boolean(dispatch.profile && dispatch.profile.userId === auth.actor.userId && dispatch.profile.organizationId === auth.actor.organizationId);
+  const partner = await getPartnerAuthState();
+  const canPartner = partner.authorized && partner.actor.userId === auth.actor.userId && partner.actor.organizationId === auth.actor.organizationId;
   const params = await searchParams;
-  return <TowingWorkspace view="driver" initialOrderId={params.orderId} />;
+  return <TowingWorkspace canDispatch={canDispatch} canPartner={canPartner} view="driver" initialOrderId={params.orderId} />;
 }
