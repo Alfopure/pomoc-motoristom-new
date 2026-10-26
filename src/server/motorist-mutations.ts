@@ -4,6 +4,7 @@ import { createWorkspaceTask, TASK_WORKSPACE_ROLES } from "./tasks";
 import { taskWorkspaceSystemEnabled } from "./task-system-gate";
 import { runCompatibleCaseTaskAction } from "./legacy-task-adapter";
 import { CaseWritePlan, commitAtomicCaseSave, caseMutationIdentity, readCaseMutationResult } from "./case-atomic-save";
+import { caseCreationIdentity, commitAtomicCaseCreation } from "./case-atomic-create";
 import { matchFleetIdentities } from "@/lib/fleet-pairing";
 import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
 import { sameE164 } from "@/lib/telephony/normalize-e164";
@@ -112,6 +113,7 @@ export class CaseCreationCommittedError extends MutationError {
 
 export async function createCase(input: CreateCaseInput, ownerProfileId?: string, actorOrganizationId?: string) {
   const warnings = collectCaseInputWarnings(input);
+  const creationIdentity = caseCreationIdentity(input);
 
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase, actorOrganizationId);
@@ -122,17 +124,23 @@ export async function createCase(input: CreateCaseInput, ownerProfileId?: string
     : await resolveDefaultOwnerId(supabase, organizationId);
   const caseNumber = await nextCaseNumber(supabase, organizationId);
   const primaryContact = primaryContactInput(input);
+  const plan = creationIdentity ? new CaseWritePlan() : null;
   const contact = hasMeaningfulContact(primaryContact)
-    ? await createCaseContact(supabase, organizationId, primaryContact, input.customerNote)
+    ? plan ? { id: plan.write("motorist_contacts", null, {
+        name: cleanString(primaryContact.name) ?? cleanString(primaryContact.phone) ?? cleanString(primaryContact.email),
+        phone: canonicalCasePhone(primaryContact.phone), email: cleanString(primaryContact.email), role: "client", notes: cleanString(input.customerNote),
+      }) } : await createCaseContact(supabase, organizationId, primaryContact, input.customerNote)
     : null;
-  const vehicle = hasMeaningfulVehicleInput(input) ? await createCaseVehicle(supabase, organizationId, input) : null;
-  const pickup = isValidPlaceSelection(input.pickup) ? await createLocation(supabase, organizationId, input.pickup, "Pickup") : null;
-  const destination = isValidPlaceSelection(input.destination) ? await createLocation(supabase, organizationId, input.destination, "Servis") : null;
+  const vehicle = hasMeaningfulVehicleInput(input)
+    ? plan ? { id: plan.write("motorist_vehicles", null, vehicleWritePayload(input)) } : await createCaseVehicle(supabase, organizationId, input) : null;
+  const pickup = isValidPlaceSelection(input.pickup)
+    ? plan ? { id: upsertCaseLocation(plan, null, input, "pickup", "Pickup"), address: input.pickup.address.trim(), place_id: input.pickup.placeId ?? null }
+      : await createLocation(supabase, organizationId, input.pickup, "Pickup") : null;
+  const destination = isValidPlaceSelection(input.destination)
+    ? plan ? { id: upsertCaseLocation(plan, null, input, "destination", "Servis"), address: input.destination.address.trim(), place_id: input.destination.placeId ?? null }
+      : await createLocation(supabase, organizationId, input.destination, "Servis") : null;
 
-  const caseRow = await insertSingle<CaseRow>(
-    supabase
-      .from("motorist_cases")
-      .insert({
+  const casePayload = {
         organization_id: organizationId,
         case_number: caseNumber,
         status: "new",
@@ -155,7 +163,19 @@ export async function createCase(input: CreateCaseInput, ownerProfileId?: string
         payment_details: paymentDetailsPayload(input),
         closure_details: closureDetailsPayload(input),
         attachments_metadata: attachmentMetadataPayload(input.attachmentMetadata),
-      })
+      } satisfies Tables["motorist_cases"]["Insert"];
+  if (creationIdentity && plan) {
+    if (!ownerId) throw new MutationError("Vytvorenie prípadu vyžaduje aktívneho operátora.", 403);
+    const caseRow = await commitAtomicCaseCreation(supabase, {
+      organizationId, actorId: ownerId, identity: creationIdentity, casePatch: casePayload, related: plan.writes,
+      eventBody: caseCreatedEventBody(pickup, destination),
+      eventPayload: { source: "manual_dispatch_form", pickup_place_id: pickup?.place_id ?? null, destination_place_id: destination?.place_id ?? null },
+      partnerOrigin: input.partnerOrigin,
+    });
+    return { caseRow, warnings };
+  }
+  const caseRow = await insertSingle<CaseRow>(
+    supabase.from("motorist_cases").insert(casePayload)
       .select("*")
       .single(),
   );
@@ -3329,7 +3349,7 @@ function caseSummary(input: CreateCaseInput | UpdateCaseInput) {
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
-function caseCreatedEventBody(pickup: LocationRow | null, destination: LocationRow | null) {
+function caseCreatedEventBody(pickup: Pick<LocationRow, "address"> | null, destination: Pick<LocationRow, "address"> | null) {
   if (pickup && destination) {
     return `Pickup: ${pickup.address}. Cieľ: ${destination.address}.`;
   }

@@ -62,6 +62,10 @@ describe("route-auth-registry", () => {
       "public/handoffs/commands",
       "public/handoffs/current",
       "public/handoffs/session",
+      // Web logistics links use their own restricted grant, separate from a dispatch session.
+      "public/operation-handoffs/commands",
+      "public/operation-handoffs/current",
+      "public/operation-handoffs/session",
       // Telnyx webhooky — autentifikáciou je Ed25519 podpis, nie session.
       "sms/telnyx/webhook",
       "telephony/telnyx/webhook",

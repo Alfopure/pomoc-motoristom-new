@@ -69,7 +69,7 @@ const nextConfig: NextConfig = {
         { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
       ],
     },
-    ...["/handoff", "/api/public/handoffs/:path*"].map(source => ({ source, headers: [
+    ...["/handoff", "/api/public/handoffs/:path*", "/jazda", "/api/public/operation-handoffs/:path*"].map(source => ({ source, headers: [
       { key: "Cache-Control", value: "private, no-store, max-age=0" },
       { key: "Referrer-Policy", value: "no-referrer" },
       { key: "X-Robots-Tag", value: "noindex, nofollow" },
