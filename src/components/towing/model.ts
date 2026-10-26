@@ -35,7 +35,7 @@ function fieldValue(value: unknown) {
 /** Omit unchanged timestamps and server-derived provenance from operational edits. */
 export function towingFieldsPatch(fields: Partial<TowingFields>, previous: TowingFields, driver = true): Record<string, unknown> {
   const names = driver ? towingDriverFieldNames : Object.keys(fields).filter(key => !derivedFields.has(key)) as (keyof TowingFields)[];
-  return Object.fromEntries(names.filter(key => fieldValue(fields[key]) !== fieldValue(previous[key])).map(key => [key, fields[key] ?? null]));
+  return Object.fromEntries(names.filter(key => fieldValue(fields[key]) !== fieldValue(previous[key]) || (key === "startedAt" && previous.startSource === "assignment" && fields.startSource === "manual")).map(key => [key, fields[key] ?? null]));
 }
 
 export function towingPriceLinesKey(lines: readonly TowingLine[]) {

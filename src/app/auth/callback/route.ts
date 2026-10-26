@@ -1,3 +1,4 @@
+import { requirePartnerActor } from "@/server/partners/auth";
 import { NextResponse } from "next/server";
 import type { EmailOtpType } from "@supabase/supabase-js";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -19,6 +20,10 @@ export async function GET(request: Request) {
     await supabase.auth.exchangeCodeForSession(code);
   }
 
+  if (next.pathname === "/partner" || next.searchParams.get("module") === "partner") {
+    try { await requirePartnerActor(next.pathname === "/auth/set-password"); }
+    catch { return NextResponse.redirect(new URL("/partner", requestUrl.origin)); }
+  }
   return NextResponse.redirect(next);
 }
 

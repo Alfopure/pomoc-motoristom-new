@@ -64,6 +64,8 @@ import { SmsComposerDialog } from "./SmsComposerDialog";
 import { DashboardPhone } from "./DashboardPhone";
 import type { CaseSortState } from "./CaseTable";
 import { FleetModule } from "./FleetModule";
+import { OperationsModule } from "@/components/operations/OperationsModule";
+import { PartnersModule } from "@/components/partners/PartnersModule";
 import { mergeFleetData, useFleetRefresh } from "./useFleetRefresh";
 import { IntegrationSettings } from "./IntegrationSettings";
 import type { CustomerLocationMapFocus } from "./DispatchMap";
@@ -252,7 +254,7 @@ function DispatchConsoleContent({
   viewerProfileId?: string;
   /** The signed-in profile's role; only supervision is gated on it in the console. */
   viewerRole?: AppRole;
-  towingHref?: "/zakazky" | "/vodic";
+  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy";
 }) {
   const { mode: layoutMode } = useLayoutPreview();
   const updateAvailable = useAppUpdate(appVersion);
@@ -484,7 +486,7 @@ function DispatchConsoleContent({
     if (pushDeepLinkHandled.current) return;
     const frame = window.requestAnimationFrame(() => {
       const url = new URL(window.location.href);
-      if (!url.searchParams.has("task") && !url.searchParams.has("call")) return;
+      if (!url.searchParams.has("task") && !url.searchParams.has("call") && !url.searchParams.has("case")) return;
       pushDeepLinkHandled.current = true;
       handleInitialPushOpen(url.href);
     });
@@ -885,6 +887,8 @@ function DispatchConsoleContent({
     { group: "daily", icon: Headphones, label: "Ústredňa", shortLabel: "Ústredňa", view: "call-center" },
     { group: "operations", icon: CalendarDays, label: "Dochádzka", shortLabel: "Doch.", view: "attendance" },
     { group: "operations", icon: Truck, label: "Flotila", shortLabel: "Flotila", view: "fleet" },
+    { group: "operations", icon: MapPinned, label: "Výjazdy a odvozy", shortLabel: "Výjazdy", view: "operations" },
+    { group: "operations", icon: ClipboardCheck, label: "Partneri a konzultácie", shortLabel: "Partneri", view: "partners" },
     { group: "management", icon: BarChart3, label: "Reporty", shortLabel: "Reporty", view: "reports" },
     { group: "management", icon: Settings2, label: "Nastavenia", shortLabel: "Nastav.", view: "settings" },
   ];
@@ -1217,6 +1221,11 @@ function DispatchConsoleContent({
   }
 
   const handleInitialPushOpen = useEffectEvent((rawUrl: string) => {
+    const linkedCase = new URL(rawUrl, window.location.origin).searchParams.get("case");
+    if (linkedCase && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(linkedCase)) {
+      openCaseDetail(linkedCase);
+      return;
+    }
     const target = notificationTarget(rawUrl, window.location.origin);
     if (!target || target.kind === "settings") return;
     if (target.kind === "call") { openCallNotification(target.id); return; }
@@ -2640,6 +2649,12 @@ function DispatchConsoleContent({
 
       {activeView === "attendance" && (attendanceLoaded ? <AttendanceModule attendance={attendance} operators={effectiveOperators} onDataChange={setDispatchData} /> : <p role="status">{attendanceError ?? "Načítavam dochádzku…"}</p>)}
       {activeView === "reports" && <ReportDashboard />}
+      <main className="dispatch-standalone-workspace" hidden={activeView !== "operations"} inert={activeView !== "operations"}>
+        {activeView === "operations" && <OperationsModule cases={authorizedCases} onOpenCase={openCase} />}
+      </main>
+      <main className="dispatch-standalone-workspace" hidden={activeView !== "partners"} inert={activeView !== "partners"}>
+        {activeView === "partners" && <PartnersModule />}
+      </main>
       {activeView === "fleet" && (
         <FleetModule
           branches={branches}
@@ -2788,7 +2803,7 @@ function AccountMenu({
   appRelease: AppRelease;
   role?: AppRole;
   signingOut: boolean;
-  towingHref?: "/zakazky" | "/vodic";
+  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy";
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -2871,7 +2886,7 @@ function AccountMenu({
             </span>
           </div>
           <div className="border-t border-zinc-200 p-2">
-            {towingHref && <a href={towingHref} className="flex min-h-11 items-center rounded-lg px-2.5 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">Zákazky odťahovej služby</a>}
+            {towingHref && <a href={towingHref} target="_blank" rel="noreferrer" className="flex min-h-11 items-center rounded-lg px-2.5 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{towingHref === "/moje-jazdy" ? "Moje jazdy" : "Zákazky odťahovej služby"} ↗</a>}
             {(role === "manager" || role === "admin") && <a href="/monitor" target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)}
               className="flex min-h-11 items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100">Monitor prevádzky <span className="ml-auto text-xs font-normal">↗</span></a>}
             <ReportProblemButton className="min-h-11 w-full rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100" />

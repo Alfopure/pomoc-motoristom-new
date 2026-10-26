@@ -17,3 +17,10 @@ describe("loginDestination", () => {
     }
   });
 });
+
+it('preserves validated case deep links and explicit partner workspace only',()=>{
+ expect(loginDestination('https://app.example/?case=10000000-0000-4000-8000-000000000001')).toBe('/?case=10000000-0000-4000-8000-000000000001');
+ expect(loginDestination('https://app.example/?case=//outside.example')).toBe('/');
+ expect(loginDestination('https://app.example/partner','/partner')).toBe('/partner');
+ expect(loginDestination('https://app.example/','/partner?org=other')).toBe('/');
+});

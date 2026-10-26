@@ -58,6 +58,7 @@ export function MotoristLogin({ message, returnTo, appRelease }: { message: stri
   const resetParams = new URLSearchParams();
   if (email.trim()) resetParams.set("email", email.trim().toLowerCase());
   if (towing) resetParams.set("module", "towing");
+  if (returnTo === "/partner") resetParams.set("module", "partner");
   const forgotPasswordHref = `/auth/forgot-password${resetParams.size ? `?${resetParams}` : ""}`;
 
   return (

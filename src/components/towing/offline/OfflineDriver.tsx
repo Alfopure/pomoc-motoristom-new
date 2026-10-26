@@ -139,7 +139,10 @@ export function OfflineDriver() {
 }
 
 function OfflineOrderForm({ identity, record, busy, refresh }: { identity: OfflineIdentity; record: OfflineOrder; busy: boolean; refresh: () => Promise<void> }) {
-  const initialFields = record.entries.filter(e => e.phase === 'fields').reduce((fields, entry) => ({ ...fields, ...(entry.command.payload.fields as Partial<TowingFields> ?? {}) }), { ...record.order.fields });
+  const initialFields = record.entries.filter(e => e.phase === 'fields').reduce((fields, entry) => {
+    const patch = entry.command.payload.fields as Partial<TowingFields> ?? {};
+    return { ...fields, ...patch, ...(Object.hasOwn(patch, 'startedAt') ? { startSource: 'manual' as const } : {}) };
+  }, { ...record.order.fields });
   const [fields, setFields] = useState(initialFields);
   const [cash, setCash] = useState('');
   const [cashConfirmed, setCashConfirmed] = useState(false);
@@ -151,7 +154,7 @@ function OfflineOrderForm({ identity, record, busy, refresh }: { identity: Offli
   const savingRef = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const fieldLabels = { startedAt: 'Začiatok', finishedAt: 'Koniec', destination: 'Cieľ', driverNotes: 'Poznámka', performedQuantity: 'Vykonané množstvo', photoException: 'Dôvod chýbajúcich fotografií' } as const;
-  const dirty = (Object.keys(fieldLabels) as (keyof typeof fieldLabels)[]).some(key => (fields[key] ?? '') !== (initialFields[key] ?? ''));
+  const dirty = Object.keys(towingFieldsPatch(fields, initialFields)).length > 0;
   const submitted = record.entries.some(e => e.phase === 'submit');
   const disabled = busy || working || submitted;
   const makeEntry = (phase: OfflineEntry['phase'], type: OfflineEntry['command']['type'], payload: Record<string, unknown>): OfflineEntry => {
@@ -198,7 +201,7 @@ function OfflineOrderForm({ identity, record, busy, refresh }: { identity: Offli
   }
   return <section className={card}><h2 className="text-lg font-bold">{record.order.number} · {record.order.fields.subjectDescription}</h2><p className="mt-1 text-sm text-zinc-600">{record.order.fields.pickup}</p>
     <form onSubmit={saveFields} className="mt-4 grid gap-3 sm:grid-cols-2">
-      {([['startedAt','Začiatok'],['finishedAt','Koniec']] as const).map(([key, label]) => <label key={key} className="text-sm font-medium">{label}<input className={input} type="datetime-local" value={fields[key] ? localDate(fields[key]) : ''} disabled={disabled} onChange={e => setFields(f => ({ ...f, [key]: e.target.value ? new Date(e.target.value).toISOString() : '' }))} /></label>)}
+      {([['startedAt','Začiatok'],['finishedAt','Koniec']] as const).map(([key, label]) => <label key={key} className="text-sm font-medium">{label}<input className={input} type="datetime-local" value={key === 'startedAt' && fields.startSource === 'assignment' ? '' : fields[key] ? localDate(fields[key]) : ''} disabled={disabled} onChange={e => setFields(f => ({ ...f, [key]: e.target.value ? new Date(e.target.value).toISOString() : '', ...(key === 'startedAt' ? { startSource: 'manual' as const } : {}) }))} /></label>)}
       <label className="text-sm font-medium">Cieľ<input className={input} value={fields.destination ?? ''} disabled={disabled} onChange={e => setFields(f => ({ ...f, destination: e.target.value }))} /></label>
       <label className="text-sm font-medium">Vykonané množstvo<input className={input} inputMode="decimal" value={fields.performedQuantity ?? ''} disabled={disabled} onChange={e => setFields(f => ({ ...f, performedQuantity: e.target.value }))} /></label>
       <label className="text-sm font-medium sm:col-span-2">Poznámka k výkonu<textarea className={input} value={fields.driverNotes ?? ''} disabled={disabled} onChange={e => setFields(f => ({ ...f, driverNotes: e.target.value }))} /></label>

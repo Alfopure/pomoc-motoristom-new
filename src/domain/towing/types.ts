@@ -14,6 +14,7 @@ export interface TowingFields {
   branchId?: string; fleetAssetId?: string; plannedAt?: string; startedAt?: string; finishedAt?: string;
   startSource?: 'assignment' | 'manual'; driverNotes?: string; performedQuantity?: string; photoException?: string;
   requester?: TowingParty; owner?: TowingParty; customer?: TowingParty; recipient?: TowingParty;
+  executionOrigin?: 'local' | 'awp_record_only'; externalReference?: string;
   assistanceReference?: string; assistancePartnerId?: string; assistancePartnerName?: string; parkingId?: string; parkingName?: string; parkingAddress?: string;
 }
 export interface TowingLine { id: string; description: string; quantity: string; unit: string; unitPrice: string; taxRate: string; netCents?: number; taxCents?: number; totalCents?: number }
@@ -38,7 +39,7 @@ export interface TowingWorkspace {
   totalCount?: number; summary?: { approvedCents: number; invoicedCents: number; receivedCents: number; dueCents: number };
   cashAccounts: TowingCashAccount[]; handovers: TowingHandover[]; taxConfigured: boolean; taxRates: string[]; taxDate: string | null;
 }
-export const TOWING_COMMANDS = ['create_order','refresh_source','update_order','assign','start','submit','return','cancel','set_lines','approve_price','set_invoice','not_required','receive_payment','propose_handover','accept_handover','reject_handover','cancel_handover','correct_payment','refund_payment','reconcile_receipt','attachment_intent','abandon_attachment','attachment_finalize','issue_document','document_result','email_intent','email_result','set_member','set_tax_config','set_parking'] as const;
+export const TOWING_COMMANDS = ['create_order','convert_record_only','refresh_source','update_order','assign','start','submit','return','cancel','set_lines','approve_price','set_invoice','not_required','receive_payment','propose_handover','accept_handover','reject_handover','cancel_handover','correct_payment','refund_payment','reconcile_receipt','attachment_intent','abandon_attachment','attachment_finalize','issue_document','document_result','email_intent','email_result','set_member','set_tax_config','set_parking'] as const;
 export type TowingCommandType = typeof TOWING_COMMANDS[number];
 export interface TowingCommand { commandId: string; type: TowingCommandType; targetId: string; expectedRevision?: number; assignmentGeneration?: number; payload: Record<string, unknown> }
 export interface TowingCommandResult { commandId: string; targetId: string; revision: number; result?: Record<string, unknown> }

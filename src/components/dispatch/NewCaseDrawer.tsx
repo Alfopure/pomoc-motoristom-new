@@ -1,4 +1,5 @@
 "use client";
+import { emptyPartnerSettlement } from "@/domain/partners";
 import { diagnosticJson } from "@/lib/diagnostics/request";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
@@ -150,6 +151,17 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   const [assistanceServiceName, setAssistanceServiceName] = useState("");
   const [assistanceReference, setAssistanceReference] = useState("");
   const [partnerDirectoryId, setPartnerDirectoryId] = useState("");
+  const [originPartnerId, setOriginPartnerId] = useState("");
+  const originChanged = useRef(false);
+  useEffect(() => {
+    if (!hasActiveCall || !call.lineId) return;
+    let active = true;
+    void fetch(`/api/partners?lineId=${encodeURIComponent(call.lineId)}&origin=true`, { cache: "no-store" })
+      .then(response => response.ok ? response.json() : null)
+      .then(value => { if (active && !originChanged.current && value?.origin?.partner_id) setOriginPartnerId(value.origin.partner_id); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [hasActiveCall, call.lineId]);
   const [directoryEntries, setDirectoryEntries] = useState(partnerDirectory);
   const [directorySaving, setDirectorySaving] = useState(false);
   const [directoryError, setDirectoryError] = useState<string | null>(null);
@@ -602,6 +614,17 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
         throw new Error(result.error ?? "Prípad sa nepodarilo uložiť.");
       }
 
+      let partnerOriginWarning = "";
+      if (originPartnerId) {
+        try {
+          const originResponse = await fetch("/api/partners", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+            commandId: crypto.randomUUID(), action: "set_context", expectedRevision: 0,
+            payload: { caseId: result.caseId, partnerId: originPartnerId, sourceLineId: call.lineId || null,
+              sourceCallId: /^[0-9a-f-]{36}$/i.test(call.id) ? call.id : null, settlement: emptyPartnerSettlement },
+          }) });
+          if (!originResponse.ok) partnerOriginWarning = "Partnerský pôvod nebol potvrdený; nastavte ho v partnerskej konzultácii prípadu.";
+        } catch { partnerOriginWarning = "Partnerský pôvod nie je potvrdený; overte ho v partnerskej konzultácii prípadu."; }
+      }
       let nextDispatchData = result.dispatchData;
       editorPresence.stop();
 
@@ -634,6 +657,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
 
       const noticeParts = [
         !formReady ? "Karta je uložená ako rozpracovaná. Kontrola ukazuje, ktoré údaje treba doplniť." : "Karta je uložená.",
+        partnerOriginWarning,
         attachmentValidationError ? `Prílohy neboli uložené: ${attachmentValidationError}` : "",
         ...(result.warnings ?? []).map((warning) => warning.message),
       ].filter(Boolean);
@@ -804,6 +828,9 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
               </div>
             </div>
 
+            <SelectField label="Partner pôvodu konzultácie (nezávisle od platiteľa)" value={originPartnerId}
+              onChange={value => { originChanged.current = true; setOriginPartnerId(value); }}
+              options={[["", "Bez partnerskej konzultácie"], ...partnerDirectory.filter(entry => entry.active).map(entry => [entry.id, entry.name] as [string, string])]} />
             {(customerType === "insurance" || customerType === "company") && (
               <div className="grid gap-3 @3xl:grid-cols-3">
                 <SelectField

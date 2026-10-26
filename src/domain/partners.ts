@@ -1,0 +1,5 @@
+export interface PartnerActor { id: string; userId: string; organizationId: string; partnerId: string; version: number; displayName: string; status: 'invited' | 'active'; }
+export interface PartnerOutput { id: string; caseId: string; caseNumber: string; partnerId: string; partnerName: string; version: number; title: string; result: string; recipient: string; publishedAt: string; hash: string; }
+export interface PartnerCaseContext { case_id: string; partner_id: string; partner_name: string; source_call_id: string | null; source_line_id: string | null; revision: number; settlement: PartnerSettlement; }
+export interface PartnerSettlement { payer: string; reference: string; agreement: string; agreementVersion: string; billable: boolean; approvedCents: number | null; currency: 'EUR'; recommendation: string; serviceAccepted: boolean; acceptanceEvidence: string; }
+export const emptyPartnerSettlement: PartnerSettlement = { payer: '', reference: '', agreement: '', agreementVersion: '', billable: false, approvedCents: null, currency: 'EUR', recommendation: '', serviceAccepted: false, acceptanceEvidence: '' };

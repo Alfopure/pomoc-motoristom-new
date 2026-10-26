@@ -1,3 +1,4 @@
+import { markPartnerPasswordCompleted } from "@/server/partners/auth";
 import { markPasswordCompleted } from "@/server/access-management";
 import { assertSameOriginRequest } from "@/server/api-auth";
 import { MutationError } from "@/server/motorist-mutations";
@@ -7,6 +8,10 @@ import { assertTowingOrigin, towingErrorResponse } from "@/server/towing/http";
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  if (new URL(request.url).searchParams.get("module") === "partner") {
+    try { assertSameOriginRequest(request); await markPartnerPasswordCompleted(new URL(request.url).searchParams.get("invitation")); return Response.json({ok:true},{headers:{"Cache-Control":"private, no-store"}}); }
+    catch(error) { if(error instanceof MutationError) return Response.json({error:error.message},{status:error.status}); return Response.json({error:"Partnerský prístup sa nepodarilo potvrdiť."},{status:503}); }
+  }
   if (new URL(request.url).searchParams.get("module") === "towing") {
     try {
       assertTowingOrigin(request);

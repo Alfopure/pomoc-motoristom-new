@@ -35,6 +35,11 @@ export type RouteAuthEntry = {
 };
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
+  operations: { class: 'session', note: 'Current dispatch profile or active deliver membership; organization-scoped RPC authorizes every command.' },
+  'operations/[id]': { class: 'session', note: 'Current organization and assignment checked by operations RPC; revisions and immutable command receipts.' },
+  'operations/[id]/files': { class: 'session', note: 'Current operation access on every upload/download; private storage, validated MIME/size and explicit evidence reference.' },
+  partners: { class: 'session', note: 'Dispatch profile for office commands; portal read requires current versioned partner membership and explicit share.' },
+  'partners/outputs/[id]': { class: 'session', note: 'Private immutable output/PDF; current dispatcher or active partner member plus unrevoked share on every request.' },
   "towing/workspace": { class: "session", note: "Isolated auth.users towing membership; capability and own assignment projection, no legacy profile role." },
   "towing/access": { class: "session", note: "Identity-bound driver access/lease; explicit verified revocation codes." },
   "towing/commands": { class: "session", note: "Same-origin, current towing capability, atomic revision and command receipts." },
