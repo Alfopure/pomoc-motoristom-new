@@ -19,15 +19,18 @@ const params = (actor: OperationsActor) => ({ p_user_id: actor.userId, p_organiz
 export async function getOperationsWorkspace(filters: Record<string, unknown> = {}): Promise<OperationsWorkspace> {
   const actor = await requireOperationsActor();
   const checkedFilters = { ...filters };
-  for (const key of ['id', 'ownerId', 'caseId']) {
+  for (const key of ['id', 'ownerId', 'caseId', 'fleetAssetId']) {
     if (checkedFilters[key] !== undefined) checkedFilters[key] = uuid(checkedFilters[key]);
+  }
+  if (checkedFilters.view !== undefined && !['open', 'done', 'all', 'returns', 'damage'].includes(String(checkedFilters.view))) {
+    throw new TowingError('invalid_input', 400, 'Neplatné zobrazenie jázd.');
   }
   const result = await admin().rpc('motorist_operations_workspace', { ...params(actor), p_filters: checkedFilters });
   mapRpcError(result.error);
   return result.data as OperationsWorkspace;
 }
 export function parseOperationCommand(value: Record<string, unknown>, operationId?: string): OperationCommand {
-  const actions = ['link_towing_return','create','assign','confirm','start','accept','arrive','collect','complete','cancel','reschedule','return','evidence','inspect'];
+  const actions = ['link_towing_return','create','assign','confirm','start','accept','arrive','collect','complete','cancel','reschedule','return','evidence','damage_update','inspect'];
   if (typeof value.action !== 'string' || !actions.includes(value.action) || !value.payload || typeof value.payload !== 'object' || Array.isArray(value.payload))
     throw new TowingError('invalid_input', 400, 'Neplatný príkaz jazdy.');
   return { commandId: uuid(value.commandId), action: value.action as OperationCommand['action'], expectedRevision: revision(value.expectedRevision),

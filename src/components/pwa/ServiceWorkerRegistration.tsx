@@ -41,7 +41,7 @@ export function ServiceWorkerRegistration() {
   }, []);
 
   useEffect(() => {
-    if (window.location.pathname.startsWith("/l/") || window.location.pathname === "/handoff" || isStandalone() || recentlyDismissed()) return;
+    if (window.location.pathname.startsWith("/l/") || window.location.pathname === "/handoff" || window.location.pathname === "/jazda" || isStandalone() || recentlyDismissed()) return;
 
     const handlePrompt = (event: Event) => {
       event.preventDefault();

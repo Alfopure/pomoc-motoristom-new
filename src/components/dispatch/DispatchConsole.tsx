@@ -113,6 +113,7 @@ import { TaskCaseWorkflowActions } from "./TaskCaseWorkflowActions";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { unavailableWorkspaceCapabilities } from "@/domain/workspace-capabilities";
 import { useDraftEditors, type DraftEditorState } from "./useDraftEditors";
+import { PartnerDraftProvider } from "@/components/partners/PartnerDraftProvider";
 import { createNotificationNavigationReceiver } from "@/components/pwa/notification-navigation";
 import "./workspace-tools.css";
 import "./live-layout-preview.css";
@@ -2221,6 +2222,7 @@ function DispatchConsoleContent({
   return (
     <CaseCollaborationProvider actorKey={actorKey} viewerProfileId={viewerProfileId} enabled={source === "supabase"}
       initialCases={dispatchCases} onCasesChange={handleCollaborativeCases} onNotificationsChange={handleCollaborativeNotifications} onStateChange={handleCollaborationState}>
+    <PartnerDraftProvider key={actorKey} registerDraft={registerDraft}>
     <NotebookProvider actorKey={actorKey} viewerProfileId={viewerProfileId} enabled={capabilities.notes} onEditorStateChange={handleNotebookEditor}>
     <TaskWorkspaceProvider actorKey={actorKey} enabled={capabilities.tasks} initialTasks={dispatchData.tasks} viewerProfileId={viewerProfileId} onEditorStateChange={handleTaskEditor} onTasksChange={handleWorkspaceTasks}>
     <TaskFocusBridge requestVersion={taskOpenVersion} taskId={focusedTaskId} enabled={capabilities.tasks} />
@@ -2799,6 +2801,7 @@ function DispatchConsoleContent({
     </div>
     </TaskWorkspaceProvider>
     </NotebookProvider>
+    </PartnerDraftProvider>
     </CaseCollaborationProvider>
   );
 }

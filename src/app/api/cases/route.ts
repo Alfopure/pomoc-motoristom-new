@@ -15,7 +15,7 @@ export async function POST(request: Request) {
       const actor = await requireDefaultMotoristActor(["dispatcher", "senior_dispatcher", "manager", "admin"]);
       const input = (await request.json()) as CreateCaseInput & { editorSessionId?: string | null };
       const sessionId = input.editorSessionId ? editorSessionId(input.editorSessionId) : null;
-      const { caseRow, warnings } = await createCase(input, actor.profileId);
+      const { caseRow, warnings } = await createCase(input, actor.profileId, actor.organizationId);
       committed = true;
       if (sessionId) {
         try { await finishCaseEditorDraft(actor, sessionId, caseRow.id); }
