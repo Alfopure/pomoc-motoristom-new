@@ -2,14 +2,14 @@ import 'server-only';
 import { randomUUID } from 'node:crypto';
 import { createSupabaseAdminClient } from '@/lib/supabase/admin';
 import { getOperationsWorkspace } from './index';
-import { TowingError, boundedBytes, uuid } from '@/server/towing/http';
+import { TowingError, boundedBytes } from '@/server/towing/http';
 
 const BUCKET = 'motorist-operation-evidence';
 const MAX_BYTES = 4 * 1024 * 1024;
 const extensions: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'application/pdf': 'pdf' };
 
 async function access(operationId: string, writing = false) {
-  const workspace = await getOperationsWorkspace({ id: uuid(operationId) });
+  const workspace = await getOperationsWorkspace({ id: operationId });
   const operation = workspace.operations.find(item => item.id === operationId);
   if (!operation || (operation.owner !== 'logistics' && !(workspace.actor.canDispatch && operation.cycleId))) throw new TowingError('not_found', 404, 'Jazda nie je dostupná.');
   if (writing && !workspace.actor.canDispatch && ['completed', 'cancelled'].includes(operation.status)) {

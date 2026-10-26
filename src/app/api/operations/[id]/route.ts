@@ -1,9 +1,9 @@
 import { commandOperation, getOperationsWorkspace, parseOperationCommand } from '@/server/operations';
-import { assertTowingOrigin, boundedJson, towingErrorResponse, towingJson, uuid } from '@/server/towing/http';
+import { assertTowingOrigin, boundedJson, towingErrorResponse, towingJson } from '@/server/towing/http';
 type Context = { params: Promise<{ id: string }> };
 export const dynamic = 'force-dynamic';
 export async function GET(_request: Request, context: Context) {
-  try { const workspace = await getOperationsWorkspace({ id: uuid((await context.params).id) }); const operation = workspace.operations[0];
+  try { const workspace = await getOperationsWorkspace({ id: (await context.params).id }); const operation = workspace.operations[0];
     return operation ? towingJson({ actor: workspace.actor, operation }) : towingJson({ error: 'Jazda nie je dostupná.', code: 'not_found' }, 404); }
   catch (error) { return towingErrorResponse(error); }
 }

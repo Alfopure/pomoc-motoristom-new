@@ -18,7 +18,11 @@ export async function requireOperationsActor(): Promise<OperationsActor> {
 const params = (actor: OperationsActor) => ({ p_user_id: actor.userId, p_organization_id: actor.organizationId });
 export async function getOperationsWorkspace(filters: Record<string, unknown> = {}): Promise<OperationsWorkspace> {
   const actor = await requireOperationsActor();
-  const result = await admin().rpc('motorist_operations_workspace', { ...params(actor), p_filters: filters });
+  const checkedFilters = { ...filters };
+  for (const key of ['id', 'ownerId', 'caseId']) {
+    if (checkedFilters[key] !== undefined) checkedFilters[key] = uuid(checkedFilters[key]);
+  }
+  const result = await admin().rpc('motorist_operations_workspace', { ...params(actor), p_filters: checkedFilters });
   mapRpcError(result.error);
   return result.data as OperationsWorkspace;
 }

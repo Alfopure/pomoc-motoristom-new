@@ -66,6 +66,7 @@ import type { CaseSortState } from "./CaseTable";
 import { FleetModule } from "./FleetModule";
 import { OperationsModule } from "@/components/operations/OperationsModule";
 import { PartnersModule } from "@/components/partners/PartnersModule";
+import { requestSharedCaseOpen, subscribeSharedCaseOpen } from "./shared-case-navigation";
 import { mergeFleetData, useFleetRefresh } from "./useFleetRefresh";
 import { IntegrationSettings } from "./IntegrationSettings";
 import type { CustomerLocationMapFocus } from "./DispatchMap";
@@ -302,6 +303,7 @@ function DispatchConsoleContent({
   const routingUrlInitialized = useRef(false);
   const [mobilePane, setMobilePane] = useState<"cases" | "workspace">("cases");
   const pushDeepLinkHandled = useRef(false);
+  const sharedCaseRead = useRef<AbortController | null>(null);
   const [attendanceLoaded, setAttendanceLoaded] = useState(source !== "supabase");
   const [attendanceError, setAttendanceError] = useState<string | null>(null);
   useEffect(() => {
@@ -478,6 +480,34 @@ function DispatchConsoleContent({
 
   useEffect(() => {
     consoleRef.current?.setAttribute("data-hydrated", "true");
+  }, []);
+
+  const openSharedCase = useEffectEvent((caseId: string, writeHistory: boolean) => {
+    sharedCaseRead.current?.abort();
+    const controller = new AbortController();
+    sharedCaseRead.current = controller;
+    const show = () => openCaseDetail(caseId, writeHistory ? () => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("task"); url.searchParams.delete("call");
+      url.searchParams.set("case", caseId);
+      if (url.href !== window.location.href) window.history.pushState(window.history.state, "", url);
+    } : undefined);
+    if (dispatchCases.some(item => item.id === caseId)) { show(); return; }
+    setMutationNotice("Načítavam prepojený prípad…");
+    void fetch(`/api/cases/${caseId}`, { headers: { "x-case-response": "detail-v2" }, cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]) })
+      .then(async response => {
+        const body = await response.json();
+        if (!response.ok || body.caseDetail?.id !== caseId) throw new Error("Prepojený prípad nie je dostupný.");
+        if (controller.signal.aborted) return;
+        setDispatchData(current => current.dispatchCases.some(item => item.id === caseId)
+          ? mergeCaseDetail(current, body.caseDetail)
+          : { ...current, dispatchCases: [{ ...body.caseDetail, tasks: [] }, ...current.dispatchCases] });
+        setMutationNotice(null); show();
+      }).catch(error => { if (!controller.signal.aborted) setMutationNotice(error instanceof Error ? error.message : "Prepojený prípad sa nepodarilo načítať."); });
+  });
+  useEffect(() => {
+    const unsubscribe = subscribeSharedCaseOpen((id, writeHistory) => openSharedCase(id, writeHistory));
+    return () => { unsubscribe(); sharedCaseRead.current?.abort(); };
   }, []);
 
   useEffect(() => {
@@ -1142,6 +1172,7 @@ function DispatchConsoleContent({
   }
 
   function selectCase(caseId: string) {
+    sharedCaseRead.current?.abort();
     return requestNavigation(() => {
       observeCaseOpen(caseId);
       setCenterView("map");
@@ -1154,6 +1185,7 @@ function DispatchConsoleContent({
   }
 
   function openCase(caseId: string) {
+    sharedCaseRead.current?.abort();
     requestNavigation(() => {
       observeCaseOpen(caseId);
       setCenterView("map");
@@ -1168,7 +1200,7 @@ function DispatchConsoleContent({
     });
   }
 
-  function openCaseDetail(caseId: string) {
+  function openCaseDetail(caseId: string, afterNavigate?: () => void) {
     requestNavigation(() => {
       observeCaseOpen(caseId);
       setCenterView("map");
@@ -1179,6 +1211,7 @@ function DispatchConsoleContent({
       returnViewRef.current = activeView;
       setActiveView("dispatch");
       setWorkspace({ kind: "detail", mode: "expanded" });
+      afterNavigate?.();
     });
   }
 
@@ -1223,7 +1256,7 @@ function DispatchConsoleContent({
   const handleInitialPushOpen = useEffectEvent((rawUrl: string) => {
     const linkedCase = new URL(rawUrl, window.location.origin).searchParams.get("case");
     if (linkedCase && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(linkedCase)) {
-      openCaseDetail(linkedCase);
+      openSharedCase(linkedCase, false);
       return;
     }
     const target = notificationTarget(rawUrl, window.location.origin);
@@ -1719,6 +1752,7 @@ function DispatchConsoleContent({
   }
 
   function switchView(view: View) {
+    sharedCaseRead.current?.abort();
     if (view === "tools") { toggleTools(); return; }
     const navigate = () => {
       setToolsOpen(false);
@@ -2650,7 +2684,7 @@ function DispatchConsoleContent({
       {activeView === "attendance" && (attendanceLoaded ? <AttendanceModule attendance={attendance} operators={effectiveOperators} onDataChange={setDispatchData} /> : <p role="status">{attendanceError ?? "Načítavam dochádzku…"}</p>)}
       {activeView === "reports" && <ReportDashboard />}
       <main className="dispatch-standalone-workspace" hidden={activeView !== "operations"} inert={activeView !== "operations"}>
-        {activeView === "operations" && <OperationsModule cases={authorizedCases} onOpenCase={openCase} />}
+        {activeView === "operations" && <OperationsModule cases={authorizedCases} onOpenCase={requestSharedCaseOpen} />}
       </main>
       <main className="dispatch-standalone-workspace" hidden={activeView !== "partners"} inert={activeView !== "partners"}>
         {activeView === "partners" && <PartnersModule />}

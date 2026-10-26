@@ -20,7 +20,7 @@ export default async function MyOperationsPage() {
   } catch (error) {
     failure = error instanceof TowingError ? error.message : "Jazdy momentálne nie sú dostupné.";
   }
-  if (!actor) return <MotoristLogin message={failure} returnTo="/moje-jazdy" appRelease={getAppRelease()} />;
+  if (!actor) return <MotoristLogin message={failure ?? "Jazdy momentálne nie sú dostupné."} returnTo="/moje-jazdy" appRelease={getAppRelease()} />;
   const dispatch = await getDefaultMotoristAuthState();
   const towing = towingEnabled() ? await getTowingAuthState() : null;
   const canDispatch = dispatch.authorized && Boolean(dispatch.profile) && dispatch.profile?.userId === actor.userId && dispatch.profile?.organizationId === actor.organizationId;
