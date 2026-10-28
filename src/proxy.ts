@@ -3,8 +3,9 @@ import { updateSession } from "@/lib/supabase/proxy";
 
 /**
  * Supabase session refresh for server-rendered pages; never redirects or blocks.
- * Not an auth gate: the security audit ADR (docs/bezpecnostny-audit-a-plan.md)
- * keeps authorization in every route, page and RPC.
+ * Not an auth gate, which the security audit ADR rules out; its 2026-10-28
+ * amendment (docs/bezpecnostny-audit-a-plan.md) admits only this refresh.
+ * Authorization stays in every route, page and RPC.
  */
 export function proxy(request: NextRequest) {
   return updateSession(request);
