@@ -4,6 +4,21 @@ Cieľ: TEST aplikácia v iPhone cez interný TestFlight, bez App Review. Je to T
 variant (TEST server, TEST databáza, telefonovanie zapnuté v aplikácii, OTA vypnuté).
 Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 
+**Build 0.1.0 (25), 28. 10. 2026 — Moja práca a Pobočka:** zdroj `dev`
+`df2fa8d638f82fac2984b3c2c20a9251e643f016` (overený na kanonickom TESTe).
+Nové moduly Moja práca (vlastné jazdy, odvozy, presuny a odťahy s krokmi,
+dokladmi a polohou počas prijatej jazdy) a Pobočka (front, prevzatie,
+pridelenie), push upozornenia na prácu a nové texty povolení. IPA 21 337 114
+bajtov, SHA-256 `3297d50fa27ca72d4a210fb3d3b26d5532d156d3e940dda52623bd35779b6910`,
+kontrola IPA prešla. Release simulátor iOS 27: studený štart, návrat z pozadia
+a dva reštarty vizuálne overené (prihlasovacia obrazovka TEST); kontrolná
+vzorka buildu 21 použitá znova, lebo od nej sa zmenili iba texty troch
+povolení v `mobile/app.config.ts`. Číslo 24 si vyhradil zlyhaný pokus (na Macu
+došlo miesto pri balení IPA; uvoľnené staré pracovné priečinky buildov).
+Apple: `VALID`, beta review `APPROVED`, externá skupina **Externí testeri TEST**
+`IN_BETA_TESTING`, interný stav `READY_FOR_BETA_TESTING`. Fyzický iPhone
+(push, poloha, fotoaparát) zatiaľ neoverený.
+
 **Externé testovanie, 27. 10. 2026:** na výslovný pokyn majiteľa bol existujúci
 build **0.1.0 (23)** odoslaný na Beta App Review. Apple ho schválil a o
 **07:07 UTC** bolo priamym čítaním API overené `APPROVED`, `VALID` a externé
