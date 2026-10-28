@@ -1,7 +1,7 @@
 import { connection } from "next/server";
 import { BranchWorkspace } from "@/components/branches/BranchWorkspace";
 import { MotoristLogin } from "@/components/auth/MotoristLogin";
-import { Shell } from "@/components/towing/primitives";
+import { Notice, Shell } from "@/components/towing/primitives";
 import { getAppRelease } from "@/server/app-release";
 import { getDefaultMotoristAuthState } from "@/server/api-auth";
 import { getBranchAccess } from "@/server/branches/service";
@@ -12,8 +12,9 @@ export const metadata = { title: "Pobočka · Pomoc motoristom" };
 /** Local branch workspace: same login and data as the dispatch app, scoped to the lead's groups. */
 export default async function BranchPage() {
   await connection();
-  const actor = await getBranchAccess().catch(() => null);
-  if (!actor) return <MotoristLogin message="Prihláste sa účtom pobočky. Ak sa prihlásiť nedá, požiadajte centrálu o pridelenie pobočky." returnTo="/pobocka" appRelease={getAppRelease()} />;
+  const actor = await getBranchAccess().catch(() => 'signed-out' as const);
+  if (actor === 'signed-out') return <MotoristLogin message="Prihláste sa účtom pobočky." returnTo="/pobocka" appRelease={getAppRelease()} />;
+  if (actor === 'no-seat') return <Shell view="branch"><Notice>Váš účet zatiaľ nemá pridelenú pobočku. Požiadajte centrálu o pridelenie miesta miestneho dispečera.</Notice></Shell>;
   const dispatch = await getDefaultMotoristAuthState();
   const towing = towingEnabled() ? await getTowingAuthState() : null;
   const capabilities = towing?.authorized && towing.actor.userId === actor.userId ? towing.actor.capabilities : [];

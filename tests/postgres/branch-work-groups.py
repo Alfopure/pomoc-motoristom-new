@@ -10,7 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 M = ROOT / 'supabase/migrations'
 ORG = '00000000-0000-4000-8000-000000000001'
 def uid(n): return f'72000000-0000-4000-8000-{n:012d}'
-CENTRAL, MANAGER, L1, L2, LB, P, T, OUT = (uid(n) for n in (10, 11, 12, 13, 14, 15, 16, 17))
+CENTRAL, MANAGER, L1, L2, LB, P, T, OUT, LT = (uid(n) for n in (10, 11, 12, 13, 14, 15, 16, 17, 18))
 checks = []
 STUBS = r"""
 create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;
@@ -72,10 +72,10 @@ with tempfile.TemporaryDirectory(prefix='pm-branch-pg-') as temp:
         check('all migrations apply over the stubbed platform schemas')
         branch_a, branch_b = uid(30), uid(31)
         run(f"insert into motorist_branches(id,organization_id,name,address) values('{branch_a}','{ORG}','Pobočka Žilina','Fixture 1'),('{branch_b}','{ORG}','Pobočka Košice','Fixture 2')")
-        for who, email in [(CENTRAL, 'c'), (MANAGER, 'm'), (L1, 'l1'), (L2, 'l2'), (LB, 'lb'), (P, 'p'), (T, 't'), (OUT, 'out')]:
+        for who, email in [(CENTRAL, 'c'), (MANAGER, 'm'), (L1, 'l1'), (L2, 'l2'), (LB, 'lb'), (P, 'p'), (T, 't'), (OUT, 'out'), (LT, 'lt')]:
             run(f"insert into auth.users(id,email) values('{who}','{email}@example.invalid')")
         run(f"insert into motorist_profiles(organization_id,user_id,display_name,role,active,access_status) values('{ORG}','{CENTRAL}','Centrála','dispatcher',true,'active'),('{ORG}','{MANAGER}','Vedúci','manager',true,'active')")
-        for who, name, roles in [(L1, 'Lokálny 1', ['branch']), (L2, 'Lokálny 2', ['branch', 'delivery']), (LB, 'Lokálny B', ['branch']), (P, 'Pristavovač', ['delivery']), (T, 'Odťahovkár', ['driver', 'delivery']), (OUT, 'Bez pobočky', ['delivery'])]:
+        for who, name, roles in [(L1, 'Lokálny 1', ['branch']), (L2, 'Lokálny 2', ['branch', 'delivery']), (LB, 'Lokálny B', ['branch']), (P, 'Pristavovač', ['delivery']), (T, 'Odťahovkár', ['driver', 'delivery']), (OUT, 'Bez pobočky', ['delivery']), (LT, 'Odťahová kancelária', ['branch', 'dispatch'])]:
             arr = 'array[' + ','.join(f"'{x}'" for x in roles) + ']'
             run(f"insert into motorist_towing_memberships(id,organization_id,auth_user_id,display_name,roles,capabilities) values('{who}','{ORG}','{who}','{name}',{arr},app_private.towing_capabilities({arr}))")
         check('branch role is accepted without towing capabilities', value(f"select cardinality(capabilities) from motorist_towing_memberships where id='{L1}'") == '0')
@@ -123,6 +123,16 @@ with tempfile.TemporaryDirectory(prefix='pm-branch-pg-') as temp:
         lines = same_tx.stdout.strip().splitlines()
         check('scope is cleared inside the same transaction after the command', 'scope=' in lines and same_tx.returncode != 0 and 'Forbidden' in same_tx.stderr)
         check('lead cannot reassign outside the group', denied(command(L1, 'operate', {'command': {'action': 'assign', 'expectedRevision': re['execution']['revision'], 'payload': {'assigneeId': OUT}}}, request=r1['id'], rev=req_rev(r1['id'])), '22023'))
+        started = cmd(CENTRAL, 'create', {'groupId': ga, 'kind': 'delivery', 'pickup': 'S', 'destination': 'E'}, rev=0)['request']
+        cmd(L1, 'claim', request=started['id'], rev=req_rev(started['id']))
+        st = cmd(L1, 'materialize', {'assigneeId': P}, request=started['id'], rev=req_rev(started['id']))['request']
+        op = st['execution']['operationId']
+        j("select public.motorist_operations_command('%s','%s','%s'::jsonb)" % (P, ORG, json.dumps({'commandId': uid(950), 'action': 'start', 'operationId': op, 'expectedRevision': st['execution']['revision'], 'payload': {}})))
+        rev_now = int(value(f"select revision from motorist_logistics_executions where operation_id='{op}'"))
+        check('lead cannot cancel an execution that already started', denied(command(L1, 'operate', {'command': {'action': 'cancel', 'expectedRevision': rev_now, 'payload': {'reason': 'x'}}}, request=started['id'], rev=req_rev(started['id'])), 'PT409'))
+        j("select public.motorist_operations_command('%s','%s','%s'::jsonb)" % (CENTRAL, ORG, json.dumps({'commandId': uid(951), 'action': 'cancel', 'operationId': op, 'expectedRevision': rev_now, 'payload': {'reason': 'Klient zrušil'}})))
+        reo = cmd(L1, 'reopen', request=started['id'], rev=req_rev(started['id']))['request']
+        check('cancelled execution can be reopened into the queue', reo['status'] == 'queued' and reo['execution'] is None)
         check('lead cannot run executor-only or evidence actions', denied(command(L1, 'operate', {'command': {'action': 'complete', 'expectedRevision': re['execution']['revision'], 'payload': {}}}, request=r1['id'], rev=req_rev(r1['id'])), '22023'))
         # Routing history: request moved A -> B keeps A's receipt in reports.
         r2 = cmd(CENTRAL, 'create', {'groupId': ga, 'kind': 'transfer', 'pickup': 'X', 'destination': 'Y'}, rev=0)['request']
@@ -133,23 +143,42 @@ with tempfile.TemporaryDirectory(prefix='pm-branch-pg-') as temp:
         r4 = cmd(CENTRAL, 'create', {'groupId': ga, 'kind': 'tow', 'caseId': case_id, 'pickup': 'D1'}, rev=0)['request']
         cmd(L1, 'claim', request=r4['id'], rev=req_rev(r4['id']))
         check('towing materialization needs towing office capability', denied(command(L1, 'materialize', {}, request=r4['id'], rev=req_rev(r4['id']))))
-        cmd(L1, 'cancel', {'reason': 'Duplicitné'}, request=r3['id'], rev=req_rev(r3['id']))
+        check('invalid kind is a validation error', denied(command(CENTRAL, 'create', {'groupId': ga}, rev=0), '22023'))
+        cmd(L2, 'claim', request=r3['id'], rev=req_rev(r3['id']))
+        check('another lead cannot cancel an active claim', denied(command(L1, 'cancel', {'reason': 'x'}, request=r3['id'], rev=req_rev(r3['id']))))
+        cmd(L2, 'cancel', {'reason': 'Duplicitné'}, request=r3['id'], rev=req_rev(r3['id']))
+        # Towing-office lead: case-linked tow without a dispatch profile, RFC 4122 identity.
+        cmd(MANAGER, 'group_member', {'groupId': ga, 'memberId': LT, 'role': 'lead'})
+        r5 = cmd(CENTRAL, 'create', {'groupId': ga, 'kind': 'tow', 'caseId': case_id, 'pickup': 'D1 km 120', 'destination': 'Servis'}, rev=0)['request']
+        cmd(LT, 'claim', request=r5['id'], rev=req_rev(r5['id']))
+        t5 = cmd(LT, 'materialize', {}, request=r5['id'], rev=req_rev(r5['id']))['request']
+        import re as _re
+        check('branch tow order id is RFC 4122', bool(_re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', t5['execution']['ownerId'])))
+        check('branch tow keeps the case link and allowlisted contact', value(f"select source_case_id::text||'|'||(fields->>'contact')||'|'||(fields->>'pickup') from motorist_towing_orders where id='{t5['execution']['ownerId']}'") == f"{case_id}|+421900000000|D1 km 120"
+              and value(f"select case_id from motorist_operations where towing_order_id='{t5['execution']['ownerId']}'") == case_id)
         check('cancel without reason refused', denied(command(L1, 'cancel', {}, request=r4['id'], rev=req_rev(r4['id'])), '22023'))
         report = lambda who, f=None: j("select public.motorist_branch_report('%s','%s',now()-interval '1 day',now()+interval '1 day','%s'::jsonb)" % (who, ORG, json.dumps(f or {})))
         rows = {g['groupId']: g for g in report(CENTRAL)['groups']}
         a, b = rows[ga], rows[gb]
-        check('received counts routing episodes per group', a['received'] == 4 and b['received'] == 1)
-        check('unique cases differ from requests', a['uniqueRequests'] == 4 and a['uniqueCases'] == 1 and a['withoutCase'] == 2)
-        check('reaction uses only claimed episodes and reports unknowns', a['reaction']['samples'] == 2 and a['reaction']['unclaimed'] == 2 and a['reaction']['avgSeconds'] is not None)
+        check('received counts routing episodes per group', a['received'] == 6 and b['received'] == 1)
+        check('unique cases differ from requests', a['uniqueRequests'] == 6 and a['uniqueCases'] == 1 and a['withoutCase'] == 3)
+        check('reaction uses only claimed episodes and reports unknowns', a['reaction']['samples'] == 5 and a['reaction']['unclaimed'] == 1 and a['reaction']['avgSeconds'] is not None)
         check('moved request claim is attributed to the new group', b['reaction']['samples'] == 1)
-        check('assignment time only from materialized episodes', a['assignment']['samples'] == 1 and b['assignment']['samples'] == 0)
-        check('in-progress counts current executions', a['inProgressNow'] == 1 and a['completed'] == 0)
+        check('assignment time only from materialized episodes', a['assignment']['samples'] == 3 and b['assignment']['samples'] == 0)
+        check('in-progress counts current executions', a['inProgressNow'] == 2 and a['completed'] == 0 and a['waitingNow'] == 1 and a['unassignedNow'] == 1)
         check('workload per executor', [w['memberId'] for w in report(CENTRAL)['workload']] == [L2])
         check('local report is limited to own groups', [g['groupId'] for g in report(LB)['groups']] == [gb])
         check('foreign group report rejected', denied("select public.motorist_branch_report('%s','%s',now()-interval '1 day',now(),'{\"groupId\":\"%s\"}')" % (LB, ORG, ga)))
         check('report period bounded', denied("select public.motorist_branch_report('%s','%s',now()-interval '400 days',now(),'{}')" % (CENTRAL, ORG), '22023'))
         # Revocation: removing the lead seat removes access immediately.
-        cmd(MANAGER, 'group_member', {'groupId': ga, 'memberId': L1, 'role': 'none'})
+        held = cmd(CENTRAL, 'create', {'groupId': ga, 'kind': 'transfer'}, rev=0)['request']
+        cmd(L1, 'claim', request=held['id'], rev=req_rev(held['id']))
+        grp_cmd = command(MANAGER, 'group_member', {'groupId': ga, 'memberId': L1, 'role': 'none'}, cid=uid(960))
+        j(grp_cmd)
+        check('removing a lead seat releases that lead\'s claims', value(f"select status from motorist_work_requests where id='{held['id']}'") == 'queued')
+        run(f"update motorist_profiles set role='dispatcher' where user_id='{MANAGER}'")
+        check('group receipt replay re-checks manage permission', denied(grp_cmd.replace(MANAGER, MANAGER)))
+        run(f"update motorist_profiles set role='manager' where user_id='{MANAGER}'")
         check('revoked lead loses the module', denied(f"select public.motorist_branch_workspace('{L1}','{ORG}','{{}}')"))
         for role in ['anon', 'authenticated']:
             check(f'{role} cannot execute branch RPCs', denied(f"set role {role};select public.motorist_branch_workspace('{CENTRAL}','{ORG}','{{}}')"))

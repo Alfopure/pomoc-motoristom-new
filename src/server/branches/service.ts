@@ -24,6 +24,10 @@ const messages: [RegExp, number, string][] = [
   [/Work already started|Work started/, 409, 'Jazda už začala; termín ani vodiča nemožno zmeniť.'],
   [/Revision conflict/, 409, 'Údaje sa medzitým zmenili. Obnovte zoznam a skúste znova.'],
   [/Invalid group/, 400, 'Vyplňte názov pobočky a aspoň jeden druh práce.'],
+  [/Invalid kind/, 400, 'Vyberte druh práce.'],
+  [/Only cancelled executions reopen/, 409, 'Znovu otvoriť možno iba požiadavku so zrušenou jazdou.'],
+  [/Towing access denied/, 403, 'Účet nemá aktívne oprávnenie odťahovej kancelárie.'],
+  [/Assignment incomplete/, 400, 'Odťahová zákazka potrebuje pobočku, miesto nakládky a kontakt.'],
 ];
 function mapBranchError(error: { code?: string; message?: string } | null) {
   if (!error) return;
@@ -48,10 +52,14 @@ export async function getBranchWorkspace(filters: Record<string, unknown> = {}):
   mapBranchError(result.error);
   return result.data as BranchWorkspace;
 }
-/** Page gate: null when the signed-in account has neither a central profile nor a lead seat. */
-export async function getBranchAccess(): Promise<BranchWorkspace['actor'] | null> {
-  try { return (await getBranchWorkspace({ limit: 1 })).actor; }
-  catch (error) { if (error instanceof TowingError && [401, 403].includes(error.status)) return null; throw error; }
+/** Page gate: 'signed-out', 'no-seat' or the actor (central profile or a lead seat). */
+export async function getBranchAccess(): Promise<BranchWorkspace['actor'] | 'signed-out' | 'no-seat'> {
+  let user;
+  try { user = await currentUser(); } catch { return 'signed-out'; }
+  const result = await admin().rpc('motorist_branch_actor', user);
+  if (result.error?.code === '42501') return 'no-seat';
+  mapBranchError(result.error);
+  return result.data as BranchWorkspace['actor'];
 }
 export function parseBranchCommand(value: Record<string, unknown>): BranchCommand {
   if (typeof value.action !== 'string' || !branchActions.includes(value.action as never) || !value.payload || typeof value.payload !== 'object' || Array.isArray(value.payload))
@@ -59,8 +67,10 @@ export function parseBranchCommand(value: Record<string, unknown>): BranchComman
   return { commandId: uuid(value.commandId), action: value.action as BranchCommand['action'], payload: value.payload as Record<string, unknown>,
     ...(value.requestId !== undefined ? { requestId: uuid(value.requestId) } : {}), ...(value.expectedRevision !== undefined ? { expectedRevision: revision(value.expectedRevision) } : {}) };
 }
-export async function commandBranch(command: BranchCommand): Promise<BranchReceipt> {
-  const result = await admin().rpc('motorist_branch_command', { ...await currentUser(), p_command: command });
+export async function commandBranch(input: Record<string, unknown>): Promise<BranchReceipt> {
+  const user = await currentUser();
+  const command = parseBranchCommand(input);
+  const result = await admin().rpc('motorist_branch_command', { ...user, p_command: command });
   mapBranchError(result.error);
   return result.data as BranchReceipt;
 }

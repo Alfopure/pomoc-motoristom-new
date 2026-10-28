@@ -2,7 +2,7 @@
 export type WorkRequestKind = 'delivery' | 'collection' | 'transfer' | 'tow';
 export type WorkRequestStatus = 'queued' | 'claimed' | 'assigned' | 'cancelled';
 export type BranchView = 'open' | 'queue' | 'active' | 'done' | 'all';
-export type BranchAction = 'create' | 'route' | 'claim' | 'release' | 'cancel' | 'materialize' | 'operate' | 'group_save' | 'group_member';
+export type BranchAction = 'create' | 'route' | 'claim' | 'release' | 'cancel' | 'materialize' | 'operate' | 'reopen' | 'group_save' | 'group_member';
 export interface BranchActor { userId: string; organizationId: string; displayName: string; memberId: string | null; version: number | null; central: boolean; manage: boolean; leadGroups: { id: string; name: string; role: 'lead'; receivesNew: boolean }[]; canDeliver: boolean; canOperateTowing: boolean }
 export interface WorkExecution { operationId: string; owner: 'logistics' | 'towing_order'; ownerId: string; status: string; revision: number; assigneeId: string | null; assignee: string | null; scheduledAt: string | null; plannedEndAt: string | null; confirmedAt: string | null; startedAt: string | null; finishedAt: string | null; done: boolean; cancelled: boolean }
 export interface WorkRequest { id: string; kind: WorkRequestKind; status: WorkRequestStatus; revision: number; groupId: string; groupName: string; branchName: string | null; caseId: string | null; caseNumber: string | null; caseType: string | null; customer: { name: string; phone: string } | null; vehicle: string | null; pickup: string; destination: string; dueAt: string | null; note: string; fleetAssetId: string | null; cycleId: string | null; routedAt: string; claimedBy: string | null; claimedByName: string | null; claimedAt: string | null; cancelReason: string | null; createdAt: string; updatedAt: string; execution: WorkExecution | null; related: { id: string; kind: WorkRequestKind; status: WorkRequestStatus; groupName: string; executionStatus: string | null }[] }
@@ -16,7 +16,7 @@ export interface BranchReportRow { groupId: string; groupName: string; branchNam
 export interface BranchReport { from: string; to: string; groups: BranchReportRow[]; workload: { memberId: string; name: string; open: number; inProgress: number }[] }
 export const workKinds: Record<WorkRequestKind, string> = { delivery: 'Pristavenie', collection: 'Odvoz vozidla', transfer: 'Presun', tow: 'Odťah' };
 export const branchViews: BranchView[] = ['open', 'queue', 'active', 'done', 'all'];
-export const branchActions: BranchAction[] = ['create', 'route', 'claim', 'release', 'cancel', 'materialize', 'operate', 'group_save', 'group_member'];
+export const branchActions: BranchAction[] = ['create', 'route', 'claim', 'release', 'cancel', 'materialize', 'operate', 'reopen', 'group_save', 'group_member'];
 /** Human duration for report timings; unknown stays visible as unknown, never as zero. */
 export function formatDuration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return 'neznáme';

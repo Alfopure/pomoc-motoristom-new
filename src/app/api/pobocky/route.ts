@@ -1,4 +1,4 @@
-import { commandBranch, getBranchWorkspace, parseBranchCommand } from '@/server/branches/service';
+import { commandBranch, getBranchWorkspace } from '@/server/branches/service';
 import { assertTowingOrigin, boundedJson, towingErrorResponse, towingJson } from '@/server/towing/http';
 export const dynamic = 'force-dynamic';
 export async function GET(request: Request) {
@@ -6,6 +6,6 @@ export async function GET(request: Request) {
   catch (error) { return towingErrorResponse(error); }
 }
 export async function POST(request: Request) {
-  try { assertTowingOrigin(request); return towingJson(await commandBranch(parseBranchCommand(await boundedJson(request, 32_000)))); }
+  try { assertTowingOrigin(request); return towingJson(await commandBranch(await boundedJson(request, 32_000))); }
   catch (error) { return towingErrorResponse(error); }
 }
