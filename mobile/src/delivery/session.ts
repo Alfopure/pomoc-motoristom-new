@@ -12,6 +12,7 @@ import { DeliveryCommands } from "./commands";
 import { createDeliveryCommandStorage } from "./command-storage";
 import { createLocationSharing } from "./native-sharing";
 import type { LocationSharing } from "./sharing";
+import { fieldModules, type FieldModules } from "../shell/modules";
 
 /** The module Pristavenia of the signed-in person: their deliveries and the sharing
  * of their position. It lives as long as the account, not as a screen, so the
@@ -19,6 +20,8 @@ import type { LocationSharing } from "./sharing";
 export type DeliverySession = {
   api: DeliveryApi; key: readonly string[];
   me: UseQueryResult<MobileFieldMe>; memberId: string | null;
+  /** Which field modules the verified identity shows (presentation only). */
+  modules: FieldModules;
   list: UseQueryResult<MobileDelivery[]>; location: LocationSharing;
   commands: DeliveryCommands | null; error: unknown; refresh: () => Promise<DeliveryRefreshResult>;
 };
@@ -42,9 +45,12 @@ export function useDeliverySession({ config, client, userId, liveUser, active, e
   // A refusal (role removed, deliveries switched off) ends Pristavenia, even with an older answer cached.
   const refused = me.isError && deliveryRefused(me.error);
   const verifiedMember = enabled ? deliveryMember(me.data, me.error) : null;
+  // Pristavenia only with `deliver`: a tow driver or branch lead has no delivery list,
+  // and its refusal must not end their field account.
+  const modules = fieldModules(verifiedMember ? me.data : null);
   const location = useMemo(() => createLocationSharing(api, config), [api, config]);
   useEffect(() => () => location.dispose(), [location]);
-  const list = useQuery({ queryKey: [...key, "deliveries"], enabled: enabled && Boolean(verifiedMember), queryFn: ({ signal }) => api.list(signal),
+  const list = useQuery({ queryKey: [...key, "deliveries"], enabled: enabled && Boolean(verifiedMember) && modules.delivery, queryFn: ({ signal }) => api.list(signal),
     refetchInterval: active ? 30_000 : false });
   const memberId = enabled && !accessError ? deliveryMember(me.data, me.error, list.error) : null;
   useEffect(() => { location.setMember(memberId); }, [location, memberId]);
@@ -59,13 +65,17 @@ export function useDeliverySession({ config, client, userId, liveUser, active, e
   useEffect(() => { if (settled) void location.reconcile(memberId); }, [settled, memberId, location]);
   // The delivery this pristavovač took. Until the list loads, nothing changes. Each
   // fresh list checks again, so sending that stopped on its own starts again.
-  const sharing = me.isPending && !accessError ? undefined : deliverySharing(memberId, list.data, list.error);
+  const sharing = me.isPending && !accessError ? undefined : modules.delivery || !me.isSuccess ? deliverySharing(memberId, list.data, list.error) : null;
   const checked = list.dataUpdatedAt;
   useEffect(() => {
     if (sharing === undefined) return;
     // Expo Go sends only while the app is open; the native app also in the background.
     void location.follow(location.mode === "foreground" && !active ? null : sharing);
   }, [location, active, sharing, checked]);
-  return { api, key, me, memberId, list, location, commands, error: accessError ?? me.error ?? list.error,
-    refresh: () => refreshDeliveryAccess(() => me.refetch(), () => list.refetch()) };
+  return { api, key, me, memberId, modules, list, location, commands, error: accessError ?? me.error ?? list.error,
+    refresh: () => {
+      let fresh = me.data;
+      return refreshDeliveryAccess(async () => { const result = await me.refetch(); fresh = result.data; return result; },
+        () => fieldModules(fresh).delivery ? list.refetch() : Promise.resolve({ isSuccess: true, error: null }));
+    } };
 }

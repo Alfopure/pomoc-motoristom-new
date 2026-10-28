@@ -287,6 +287,11 @@ describe("notification taps", () => {
     expect(readPushTap(response({ kind: "task", id: TASK.toUpperCase(), profileId: ME }))).toEqual({ key: "n1", profileId: ME, target: { kind: "task", id: TASK } });
     expect(readPushTap(response({ kind: "callbacks", profileId: ME }))).toEqual({ key: "n1", profileId: ME, target: { kind: "callbacks" } });
     expect(readPushTap(response({ kind: "delivery", id: TASK, profileId: ME }))).toEqual({ key: "n1", profileId: ME, target: { kind: "delivery", id: TASK } });
+    // Moja práca and Pobočka open their own work.
+    for (const kind of ["operation", "towing", "branch-request"] as const) {
+      expect(readPushTap(response({ kind, id: TASK.toUpperCase(), profileId: ME }))).toEqual({ key: "n1", profileId: ME, target: { kind, id: TASK } });
+    }
+    expect(readPushTap(response({ kind: "operation", profileId: ME }))).toBeNull();
     for (const data of [null, {}, { kind: "task", id: "x", profileId: ME }, { kind: "sms", profileId: ME }, { kind: "case", id: TASK }, { kind: "case", id: TASK, profileId: "me" }, { kind: "delivery", profileId: ME }]) {
       expect(readPushTap(response(data))).toBeNull();
     }

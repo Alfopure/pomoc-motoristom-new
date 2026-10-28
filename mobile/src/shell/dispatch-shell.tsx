@@ -28,7 +28,7 @@ import { HomeScreen, type HomeTarget } from "./home";
 import { SearchScreen } from "./search";
 import { AlertsScreen } from "../alerts/ui";
 import { ModulesScreen, type ModuleAccessRefresh } from "./modules-screen";
-import { PIN_LIMIT, accessLabel, moduleAccess, moduleById, roleNames, rolePins, type ModuleId } from "./modules";
+import { NO_FIELD, PIN_LIMIT, accessLabel, moduleAccess, moduleById, roleNames, rolePins, type ModuleId } from "./modules";
 import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, type DispatchView, type HovoryView, type ShellState, type ShellTab } from "./navigation";
 import { Group, Row } from "../design/list";
 import { GlassButton, ModuleTile, Sheet, Toast, tabLabel } from "./parts";
@@ -49,12 +49,17 @@ import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
 import { AppErrorBoundary, ErrorReporterContext } from "../ui/error-boundary";
 import { CallScreenFallback, CallStripFallback } from "../calls/call-screen";
 import type { PushSettings } from "../notifications/settings";
-import { pushTaps } from "../notifications/taps";
+import { isFieldTap, pushTaps } from "../notifications/taps";
 import { pushKinds } from "../notifications/ui";
 import { DeliveryModule } from "../delivery/module";
 import { canUseDeliveryCache, deliveryStatusLabels, isOpen, sortDeliveries, visibleDelivery } from "../delivery/model";
 import { useDeliveryTime } from "../delivery/use-delivery-time";
 import type { DeliverySession } from "../delivery/session";
+import { BranchModule } from "../branch/module";
+import { waiting as awaitingLead } from "../branch/model";
+import { WorkModule, type WorkOpenRequest } from "../field-work/module";
+import { isOpenOperation, workItems } from "../field-work/model";
+import type { FieldWorkSession } from "../field-work/session";
 
 type Props = {
   config: MobileConfig; client: SupabaseClient; api: MobileApi; active: boolean; userId: string; liveUser: () => string | null;
@@ -65,6 +70,8 @@ type Props = {
   push: PushSettings;
   /** Pristavenia of someone who dispatches and also delivers; null without that role. */
   delivery: DeliverySession | null;
+  /** Moja práca and Pobočka of someone who dispatches and also has a field membership. */
+  work: FieldWorkSession | null;
   /** Available even before the current account has a delivery membership. */
   accessRefresh: ModuleAccessRefresh;
 };
@@ -83,11 +90,13 @@ export function DispatchShell(props: Props) {
   const forgetScreenData = () => queryClient.removeQueries({ predicate: query => query.queryKey.at(-1) !== "me" });
   const insets = useSafeAreaInsets();
   const { fontScale } = useWindowDimensions();
-  const delivery = props.delivery?.memberId ? props.delivery : null, delivers = delivery !== null;
-  const available = useMemo(() => moduleAccess(identity.profile.role, delivers), [identity.profile.role, delivers]);
+  const delivery = props.delivery?.memberId ? props.delivery : null, work = delivery ? props.work : null;
+  const { delivery: hasDelivery, work: hasWork, branch: hasBranch } = delivery?.modules ?? NO_FIELD;
+  const field = useMemo(() => ({ delivery: hasDelivery, work: hasWork, branch: hasBranch }), [hasDelivery, hasWork, hasBranch]);
+  const available = useMemo(() => moduleAccess(identity.profile.role, field), [identity.profile.role, field]);
   const prefs = useMemo(() => new ShellPreferences(createShellPreferencesStorage(),
-    shellPreferencesKey({ environment: config.environment, userId, profileId: identity.profileId }), available, rolePins(identity.profile.role, delivers)),
-  [config.environment, userId, identity.profileId, identity.profile.role, available, delivers]);
+    shellPreferencesKey({ environment: config.environment, userId, profileId: identity.profileId }), available, rolePins(identity.profile.role, field)),
+  [config.environment, userId, identity.profileId, identity.profile.role, available, field]);
   useEffect(() => () => prefs.dispose(), [prefs]);
   const preferences = useSyncExternalStore(prefs.subscribe, prefs.snapshot, prefs.snapshot);
   // An unreadable Keychain (locked phone) is retried each time the app returns to the foreground.
@@ -103,6 +112,8 @@ export function DispatchShell(props: Props) {
   const [callSelection, setCallSelection] = useState<{ target: MobileCallContextTarget; view: DispatchView } | null>(null);
   const [toast, setToast] = useState<{ message: string; key: number } | null>(null);
   const [deliveryRequest, setDeliveryRequest] = useState<{ id: string; nonce: number } | null>(null);
+  const [workRequest, setWorkRequest] = useState<WorkOpenRequest | null>(null);
+  const [branchRequest, setBranchRequest] = useState<{ id: string; nonce: number } | null>(null);
   const sheet = usePhoneOverlay<ShellSheet>(active);
   const [backStore] = useState(() => new ShellBackStore());
   const moduleBack = useSyncExternalStore(backStore.subscribe, backStore.snapshot, backStore.snapshot);
@@ -141,16 +152,19 @@ export function DispatchShell(props: Props) {
   const dialBlocked = dialBlockedReason(phone, phoneState);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 2400); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => { if (view === "modules" && preferences.loaded && !preferences.tipDismissed) prefs.dismissTip(); }, [view, preferences.loaded, preferences.tipDismissed, prefs]);
-  // A tapped delivery notice opens it in Pristavenia, under the pristavovač's own id.
+  // A tapped field notice opens its work (Pristavenia, Moja práca, Pobočka), under the member's own id.
   const memberId = delivery?.memberId ?? null;
   useEffect(() => {
     if (!memberId) return;
     const consume = () => {
-      if (pushTaps.snapshot()?.target.kind !== "delivery") return;
+      if (!isFieldTap(pushTaps.snapshot()?.target)) return;
       const target = pushTaps.take(memberId);
-      if (target?.kind !== "delivery") return;
-      setShell(current => openModule(reconcileShell(current, pins, available), pins, "pristavenia"));
-      setDeliveryRequest(value => ({ id: target.id, nonce: (value?.nonce ?? 0) + 1 }));
+      const module: ModuleId | null = target?.kind === "delivery" ? "pristavenia" : target?.kind === "operation" || target?.kind === "towing" ? "praca" : target?.kind === "branch-request" ? "pobocka" : null;
+      if (!target || !module || !available.includes(module) || !("id" in target)) return;
+      setShell(current => openModule(reconcileShell(current, pins, available), pins, module));
+      if (target.kind === "delivery") setDeliveryRequest(value => ({ id: target.id, nonce: (value?.nonce ?? 0) + 1 }));
+      else if (target.kind === "operation" || target.kind === "towing") setWorkRequest(value => ({ kind: target.kind as "operation" | "towing", id: target.id, nonce: (value?.nonce ?? 0) + 1 }));
+      else setBranchRequest(value => ({ id: target.id, nonce: (value?.nonce ?? 0) + 1 }));
     };
     const unsubscribe = pushTaps.subscribe(consume);
     const pending = setTimeout(consume, 0);
@@ -159,6 +173,9 @@ export function DispatchShell(props: Props) {
   const deliveryNow = useDeliveryTime(active && Boolean(delivery));
   const deliveries = sortDeliveries(canUseDeliveryCache(delivery?.list.error) ? (delivery?.list.data ?? []).map(item => visibleDelivery(item, deliveryNow)) : [], deliveryNow);
   const openDeliveries = deliveries.filter(item => isOpen(item, deliveryNow));
+  const openWork = work && field.work && canUseDeliveryCache(work.list.error) ? workItems(work.list.data).filter(item => item.kind === "towing" || isOpenOperation(item.operation)).length : 0;
+  const branchQueue = work && field.branch ? (work.branch.data?.requests ?? []).filter(awaitingLead).length : 0;
+  const fieldBadges = { pristavenia: openDeliveries.length, praca: openWork, pobocka: branchQueue };
 
   const go = (next: ShellState) => { setCallSelection(null); setShell(next); };
   const navigate = (id: ModuleId, hovory?: HovoryView) => go(openModule(nav, pins, id, hovory));
@@ -284,7 +301,7 @@ export function DispatchShell(props: Props) {
       phone={phone} phoneState={phoneState} onCallContext={openCallContext} />}
     {view === "history" && !callTarget && <History api={api} me={identity} queryKey={queryKey} active={active} category={category} onCategory={setCategory}
       search={search} onSearch={setSearch} onCallContext={openCallContext} onSelect={value => { setNumber(value); navigate("hovory", "console"); }} />}
-    {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={pins.length < PIN_LIMIT} badges={{ hovory: waiting, pristavenia: openDeliveries.length }}
+    {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={pins.length < PIN_LIMIT} badges={{ hovory: waiting, ...fieldBadges }}
       onOpen={id => navigate(id)} onMenu={id => sheet.open({ kind: "menu", id })} onEdit={() => sheet.open({ kind: "edit" })} onAccount={() => go({ ...nav, account: true })} accessRefresh={props.accessRefresh} />}
     <DraftWorkspace key={identity.profileId} config={config} client={props.client} identity={identity} userId={userId} liveUser={props.liveUser} active={active}
       view={view} onView={target => {
@@ -308,7 +325,7 @@ export function DispatchShell(props: Props) {
           phone={{ label: statusLabel, tone: presence ? presenceTone[presence] : "gray", detail: phoneDetail }}
           callbacks={callbackSummary} activeCalls={consoleQuery.data?.activeCalls ?? []}
           tip={preferences.loaded && !preferences.tipDismissed} onDismissTip={() => prefs.dismissTip()}
-          deliveries={delivery ? { count: delivery.list.data ? openDeliveries.length : null, onOpen: () => navigate("pristavenia"),
+          deliveries={delivery && field.delivery ? { count: delivery.list.data ? openDeliveries.length : null, onOpen: () => navigate("pristavenia"),
             detail: delivery.list.isError ? "Pristavenia nie sú dostupné" : openDeliveries.length ? deliveryStatusLabels[openDeliveries[0].status] : "Žiadne otvorené" } : null}
           onOpen={homeTarget} onCall={id => openCallContext({ kind: "session", id })}
           onRefresh={() => { void Promise.allSettled([props.accessRefresh.refresh(), callbackSummary.refetch(), consoleQuery.refetch(), queryClient.invalidateQueries({ queryKey: [...queryKey, identity.profileId] })]); }} />;
@@ -316,14 +333,18 @@ export function DispatchShell(props: Props) {
       bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
       hasCall={Boolean(phoneState.call || phoneState.termination)} onLogout={props.onLogout} onLogoutWithoutSaving={props.onLogoutWithoutSaving} push={props.push}
-      pushKinds={pushKinds(true, delivers)} roleLabel={accessLabel(identity.profile.role, delivers)} />
-    {delivery && <View style={view === "deliveries" ? { flex: 1 } : { display: "none" }}>
+      pushKinds={pushKinds(true, field)} roleLabel={accessLabel(identity.profile.role, field, delivery?.me.data?.capabilities)} />
+    {delivery && field.delivery && <View style={view === "deliveries" ? { flex: 1 } : { display: "none" }}>
       <DeliveryModule session={delivery} active={active} visible={view === "deliveries"} openRequest={deliveryRequest} /></View>}
+    {field.work && <View style={view === "work" ? { flex: 1 } : { display: "none" }}>
+      <WorkModule session={work} active={active} visible={view === "work"} openRequest={workRequest} /></View>}
+    {field.branch && <View style={view === "branch" ? { flex: 1 } : { display: "none" }}>
+      <BranchModule session={work} active={active} visible={view === "branch"} openRequest={branchRequest} /></View>}
     </AppErrorBoundary>
     </View></CallActionContext.Provider></ShellBackContext.Provider>
     {callBar && <AppErrorBoundary key={"bar:" + callBar.id} reporter={reporter} onReset={() => undefined} fallback={() => null}>
       <CallBar call={callBar} active={active} onPress={() => openBarCall(callBar)} /></AppErrorBoundary>}
-    <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting, pristavenia: openDeliveries.length }} showAdd={pins.length < PIN_LIMIT}
+    <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting, ...fieldBadges }} showAdd={pins.length < PIN_LIMIT}
       onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => sheet.open({ kind: "edit" })} />
     <Sheet visible={sheet.value !== null} large={sheet.value?.kind === "edit"} onClose={sheet.close}
       title={sheet.value?.kind === "edit" ? "Upraviť lištu" : sheet.value?.kind === "pin" ? "Do lišty" : sheetModule ? moduleById(sheetModule).name : ""}

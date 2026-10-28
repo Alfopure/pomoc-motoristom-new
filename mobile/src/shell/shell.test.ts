@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { memoryStorage } from "../lib/session-storage";
-import { MODULES, PIN_LIMIT, isModuleId, moduleAccess, moduleById, rolePins, type ModuleId } from "./modules";
+import { MODULES, PIN_LIMIT, accessLabel, fieldModules, fieldRoleLabel, isModuleId, moduleAccess, moduleById, rolePins, type ModuleId } from "./modules";
+import { pushKinds, pushOffer } from "../notifications/kinds";
 import { movingPin, normalizePins, pinsFull, replacingPin, samePins, withPin, withoutPin } from "./pins";
 import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, shellLocation, type ShellState } from "./navigation";
 import { ShellPreferences, parseShellPreferences, shellPreferencesKey } from "./preferences";
@@ -30,6 +31,28 @@ describe("module registry", () => {
     expect(isModuleId("vozidla")).toBe(false);
     expect(moduleById("nastroje").short).toBe("Nástroje");
     expect(() => moduleById("x" as ModuleId)).toThrow();
+  });
+  it("shows field modules from the server's capabilities and lead seats", () => {
+    const branches = [{ id: "99000000-0000-4000-8000-000000000001", name: "Žilina" }];
+    // An older server sends no capabilities: a pristavovač as before.
+    expect(fieldModules({})).toEqual({ delivery: true, work: false, branch: false });
+    expect(fieldModules(null)).toEqual({ delivery: false, work: false, branch: false });
+    expect(fieldModules({ capabilities: ["deliver"], branches: [] })).toEqual({ delivery: true, work: true, branch: false });
+    expect(fieldModules({ capabilities: ["drive"], branches: [] })).toEqual({ delivery: false, work: true, branch: false });
+    expect(fieldModules({ capabilities: [], branches })).toEqual({ delivery: false, work: false, branch: true });
+    expect(moduleAccess(null, { delivery: true, work: true, branch: true })).toEqual(["pristavenia", "praca", "pobocka"]);
+    expect(moduleAccess("dispatcher", { delivery: false, work: true, branch: false })).toEqual([...all, "praca"]);
+    expect(rolePins(null, { delivery: true, work: true, branch: false })).toEqual(["praca", "pristavenia"]);
+    expect(rolePins(null, { delivery: false, work: false, branch: true })).toEqual(["pobocka"]);
+    expect(rolePins("dispatcher", { delivery: true, work: true, branch: true })).toEqual(["hovory", "pripady", "ulohy"]);
+    expect(dispatchView({ ...initialShell, tab: "praca" })).toBe("work");
+    expect(dispatchView({ ...initialShell, tab: "moduly", opened: "pobocka" })).toBe("branch");
+    expect(fieldRoleLabel({ delivery: true, work: true, branch: true }, ["deliver", "drive"])).toBe("Pristavovač · Vodič · Miestny dispečer");
+    expect(fieldRoleLabel({ delivery: false, work: true, branch: false }, ["drive"])).toBe("Vodič");
+    expect(accessLabel("dispatcher", { delivery: false, work: false, branch: true })).toBe("Dispečer · Miestny dispečer");
+    expect(pushKinds(false, { delivery: true, work: true, branch: true })).toEqual(["handoffs", "work", "branch"]);
+    expect(pushKinds(true, false)).not.toContain("work");
+    expect(pushOffer(["work", "branch"])).toBe("Pridelenú prácu a požiadavky pobočky aj pri zamknutom telefóne");
   });
 });
 

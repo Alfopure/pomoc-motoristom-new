@@ -1,4 +1,8 @@
-export type PushTarget = { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" } | { kind: "delivery"; id: string };
+export type PushTarget = { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" } | { kind: "delivery"; id: string }
+  | { kind: "operation"; id: string } | { kind: "towing"; id: string } | { kind: "branch-request"; id: string };
+/** Notices addressed to the field member (its member id), opened by the field modules. */
+export const FIELD_TAP_KINDS: readonly PushTarget["kind"][] = ["delivery", "operation", "towing", "branch-request"];
+export const isFieldTap = (target: PushTarget | undefined | null) => Boolean(target && FIELD_TAP_KINDS.includes(target.kind));
 type PushTap = { key: string; profileId: string; target: PushTarget };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -11,8 +15,8 @@ export function readPushTap(response: unknown): PushTap | null {
   if (typeof data.profileId !== "string" || !UUID.test(data.profileId)) return null;
   const profileId = data.profileId.toLowerCase();
   if (data.kind === "callbacks") return { key: request.identifier, profileId, target: { kind: "callbacks" } };
-  if ((data.kind === "task" || data.kind === "case" || data.kind === "delivery") && typeof data.id === "string" && UUID.test(data.id)) {
-    return { key: request.identifier, profileId, target: { kind: data.kind, id: data.id.toLowerCase() } };
+  if (["task", "case", "delivery", "operation", "towing", "branch-request"].includes(data.kind as string) && typeof data.id === "string" && UUID.test(data.id)) {
+    return { key: request.identifier, profileId, target: { kind: data.kind as Exclude<PushTarget["kind"], "callbacks">, id: data.id.toLowerCase() } };
   }
   return null;
 }

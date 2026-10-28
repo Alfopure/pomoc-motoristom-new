@@ -466,6 +466,89 @@ export type MobileDeliveryTracker = MobileFieldScope & { token: string; expiresA
 /** Readings the phone kept since its last send (also while offline), oldest first. */
 export type MobileDeliveryTrackInput = { positions: MobileDeliveryPositionInput[] };
 export type MobileDeliveryTrackReceipt = { ok: true; apiVersion: 1; environment: MobileEnvironment; stored: number; active: boolean };
+
+/** Moja práca: the member's own jazdy, odvozy and presuny (logistics operations, `deliver`). */
+export type MobileOperationKind = "delivery" | "collection" | "transfer";
+export type MobileOperationStatus = "assigned" | "accepted" | "en_route" | "arrived" | "collected" | "completed" | "cancelled";
+export type MobileOperationEvidence = {
+  id: string; stage: "pickup" | "handover" | "inspection" | "damage"; observedAt: string; source: "observed" | "reported" | "exception";
+  person: string | null; note: string; photo: boolean; odometer: number | null; fuel: string | null; missingReason: string | null; damageStatus: "open" | "resolved" | null;
+};
+export type MobileOperation = {
+  id: string; kind: MobileOperationKind; status: MobileOperationStatus; revision: number; caseNumber: string | null;
+  vehicle: string | null; from: string; to: string; scheduledAt: string | null; plannedEndAt: string | null; startedAt: string | null; updatedAt: string;
+  /** Only while the operation is open and assigned to this member. */
+  customer: { name: string; phone: string } | null;
+  /** The branch request's note for the executor, when the work came through a branch. */
+  instructions: string | null;
+  /** A confirmed vehicle: damage can be reported for it. */
+  vehicleConfirmed: boolean;
+  evidenceState: "pending" | "complete"; evidence: MobileOperationEvidence[];
+};
+export type MobileOperationAction = "accept" | "start" | "arrive" | "collect" | "complete" | "evidence";
+export type MobileOperationEvidenceInput = {
+  stage: "pickup" | "handover" | "damage"; source: "observed" | "reported" | "exception"; observedAt: string;
+  person: string | null; note: string; photoReference: string | null; odometer: number | null; fuel: string | null; missingReason: string | null; damageResolver?: string;
+};
+export type MobileOperationCommand = { commandId: string; action: MobileOperationAction; expectedRevision: number; payload: Record<string, never> | MobileOperationEvidenceInput };
+export type MobileOperationDetail = MobileFieldScope & { operation: MobileOperation };
+export type MobileOperationReceipt = MobileFieldScope & { commandId: string; committedRevision: number; operation: MobileOperation };
+/** A private evidence file; its reference goes into the next `evidence` command. */
+export type MobileOperationFile = MobileFieldScope & { reference: string };
+export type MobileOperationPositionReceipt = MobileFieldScope & { stored: boolean; active: boolean };
+
+/** Moja práca: the driver's own odťahové zákazky (`drive`); pricing and billing stay on the web. */
+export type MobileTowingStatus = "assigned" | "in_progress" | "needs_changes";
+export type MobileTowingAttachment = { id: string; kind: "work" | "handover" | "scan"; name: string; mimeType: string; status: "pending" | "ready" | "abandoned"; createdAt: string };
+export type MobileTowingFields = {
+  serviceType: "tow" | "repair" | "transport" | "storage" | "relocation"; subjectType: "vehicle" | "machine" | "material"; subjectDescription: string;
+  plate: string | null; vin: string | null; pickup: string; destination: string | null; contact: string | null; noContactReason: string | null;
+  plannedAt: string | null; startedAt: string | null; finishedAt: string | null; startSource: "assignment" | "manual" | null;
+  driverNotes: string | null; performedQuantity: string | null; photoException: string | null;
+  assistanceReference: string | null; assistancePartnerName: string | null; parkingName: string | null; parkingAddress: string | null;
+  customer: { name: string; phone: string | null } | null;
+};
+export type MobileTowingOrder = {
+  id: string; number: string; revision: number; assignmentGeneration: number; workStatus: MobileTowingStatus; updatedAt: string;
+  fields: MobileTowingFields; attachments: MobileTowingAttachment[];
+};
+/** The fields a driver may write; null clears one. */
+export type MobileTowingDriverFields = Partial<Record<"startedAt" | "finishedAt" | "driverNotes" | "performedQuantity" | "photoException" | "destination", string | null>>;
+export type MobileTowingCommand = {
+  commandId: string; type: "start" | "update_order" | "submit" | "abandon_attachment"; expectedRevision: number; assignmentGeneration: number;
+  /** abandon_attachment: an own unfinished upload of the current assignment, with a reason. */
+  payload: Record<string, never> | { fields: MobileTowingDriverFields } | { id: string; reason: string };
+};
+export type MobileTowingDetail = MobileFieldScope & { order: MobileTowingOrder };
+/** `order` is null once it left the driver's list (submitted, reassigned or cancelled). */
+export type MobileTowingReceipt = MobileFieldScope & { commandId: string; revision: number; order: MobileTowingOrder | null };
+export type MobileTowingAttachmentReceipt = MobileFieldScope & { commandId: string; revision: number; attachmentId: string };
+/** null: the member has no such work here (capability or module off). `unavailable` names a source
+ * that failed to load just now, so its list is null without meaning "none". */
+export type MobileFieldWork = MobileFieldScope & { operations: MobileOperation[] | null; towing: MobileTowingOrder[] | null; unavailable: ("operations" | "towing")[] };
+
+/** Pobočka: a local lead's queue and running work of their own groups; reports and settings stay on the web. */
+export type MobileBranchView = "open" | "queue" | "active" | "done";
+export type MobileBranchKind = "delivery" | "collection" | "transfer" | "tow";
+export type MobileBranchExecution = {
+  owner: "logistics" | "towing_order"; status: string; revision: number; assigneeId: string | null; assignee: string | null;
+  scheduledAt: string | null; plannedEndAt: string | null; confirmedAt: string | null; startedAt: string | null; finishedAt: string | null; done: boolean; cancelled: boolean;
+};
+export type MobileBranchRequest = {
+  id: string; kind: MobileBranchKind; status: "queued" | "claimed" | "assigned" | "cancelled"; revision: number; groupId: string; groupName: string;
+  caseNumber: string | null; customer: { name: string; phone: string } | null; vehicle: string | null; pickup: string; destination: string;
+  dueAt: string | null; note: string; routedAt: string; claimedByMe: boolean; claimedByName: string | null; claimedAt: string | null;
+  execution: MobileBranchExecution | null;
+};
+export type MobileBranchGroup = {
+  id: string; name: string; receivesNew: boolean; counts: { queued: number; claimed: number; active: number; overdue: number };
+  /** Active members; `canDeliver` ones can be assigned a jazda. */
+  members: { id: string; name: string; role: "lead" | "member"; canDeliver: boolean; canDrive: boolean }[];
+};
+export type MobileBranchWorkspace = MobileFieldScope & { view: MobileBranchView; groups: MobileBranchGroup[]; requests: MobileBranchRequest[]; totalCount: number; canOperateTowing: boolean };
+export type MobileBranchAction = "claim" | "release" | "materialize" | "operate" | "reopen";
+export type MobileBranchCommand = { commandId: string; action: MobileBranchAction; requestId: string; expectedRevision: number; payload: Record<string, unknown> };
+export type MobileBranchReceipt = MobileFieldScope & { commandId: string; committedRevision: number; request: MobileBranchRequest };
 /** Current-link retrieval has no immutable mutation receipt in the existing RPC. */
 export type MobileHandoffRecovered = MobileScope & {
   kind: "link";

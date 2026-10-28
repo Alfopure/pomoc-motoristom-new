@@ -30,6 +30,8 @@ import { pushTaps } from "./src/notifications/taps";
 import { useDeliverySession } from "./src/delivery/session";
 import { haltBackgroundSharing } from "./src/delivery/native-sharing";
 import { FieldShell } from "./src/shell/field-shell";
+import { useFieldWork } from "./src/field-work/session";
+import { hasField } from "./src/shell/modules";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
 /** The server's answer "signed in, but not a dispatcher": a pristavovač. Kept as the
@@ -245,6 +247,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   useEffect(() => () => push.dispose(), [push]);
   // Pristavenia: a pristavovač alone, or a dispatcher who also delivers (one app, both modules).
   const delivery = useDeliverySession({ config, client, userId, liveUser, active, enabled: Boolean(identity) || fieldOnly, writable: !logoutBusy && !logoutState.busy });
+  // Moja práca and Pobočka of the same field membership.
+  const work = useFieldWork({ delivery, config, client, userId, liveUser, active, writable: !logoutBusy && !logoutState.busy });
   const refreshingAccess = useRef(false);
   const [accessRefreshState, setAccessRefreshState] = useState({ busy: false, error: null as string | null, message: null as string | null });
   async function refreshAccess() {
@@ -289,6 +293,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
         // Notices for this account stop reaching the phone; the choice stays for the next sign-in.
         await push.forget();
         // Nothing more about this person's position leaves the phone.
+        await work?.tracker.forget();
         await Promise.race([delivery.location.forget(), new Promise(resolve => setTimeout(resolve, 5_000))]);
       });
     } finally { preparingLogout.current = false; setLogoutBusy(false); }
@@ -299,9 +304,19 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     ]);
   }
   if (me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do dispečingu…" /></>;
-  if (fieldOnly && delivery.memberId) return <FieldShell key={delivery.memberId} config={config} active={active} userId={userId} session={delivery} push={push}
+  // A membership with only office roles (billing, reports…) has nothing in the app yet.
+  if (fieldOnly && delivery.memberId && !hasField(delivery.modules)) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
+    <Text accessibilityRole="header" style={styles.subheading}>V aplikácii pre vás zatiaľ nie je modul</Text>
+    <Text style={styles.muted}>Váš účet nemá pristavenia, jazdy, odťahy ani pobočku. Prácu kancelárie nájdete na webe dispečingu.</Text>
+    <Button label="Skontrolovať prístup znova" secondary disabled={accessRefreshState.busy} onPress={() => { void refreshAccess(); }} />
+    {accessRefreshState.error && <ErrorNotice message={accessRefreshState.error} />}
+    {logoutState.message && <ErrorNotice message={logoutState.message} />}
+    {logoutError && <ErrorNotice message={logoutError} />}
+    <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={logoutBusy || logoutState.busy} secondary />
+  </View></>;
+  if (fieldOnly && delivery.memberId) return <FieldShell key={delivery.memberId} config={config} active={active} userId={userId} session={delivery} work={work} push={push}
     logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} accessRefresh={accessRefresh} />;
-  if (fieldOnly && delivery.me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup k pristaveniam…" /></>;
+  if (fieldOnly && delivery.me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do aplikácie…" /></>;
   if (fieldOnly) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
     <ErrorNotice message={errorMessage(delivery.error)} onRetry={() => { void refreshAccess(); }} />
     {logoutState.message && <ErrorNotice message={logoutState.message} />}
@@ -321,7 +336,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
         identity={identity} queryKey={key} meError={me.isError ? me.error : null} onRetryMe={() => { void me.refetch(); }}
         phone={phone} phoneState={phoneState} callbackSummary={callbackSummary} dialer={dialer}
         logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} onLogoutWithoutSaving={logoutWithoutSaving} push={push}
-        delivery={delivery.memberId ? delivery : null} accessRefresh={accessRefresh} />
+        delivery={delivery.memberId ? delivery : null} work={work} accessRefresh={accessRefresh} />
     </PhoneOverlayProvider>
   </View>;
 }
