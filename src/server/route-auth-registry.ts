@@ -40,6 +40,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   'pobocky/report': { class: 'session', note: 'Same branch actor; aggregates only groups in scope over a bounded period.' },
   'operations/[id]': { class: 'session', note: 'Current organization and assignment checked by operations RPC; revisions and immutable command receipts.' },
   'operations/[id]/files': { class: 'session', note: 'Current operation access on every upload/download; private storage, validated MIME/size and explicit evidence reference.' },
+  'operations/[id]/rental-draft': { class: 'session', note: 'Office operations actor; read-only allowlisted preview of the rental draft, no external call until the rental contract exists.' },
   'operations/[id]/handoffs': { class: 'session', note: 'Current dispatch permission publishes only the assigned member\'s logistics operation; preview hash and revision checked by RPC.' },
   'public/operation-handoffs/session': { class: 'public', note: 'Same-origin, rate-limited exchange of a single-operation token for a scoped httpOnly session; current assignment and membership revalidated.' },
   'public/operation-handoffs/current': { class: 'public', note: 'Single-operation grant session only; expiry, revocation, assignment generation and snapshot checked on every read.' },
