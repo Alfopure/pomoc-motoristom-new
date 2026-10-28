@@ -4,15 +4,13 @@ Zdroj na TEST: `dev` `02b5538` (28. 10. 2026, overené `/api/health/live`).
 
 Stav 28. 10. 2026. Produkcia `main` = `7ff4247` (12. 10.), produkčná DB `ifpaeegaesdmljfkdvcn` končí migráciou `line_workspace`. `dev` = TEST. Nič z tohto plánu sa nevykoná bez výslovného schválenia majiteľa vrátane presného SQL.
 
-## Odporúčané poradie
+## Schválené poradie (majiteľ 28. 10. 2026)
 
-**Krok 1 – telefonické opravy (malé izolované vydanie z `main`).** PR #441, #442, #444, #450, #452, #454, #456, #458, #460 a #522 (ukončené hovory, idempotentné udalosti, realtime auth, polling; bez migrácie). Žiadne nové moduly, žiadne prepínače. Overenie: health live/ready, cron 288/288, žiadne 5xx, hovor prijatý a ukončený, záznam hovoru.
+Samotné telefonické opravy sa nedajú bezpečne oddeliť (nadväzujú na iné zmeny v `dev`), preto majiteľ zvolil: **vydať naraz presne to, čo beží na TEST, po jeho teste** (web + iPhone build 26 podľa návodu). Schválené sú aj migrácie (bod 3) a zapnutie modulov (bod 4); nahrávanie a AI ostávajú vypnuté (bod 5); App Store 1.0 hneď potom (bod 6).
 
-**Krok 2 – celý `dev`.** Moduly odťahy, výjazdy/odvozy, partneri, pobočky, mobilné API, push. 20 + nové migrácie v poradí nižšie.
+**Telnyx webhooky sú už presmerované** na `dispecing.linkapomoci.sk` (28. 10. 17:59 UTC), záloha `dispecing-test.vercel.app`.
 
-**Krok 3 – App Store 1.0** (samostatne, až keď produkcia má mobilné API).
-
-## Migrácie pre krok 2 (v tomto poradí, každá v transakcii, zápis do `schema_migrations`)
+## Migrácie (v tomto poradí) (v tomto poradí, každá v transakcii, zápis do `schema_migrations`)
 
 1. `20261012183000_case_owner_assignment`
 2. `20261013120000_towing_work_orders`
@@ -50,7 +48,7 @@ Na TEST sú, na produkcii chýbajú (rozhodnúť a nastaviť vedome):
 
 ## Konfigurácia providera
 
-- Telnyx produkčné webhooky z `dispecing-test.vercel.app` na `https://dispecing.linkapomoci.sk/api/telephony/telnyx/webhook` (samostatný schválený krok, s overením prichádzajúceho hovoru hneď po zmene).
+- Telnyx webhooky: hotové (pozri vyššie). `TELNYX_MEDIA_BASE_URL` na produkcii presunúť na `https://dispecing.linkapomoci.sk/telephony` pri vydaní.
 
 ## Vrátenie
 
