@@ -55,9 +55,10 @@ describe("realtime auth on the browser client", () => {
     const supabase = createClient("http://127.0.0.1:1", "sb_publishable_test", { auth: { persistSession: false, autoRefreshToken: false } });
     let current = "jwt-1";
     vi.spyOn(supabase.auth, "getSession").mockImplementation(async () => ({ data: { session: { access_token: current } }, error: null }) as never);
-    let listener: ((event: string, session: { access_token?: string | null } | null) => void) | undefined;
-    vi.spyOn(supabase.auth, "onAuthStateChange").mockImplementation(((callback: typeof listener) => {
-      listener = callback;
+    const listeners: Array<(event: string, session: { access_token?: string | null } | null) => void> = [];
+    const listener = (event: string, session: { access_token?: string | null } | null) => { for (const callback of listeners) callback(event, session); };
+    vi.spyOn(supabase.auth, "onAuthStateChange").mockImplementation(((callback: (typeof listeners)[number]) => {
+      listeners.push(callback);
       return { data: { subscription: { id: "test", callback, unsubscribe() {} } } };
     }) as never);
     const realtime = supabase.realtime as unknown as { _isManualToken(): boolean; accessTokenValue: string | null; setAuth(token?: string | null): Promise<void> };
@@ -71,10 +72,57 @@ describe("realtime auth on the browser client", () => {
     current = "jwt-2";
     await realtime.setAuth("jwt-2");
     expect(realtime._isManualToken()).toBe(true);
-    listener?.("TOKEN_REFRESHED", { access_token: "jwt-2" });
+    listener("TOKEN_REFRESHED", { access_token: "jwt-2" });
     await flush();
     expect(realtime._isManualToken()).toBe(false);
     expect(realtime.accessTokenValue).toBe("jwt-2");
+    supabase.realtime.disconnect();
+  });
+});
+
+describe("a briefly failing session refresh", () => {
+  const jwt = (claims: Record<string, unknown>) => ["e30", Buffer.from(JSON.stringify(claims)).toString("base64url"), "sig"].join(".");
+
+  it("keeps the last valid session token on the socket until the user signs out", async () => {
+    const supabase = createClient("http://127.0.0.1:1", "sb_publishable_test", { auth: { persistSession: false, autoRefreshToken: false } });
+    const valid = jwt({ sub: "user-1", exp: Math.floor(Date.now() / 1000) + 600 });
+    let session: { access_token: string } | null = { access_token: valid };
+    vi.spyOn(supabase.auth, "getSession").mockImplementation(async () => ({ data: { session }, error: session ? null : new Error("network") }) as never);
+    const listeners: Array<(event: string, session: unknown) => void> = [];
+    vi.spyOn(supabase.auth, "onAuthStateChange").mockImplementation(((callback: (typeof listeners)[number]) => {
+      listeners.push(callback);
+      return { data: { subscription: { id: "test", callback, unsubscribe() {} } } };
+    }) as never);
+    const realtime = supabase.realtime as unknown as { accessTokenValue: string | null; setAuth(token?: string | null): Promise<void> };
+
+    attachSupabaseRealtimeAuth(supabase as unknown as RealtimeAuthClient);
+    await flush();
+    expect(realtime.accessTokenValue).toBe(valid);
+
+    // The refresh fails once: supabase-js would answer with the publishable key.
+    session = null;
+    await realtime.setAuth();
+    expect(realtime.accessTokenValue).toBe(valid);
+
+    for (const callback of listeners) callback("SIGNED_OUT", null);
+    await realtime.setAuth();
+    expect(realtime.accessTokenValue).toBe("sb_publishable_test");
+    supabase.realtime.disconnect();
+  });
+
+  it("does not keep a token that is about to expire", async () => {
+    const supabase = createClient("http://127.0.0.1:1", "sb_publishable_test", { auth: { persistSession: false, autoRefreshToken: false } });
+    const expiring = jwt({ sub: "user-1", exp: Math.floor(Date.now() / 1000) + 2 });
+    let session: { access_token: string } | null = { access_token: expiring };
+    vi.spyOn(supabase.auth, "getSession").mockImplementation(async () => ({ data: { session }, error: null }) as never);
+    vi.spyOn(supabase.auth, "onAuthStateChange").mockImplementation((() => ({ data: { subscription: { id: "test", callback() {}, unsubscribe() {} } } })) as never);
+    const realtime = supabase.realtime as unknown as { accessTokenValue: string | null; setAuth(token?: string | null): Promise<void> };
+
+    attachSupabaseRealtimeAuth(supabase as unknown as RealtimeAuthClient);
+    await flush();
+    session = null;
+    await realtime.setAuth();
+    expect(realtime.accessTokenValue).toBe("sb_publishable_test");
     supabase.realtime.disconnect();
   });
 });

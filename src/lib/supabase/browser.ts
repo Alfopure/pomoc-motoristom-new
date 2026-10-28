@@ -7,7 +7,7 @@ import { requireSupabasePublicEnv } from "./env";
  * wiring can be tested without a browser or a network.
  */
 export type RealtimeAuthClient = {
-  realtime: { setAuth(token?: string | null): unknown };
+  realtime: { setAuth(token?: string | null): unknown; accessToken?: (() => Promise<string | null>) | null };
   auth: {
     onAuthStateChange(
       callback: (event: string, session: { access_token?: string | null } | null) => void,
@@ -28,6 +28,37 @@ function refreshRealtimeToken(client: RealtimeAuthClient): Promise<unknown> {
   return Promise.resolve(client.realtime.setAuth()).catch(() => undefined);
 }
 
+/** Expiry (ms) of a user session JWT; null for the publishable key or anything without `sub`. */
+function sessionTokenExpiry(token: string | null): number | null {
+  const payload = token?.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(payload.length / 4) * 4, "="))) as { sub?: unknown; exp?: unknown };
+    return typeof claims.sub === "string" && typeof claims.exp === "number" ? claims.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A refresh that fails briefly (network) makes `getSession()` answer without a
+ * session, and supabase-js then hands the socket the publishable key, which
+ * every private channel refuses. Until the user signs out, keep the last
+ * session token while it is still valid; the next heartbeat reads again.
+ */
+function keepLastSessionToken(client: RealtimeAuthClient): void {
+  const read = client.realtime.accessToken;
+  if (typeof read !== "function") return;
+  let last: { token: string; expiresAt: number } | null = null;
+  client.realtime.accessToken = async () => {
+    const token = await read();
+    const expiresAt = sessionTokenExpiry(token);
+    if (token && expiresAt !== null) { last = { token, expiresAt }; return token; }
+    return last && last.expiresAt - Date.now() > 5_000 ? last.token : token;
+  };
+  client.auth.onAuthStateChange((event) => { if (event === "SIGNED_OUT") last = null; });
+}
+
 /**
  * Private Realtime channels are authorised by the user's JWT.
  *
@@ -46,6 +77,7 @@ export function attachSupabaseRealtimeAuth(client: RealtimeAuthClient): void {
   if (realtimeAuth.has(client)) return;
   const state = { ready: false, promise: Promise.resolve() };
   realtimeAuth.set(client, state);
+  keepLastSessionToken(client);
   state.promise = Promise.race([
     refreshRealtimeToken(client),
     new Promise<void>((resolve) => setTimeout(resolve, REALTIME_AUTH_READY_MAX_MS)),

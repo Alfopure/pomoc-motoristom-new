@@ -42,11 +42,14 @@ export async function cancelRevokedOffers(deps: EffectsDeps, input: SessionRow, 
   // accepted hangup or a received `call.hangup`). An unreadable read sends.
   // Behind our own dial the revoked leg was created a moment ago and must stop
   // ringing at once; that pass keeps the previous behaviour without the read.
-  const unknown = arriving?.dialed ? [] : [...new Set(targets.flatMap(({ live }) => [...live]))].filter((callControlId) => !deps.endedLegs?.has(callControlId));
+  // Only our own accepted hangup counts here: a leg merely refused with 90018
+  // still gets its cancellation hangup unless the provider evidence says it ended.
+  const hungUpHere = (callControlId: string) => typeof deps.endedLegs?.get(callControlId) === "string";
+  const unknown = arriving?.dialed ? [] : [...new Set(targets.flatMap(({ live }) => [...live]))].filter((callControlId) => !hungUpHere(callControlId));
   const providerEnded = unknown.length ? await providerEndedLegs(deps, session.id, unknown.map((callControlId) => ({ callControlId }))) : new Set<string>();
   for (const { token, live } of targets) {
     for (const callControlId of live) {
-      if (deps.endedLegs?.has(callControlId) || providerEnded.has(callControlId)) { cancelled += 1; continue; }
+      if (hungUpHere(callControlId) || providerEnded.has(callControlId)) { cancelled += 1; continue; }
       try {
         if (!deps.telnyx) throw new Error("Provider unavailable for offer cancellation");
         const hangupId = commandId({ sessionId: session.id, legId: callControlId, step: token, intent: "cancel:offer" });
@@ -57,7 +60,7 @@ export async function cancelRevokedOffers(deps: EffectsDeps, input: SessionRow, 
         if (error instanceof SessionLeaseLostError) throw error;
         if (isCallGoneError(error)) {
           cancelled += 1;
-          if (String(error.code) === TELNYX_CALL_ENDED_CODE) deps.endedLegs?.set(callControlId, null);
+          if (String(error.code) === TELNYX_CALL_ENDED_CODE && !deps.endedLegs?.has(callControlId)) deps.endedLegs?.set(callControlId, null);
         }
         else {
           pending += 1;
