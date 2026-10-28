@@ -100,8 +100,10 @@ with tempfile.TemporaryDirectory(prefix='pm-push-pg-') as temp:
         first = claim()
         check('claim hands out due rows once under a lease', len(first) == 2 and claim() == [])
         check('claimed rows carry the tap target', all(x['target'] == {'kind': 'branch-request', 'id': r1['id']} for x in first))
-        finish([{'id': first[0]['id'], 'outcome': 'sent'}, {'id': first[1]['id'], 'outcome': 'failed'}])
-        check('failed row returns to the queue, sent row is final', sorted(x['status'] for x in outbox(f"subject_id='{r1['id']}'")) == ['pending', 'sent'])
+        finish([{'id': first[0]['id'], 'lease_id': first[0]['leaseId'], 'outcome': 'sent'}, {'id': first[1]['id'], 'lease_id': first[1]['leaseId'], 'outcome': 'failed'}])
+        check('a late result with a stale lease is ignored', finish([{'id': first[0]['id'], 'lease_id': uid(999), 'outcome': 'failed'}]) == 0)
+        check('failed row returns to the queue with backoff, sent row is final', sorted(x['status'] for x in outbox(f"subject_id='{r1['id']}'")) == ['pending', 'sent'] and claim() == [])
+        run("update motorist_push_outbox set next_attempt_at=now()")
         cmd(L1, 'claim', request=r1['id'], rev=req_rev(r1['id']))
         claim()
         check('claimed request drops the still-pending branch notice', 'dropped' in [x['status'] for x in outbox(f"subject_id='{r1['id']}'")])
@@ -112,27 +114,44 @@ with tempfile.TemporaryDirectory(prefix='pm-push-pg-') as temp:
         cmd(L1, 'operate', {'command': {'action': 'assign', 'expectedRevision': rv(), 'payload': {'assigneeId': L2}}}, request=r1['id'], rev=req_rev(r1['id']))
         evs = [(x['member'], x['event']) for x in outbox(f"subject_id='{op}'")]
         check('reassignment tells the old executor and the new one', (P, 'work_unassigned') in evs and (L2, 'work_assigned') in evs)
+        cmd(L1, 'operate', {'command': {'action': 'assign', 'expectedRevision': rv(), 'payload': {'assigneeId': P}}}, request=r1['id'], rev=req_rev(r1['id']))
+        cmd(L1, 'operate', {'command': {'action': 'assign', 'expectedRevision': rv(), 'payload': {'assigneeId': L2}}}, request=r1['id'], rev=req_rev(r1['id']))
         cmd(L1, 'operate', {'command': {'action': 'reschedule', 'expectedRevision': rv(), 'payload': {'scheduledAt': '2030-01-01T10:00:00Z'}}}, request=r1['id'], rev=req_rev(r1['id']))
         check('new term notifies the current executor', (L2, 'work_changed') in [(x['member'], x['event']) for x in outbox(f"subject_id='{op}'")])
         pending = claim()
         check('stale assignment notice for the removed executor is dropped', all(not (x['memberId'] == P and x['event'] == 'work_assigned') for x in pending)
               and 'dropped' in [x['status'] for x in outbox(f"subject_id='{op}' and member_id='{P}' and event='work_assigned'")])
-        finish([{'id': x['id'], 'outcome': 'sent'} for x in pending])
+        finish([{'id': x['id'], 'lease_id': x['leaseId'], 'outcome': 'sent'} for x in pending])
         run(f"insert into motorist_operation_evidence(operation_id,stage,author_user_id,observed_at,source,note,missing_reason,damage_status) values('{op}','damage','{L2}',now(),'observed','Škrabanec','Bez fotky','open')")
         check('damage report reaches the lead who assigned the work', [(x['member'], x['event']) for x in outbox(f"subject_id='{op}' and event='work_problem'")] == [(L1, 'work_problem')])
+        cmd(MANAGER, 'group_member', {'groupId': ga, 'memberId': L1, 'role': 'member'})
+        run(f"insert into motorist_operation_evidence(operation_id,stage,author_user_id,observed_at,source,note,missing_reason,damage_status) values('{op}','damage','{L2}',now(),'observed','Druhé','Bez fotky','open')")
+        check('a lead who lost the seat gets no damage report', len(outbox(f"subject_id='{op}' and event='work_problem'")) == 1 and all(x['memberId'] != L1 or x['event'] != 'work_problem' for x in claim()))
+        cmd(MANAGER, 'group_member', {'groupId': ga, 'memberId': L1, 'role': 'lead', 'receivesNew': True})
         cmd(L1, 'operate', {'command': {'action': 'cancel', 'expectedRevision': rv(), 'payload': {'reason': 'Klient zrušil'}}}, request=r1['id'], rev=req_rev(r1['id']))
         check('cancellation notifies the executor', (L2, 'work_cancelled') in [(x['member'], x['event']) for x in outbox(f"subject_id='{op}'")])
+        rx = cmd(CENTRAL, 'create', {'groupId': gb, 'kind': 'transfer'}, rev=0)['request']
+        got = [x for x in claim() if x['target']['id'] == rx['id']]
+        run(f"update motorist_push_outbox set lease_until=now()-interval '1 second' where subject_id='{rx['id']}'")
+        check('an expired lease is given up, never resent', [x for x in claim() if x['target']['id'] == rx['id']] == [] and [x['status'] for x in outbox(f"subject_id='{rx['id']}'")] == ['failed']
+              and finish([{'id': got[0]['id'], 'lease_id': got[0]['leaseId'], 'outcome': 'sent'}]) == 0)
         # Escalation: waiting longer than the branch setting.
         r2 = cmd(CENTRAL, 'create', {'groupId': gb, 'kind': 'transfer'}, rev=0)['request']
-        check('settings need manage permission', denied("select public.motorist_branch_group_settings('%s','%s','%s',%s,15,true)" % (CENTRAL, ORG, gb, value(f"select revision from motorist_work_groups where id='{gb}'"))))
-        check('settings are bounded', denied("select public.motorist_branch_group_settings('%s','%s','%s',%s,2,true)" % (MANAGER, ORG, gb, value(f"select revision from motorist_work_groups where id='{gb}'")), '22023'))
-        j("select public.motorist_branch_group_settings('%s','%s','%s',%s,15,true)" % (MANAGER, ORG, gb, value(f"select revision from motorist_work_groups where id='{gb}'")))
+        grev = lambda: value(f"select revision from motorist_work_groups where id='{gb}'")
+        check('settings need manage permission', denied("select public.motorist_branch_group_settings('%s','%s','%s','%s',%s,15,true)" % (CENTRAL, ORG, uid(980), gb, grev())))
+        check('settings are bounded', denied("select public.motorist_branch_group_settings('%s','%s','%s','%s',%s,2,true)" % (MANAGER, ORG, uid(981), gb, grev()), '22023'))
+        settings_sql = "select public.motorist_branch_group_settings('%s','%s','%s','%s',%s,15,true)" % (MANAGER, ORG, uid(982), gb, grev())
+        first_settings = j(settings_sql)
+        check('settings replay returns the same receipt', j(settings_sql) == first_settings)
         check('fresh work does not escalate', int(value(f"select public.motorist_branch_escalate('{ORG}')")) == 0)
-        run(f"update motorist_work_requests set routed_at=now()-interval '20 minutes' where id='{r2['id']}'")
+        run(f"alter table motorist_work_requests disable trigger motorist_work_request_queued_at;update motorist_work_requests set queued_at=now()-interval '20 minutes' where id='{r2['id']}';alter table motorist_work_requests enable trigger motorist_work_request_queued_at")
         n = int(value(f"select public.motorist_branch_escalate('{ORG}')"))
         esc = outbox(f"subject_id='{r2['id']}' and event='branch_waiting'")
         check('waiting work reminds the branch lead and central leaders once', n == 2 and sorted((x['member'] or x['profile']) for x in esc) == sorted([LB, value(f"select id from motorist_profiles where user_id='{MANAGER}'")])
               and int(value(f"select public.motorist_branch_escalate('{ORG}')")) == 0)
+        cmd(LB, 'claim', request=r2['id'], rev=req_rev(r2['id']))
+        cmd(LB, 'release', request=r2['id'], rev=req_rev(r2['id']))
+        check('work released back to the queue notifies the leads again', len(outbox(f"subject_id='{r2['id']}' and event='branch_new'")) == 2)
         # Towing: driver assignment through the towing engine.
         r3 = cmd(CENTRAL, 'create', {'groupId': ga, 'kind': 'tow', 'pickup': 'D1', 'destination': 'Servis'}, rev=0)['request']
         cmd(MANAGER, 'group_member', {'groupId': ga, 'memberId': LT, 'role': 'lead'})
@@ -150,9 +169,9 @@ with tempfile.TemporaryDirectory(prefix='pm-push-pg-') as temp:
         # Attempts cap: a notice failing five times is given up.
         r4 = cmd(CENTRAL, 'create', {'groupId': gb, 'kind': 'delivery'}, rev=0)['request']
         for _ in range(5):
-            run(f"update motorist_push_outbox set lease_until=null,status='pending' where subject_id='{r4['id']}' and status='sending'")
+            run(f"update motorist_push_outbox set next_attempt_at=now() where subject_id='{r4['id']}'")
             got = [x for x in claim() if x['target']['id'] == r4['id']]
-            finish([{'id': x['id'], 'outcome': 'failed'} for x in got])
+            finish([{'id': x['id'], 'lease_id': x['leaseId'], 'outcome': 'failed'} for x in got])
         check('five failed attempts end as failed', [x['status'] for x in outbox(f"subject_id='{r4['id']}'")] == ['failed'])
         for role in ['anon', 'authenticated']:
             check(f'{role} cannot claim or read the outbox', denied(f"set role {role};select public.motorist_push_outbox_claim('{ORG}',1)") and denied(f"set role {role};select * from motorist_push_outbox"))

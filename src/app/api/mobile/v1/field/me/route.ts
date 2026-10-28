@@ -1,6 +1,7 @@
 import type { MobileFieldMe } from "@/lib/mobile-api";
 import { fieldAdmin, fieldScope, requireMobileMember } from "@/server/mobile/field-auth";
 import { mobileError, mobileJson } from "@/server/mobile/http";
+import { MutationError } from "@/server/mutation-error";
 
 export const runtime = "nodejs";
 /** The field member signed in on this phone (pristavovač, vodič or miestny dispečer);
@@ -10,7 +11,9 @@ export async function GET(request: Request) {
     const actor = await requireMobileMember(request);
     let branches: { id: string; name: string }[] = [];
     const seats = await fieldAdmin().rpc("motorist_branch_actor", { p_user_id: actor.userId, p_organization_id: actor.organizationId });
-    // No seat (42501) or a server without branches yet: the member simply has none.
+    // No seat (42501) or a server without branches yet: the member simply has none. Any other
+    // failure is a passing one; the app retries rather than hiding the branch module.
+    if (seats.error && !["42501", "PGRST202", "42883"].includes(seats.error.code ?? "")) throw new MutationError("Pobočky sa nepodarilo overiť.", 503);
     if (!seats.error && Array.isArray((seats.data as { leadGroups?: unknown } | null)?.leadGroups))
       branches = ((seats.data as { leadGroups: { id: string; name: string }[] }).leadGroups).map(group => ({ id: group.id, name: group.name }));
     const payload: MobileFieldMe = { ...fieldScope(actor), member: { id: actor.memberId, displayName: actor.displayName, email: actor.email }, capabilities: actor.capabilities, branches };

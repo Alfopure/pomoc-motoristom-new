@@ -82,7 +82,7 @@ async function saveGroupSettings(user: Awaited<ReturnType<typeof currentUser>>, 
   const payload = (input.payload && typeof input.payload === 'object' ? input.payload : {}) as Record<string, unknown>;
   const minutes = Number(payload.escalateAfterMinutes);
   if (!Number.isSafeInteger(minutes) || minutes < 5 || minutes > 1440 || typeof payload.escalateToCentral !== 'boolean') throw new TowingError('invalid_input', 400, 'Zadajte 5 až 1440 minút.');
-  const result = await admin().rpc('motorist_branch_group_settings', { ...user, p_group_id: uuid(payload.groupId), p_expected_revision: revision(input.expectedRevision), p_escalate_after: minutes, p_escalate_to_central: payload.escalateToCentral });
+  const result = await admin().rpc('motorist_branch_group_settings', { ...user, p_command_id: uuid(input.commandId), p_group_id: uuid(payload.groupId), p_expected_revision: revision(input.expectedRevision), p_escalate_after: minutes, p_escalate_to_central: payload.escalateToCentral });
   mapBranchError(result.error);
   return { commandId: uuid(input.commandId), ...(result.data as Pick<BranchReceipt, 'group'>) };
 }

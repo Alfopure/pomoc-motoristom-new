@@ -9,8 +9,8 @@ import { deliverPushNotices, mobilePushEnabled, queueMobilePush, STALE_DEVICE_DA
  * database outbox written in the same transaction as the change. A claim lease
  * keeps the immediate send and the cron drain from sending a row twice; the
  * server re-checks each recipient's access before it hands out a row. */
-export type OutboxRow = { id: string; memberId: string | null; profileId: string | null; type: Extract<MobilePushType, "work" | "branch">; event: string; title: string; body: string; target: MobilePushData };
-export type OutboxOutcome = { id: string; outcome: "sent" | "no_device" | "failed" };
+export type OutboxRow = { id: string; leaseId: string; memberId: string | null; profileId: string | null; type: Extract<MobilePushType, "work" | "branch">; event: string; title: string; body: string; target: MobilePushData };
+export type OutboxOutcome = { id: string; lease_id: string; outcome: "sent" | "no_device" | "failed" };
 export type OutboxDrain = { claimed: number; sent: number; noDevice: number; failed: number };
 type Admin = SupabaseClient;
 const READ_MS = 8_000;
@@ -19,9 +19,9 @@ const READ_MS = 8_000;
 export function outboxOutcomes(rows: readonly OutboxRow[], notices: readonly { rowId: string }[], outcomes: readonly ("sent" | "gone" | "failed")[]): OutboxOutcome[] {
   return rows.map(row => {
     const mine = notices.map((notice, index) => notice.rowId === row.id ? outcomes[index] : null).filter((value): value is "sent" | "gone" | "failed" => value !== null);
-    if (mine.includes("sent")) return { id: row.id, outcome: "sent" };
-    if (!mine.length || mine.every(value => value === "gone")) return { id: row.id, outcome: "no_device" };
-    return { id: row.id, outcome: "failed" };
+    if (mine.includes("sent")) return { id: row.id, lease_id: row.leaseId, outcome: "sent" };
+    if (!mine.length || mine.every(value => value === "gone")) return { id: row.id, lease_id: row.leaseId, outcome: "no_device" };
+    return { id: row.id, lease_id: row.leaseId, outcome: "failed" };
   });
 }
 
@@ -57,12 +57,24 @@ export async function drainPushOutbox(admin: Admin, organizationId: string, opti
     drain.claimed = rows.length;
     if (!rows.length) return drain;
     const owners = await devicesFor(admin, organizationId, rows, options.now ?? new Date());
+    // One phone gets one notice per event and work, even when it is registered for two roles.
+    const seen = new Set<string>();
     const notices: (PushNotice & { rowId: string })[] = rows.flatMap(row => (owners.get((row.memberId ?? row.profileId)!) ?? [])
-      .filter(device => device.preferences[row.type]).map(device => ({ rowId: row.id, device, title: row.title, body: row.body, data: row.target })));
+      .filter(device => device.preferences[row.type]).flatMap(device => {
+        const key = `${device.token}:${row.event}:${"id" in row.target ? row.target.id : ""}`;
+        if (seen.has(key)) return [];
+        seen.add(key);
+        return [{ rowId: row.id, device, title: row.title, body: row.body, data: row.target }];
+      }));
     const delivered = notices.length ? await deliverPushNotices(admin as never, notices, options.transport) : [];
     const results = outboxOutcomes(rows, notices, delivered);
     for (const result of results) drain[result.outcome === "sent" ? "sent" : result.outcome === "no_device" ? "noDevice" : "failed"] += 1;
-    await admin.rpc("motorist_push_outbox_finish", { p_organization_id: organizationId, p_results: results }).abortSignal(AbortSignal.timeout(READ_MS));
+    // A result that is never recorded leaves the lease to expire, and the row is then given up (at most once).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const finished = await admin.rpc("motorist_push_outbox_finish", { p_organization_id: organizationId, p_results: results }).abortSignal(AbortSignal.timeout(READ_MS));
+      if (!finished.error) break;
+      if (attempt === 1) console.warn(JSON.stringify({ event: "mobile.push.outbox.finish", error: finished.error.code ?? "unknown", rows: results.length }));
+    }
   } catch (error) {
     // Unfinished rows keep their lease and return to the queue when it expires.
     console.warn(JSON.stringify({ event: "mobile.push.outbox", error: error instanceof Error ? error.message : "failed", claimed: drain.claimed }));

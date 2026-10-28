@@ -1,33 +1,52 @@
 begin;
 -- Work notices to the right person. Each notice is written in the same
 -- transaction as the change that causes it (outbox), sent right after the
--- command and drained by the existing five-minute cron. Before sending, the
--- recipient's current access is re-checked; stale notices are dropped.
+-- command and drained by the existing five-minute cron. Delivery is at most
+-- once: a claim lease that expires before its result is recorded is given up,
+-- never resent. Before sending, the recipient's current access is re-checked.
 
 alter table public.motorist_work_groups
  add column escalate_after_minutes integer not null default 10 check (escalate_after_minutes between 5 and 1440),
  add column escalate_to_central boolean not null default false;
+-- Every return to a branch queue (routing, release, reopen, lead removal) is a new arrival for notices and escalation.
+alter table public.motorist_work_requests add column queued_at timestamptz;
+update public.motorist_work_requests set queued_at=routed_at where status='queued';
+create function app_private.work_request_queued_at() returns trigger language plpgsql set search_path='' as $$
+begin
+ if new.status='queued' and (tg_op='INSERT' or old.status<>'queued' or new.group_id is distinct from old.group_id or new.routed_at is distinct from old.routed_at) then new.queued_at:=clock_timestamp(); end if;
+ return new;
+end $$;
+create trigger motorist_work_request_queued_at before insert or update of status,group_id,routed_at on public.motorist_work_requests
+ for each row execute function app_private.work_request_queued_at();
 
 create table public.motorist_push_outbox (
  id uuid primary key default gen_random_uuid(), organization_id uuid not null references public.motorist_organizations(id),
  member_id uuid references public.motorist_towing_memberships(id), profile_id uuid references public.motorist_profiles(id),
  type text not null check (type in ('work','branch')), event text not null,
- subject_type text not null check (subject_type in ('operation','towing','branch_request')), subject_id uuid not null,
+ subject_type text not null check (subject_type in ('operation','towing','branch_request')), subject_id uuid not null, ref_generation bigint,
  dedupe_key text not null, title text not null check (length(title) <= 120), body text not null check (length(body) <= 240),
  status text not null default 'pending' check (status in ('pending','sending','sent','dropped','failed')),
- attempts integer not null default 0, lease_until timestamptz, outcome text,
+ attempts integer not null default 0, next_attempt_at timestamptz not null default clock_timestamp(), lease_id uuid, lease_until timestamptz, outcome text,
  created_at timestamptz not null default clock_timestamp(), finished_at timestamptz,
  check ((member_id is null) <> (profile_id is null)), unique (organization_id, dedupe_key)
 );
-create index motorist_push_outbox_due on public.motorist_push_outbox(organization_id, created_at) where status in ('pending','sending');
+create index motorist_push_outbox_due on public.motorist_push_outbox(organization_id, next_attempt_at) where status in ('pending','sending');
+-- A notice that could not be queued never blocks the business change; it is recorded here for monitoring.
+create table public.motorist_push_outbox_failures (
+ id bigint generated always as identity primary key, organization_id uuid, event text, error text, created_at timestamptz not null default clock_timestamp()
+);
 alter table public.motorist_push_outbox enable row level security;
-revoke all on public.motorist_push_outbox from public, anon, authenticated, service_role;
+alter table public.motorist_push_outbox_failures enable row level security;
+revoke all on public.motorist_push_outbox, public.motorist_push_outbox_failures from public, anon, authenticated, service_role;
 
-create function app_private.push_enqueue(org uuid, member uuid, profile uuid, kind text, event text, subject_type text, subject uuid, dedupe text, title text, body text)
-returns void language sql security definer set search_path='' as $$
- insert into public.motorist_push_outbox(organization_id,member_id,profile_id,type,event,subject_type,subject_id,dedupe_key,title,body)
- values(org,member,profile,kind,event,subject_type,subject,dedupe,left(title,120),left(body,240)) on conflict (organization_id,dedupe_key) do nothing
-$$;
+create function app_private.push_enqueue(org uuid, member uuid, profile uuid, kind text, event text, subject_type text, subject uuid, dedupe text, title text, body text, generation bigint default null)
+returns void language plpgsql security definer set search_path='' as $$
+begin
+ insert into public.motorist_push_outbox(organization_id,member_id,profile_id,type,event,subject_type,subject_id,ref_generation,dedupe_key,title,body)
+ values(org,member,profile,kind,event,subject_type,subject,generation,dedupe,left(title,120),left(body,240)) on conflict (organization_id,dedupe_key) do nothing;
+exception when others then
+ insert into public.motorist_push_outbox_failures(organization_id,event,error) values(org,event,left(sqlerrm,500));
+end $$;
 -- Notice texts never carry customer data.
 create function app_private.push_term(at timestamptz) returns text language sql immutable set search_path='' as $$
  select case when at is null then 'Bez dohodnutého termínu' else 'Termín ' || to_char(at at time zone 'Europe/Bratislava','DD.MM. HH24:MI') end
@@ -35,34 +54,36 @@ $$;
 create function app_private.push_kind(kind text) returns text language sql immutable set search_path='' as $$
  select case kind when 'delivery' then 'pristavenie' when 'collection' then 'odvoz vozidla' when 'transfer' then 'presun vozidla' when 'tow' then 'odťah' else 'práca' end
 $$;
+-- Slovak agreement: pristavenie is neuter, odvoz/presun/odťah masculine.
+create function app_private.push_kind_title(kind text, adjective text) returns text language sql immutable set search_path='' as $$
+ select case when kind='delivery' then case adjective when 'new' then 'Nové' else 'Zrušené' end else case adjective when 'new' then 'Nový' else 'Zrušený' end end || ' ' || app_private.push_kind(kind)
+$$;
 
 -- Logistics executions: assignment, reassignment, new term, cancellation.
 create function app_private.push_logistics_change() returns trigger language plpgsql security definer set search_path='' as $$
 declare op public.motorist_operations; label text;
 begin
  select * into op from public.motorist_operations where id=new.operation_id;
- -- Legacy app deliveries keep their own notice (case-handoff push); never twice.
- if exists(select 1 from public.motorist_case_handoffs h where h.operation_id=new.operation_id) then return new; end if;
  label:=app_private.push_kind(op.kind);
- begin
-  if new.assignee_id is distinct from old.assignee_id then
-   if new.assignee_id is not null and new.status not in ('completed','cancelled') then
-    perform app_private.push_enqueue(new.organization_id,new.assignee_id,null,'work','work_assigned','operation',new.operation_id,
-     'work_assigned:'||new.operation_id||':'||new.assignment_generation||':'||new.assignee_id,'Nové ' || label,app_private.push_term(new.scheduled_at));
-   end if;
-   if old.assignee_id is not null then
-    perform app_private.push_enqueue(new.organization_id,old.assignee_id,null,'work','work_unassigned','operation',new.operation_id,
-     'work_unassigned:'||new.operation_id||':'||new.assignment_generation||':'||old.assignee_id,'Práca vám bola odobratá',initcap(label) || ' prevzal iný kolega.');
-   end if;
-  elsif new.assignee_id is not null and new.status='cancelled' and old.status<>'cancelled' then
-   perform app_private.push_enqueue(new.organization_id,new.assignee_id,null,'work','work_cancelled','operation',new.operation_id,
-    'work_cancelled:'||new.operation_id||':'||new.assignee_id,'Zrušené ' || label,'Jazdu netreba vykonať.');
-  elsif new.assignee_id is not null and new.status not in ('completed','cancelled') and (new.scheduled_at is distinct from old.scheduled_at or new.planned_end_at is distinct from old.planned_end_at) then
-   perform app_private.push_enqueue(new.organization_id,new.assignee_id,null,'work','work_changed','operation',new.operation_id,
-    'work_changed:'||new.operation_id||':'||new.revision||':'||new.assignee_id,'Zmena termínu: ' || label,app_private.push_term(new.scheduled_at));
+ -- A member who holds the live legacy app delivery of this work is notified by that path; never twice.
+ if new.assignee_id is not null and exists(select 1 from public.motorist_case_handoffs h where h.operation_id=new.operation_id and h.recipient_member_id=new.assignee_id
+   and h.status in ('offered','accepted','en_route','arrived')) then return new; end if;
+ if new.assignee_id is distinct from old.assignee_id then
+  if new.assignee_id is not null and new.status not in ('completed','cancelled') then
+   perform app_private.push_enqueue(new.organization_id,new.assignee_id,null,'work','work_assigned','operation',new.operation_id,
+    'work_assigned:'||new.operation_id||':'||new.assignment_generation||':'||new.assignee_id,app_private.push_kind_title(op.kind,'new'),app_private.push_term(new.scheduled_at),new.assignment_generation);
   end if;
- exception when others then raise warning 'push outbox (logistics) skipped: %', sqlerrm;
- end;
+  if old.assignee_id is not null then
+   perform app_private.push_enqueue(new.organization_id,old.assignee_id,null,'work','work_unassigned','operation',new.operation_id,
+    'work_unassigned:'||new.operation_id||':'||new.assignment_generation||':'||old.assignee_id,'Práca vám bola odobratá',initcap(label) || ' prevzal iný kolega.');
+  end if;
+ elsif new.assignee_id is not null and new.status='cancelled' and old.status<>'cancelled' then
+  perform app_private.push_enqueue(new.organization_id,new.assignee_id,null,'work','work_cancelled','operation',new.operation_id,
+   'work_cancelled:'||new.operation_id||':'||new.assignee_id,app_private.push_kind_title(op.kind,'cancelled'),'Jazdu netreba vykonať.');
+ elsif new.assignee_id is not null and new.status not in ('completed','cancelled') and (new.scheduled_at is distinct from old.scheduled_at or new.planned_end_at is distinct from old.planned_end_at) then
+  perform app_private.push_enqueue(new.organization_id,new.assignee_id,null,'work','work_changed','operation',new.operation_id,
+   'work_changed:'||new.operation_id||':'||new.revision||':'||new.assignee_id,'Zmena termínu: ' || label,app_private.push_term(new.scheduled_at),new.assignment_generation);
+ end if;
  return new;
 end $$;
 create trigger motorist_push_logistics after update of assignee_id,status,scheduled_at,planned_end_at on public.motorist_logistics_executions
@@ -71,67 +92,58 @@ create trigger motorist_push_logistics after update of assignee_id,status,schedu
 -- Towing orders: driver assignment and work returned for changes or cancelled.
 create function app_private.push_towing_change() returns trigger language plpgsql security definer set search_path='' as $$
 begin
- begin
-  if new.driver_id is distinct from old.driver_id and new.driver_id is not null and new.work_status not in ('submitted','cancelled') then
-   perform app_private.push_enqueue(new.organization_id,new.driver_id,null,'work','tow_assigned','towing',new.id,
-    'tow_assigned:'||new.id||':'||new.assignment_generation||':'||new.driver_id,'Nový odťah',app_private.push_term(nullif(new.fields->>'plannedAt','')::timestamptz));
-  end if;
-  if new.driver_id is distinct from old.driver_id and old.driver_id is not null then
-   perform app_private.push_enqueue(new.organization_id,old.driver_id,null,'work','tow_unassigned','towing',new.id,
-    'tow_unassigned:'||new.id||':'||new.assignment_generation||':'||old.driver_id,'Odťah vám bol odobratý','Zákazku prevzal iný vodič.');
-  end if;
-  if new.driver_id is not null and new.driver_id is not distinct from old.driver_id and new.work_status is distinct from old.work_status and new.work_status in ('needs_changes','cancelled') then
-   perform app_private.push_enqueue(new.organization_id,new.driver_id,null,'work','tow_'||new.work_status,'towing',new.id,
-    'tow_'||new.work_status||':'||new.id||':'||new.revision||':'||new.driver_id,
-    case new.work_status when 'needs_changes' then 'Odťah vrátený na doplnenie' else 'Odťah zrušený' end,
-    case new.work_status when 'needs_changes' then 'Kancelária žiada doplniť údaje.' else 'Zákazku netreba vykonať.' end);
-  end if;
- exception when others then raise warning 'push outbox (towing) skipped: %', sqlerrm;
- end;
+ if new.driver_id is distinct from old.driver_id and new.driver_id is not null and new.work_status not in ('submitted','cancelled') then
+  perform app_private.push_enqueue(new.organization_id,new.driver_id,null,'work','tow_assigned','towing',new.id,
+   'tow_assigned:'||new.id||':'||new.assignment_generation||':'||new.driver_id,'Nový odťah',app_private.push_term(nullif(new.fields->>'plannedAt','')::timestamptz),new.assignment_generation);
+ end if;
+ if new.driver_id is distinct from old.driver_id and old.driver_id is not null then
+  perform app_private.push_enqueue(new.organization_id,old.driver_id,null,'work','tow_unassigned','towing',new.id,
+   'tow_unassigned:'||new.id||':'||new.assignment_generation||':'||old.driver_id,'Odťah vám bol odobratý','Zákazku prevzal iný vodič.');
+ end if;
+ if new.driver_id is not null and new.driver_id is not distinct from old.driver_id and new.work_status is distinct from old.work_status and new.work_status in ('needs_changes','cancelled') then
+  perform app_private.push_enqueue(new.organization_id,new.driver_id,null,'work','tow_'||new.work_status,'towing',new.id,
+   'tow_'||new.work_status||':'||new.id||':'||new.revision||':'||new.driver_id,
+   case new.work_status when 'needs_changes' then 'Odťah vrátený na doplnenie' else 'Zrušený odťah' end,
+   case new.work_status when 'needs_changes' then 'Kancelária žiada doplniť údaje.' else 'Zákazku netreba vykonať.' end,new.assignment_generation);
+ end if;
  return new;
 end $$;
 create trigger motorist_push_towing after update of driver_id,work_status on public.motorist_towing_orders
  for each row execute function app_private.push_towing_change();
 
--- Branch queue: a request arriving in a group notifies its receiving leads.
+-- Branch queue: every arrival in a group's queue notifies its receiving leads.
 create function app_private.push_branch_arrival() returns trigger language plpgsql security definer set search_path='' as $$
 declare g public.motorist_work_groups; m record;
 begin
- if new.status<>'queued' or (tg_op='UPDATE' and new.routed_at is not distinct from old.routed_at) then return new; end if;
- begin
-  select * into g from public.motorist_work_groups where id=new.group_id;
-  for m in select gm.member_id from public.motorist_work_group_members gm join public.motorist_towing_memberships tm on tm.id=gm.member_id and tm.active
-   where gm.group_id=new.group_id and gm.role='lead' and gm.receives_new loop
-   perform app_private.push_enqueue(new.organization_id,m.member_id,null,'branch','branch_new','branch_request',new.id,
-    'branch_new:'||new.id||':'||extract(epoch from new.routed_at)::bigint||':'||m.member_id,'Nová práca: ' || g.name,initcap(app_private.push_kind(new.kind)) || ' čaká na prevzatie.');
-  end loop;
- exception when others then raise warning 'push outbox (branch) skipped: %', sqlerrm;
- end;
+ if new.status<>'queued' or (tg_op='UPDATE' and new.queued_at is not distinct from old.queued_at) then return new; end if;
+ select * into g from public.motorist_work_groups where id=new.group_id;
+ for m in select gm.member_id from public.motorist_work_group_members gm join public.motorist_towing_memberships tm on tm.id=gm.member_id and tm.active
+  where gm.group_id=new.group_id and gm.role='lead' and gm.receives_new loop
+  perform app_private.push_enqueue(new.organization_id,m.member_id,null,'branch','branch_new','branch_request',new.id,
+   'branch_new:'||new.id||':'||extract(epoch from new.queued_at)::bigint||':'||m.member_id,'Nová práca: ' || g.name,initcap(app_private.push_kind(new.kind)) || ' čaká na prevzatie.');
+ end loop;
  return new;
 end $$;
-create trigger motorist_push_branch after insert or update of group_id,status,routed_at on public.motorist_work_requests
+create trigger motorist_push_branch after insert or update of group_id,status,routed_at,queued_at on public.motorist_work_requests
  for each row execute function app_private.push_branch_arrival();
 
--- A reported damage reaches the lead who assigned the work, else the dispatcher who created it.
+-- A reported damage reaches the lead who assigned the work while still a lead there, else the dispatcher who created it.
 create function app_private.push_damage_report() returns trigger language plpgsql security definer set search_path='' as $$
 declare lead uuid; creator uuid; op public.motorist_operations; label text;
 begin
  if new.stage<>'damage' then return new; end if;
- begin
-  select * into op from public.motorist_operations where id=new.operation_id;
-  label:=initcap(app_private.push_kind(op.kind));
-  select e.actor_member_id into lead from public.motorist_work_requests r join public.motorist_work_request_events e on e.request_id=r.id and e.action='materialize'
-   where r.operation_id=new.operation_id and e.actor_member_id is not null order by e.created_at desc limit 1;
-  if lead is not null then
-   perform app_private.push_enqueue(op.organization_id,lead,null,'work','work_problem','operation',op.id,'work_problem:'||new.id||':m:'||lead,'Nahlásené poškodenie',label || ': vykonávateľ nahlásil poškodenie.');
-  else
-   select p.id into creator from public.motorist_profiles p where p.organization_id=op.organization_id and p.user_id=op.created_by and p.active;
-   if creator is not null then
-    perform app_private.push_enqueue(op.organization_id,null,creator,'work','work_problem','operation',op.id,'work_problem:'||new.id||':p:'||creator,'Nahlásené poškodenie',label || ': vykonávateľ nahlásil poškodenie.');
-   end if;
+ select * into op from public.motorist_operations where id=new.operation_id;
+ label:=initcap(app_private.push_kind(op.kind));
+ select e.actor_member_id into lead from public.motorist_work_requests r join public.motorist_work_request_events e on e.request_id=r.id and e.action='materialize'
+  where r.operation_id=new.operation_id and e.actor_member_id is not null and app_private.branch_lead(r.organization_id,e.actor_member_id,r.group_id) order by e.created_at desc limit 1;
+ if lead is not null then
+  perform app_private.push_enqueue(op.organization_id,lead,null,'work','work_problem','operation',op.id,'work_problem:'||new.id||':m:'||lead,'Nahlásené poškodenie',label || ': vykonávateľ nahlásil poškodenie.');
+ else
+  select p.id into creator from public.motorist_profiles p where p.organization_id=op.organization_id and p.user_id=op.created_by and p.active and p.kind is distinct from 'ai';
+  if creator is not null then
+   perform app_private.push_enqueue(op.organization_id,null,creator,'work','work_problem','operation',op.id,'work_problem:'||new.id||':p:'||creator,'Nahlásené poškodenie',label || ': vykonávateľ nahlásil poškodenie.');
   end if;
- exception when others then raise warning 'push outbox (damage) skipped: %', sqlerrm;
- end;
+ end if;
  return new;
 end $$;
 create trigger motorist_push_damage after insert on public.motorist_operation_evidence
@@ -139,65 +151,75 @@ create trigger motorist_push_damage after insert on public.motorist_operation_ev
 
 -- Waiting too long in a branch queue (evaluated by the cron, so at least 5 minutes).
 create function public.motorist_branch_escalate(p_organization_id uuid) returns integer language plpgsql security definer set search_path='' as $$
-declare r record; m record; n integer:=0; before bigint;
+declare r record; m record; before bigint; after_count bigint;
 begin
- for r in select wr.*,g.name group_name,g.escalate_to_central,round(extract(epoch from now()-wr.routed_at)/60)::int waited from public.motorist_work_requests wr join public.motorist_work_groups g on g.id=wr.group_id and g.active
-  where wr.organization_id=p_organization_id and wr.status='queued' and wr.routed_at<now()-make_interval(mins=>g.escalate_after_minutes) and wr.routed_at>now()-interval '2 days' limit 200 loop
-  select count(*) into before from public.motorist_push_outbox where organization_id=p_organization_id and subject_id=r.id and event='branch_waiting';
+ select count(*) into before from public.motorist_push_outbox where organization_id=p_organization_id and event='branch_waiting';
+ for r in select wr.*,g.name group_name,g.escalate_to_central,round(extract(epoch from now()-wr.queued_at)/60)::int waited from public.motorist_work_requests wr join public.motorist_work_groups g on g.id=wr.group_id and g.active
+  where wr.organization_id=p_organization_id and wr.status='queued' and wr.queued_at<now()-make_interval(mins=>g.escalate_after_minutes) and wr.queued_at>now()-interval '2 days' limit 200 loop
   for m in select gm.member_id from public.motorist_work_group_members gm join public.motorist_towing_memberships tm on tm.id=gm.member_id and tm.active
    where gm.group_id=r.group_id and gm.role='lead' loop
-   perform app_private.push_enqueue(p_organization_id,m.member_id,null,'branch','branch_waiting','branch_request',r.id,'branch_waiting:'||r.id||':'||extract(epoch from r.routed_at)::bigint||':m:'||m.member_id,
+   perform app_private.push_enqueue(p_organization_id,m.member_id,null,'branch','branch_waiting','branch_request',r.id,'branch_waiting:'||r.id||':'||extract(epoch from r.queued_at)::bigint||':m:'||m.member_id,
     'Práca čaká na prevzatie',r.group_name || ': ' || app_private.push_kind(r.kind) || ' čaká ' || r.waited || ' min.');
   end loop;
   if r.escalate_to_central then
-   for m in select p.id from public.motorist_profiles p where p.organization_id=p_organization_id and p.active and p.access_status='active' and p.role in ('senior_dispatcher','manager','admin') loop
-    perform app_private.push_enqueue(p_organization_id,null,m.id,'branch','branch_waiting','branch_request',r.id,'branch_waiting:'||r.id||':'||extract(epoch from r.routed_at)::bigint||':p:'||m.id,
+   for m in select p.id from public.motorist_profiles p where p.organization_id=p_organization_id and p.active and p.access_status='active' and p.kind is distinct from 'ai' and p.role in ('senior_dispatcher','manager','admin') loop
+    perform app_private.push_enqueue(p_organization_id,null,m.id,'branch','branch_waiting','branch_request',r.id,'branch_waiting:'||r.id||':'||extract(epoch from r.queued_at)::bigint||':p:'||m.id,
      'Pobočka neprevzala prácu',r.group_name || ': ' || app_private.push_kind(r.kind) || ' čaká ' || r.waited || ' min.');
    end loop;
   end if;
-  n:=n+(select count(*) from public.motorist_push_outbox where organization_id=p_organization_id and subject_id=r.id and event='branch_waiting')-before;
  end loop;
- return n;
+ select count(*) into after_count from public.motorist_push_outbox where organization_id=p_organization_id and event='branch_waiting';
+ return after_count-before;
 end $$;
 
--- Claim due notices with a lease (immediate send and cron never send the same
--- row twice) and drop the ones whose recipient no longer has the work.
+-- Recipient still has the work right now.
 create function app_private.push_still_valid(o public.motorist_push_outbox) returns boolean language sql stable set search_path='' as $$
  select case
   when o.member_id is not null and not exists(select 1 from public.motorist_towing_memberships m where m.id=o.member_id and m.active) then false
   when o.profile_id is not null and not exists(select 1 from public.motorist_profiles p where p.id=o.profile_id and p.active and p.access_status='active') then false
-  when o.event in ('work_assigned','work_changed') then exists(select 1 from public.motorist_logistics_executions e where e.operation_id=o.subject_id and e.assignee_id=o.member_id and e.status not in ('completed','cancelled'))
-  when o.event='tow_assigned' then exists(select 1 from public.motorist_towing_orders t where t.id=o.subject_id and t.driver_id=o.member_id and t.work_status not in ('submitted','cancelled'))
+  when o.event in ('work_assigned','work_changed') then exists(select 1 from public.motorist_logistics_executions e where e.operation_id=o.subject_id and e.assignee_id=o.member_id
+   and e.status not in ('completed','cancelled') and (o.ref_generation is null or e.assignment_generation=o.ref_generation))
+  when o.event='tow_assigned' then exists(select 1 from public.motorist_towing_orders t where t.id=o.subject_id and t.driver_id=o.member_id and t.work_status not in ('submitted','cancelled')
+   and (o.ref_generation is null or t.assignment_generation=o.ref_generation))
+  when o.event='tow_needs_changes' then exists(select 1 from public.motorist_towing_orders t where t.id=o.subject_id and t.driver_id=o.member_id and t.work_status='needs_changes')
+  when o.event='work_problem' and o.member_id is not null then exists(select 1 from public.motorist_work_requests r where r.operation_id=o.subject_id and app_private.branch_lead(r.organization_id,o.member_id,r.group_id))
   when o.event in ('branch_new','branch_waiting') then exists(select 1 from public.motorist_work_requests r where r.id=o.subject_id and r.status='queued'
    and (o.profile_id is not null or app_private.branch_lead(r.organization_id,o.member_id,r.group_id)))
   else true end
 $$;
+-- Claim due notices under a lease. A lease that expired without a result is
+-- uncertain (the phone may have it), so it is given up instead of resent.
 create function public.motorist_push_outbox_claim(p_organization_id uuid, p_limit integer default 50) returns jsonb language plpgsql security definer set search_path='' as $$
-declare claimed jsonb;
+declare claimed jsonb; lease uuid:=gen_random_uuid();
 begin
- update public.motorist_push_outbox set status='dropped',outcome='no_longer_valid',finished_at=clock_timestamp(),lease_until=null
-  where id in (select id from public.motorist_push_outbox o where o.organization_id=p_organization_id and (o.status='pending' or (o.status='sending' and o.lease_until<clock_timestamp()))
-   and not app_private.push_still_valid(o) order by o.created_at limit 500 for update skip locked);
- update public.motorist_push_outbox set status='failed',outcome='expired',finished_at=clock_timestamp(),lease_until=null
-  where organization_id=p_organization_id and status in ('pending','sending') and created_at<now()-interval '1 day';
- with due as (select id from public.motorist_push_outbox where organization_id=p_organization_id and (status='pending' or (status='sending' and lease_until<clock_timestamp()))
+ update public.motorist_push_outbox set status='failed',outcome='lease_expired',finished_at=clock_timestamp(),lease_id=null,lease_until=null
+  where organization_id=p_organization_id and status='sending' and lease_until<clock_timestamp();
+ update public.motorist_push_outbox set status='failed',outcome='expired',finished_at=clock_timestamp()
+  where organization_id=p_organization_id and status='pending' and created_at<now()-interval '1 day';
+ update public.motorist_push_outbox set status='dropped',outcome='no_longer_valid',finished_at=clock_timestamp()
+  where id in (select id from public.motorist_push_outbox o where o.organization_id=p_organization_id and o.status='pending' and not app_private.push_still_valid(o)
+   order by o.created_at limit 500 for update skip locked);
+ with due as (select id from public.motorist_push_outbox where organization_id=p_organization_id and status='pending' and next_attempt_at<=clock_timestamp()
    order by created_at limit least(200,greatest(1,p_limit)) for update skip locked),
-  marked as (update public.motorist_push_outbox o set status='sending',attempts=o.attempts+1,lease_until=clock_timestamp()+interval '2 minutes' from due where o.id=due.id returning o.*)
- select coalesce(jsonb_agg(jsonb_build_object('id',id,'memberId',member_id,'profileId',profile_id,'type',type,'event',event,'title',title,'body',body,
+  marked as (update public.motorist_push_outbox o set status='sending',attempts=o.attempts+1,lease_id=lease,lease_until=clock_timestamp()+interval '2 minutes' from due where o.id=due.id returning o.*)
+ select coalesce(jsonb_agg(jsonb_build_object('id',id,'leaseId',lease_id,'memberId',member_id,'profileId',profile_id,'type',type,'event',event,'title',title,'body',body,
   'target',jsonb_build_object('kind',case subject_type when 'branch_request' then 'branch-request' else subject_type end,'id',subject_id)) order by created_at),'[]') into claimed from marked;
  return claimed;
 end $$;
+-- Only the current lease holder records a result. Failed sends back off: 30 s, 2 min, 4.5 min, 8 min.
 create function public.motorist_push_outbox_finish(p_organization_id uuid, p_results jsonb) returns integer language plpgsql security definer set search_path='' as $$
 declare n integer;
 begin
  if jsonb_typeof(p_results)<>'array' then raise exception 'Invalid results' using errcode='22023'; end if;
  update public.motorist_push_outbox o set
   status=case x.outcome when 'sent' then 'sent' when 'no_device' then 'dropped' else case when o.attempts>=5 then 'failed' else 'pending' end end,
-  outcome=x.outcome,lease_until=null,finished_at=case when x.outcome in ('sent','no_device') or o.attempts>=5 then clock_timestamp() else null end
- from jsonb_to_recordset(p_results) x(id uuid, outcome text)
- where o.id=x.id and o.organization_id=p_organization_id and o.status='sending' and x.outcome in ('sent','no_device','failed');
+  outcome=x.outcome,lease_id=null,lease_until=null,next_attempt_at=clock_timestamp()+make_interval(secs=>30*o.attempts*o.attempts),
+  finished_at=case when x.outcome in ('sent','no_device') or o.attempts>=5 then clock_timestamp() else null end
+ from jsonb_to_recordset(p_results) x(id uuid, lease_id uuid, outcome text)
+ where o.id=x.id and o.organization_id=p_organization_id and o.status='sending' and o.lease_id=x.lease_id and x.outcome in ('sent','no_device','failed');
  get diagnostics n=row_count;
  delete from public.motorist_push_outbox where organization_id=p_organization_id and status in ('sent','dropped','failed') and created_at<now()-interval '30 days';
+ delete from public.motorist_push_outbox_failures where organization_id=p_organization_id and created_at<now()-interval '30 days';
  return n;
 end $$;
 
@@ -234,24 +256,34 @@ begin
   'fleet',case when (actor->>'central')::boolean then coalesce((select jsonb_agg(jsonb_build_object('id',id,'name',label) order by label) from public.motorist_fleet_assets where organization_id=p_organization_id and kind='replacement_car'),'[]') else '[]' end);
 end $$;
 
--- Escalation settings of a branch (manager/admin). Kept apart from group_save so
--- existing group receipts and their replay semantics stay unchanged.
-create function public.motorist_branch_group_settings(p_user_id uuid,p_organization_id uuid,p_group_id uuid,p_expected_revision bigint,p_escalate_after integer,p_escalate_to_central boolean)
+-- Escalation settings of a branch (manager/admin), replay-safe by command id;
+-- the stored command row records who changed what.
+create function public.motorist_branch_group_settings(p_user_id uuid,p_organization_id uuid,p_command_id uuid,p_group_id uuid,p_expected_revision bigint,p_escalate_after integer,p_escalate_to_central boolean)
 returns jsonb language plpgsql security definer set search_path='' as $$
-declare actor jsonb; g public.motorist_work_groups;
+declare actor jsonb; g public.motorist_work_groups; command jsonb; receipt jsonb;
 begin
  actor:=app_private.branch_actor(p_user_id,p_organization_id);
  if not (actor->>'manage')::boolean then raise exception 'Forbidden' using errcode='42501'; end if;
- if p_escalate_after is null or p_escalate_after not between 5 and 1440 or p_escalate_to_central is null then raise exception 'Invalid escalation' using errcode='22023'; end if;
+ if p_command_id is null or p_escalate_after is null or p_escalate_after not between 5 and 1440 or p_escalate_to_central is null then raise exception 'Invalid escalation' using errcode='22023'; end if;
+ command:=jsonb_build_object('action','group_settings','groupId',p_group_id,'expectedRevision',p_expected_revision,'escalateAfterMinutes',p_escalate_after,'escalateToCentral',p_escalate_to_central);
+ perform pg_advisory_xact_lock(hashtextextended(p_organization_id::text||p_user_id::text||p_command_id::text,28102026));
+ select c.receipt into receipt from public.motorist_work_request_commands c where c.organization_id=p_organization_id and c.actor_user_id=p_user_id and c.command_id=p_command_id;
+ if found then
+  if not exists(select 1 from public.motorist_work_request_commands c where c.organization_id=p_organization_id and c.actor_user_id=p_user_id and c.command_id=p_command_id and c.payload=command) then raise exception 'Command conflict' using errcode='PT409'; end if;
+  return receipt;
+ end if;
  update public.motorist_work_groups set escalate_after_minutes=p_escalate_after,escalate_to_central=p_escalate_to_central,revision=revision+1,updated_at=now()
   where id=p_group_id and organization_id=p_organization_id and revision=p_expected_revision returning * into g;
  if not found then raise exception 'Revision conflict' using errcode='PT409'; end if;
- return jsonb_build_object('group',jsonb_build_object('id',g.id,'revision',g.revision,'name',g.name,'escalateAfterMinutes',g.escalate_after_minutes,'escalateToCentral',g.escalate_to_central));
+ receipt:=jsonb_build_object('commandId',p_command_id,'group',jsonb_build_object('id',g.id,'revision',g.revision,'name',g.name,'escalateAfterMinutes',g.escalate_after_minutes,'escalateToCentral',g.escalate_to_central));
+ insert into public.motorist_work_request_commands(organization_id,actor_user_id,command_id,payload,receipt) values(p_organization_id,p_user_id,p_command_id,command,receipt);
+ return receipt;
 end $$;
-revoke all on function app_private.push_enqueue(uuid,uuid,uuid,text,text,text,uuid,text,text,text),app_private.push_term(timestamptz),app_private.push_kind(text),
- app_private.push_logistics_change(),app_private.push_towing_change(),app_private.push_branch_arrival(),app_private.push_damage_report(),
+
+revoke all on function app_private.push_enqueue(uuid,uuid,uuid,text,text,text,uuid,text,text,text,bigint),app_private.push_term(timestamptz),app_private.push_kind(text),app_private.push_kind_title(text,text),
+ app_private.push_logistics_change(),app_private.push_towing_change(),app_private.push_branch_arrival(),app_private.push_damage_report(),app_private.work_request_queued_at(),
  app_private.push_still_valid(public.motorist_push_outbox) from public,anon,authenticated,service_role;
-revoke all on function public.motorist_branch_escalate(uuid),public.motorist_push_outbox_claim(uuid,integer),public.motorist_push_outbox_finish(uuid,jsonb),public.motorist_branch_group_settings(uuid,uuid,uuid,bigint,integer,boolean) from public,anon,authenticated;
-grant execute on function public.motorist_branch_escalate(uuid),public.motorist_push_outbox_claim(uuid,integer),public.motorist_push_outbox_finish(uuid,jsonb),public.motorist_branch_group_settings(uuid,uuid,uuid,bigint,integer,boolean) to service_role;
+revoke all on function public.motorist_branch_escalate(uuid),public.motorist_push_outbox_claim(uuid,integer),public.motorist_push_outbox_finish(uuid,jsonb),public.motorist_branch_group_settings(uuid,uuid,uuid,uuid,bigint,integer,boolean) from public,anon,authenticated;
+grant execute on function public.motorist_branch_escalate(uuid),public.motorist_push_outbox_claim(uuid,integer),public.motorist_push_outbox_finish(uuid,jsonb),public.motorist_branch_group_settings(uuid,uuid,uuid,uuid,bigint,integer,boolean) to service_role;
 notify pgrst, 'reload schema';
 commit;
