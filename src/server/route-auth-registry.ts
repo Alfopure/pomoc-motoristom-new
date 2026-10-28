@@ -13,8 +13,9 @@
  *  - `user-bearer` — verified Supabase user JWT + active organization profile; no cookies or machine secrets.
  *  - `field-bearer` — verified Supabase user JWT + active field membership with the needed capability;
  *    no dispatch profile, cookies or machine secrets (pristavovač in the mobile app).
- *  - `delivery-tracker` — a per-delivery secret issued to the pristavovač over `field-bearer`
- *    (`Authorization: Tracker …`, only its hash stored); it only adds positions to that open delivery.
+ *  - `delivery-tracker` — a per-delivery or per-operation secret issued to the field member over
+ *    `field-bearer` (`Authorization: Tracker …`, only its hash stored); it only adds positions to
+ *    that open delivery or the member's own accepted operation.
  *
  * `role` je vyplnené LEN tam, kde route reálne používa role-gate (inak member-level prístup).
  *
@@ -68,6 +69,8 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/field/operations/[id]/commands": { class: "field-bearer", note: "Requires deliver; accept/start/arrive/collect/complete/evidence on an own operation via motorist_operations_command with command id, expected revision and receipt replay." },
   "mobile/v1/field/operations/[id]/files": { class: "field-bearer", note: "Requires deliver; evidence file for an own open operation; private bucket, validated MIME/size, assignment re-checked after storage." },
   "mobile/v1/field/operations/[id]/position": { class: "field-bearer", note: "Requires deliver; position only while the own operation is accepted/en_route/arrived/collected; throttled, kept 30 days." },
+  "mobile/v1/field/operations/[id]/tracker": { class: "field-bearer", note: "Requires deliver; issues or revokes the secret for background positions of the own accepted operation (not legacy-delivery work)." },
+  "mobile/v1/field/operations/track": { class: "delivery-tracker", note: "Background positions by the per-operation secret (hash lookup); answers only stored count and whether to go on." },
   "mobile/v1/field/towing/[id]": { class: "field-bearer", note: "Requires drive and MOTORIST_TOWING_ENABLED; one own towing order in the allowlisted driver projection without finance." },
   "mobile/v1/field/towing/[id]/commands": { class: "field-bearer", note: "Requires drive; start/update_order (driver fields)/submit with assignment generation, expected revision and receipt replay." },
   "mobile/v1/field/towing/[id]/attachments": { class: "field-bearer", note: "Requires drive; work/handover photo or scan for an own order; validated file, immutable storage path, intent+finalize commands." },

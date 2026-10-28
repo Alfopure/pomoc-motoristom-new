@@ -293,8 +293,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
         // Notices for this account stop reaching the phone; the choice stays for the next sign-in.
         await push.forget();
         // Nothing more about this person's position leaves the phone.
-        await work?.tracker.forget();
-        await Promise.race([delivery.location.forget(), new Promise(resolve => setTimeout(resolve, 5_000))]);
+        // The two revocations run one after another (4 s each at most); sign-out then halts both anyway.
+        await Promise.race([Promise.all([work?.forget(), delivery.location.forget()]), new Promise(resolve => setTimeout(resolve, 9_000))]);
       });
     } finally { preparingLogout.current = false; setLogoutBusy(false); }
   }
@@ -303,7 +303,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
       { text: "Zostať", style: "cancel" }, { text: "Odhlásiť bez uloženia", style: "destructive", onPress: () => { void logout(true); } },
     ]);
   }
-  if (me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do dispečingu…" /></>;
+  if (me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do aplikácie…" /></>;
   // A membership with only office roles (billing, reports…) has nothing in the app yet.
   if (fieldOnly && delivery.memberId && !hasField(delivery.modules)) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
     <Text accessibilityRole="header" style={styles.subheading}>V aplikácii pre vás zatiaľ nie je modul</Text>

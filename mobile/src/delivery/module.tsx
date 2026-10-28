@@ -77,7 +77,7 @@ function DeliveryList({ query, commands, active, onOpen }: { query: UseQueryResu
         <Group>{done.map((delivery, index) => <DeliveryRow key={delivery.id} delivery={delivery} first={index === 0} onOpen={onOpen} />)}</Group>
       </>}
     </>}
-    <View style={formLayout.actions}><Button label={query.isFetching ? "Obnovujem…" : "Obnoviť"} secondary disabled={query.isFetching} onPress={() => { void query.refetch(); }} /></View>
+    {!query.isError && <View style={formLayout.actions}><Button label={query.isFetching ? "Obnovujem…" : "Obnoviť"} secondary disabled={query.isFetching} onPress={() => { void query.refetch(); }} /></View>}
   </ScrollView>;
 }
 

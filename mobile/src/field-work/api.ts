@@ -106,7 +106,7 @@ export type FieldWorkApi = ReturnType<typeof createFieldWorkApi>;
 /** `memberId` comes from the verified field identity; every answer must be for it. */
 export function createFieldWorkApi(config: MobileConfig, memberId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch,
   uploadTransport: () => Promise<MobileTransport> = async () => transport, current: () => boolean = () => true) {
-  async function request(path: string, init: { method: "GET" | "POST"; body?: unknown; binary?: { bytes: Uint8Array; contentType: string }; signal?: AbortSignal; timeout?: number }) {
+  async function request(path: string, init: { method: "GET" | "POST" | "DELETE"; body?: unknown; binary?: { bytes: Uint8Array; contentType: string }; signal?: AbortSignal; timeout?: number }) {
     if (!current()) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
     const token = await getToken();
     if (!current()) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
@@ -167,6 +167,16 @@ export function createFieldWorkApi(config: MobileConfig, memberId: string, getTo
       const body = await request("operations/" + pathId(operationId, "Jazda sa nenašla.") + "/position", { method: "POST", body: position, timeout: 10_000 });
       check(typeof body.stored === "boolean" && typeof body.active === "boolean");
       return { stored: body.stored as boolean, active: body.active as boolean };
+    },
+    /** The secret for sending this operation's position in the background; kept only in the Keychain. */
+    operationTracker: async (operationId: string): Promise<{ token: string; expiresAt: string }> => {
+      const body = await request("operations/" + pathId(operationId, "Jazda sa nenašla.") + "/tracker", { method: "POST" });
+      check(typeof body.token === "string" && /^[A-Za-z0-9_-]{43}$/.test(body.token) && date(body.expiresAt));
+      return { token: body.token as string, expiresAt: body.expiresAt as string };
+    },
+    operationUntrack: async (operationId: string): Promise<void> => {
+      if (!id(operationId)) return;
+      await request("operations/" + operationId.toLowerCase() + "/tracker", { method: "DELETE", timeout: 4_000 });
     },
     towing: async (orderId: string, signal?: AbortSignal): Promise<MobileTowingOrder> => {
       const target = pathId(orderId, "Zákazka sa nenašla.");
