@@ -114,7 +114,7 @@ insert into motorist_cases(id,organization_id,case_number,status,priority,source
   # Partner A: own allowlisted cases only.
   a=portal()
   ids=[c['caseId'] for c in a['cases']]
-  check('partner A lists exactly own cases in period plus still-new insurance events',ids==[casea2,casea1,casea3])
+  check('partner A lists own still-new insurance events first, then own period cases',ids==[casea1,casea3,casea2])
   check('partner A rows contain only allowlisted fields',all(set(c)==ALLOWED for c in a['cases']) and all(set(c['vehicle'])=={'make','model','plate'} for c in a['cases']))
   check('no internal note, settlement, other partner or unrelated case leaks',not any(s in json.dumps(a,ensure_ascii=False) for s in ['SECRET','Bčko','+421900999999',caseb1,casex,'klient@example.invalid']))
   row=lambda p,case:next(c for c in p['cases'] if c['caseId']==case)
@@ -158,20 +158,30 @@ insert into motorist_cases(id,organization_id,case_number,status,priority,source
 
   # Stats: defined denominators, unknown remains unknown.
   s=a['stats']
-  check('stats count own cases, insurance, taken, contacted with sample',(s['cases'],s['insuranceEvents'],s['taken'],s['contacted'],s['contactSample'],s['contactUnknown'])==(2,1,1,1,1,0) and s['contactMedianMinutes'] is not None)
+  check('stats count own cases, insurance, taken, contacted with sample',(s['cases'],s['insuranceEvents'],s['taken'],s['contacted'],s['contactSample'],s['contactPending'],s['contactUnknown'])==(2,1,1,1,1,0,0) and s['contactMedianMinutes'] is not None)
   empty=portal(start='2025-11-01',end='2025-12-31')['stats']
-  check('uncontacted insurance event is unknown, never zero minutes',(empty['cases'],empty['insuranceEvents'],empty['contactSample'],empty['contactUnknown'])==(1,1,0,1) and empty['contactMedianMinutes'] is None)
+  check('uncontacted insurance event is pending with unknown time, never zero minutes',(empty['cases'],empty['insuranceEvents'],empty['contactSample'],empty['contactPending'],empty['contactUnknown'])==(1,1,0,1,0) and empty['contactMedianMinutes'] is None)
   check('invalid or excessive period rejected',denied(f"select public.motorist_partner_portal_cases('{usera}','{org}',1,'2027-01-01','2026-01-01')",'22023') and denied(f"select public.motorist_partner_portal_cases('{usera}','{org}',1,'2020-01-01','2027-01-01')",'22023'))
 
   # Office overview and detail.
   o=office_read(casea1)
-  names={p['partnerName']:p for p in o['partners']}
+  check('office case detail skips the all-partner overview',o['partners']==[])
+  names={p['partnerName']:p for p in office_read()['partners']}
   check('office overview lists each partner separately',set(names)=={'Final CD','Second partner'} and names['Final CD']['stats']['cases']==2 and names['Second partner']['newInsurance']==1)
   check('office case detail shows follow-up state and partner notes',o['case']['status']=='contacted' and o['case']['contactedBy']=='Final CD' and len(o['case']['notes'])==1 and o['case']['customer'] is None)
 
+  # More than 200 period cases: an older still-new insurance event stays listed with the badge.
+  run(f"""insert into motorist_cases(id,organization_id,case_number,status,priority,source_type,case_type,created_at)
+ select ('73000000-0000-4000-8000-'||lpad(g::text,12,'0'))::uuid,'{org}','PM-2026-'||(1000+g),'new','normal','partner','Odťah',timestamptz '2026-10-05T10:00:00Z'+g*interval '1 minute' from generate_series(1,205) g;
+insert into motorist_partner_case_contexts(case_id,organization_id,partner_id,partner_name,updated_by)
+ select ('73000000-0000-4000-8000-'||lpad(g::text,12,'0'))::uuid,'{org}','{partnera}','Final CD','{office}' from generate_series(1,205) g;""")
+  big=portal()
+  check('bounded list keeps still-new insurance events beyond the bound and period',len(big['cases'])==200 and big['cases'][0]['caseId']==casea3 and big['newInsurance']==1 and big['stats']['cases']==207)
   # Unmarking hides the contact again; membership version and disable are re-checked.
   value(office_sql(casea1,False,3))
-  check('unmarked insurance hides customer contact',row(portal(),casea1)['customer'] is None)
+  check('unmarked insurance hides customer contact',row(portal(start='2026-10-01',end='2026-10-03'),casea1)['customer'] is None)
+  kept=portal(start='2026-10-01',end='2026-10-03')
+  check('unmarking keeps the follow-up history but taken/contacted count only insurance events',row(kept,casea1)['status']=='contacted' and (kept['stats']['insuranceEvents'],kept['stats']['taken'],kept['stats']['contacted'])==(0,0,0))
   check('stale membership version denied',denied(f"select public.motorist_partner_portal_cases('{usera}','{org}',2,'2026-01-01','2027-01-01')") and denied(partner_sql('note',casea1,version=2,body='x')))
   run(f"update motorist_partner_memberships set status='disabled',membership_version=2 where id='{membera}'")
   check('disabled shared account denied on read and write',denied(f"select public.motorist_partner_portal_cases('{usera}','{org}',2,'2026-01-01','2027-01-01')") and denied(partner_sql('note',casea1,version=2,body='x')))

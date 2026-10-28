@@ -128,14 +128,17 @@ $$;
 
 -- Cases are counted by case creation in [from, to). Time to contact is measured
 -- from insurance marking to recorded contact only when both timestamps exist.
+-- contactPending: insurance events not yet contacted; contactUnknown: contacted,
+-- but without a usable marking-to-contact interval (for example re-marked later).
 create function public.motorist_partner_followup_stats(p_organization_id uuid, p_partner_id uuid, p_from timestamptz, p_to timestamptz)
 returns jsonb language sql stable security definer set search_path = '' as $$
  select jsonb_build_object('from', p_from, 'to', p_to, 'cases', count(*),
   'insuranceEvents', count(*) filter (where f.insurance_event),
-  'taken', count(*) filter (where f.taken_at is not null),
-  'contacted', count(*) filter (where f.contacted_at is not null),
+  'taken', count(*) filter (where f.insurance_event and f.taken_at is not null),
+  'contacted', count(*) filter (where f.insurance_event and f.contacted_at is not null),
   'contactSample', count(*) filter (where f.insurance_event and f.contacted_at >= f.insurance_marked_at),
-  'contactUnknown', count(*) filter (where f.insurance_event and not coalesce(f.contacted_at >= f.insurance_marked_at, false)),
+  'contactPending', count(*) filter (where f.insurance_event and f.contacted_at is null),
+  'contactUnknown', count(*) filter (where f.insurance_event and f.contacted_at is not null and not coalesce(f.contacted_at >= f.insurance_marked_at, false)),
   'contactMedianMinutes', round((percentile_cont(0.5) within group (order by extract(epoch from f.contacted_at - f.insurance_marked_at) / 60)
    filter (where f.insurance_event and f.contacted_at >= f.insurance_marked_at))::numeric, 1))
  from public.motorist_partner_case_contexts x
@@ -155,14 +158,15 @@ begin
   'account', m.display_name,
   'newInsurance', (select count(*) from public.motorist_partner_case_followups f where f.organization_id = m.organization_id and f.partner_id = m.partner_id and f.insurance_event and f.status = 'new'),
   'stats', public.motorist_partner_followup_stats(m.organization_id, m.partner_id, p_from, p_to),
-  -- The period list plus every still-new insurance event, so the badge is actionable.
-  'cases', (select coalesce(jsonb_agg(public.motorist_partner_followup_projection(m.organization_id, q.case_id, true) order by q.created_at desc, q.case_id), '[]'::jsonb)
-   from (select x.case_id, c.created_at from public.motorist_partner_case_contexts x
+  -- Every still-new insurance event first (the badge stays actionable beyond the
+  -- bound and the period), then the period list, newest first.
+  'cases', (select coalesce(jsonb_agg(public.motorist_partner_followup_projection(m.organization_id, q.case_id, true) order by q.pinned desc, q.created_at desc, q.case_id), '[]'::jsonb)
+   from (select x.case_id, c.created_at, coalesce(f.insurance_event and f.status = 'new', false) pinned from public.motorist_partner_case_contexts x
     join public.motorist_cases c on c.id = x.case_id and c.organization_id = x.organization_id
     left join public.motorist_partner_case_followups f on f.case_id = x.case_id and f.partner_id = x.partner_id
     where x.organization_id = m.organization_id and x.partner_id = m.partner_id
      and ((c.created_at >= p_from and c.created_at < p_to) or (f.insurance_event and f.status = 'new'))
-    order by c.created_at desc, x.case_id limit 200) q));
+    order by pinned desc, c.created_at desc, x.case_id limit 200) q));
 end $$;
 
 create function public.motorist_partner_followup_command(p_user_id uuid, p_organization_id uuid, p_membership_version bigint,
@@ -248,6 +252,9 @@ begin
   insert into public.motorist_partner_case_followups(case_id, organization_id, partner_id, insurance_event, insurance_label, insurance_marked_by, insurance_marked_at)
    values (target, x.organization_id, x.partner_id, flag, label, case when flag then a.id end, case when flag then now() end) returning * into f;
  else
+  -- Unmarking/re-marking is an office correction of the classification: the partner's
+  -- follow-up status and its taken/contacted history are kept, and a re-mark starts a
+  -- new marking time (an earlier contact then has no measurable time to contact).
   update public.motorist_partner_case_followups set insurance_event = flag, insurance_label = label,
    insurance_marked_by = case when not flag then null when f.insurance_event then f.insurance_marked_by else a.id end,
    insurance_marked_at = case when not flag then null when f.insurance_event then f.insurance_marked_at else now() end,
@@ -269,7 +276,8 @@ begin
  perform public.motorist_partner_followup_office(p_user_id, p_organization_id);
  perform public.motorist_partner_followup_period(p_from, p_to);
  return jsonb_build_object(
-  'partners', (select coalesce(jsonb_agg(jsonb_build_object('partnerId', d.id, 'partnerName', d.name,
+  -- A case detail needs only its own projection, not the all-partner overview.
+  'partners', case when p_case_id is not null then '[]'::jsonb else (select coalesce(jsonb_agg(jsonb_build_object('partnerId', d.id, 'partnerName', d.name,
     'newInsurance', (select count(*) from public.motorist_partner_case_followups f where f.organization_id = d.organization_id and f.partner_id = d.id and f.insurance_event and f.status = 'new'),
     'stats', public.motorist_partner_followup_stats(d.organization_id, d.id, p_from, p_to),
     'cases', (select coalesce(jsonb_agg(public.motorist_partner_followup_projection(d.organization_id, q.case_id, false) order by q.created_at desc, q.case_id), '[]'::jsonb)
@@ -278,7 +286,7 @@ begin
       where x.organization_id = d.organization_id and x.partner_id = d.id and c.created_at >= p_from and c.created_at < p_to
       order by c.created_at desc, x.case_id limit 50) q)) order by d.name, d.id), '[]'::jsonb)
    from public.motorist_partner_directory d where d.organization_id = p_organization_id
-    and exists(select 1 from public.motorist_partner_case_contexts x where x.organization_id = d.organization_id and x.partner_id = d.id)),
+    and exists(select 1 from public.motorist_partner_case_contexts x where x.organization_id = d.organization_id and x.partner_id = d.id)) end,
   'case', case when p_case_id is not null then public.motorist_partner_followup_projection(p_organization_id, p_case_id, false) end);
 end $$;
 

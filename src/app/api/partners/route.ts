@@ -8,8 +8,8 @@ import { readPartnerFollowupOffice, setPartnerInsurance } from '@/server/partner
 export const runtime='nodejs';
 export async function GET(request:Request){try{const params=new URL(request.url).searchParams;
  if(params.get('portal')==='true')return Response.json({outputs:await readPartnerOutputs(await requirePartnerActor())},{headers:{'Cache-Control':'private, no-store'}});
- const actor=await requireDefaultMotoristActor(PARTNER_OFFICE_ROLES);if(params.get('origin')==='true')return Response.json({origin:await readPartnerOrigin(actor,params.get('lineId'))},{headers:{'Cache-Control':'private, no-store'}});// Follow-up is additive: without its migration the existing module keeps working.
- const [office,followups]=await Promise.all([readPartnerOffice(actor,params.get('caseId'),params.get('lineId')),readPartnerFollowupOffice(actor,params.get('caseId'),params.get('from'),params.get('to')).catch(()=>null)]);
+ const actor=await requireDefaultMotoristActor(PARTNER_OFFICE_ROLES);if(params.get('origin')==='true')return Response.json({origin:await readPartnerOrigin(actor,params.get('lineId'))},{headers:{'Cache-Control':'private, no-store'}});// Follow-up is additive: only a missing follow-up RPC yields null; other errors surface.
+ const [office,followups]=await Promise.all([readPartnerOffice(actor,params.get('caseId'),params.get('lineId')),readPartnerFollowupOffice(actor,params.get('caseId'),params.get('from'),params.get('to'))]);
  return Response.json({...office,followups},{headers:{'Cache-Control':'private, no-store'}});
 }catch(error){return partnerResponse(error);}}
 export async function POST(request:Request){try{assertSameOriginRequest(request);const actor=await requireDefaultMotoristActor(PARTNER_OFFICE_ROLES);const input=await request.json();

@@ -38,9 +38,13 @@ export async function partnerFollowupCommand(actor: PartnerActor, input: unknown
   const result = await partnerAdmin().rpc('motorist_partner_followup_command', { p_user_id: actor.userId, p_organization_id: actor.organizationId, p_membership_version: actor.version, p_command_id: command.commandId, p_expected_revision: command.expectedRevision, p_action: command.action, p_payload: command.payload });
   partnerCheck(result.error); return result.data;
 }
-export async function readPartnerFollowupOffice(actor: MotoristActor, caseId: string | null, from: string | null = null, to: string | null = null): Promise<PartnerFollowupOverview> {
+/** Missing follow-up RPC (migration not yet applied) is the only error read as "unavailable" (null). */
+export function isMissingFollowupRpc(error: { code?: string } | null) { return error?.code === 'PGRST202' || error?.code === '42883'; }
+export async function readPartnerFollowupOffice(actor: MotoristActor, caseId: string | null, from: string | null = null, to: string | null = null): Promise<PartnerFollowupOverview | null> {
   await assertPartnerOffice(actor); const period = followupPeriod(from, to);
   const result = await partnerAdmin().rpc('motorist_partner_followup_office_read', { p_user_id: actor.userId, p_organization_id: actor.organizationId, p_from: period.from, p_to: period.to, p_case_id: caseId ? uuid(caseId) : null });
+  if (isMissingFollowupRpc(result.error)) { console.warn('partner follow-up RPC is not installed; follow-up section hidden', result.error?.code); return null; }
+  if (result.error) console.error('partner follow-up office read failed', result.error.code, result.error.message);
   partnerCheck(result.error); return result.data as PartnerFollowupOverview;
 }
 export async function setPartnerInsurance(actor: MotoristActor, input: unknown) {

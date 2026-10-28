@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { partnerContactTimeLabel, partnerFollowupStatusLabels, partnerPeriod, partnerWorkStatusLabels, type PartnerFollowupCase, type PartnerFollowupStats, type PartnerPortalData } from '@/domain/partners';
 
 const control='rounded border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-950';
@@ -8,16 +8,17 @@ const day=(value:string)=>new Date(value).toLocaleDateString('sk-SK',{timeZone:'
 export function vehicleLabel(v:PartnerFollowupCase['vehicle']){const name=[v.make,v.model].filter(Boolean).join(' ');return [name,v.plate].filter(Boolean).join(' · ')||'Vozidlo neuvedené';}
 export function PartnerFollowupStatsView({stats}:{stats:PartnerFollowupStats}){
  return <div className="space-y-1"><dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">{([['Prípady',stats.cases],['Poistné udalosti',stats.insuranceEvents],['Prevzaté',stats.taken],['Klient kontaktovaný',stats.contacted]] as const).map(([label,value])=><div key={label} className="rounded border bg-zinc-50 p-2"><dt className="text-zinc-600">{label}</dt><dd className="text-lg font-semibold">{value}</dd></div>)}<div className="col-span-2 rounded border bg-zinc-50 p-2 sm:col-span-1"><dt className="text-zinc-600">Čas do kontaktu</dt><dd className="font-semibold">{partnerContactTimeLabel(stats)}</dd></div></dl>
- <p className="text-xs text-zinc-600">Prípady podľa dátumu založenia. Čas do kontaktu meria od označenia poistnej udalosti po záznam kontaktu, iba keď sú známe oba časy.</p></div>;
+ <p className="text-xs text-zinc-600">Prípady podľa dátumu založenia. Prevzaté a kontaktované počítajú poistné udalosti. Čas do kontaktu meria od označenia poistnej udalosti po záznam kontaktu, iba keď sú známe oba časy; ešte nekontaktované sa uvádzajú ako čakajúce.</p></div>;
 }
 type Action='take'|'contacted'|'note';
 export function PartnerPortalCases(){
  const [period,setPeriod]=useState(()=>{const p=partnerPeriod(null,null)!;return {from:p.fromDate,to:p.toDate};});
- const [onlyNew,setOnlyNew]=useState(false);const [data,setData]=useState<PartnerPortalData|null>(null);const [error,setError]=useState('');const [busy,setBusy]=useState('');const [notes,setNotes]=useState<Record<string,string>>({});
+ const [onlyNew,setOnlyNew]=useState(false);const [data,setData]=useState<PartnerPortalData|null>(null);const [error,setError]=useState('');const [loadError,setLoadError]=useState('');const sequence=useRef(0);const [busy,setBusy]=useState('');const [notes,setNotes]=useState<Record<string,string>>({});
  // An unconfirmed command keeps its ID and body; the same button only re-sends it.
  const [pending,setPending]=useState<Record<string,{id:string;body:string}>>({});
  const valid=Boolean(partnerPeriod(period.from,period.to));
- const load=useCallback(async()=>{if(!partnerPeriod(period.from,period.to))return;try{const response=await fetch(`/api/partners/portal?from=${period.from}&to=${period.to}`,{cache:'no-store'});const value=await response.json();if(!response.ok)throw new Error(value.error);setData(value);}catch(e){setError(e instanceof Error?e.message:'Prípady nie sú dostupné.');}},[period]);
+ // Only the latest request may update the list; a lost session removes customer data from the screen.
+ const load=useCallback(async()=>{if(!partnerPeriod(period.from,period.to))return;const current=++sequence.current;try{const response=await fetch(`/api/partners/portal?from=${period.from}&to=${period.to}`,{cache:'no-store'});const value=await response.json().catch(()=>({}));if(current!==sequence.current)return;if(response.status===401||response.status===403)setData(null);if(!response.ok)throw new Error(value.error||'Prípady nie sú dostupné.');setData(value);setLoadError('');}catch(e){if(current===sequence.current)setLoadError(e instanceof Error?e.message:'Prípady nie sú dostupné.');}},[period]);
  useEffect(()=>{void load();},[load]);
  async function send(c:PartnerFollowupCase,action:Action){
   const key=`${c.caseId}:${action}`;const intent=pending[key]??{id:crypto.randomUUID(),body:JSON.stringify({action,caseId:c.caseId,...(action==='note'?{body:(notes[c.caseId]??'').trim()}:{expectedRevision:c.revision})})};
@@ -36,8 +37,8 @@ export function PartnerPortalCases(){
  return <section className="space-y-4" aria-labelledby="partner-cases">
   <div className="flex flex-wrap items-center gap-3"><h2 id="partner-cases" className="text-xl font-semibold">Moje prípady</h2>{data?<button type="button" onClick={()=>setOnlyNew(v=>!v)} aria-pressed={onlyNew} className={`rounded-full px-3 py-1 text-sm font-semibold ${data.newInsurance?'bg-red-600 text-white':'bg-zinc-100 text-zinc-700'}`}>Nové poistné udalosti: {data.newInsurance}{onlyNew?' · zobrazené iba nové':''}</button>:null}</div>
   <div className="flex flex-wrap items-end gap-3"><label className="grid gap-1 text-sm">Od<input type="date" className={control} value={period.from} onChange={e=>setPeriod(p=>({...p,from:e.target.value}))}/></label><label className="grid gap-1 text-sm">Do<input type="date" className={control} value={period.to} onChange={e=>setPeriod(p=>({...p,to:e.target.value}))}/></label>{!valid?<p role="alert" className="text-sm text-red-700">Zvoľte platné obdobie (najviac 400 dní).</p>:null}</div>
-  {error?<p role="alert" className="text-sm text-red-700">{error}</p>:null}
-  {!data?<p>Načítavam prípady…</p>:<><PartnerFollowupStatsView stats={data.stats}/>
+  {loadError?<p role="alert" className="text-sm text-red-700">{loadError}</p>:null}{error?<p role="alert" className="text-sm text-red-700">{error}</p>:null}
+  {!data?(loadError?null:<p>Načítavam prípady…</p>):<><PartnerFollowupStatsView stats={data.stats}/>
   {cases.length===0?<p className="text-sm">V zvolenom období nemáte prípad.</p>:cases.map(c=><article key={c.caseId} className={`space-y-2 rounded-lg border p-4 ${c.insuranceEvent?'border-amber-400 bg-amber-50':'bg-white'}`}>
    <div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold">{c.caseNumber}</h3>{c.insuranceEvent?<span className="rounded bg-amber-600 px-2 py-0.5 text-xs font-semibold text-white">Poistná udalosť{c.insuranceLabel?` · ${c.insuranceLabel}`:''}</span>:<span className="rounded bg-zinc-100 px-2 py-0.5 text-xs text-zinc-700">Bez poistnej udalosti</span>}{c.insuranceEvent?<span className={`rounded px-2 py-0.5 text-xs font-semibold ${c.status==='new'?'bg-red-600 text-white':c.status==='taken'?'bg-sky-100 text-sky-900':'bg-emerald-100 text-emerald-900'}`}>{partnerFollowupStatusLabels[c.status]}</span>:null}</div>
    <p className="text-sm">{day(c.createdAt)} · {c.caseType} · {partnerWorkStatusLabels[c.workStatus]}</p><p className="text-sm">{vehicleLabel(c.vehicle)}</p>
