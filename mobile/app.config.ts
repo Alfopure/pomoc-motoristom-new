@@ -59,11 +59,11 @@ const config: ExpoConfig = {
     ["expo-secure-store", { faceIDPermission: "Aplikácia Face ID nepoužíva a o prístup k nemu nežiada." }], "./plugins/with-no-background-fetch.cjs", ["expo-splash-screen", { image: "./assets/splash-icon.png", imageWidth: 180, resizeMode: "contain", backgroundColor: "#F2F2F7" }],
     ["expo-notifications", { defaultChannel: "default" }],
     "./plugins/with-draft-secure-store.cjs", ...(voiceProof ? ["./plugins/with-telnyx-reconnect-guard.cjs"] : []), ["expo-image-picker", {
-    photosPermission: "Aplikácia potrebuje prístup k vybranej fotografii na priloženie k prípadu.",
-    cameraPermission: "Aplikácia potrebuje fotoaparát na odfotografovanie prílohy prípadu.",
+    photosPermission: "Aplikácia potrebuje prístup k vybranej fotografii na priloženie k prípadu alebo ako doklad k jazde, odvozu či odťahu.",
+    cameraPermission: "Aplikácia potrebuje fotoaparát na odfotografovanie prílohy prípadu a dokladov k jazde, odvozu či odťahu (vozidlo, poškodenie, papierový doklad).",
     microphonePermission: microphoneUse,
   }], ["expo-location", {
-    locationWhenInUsePermission: "Aplikácia použije polohu telefónu na váš pokyn pri výbere miesta zásahu a počas pristavenia, ktoré ste prijali, aby dispečer videl, kde ste.",
+    locationWhenInUsePermission: "Aplikácia použije polohu telefónu na váš pokyn pri výbere miesta zásahu a počas pristavenia, jazdy, odvozu či presunu, ktoré ste prijali, aby dispečer videl, kde ste.",
     locationAlwaysPermission: false,
     // A pristavovač's position goes on with the app in the background or closed, only while
     // their accepted delivery is open; iOS shows the blue location indicator meanwhile.

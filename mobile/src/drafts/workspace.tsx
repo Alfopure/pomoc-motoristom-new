@@ -41,7 +41,7 @@ import { formLayout } from "../design/form";
 import { Group, Row, SectionHeader } from "../design/list";
 import { palette, space, type } from "../design/tokens";
 import type { PushSettings } from "../notifications/settings";
-import { pushTaps } from "../notifications/taps";
+import { isFieldTap, pushTaps } from "../notifications/taps";
 import { NotificationSettings } from "../notifications/ui";
 
 type Props = { config: MobileConfig; client: SupabaseClient; identity: MobileMe; userId: string; liveUser: () => string | null;
@@ -186,8 +186,8 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
   // A tapped notification opens its task, case or the callbacks, once the organization is verified here.
   const tap = useSyncExternalStore(pushTaps.subscribe, pushTaps.snapshot, pushTaps.snapshot);
   useEffect(() => {
-    // Deliveries open in Pristavenia, under the pristavovač's own id.
-    if (!tap || tap.target.kind === "delivery" || !current()) return;
+    // Field notices (Pristavenia, Moja práca, Pobočka) open under the member's own id.
+    if (!tap || isFieldTap(tap.target) || !current()) return;
     const target = pushTaps.take(verified.profileId);
     if (target?.kind === "task") { setTaskRequest({ taskId: target.id, nonce: ++request.current }); onView("tasks"); }
     else if (target?.kind === "case") { setCaseRequest({ kind: "detail", id: target.id, nonce: ++request.current }); onView("cases"); }

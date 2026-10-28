@@ -43,8 +43,12 @@ async function currentUser() {
   if (error || !data.user) throw new TowingError('unauthenticated', 401, 'Prihláste sa do aplikácie.');
   return { p_user_id: data.user.id, p_organization_id: await resolveDefaultOrganizationId() };
 }
+/** Who the branch RPCs re-authorize: a verified user of one organization (web session or mobile bearer). */
+export type BranchUser = { p_user_id: string; p_organization_id: string };
 export async function getBranchWorkspace(filters: Record<string, unknown> = {}): Promise<BranchWorkspace> {
-  const user = await currentUser();
+  return branchWorkspaceFor(await currentUser(), filters);
+}
+export async function branchWorkspaceFor(user: BranchUser, filters: Record<string, unknown> = {}): Promise<BranchWorkspace> {
   const checked: Record<string, unknown> = {};
   for (const key of ['groupId', 'caseId', 'id']) if (filters[key] !== undefined && filters[key] !== '') checked[key] = uuid(filters[key]);
   if (filters.view !== undefined) { if (!branchViews.includes(filters.view as never)) throw new TowingError('invalid_input', 400, 'Neplatné zobrazenie.'); checked.view = filters.view; }
@@ -71,7 +75,9 @@ export function parseBranchCommand(value: Record<string, unknown>): BranchComman
 export async function commandBranch(input: Record<string, unknown>): Promise<BranchReceipt> {
   const user = await currentUser();
   if (input.action === 'group_settings') return saveGroupSettings(user, input);
-  const command = parseBranchCommand(input);
+  return commandBranchFor(user, parseBranchCommand(input));
+}
+export async function commandBranchFor(user: BranchUser, command: BranchCommand): Promise<BranchReceipt> {
   const result = await admin().rpc('motorist_branch_command', { ...user, p_command: command });
   mapBranchError(result.error);
   queueWorkPush(user.p_organization_id);

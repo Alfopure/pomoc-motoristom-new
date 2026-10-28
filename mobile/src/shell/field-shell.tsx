@@ -17,14 +17,19 @@ import { canUseDeliveryCache, isOpen, sortDeliveries, visibleDelivery } from "..
 import { useDeliveryTime } from "../delivery/use-delivery-time";
 import type { DeliverySession } from "../delivery/session";
 import type { SharingState } from "../delivery/sharing";
+import { BranchModule, type BranchOpenRequest } from "../branch/module";
+import { waiting } from "../branch/model";
+import { WorkModule, WorkRow, type WorkOpenRequest } from "../field-work/module";
+import { isOpenOperation, workItems } from "../field-work/model";
+import type { FieldWorkSession } from "../field-work/session";
 import type { PushSettings } from "../notifications/settings";
-import { pushTaps } from "../notifications/taps";
-import { NotificationSettings } from "../notifications/ui";
+import { isFieldTap, pushTaps, type PushTarget } from "../notifications/taps";
+import { NotificationSettings, pushKinds } from "../notifications/ui";
 import { ShellBackContext } from "./back";
 import { ShellBackStore } from "./back-store";
 import { DoneButton, EditBarContent } from "./edit-bar";
 import { todayLabel } from "./home";
-import { DELIVERY_ROLE_NAME, PIN_LIMIT, moduleAccess, moduleById, rolePins, type ModuleId } from "./modules";
+import { PIN_LIMIT, fieldRoleLabel, moduleAccess, moduleById, rolePins, type FieldModules, type ModuleId } from "./modules";
 import { ModulesScreen, type ModuleAccessRefresh } from "./modules-screen";
 import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, type ShellState, type ShellTab } from "./navigation";
 import { ModulesMark, Sheet, shellStyles, tabLabel } from "./parts";
@@ -34,7 +39,7 @@ import { DockTabBar } from "./tab-bar";
 import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
 
 type Props = {
-  config: MobileConfig; active: boolean; userId: string; session: DeliverySession; push: PushSettings;
+  config: MobileConfig; active: boolean; userId: string; session: DeliverySession; work: FieldWorkSession | null; push: PushSettings;
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; onLogout: () => void;
   accessRefresh: ModuleAccessRefresh;
 };
@@ -42,6 +47,8 @@ const ACCOUNT_LINKS = [
   { title: "Ochrana súkromia", path: "/aplikacia/sukromie" },
   { title: "Podpora", path: "/aplikacia/podpora" },
 ] as const;
+const OFF: SharingState = { status: "off", lastSentAt: null, background: null };
+const idle = { subscribe: () => () => undefined, snapshot: () => OFF };
 /** The top bar's status for a pristavovač: whether dispatch sees where they are. */
 export function locationStatus(state: SharingState, open: number): { label: string; tone: PresenceTone } {
   if (state.status === "sharing") return { label: "Poloha zapnutá", tone: "green" };
@@ -49,17 +56,28 @@ export function locationStatus(state: SharingState, open: number): { label: stri
   if (state.status === "error") return { label: "Poloha nefunguje", tone: "red" };
   return { label: open ? "Poloha vypnutá" : "Bez pristavenia", tone: "gray" };
 }
+/** The same status across Pristavenia and Moja práca; a lead without field work sees the branch. */
+export function fieldStatus(modules: FieldModules, delivery: SharingState, work: SharingState, open: number): { label: string; tone: PresenceTone; target: ModuleId } {
+  if (!modules.delivery && !modules.work) return { label: "Pobočka", tone: "gray", target: "pobocka" };
+  const states = [modules.delivery ? delivery : null, modules.work ? work : null].filter((state): state is SharingState => state !== null);
+  const shown = states.find(state => state.status === "sharing") ?? states.find(state => state.status === "denied") ?? states.find(state => state.status === "error") ?? OFF;
+  const status = locationStatus(shown, open);
+  return { ...status, label: shown.status === "off" && !open && modules.work ? "Bez práce" : status.label, target: modules.work ? "praca" : "pristavenia" };
+}
+type FieldTap = { kind: "delivery"; id: string; nonce: number } | (WorkOpenRequest & { module: "praca" }) | { kind: "branch-request"; id: string; nonce: number };
 
-/** The same app for someone who only delivers: Prehľad · their modules · Moduly,
- * the same top bar and account, without any dispatch module. */
+/** The same app for a field member (pristavovač, vodič, miestny dispečer): Prehľad ·
+ * their modules · Moduly, the same top bar and account, without any dispatch module. */
 export function FieldShell(props: Props) {
-  const { config, active, userId, session } = props;
+  const { config, active, userId, session, work } = props;
   const memberId = session.memberId!;
   const insets = useSafeAreaInsets();
   const { fontScale } = useWindowDimensions();
-  const available = useMemo(() => moduleAccess(null, true), []);
+  const { delivery: hasDelivery, work: hasWork, branch: hasBranch } = session.modules;
+  const modules = useMemo(() => ({ delivery: hasDelivery, work: hasWork, branch: hasBranch }), [hasDelivery, hasWork, hasBranch]);
+  const available = useMemo(() => moduleAccess(null, modules), [modules]);
   const prefs = useMemo(() => new ShellPreferences(createShellPreferencesStorage(),
-    shellPreferencesKey({ environment: config.environment, userId, profileId: memberId }), available, rolePins(null, true)), [config.environment, userId, memberId, available]);
+    shellPreferencesKey({ environment: config.environment, userId, profileId: memberId }), available, rolePins(null, modules)), [config.environment, userId, memberId, available, modules]);
   useEffect(() => () => prefs.dispose(), [prefs]);
   const preferences = useSyncExternalStore(prefs.subscribe, prefs.snapshot, prefs.snapshot);
   useEffect(() => { if (active && !preferences.loaded) void prefs.load(); }, [active, preferences.loaded, prefs]);
@@ -71,85 +89,120 @@ export function FieldShell(props: Props) {
   const [backStore] = useState(() => new ShellBackStore());
   const moduleBack = useSyncExternalStore(backStore.subscribe, backStore.snapshot, backStore.snapshot);
   const location = useSyncExternalStore(session.location.subscribe, session.location.snapshot, session.location.snapshot);
-  const [openRequest, setOpenRequest] = useState<{ id: string; nonce: number } | null>(null);
+  const tracker = work?.tracker ?? idle;
+  const workLocation = useSyncExternalStore(tracker.subscribe, tracker.snapshot, tracker.snapshot);
+  const [tap, setTap] = useState<FieldTap | null>(null);
   const go = (next: ShellState) => setShell(next);
   const navigate = (id: ModuleId) => go(openModule(nav, pins, id));
   const back = () => { const next = shellBack(nav); if (next) go(next); };
-  const openDelivery = (id: string) => { navigate("pristavenia"); setOpenRequest(value => ({ id, nonce: (value?.nonce ?? 0) + 1 })); };
-  // A tapped delivery notice opens its delivery, in the account it was sent to.
+  const open = (target: PushTarget) => {
+    const module: ModuleId | null = target.kind === "delivery" ? "pristavenia" : target.kind === "operation" || target.kind === "towing" ? "praca" : target.kind === "branch-request" ? "pobocka" : null;
+    if (!module || !available.includes(module) || !("id" in target)) return;
+    setShell(current => openModule(reconcileShell(current, pins, available), pins, module));
+    setTap(value => {
+      const nonce = (value?.nonce ?? 0) + 1;
+      if (target.kind === "operation" || target.kind === "towing") return { kind: target.kind, id: target.id, nonce, module: "praca" };
+      return { kind: target.kind as "delivery" | "branch-request", id: target.id, nonce };
+    });
+  };
+  // A tapped field notice opens its work, in the account it was sent to.
   useEffect(() => {
     const consume = () => {
-      const tap = pushTaps.snapshot();
-      if (tap?.target.kind !== "delivery") return;
+      if (!isFieldTap(pushTaps.snapshot()?.target)) return;
       const target = pushTaps.take(memberId);
-      if (target?.kind === "delivery") {
-        setShell(current => openModule(reconcileShell(current, pins, available), pins, "pristavenia"));
-        setOpenRequest(value => ({ id: target.id, nonce: (value?.nonce ?? 0) + 1 }));
-      }
+      if (target) open(target);
     };
     const unsubscribe = pushTaps.subscribe(consume);
     const pending = setTimeout(consume, 0);
     return () => { unsubscribe(); clearTimeout(pending); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `open` reads the current pins and modules through them.
   }, [memberId, pins, available]);
-  // A delivery opened in the module owns Back first; then the account and Moduly.
+  // A detail opened in a module owns Back first; then the account and Moduly.
   useAndroidBack(active && (nav.account || nav.tab === "moduly" && nav.opened !== null && !moduleBack), back);
   const now = useDeliveryTime(active);
-  const deliveries = sortDeliveries(canUseDeliveryCache(session.list.error) ? (session.list.data ?? []).map(delivery => visibleDelivery(delivery, now)) : [], now);
-  const open = deliveries.filter(delivery => isOpen(delivery, now));
-  const status = locationStatus(location, open.length);
+  const deliveries = modules.delivery ? sortDeliveries(canUseDeliveryCache(session.list.error) ? (session.list.data ?? []).map(delivery => visibleDelivery(delivery, now)) : [], now) : [];
+  const openDeliveries = deliveries.filter(delivery => isOpen(delivery, now));
+  const items = work && modules.work && canUseDeliveryCache(work.list.error) ? workItems(work.list.data).filter(item => item.kind === "towing" || isOpenOperation(item.operation)) : [];
+  const queue = work && modules.branch ? (work.branch.data?.requests ?? []).filter(waiting) : [];
+  const status = fieldStatus(modules, location, workLocation, openDeliveries.length + items.length);
+  const badges = { pristavenia: openDeliveries.length, praca: items.length, pobocka: queue.length };
   const tabs = barTabs(pins);
   const showAdd = pins.length < Math.min(PIN_LIMIT, available.length);
   const openedInModules = nav.tab === "moduly" && nav.opened !== null && !nav.account;
   const left = moduleBack && !nav.account ? { kind: "back" as const, label: moduleBack.label, onPress: moduleBack.onBack, disabled: moduleBack.disabled }
     : nav.account ? { kind: "back" as const, label: nav.tab === "moduly" && nav.opened ? moduleById(nav.opened).short : tabLabel(nav.tab), onPress: back }
       : openedInModules ? { kind: "back" as const, label: "Moduly", onPress: back }
-        : { kind: "status" as const, label: status.label, tone: status.tone, onPress: () => navigate("pristavenia"), accessibilityLabel: "Poloha pre dispečing: " + status.label + ". Otvoriť pristavenia" };
+        : { kind: "status" as const, label: status.label, tone: status.tone, onPress: () => navigate(status.target),
+          accessibilityLabel: status.target === "pobocka" ? "Otvoriť pobočku" : "Poloha pre dispečing: " + status.label + ". Otvoriť " + moduleById(status.target).name };
   const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
+  const openWork = (target: { kind: "operation" | "towing"; id: string }) => open(target);
   return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(session.me.data?.member.displayName ?? "?")} onAccount={() => go({ ...nav, account: true })} left={left} />
-    {view === "home" && <FieldHome open={open} location={location} status={status} tip={preferences.loaded && !preferences.tipDismissed}
-      onDismissTip={() => prefs.dismissTip()} onOpen={openDelivery} onModule={() => navigate("pristavenia")} error={session.list.isError ? session.list.error : null}
-      onRefresh={() => { void props.accessRefresh.refresh(); }} />}
-    {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={showAdd} badges={{ pristavenia: open.length }}
+    {view === "home" && <FieldHome modules={modules} deliveries={openDeliveries} work={items} queue={queue.length} now={now}
+      location={location.status === "sharing" || !modules.work ? location : workLocation} status={status}
+      tip={preferences.loaded && !preferences.tipDismissed} onDismissTip={() => prefs.dismissTip()} onOpenDelivery={id => open({ kind: "delivery", id })} onOpenWork={openWork}
+      onModule={navigate} errors={{ delivery: modules.delivery && session.list.isError, work: Boolean(work?.list.isError) }} onRefresh={() => { void props.accessRefresh.refresh(); }} />}
+    {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={showAdd} badges={badges}
       onOpen={id => navigate(id)} onMenu={() => setEditing(true)} onEdit={() => setEditing(true)} onAccount={() => go({ ...nav, account: true })} accessRefresh={props.accessRefresh} />}
-    {view === "account" && <FieldAccount {...props} name={session.me.data?.member.displayName ?? ""} email={session.me.data?.member.email ?? null} onEditBar={() => setEditing(true)} />}
-    <View style={view === "deliveries" ? { flex: 1 } : { display: "none" }}>
-      <DeliveryModule session={session} active={active} visible={view === "deliveries"} openRequest={openRequest} />
-    </View>
+    {view === "account" && <FieldAccount {...props} modules={modules} name={session.me.data?.member.displayName ?? ""} email={session.me.data?.member.email ?? null} onEditBar={() => setEditing(true)} />}
+    {modules.delivery && <View style={view === "deliveries" ? { flex: 1 } : { display: "none" }}>
+      <DeliveryModule session={session} active={active} visible={view === "deliveries"} openRequest={tap?.kind === "delivery" ? tap : null} />
+    </View>}
+    {modules.work && <View style={view === "work" ? { flex: 1 } : { display: "none" }}>
+      <WorkModule session={work} active={active} visible={view === "work"} openRequest={tap && "module" in tap ? tap : null} />
+    </View>}
+    {modules.branch && <View style={view === "branch" ? { flex: 1 } : { display: "none" }}>
+      <BranchModule session={work} active={active} visible={view === "branch"} openRequest={tap?.kind === "branch-request" ? tap as BranchOpenRequest : null} />
+    </View>}
   </View></ShellBackContext.Provider>
-    <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ pristavenia: open.length }} showAdd={showAdd}
+    <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={badges} showAdd={showAdd}
       onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => setEditing(true)} />
     <Sheet visible={editing} large onClose={() => setEditing(false)} title="Upraviť lištu" right={<DoneButton onPress={() => setEditing(false)} />}>
-      <EditBarContent pins={pins} available={available} roleLabel={DELIVERY_ROLE_NAME} customized={preferences.customized} saveError={preferences.saveError}
+      <EditBarContent pins={pins} available={available} roleLabel={fieldRoleLabel(modules, session.me.data?.capabilities)} customized={preferences.customized} saveError={preferences.saveError}
         onChange={(next, message) => { prefs.setPins(next); AccessibilityInfo.announceForAccessibility?.(message); }}
         onReset={() => { prefs.reset(); AccessibilityInfo.announceForAccessibility?.("Lišta je podľa roly"); }} />
     </Sheet>
   </View>;
 }
 
-/** Prehľad of a pristavovač: what is waiting for them and whether dispatch sees them. */
-function FieldHome({ open, location, status, tip, onDismissTip, onOpen, onModule, error, onRefresh }: {
-  open: ReturnType<typeof sortDeliveries>; location: SharingState; status: { label: string; tone: PresenceTone }; tip: boolean;
-  onDismissTip: () => void; onOpen: (id: string) => void; onModule: () => void; error: unknown; onRefresh: () => void;
+/** Prehľad of a field member: what is waiting for them and whether dispatch sees them. */
+function FieldHome({ modules, deliveries, work, queue, now, location, status, tip, onDismissTip, onOpenDelivery, onOpenWork, onModule, errors, onRefresh }: {
+  modules: FieldModules; deliveries: ReturnType<typeof sortDeliveries>; work: ReturnType<typeof workItems>; queue: number; now: number; location: SharingState;
+  status: { label: string; tone: PresenceTone; target: ModuleId }; tip: boolean; onDismissTip: () => void; onOpenDelivery: (id: string) => void;
+  onOpenWork: (target: { kind: "operation" | "towing"; id: string }) => void; onModule: (id: ModuleId) => void; errors: { delivery: boolean; work: boolean }; onRefresh: () => void;
 }) {
   const tones: Record<PresenceTone, [string, string]> = { green: [palette.greenSoft, palette.greenText], orange: [palette.orangeSoft, palette.orangeText],
     red: [palette.redSoft, palette.redText], gray: [palette.fill, palette.secondaryLabel] };
   const [soft, ink] = tones[status.tone];
+  const tracksLocation = modules.delivery || modules.work;
   return <ScrollView contentContainerStyle={{ paddingBottom: NAVIGATION_CONTENT_BOTTOM }}>
     <View style={s.titleRow}><Text accessibilityRole="header" style={s.title}>Prehľad</Text><Text style={s.date}>{todayLabel()}</Text></View>
-    <Pressable accessibilityRole="button" accessibilityLabel={"Poloha pre dispečing: " + status.label} onPress={onModule} style={({ pressed }) => [s.card, pressed && { opacity: 0.85 }]}>
+    {tracksLocation && <Pressable accessibilityRole="button" accessibilityLabel={"Poloha pre dispečing: " + status.label} onPress={() => onModule(status.target)} style={({ pressed }) => [s.card, pressed && { opacity: 0.85 }]}>
       <View style={[s.cardIcon, { backgroundColor: soft }]}><MapPin size={16} color={ink} accessible={false} /></View>
       <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
         <Text style={s.cardTitle}>{status.label}</Text>
-        <Text style={s.cardText}>{location.status === "sharing" ? location.background === "whenInUse" ? "Dispečer vidí, kde ste, kým je aplikácia spustená."
-          : "Dispečer vidí, kde ste, kým je pristavenie otvorené." : "Poloha sa posiela až počas pristavenia, ktoré ste prijali."}</Text>
+        <Text style={s.cardText}>{location.status === "sharing" ? location.background === "always" ? "Dispečer vidí, kde ste, kým je pristavenie otvorené."
+          : "Dispečer vidí, kde ste, kým je aplikácia spustená." : "Poloha sa posiela až počas práce, ktorú ste prijali."}</Text>
       </View>
-    </Pressable>
-    {Boolean(error) && <View style={formLayout.notices}><ErrorNotice message="Pristavenia sa nepodarilo načítať." onRetry={onRefresh} /></View>}
-    <SectionHeader title="Na vybavenie" detail={open.length ? String(open.length) : null} />
-    {open.length ? <Group>{open.map((delivery, index) => <DeliveryRow key={delivery.id} delivery={delivery} first={index === 0} onOpen={onOpen} />)}</Group>
-      : <Text style={s.empty}>{error ? "Zoznam pristavení sa nepodarilo overiť. Skúste obnoviť údaje." : "Teraz nemáte žiadne pristavenie. Keď vám ho dispečer pošle, príde aj notifikácia."}</Text>}
-    <Group style={{ marginTop: space.l }}><Row first title="Všetky pristavenia" subtitle="Aj dokončené za posledný deň" tone="link" onPress={onModule} trailing={<Text style={s.chevron}>›</Text>} /></Group>
+    </Pressable>}
+    {(errors.delivery || errors.work) && <View style={formLayout.notices}><ErrorNotice message={errors.work ? "Prácu sa nepodarilo načítať." : "Pristavenia sa nepodarilo načítať."} onRetry={onRefresh} /></View>}
+    {modules.work && <>
+      <SectionHeader title="Moja práca" detail={work.length ? String(work.length) : null} />
+      {work.length ? <Group>{work.slice(0, 4).map((item, index) => <WorkRow key={item.key} item={item} first={index === 0} now={now} onOpen={onOpenWork} />)}</Group>
+        : <Text style={s.empty}>Teraz nemáte pridelenú žiadnu jazdu ani odťah.</Text>}
+      <Group style={{ marginTop: space.m }}><Row first title="Celá moja práca" tone="link" onPress={() => onModule("praca")} trailing={<Text style={s.chevron}>›</Text>} /></Group>
+    </>}
+    {modules.branch && <>
+      <SectionHeader title="Pobočka" />
+      <Group><Row first title={queue ? queue + (queue === 1 ? " požiadavka čaká" : queue < 5 ? " požiadavky čakajú" : " požiadaviek čaká") : "Nič nečaká na prevzatie"}
+        subtitle="Prevziať, prideliť a sledovať prácu pobočky" tone="link" onPress={() => onModule("pobocka")} trailing={<Text style={s.chevron}>›</Text>} /></Group>
+    </>}
+    {modules.delivery && <>
+      <SectionHeader title={modules.work ? "Pristavenia" : "Na vybavenie"} detail={deliveries.length ? String(deliveries.length) : null} />
+      {deliveries.length ? <Group>{deliveries.map((delivery, index) => <DeliveryRow key={delivery.id} delivery={delivery} first={index === 0} onOpen={onOpenDelivery} />)}</Group>
+        : <Text style={s.empty}>{errors.delivery ? "Zoznam pristavení sa nepodarilo overiť. Skúste obnoviť údaje." : "Teraz nemáte žiadne pristavenie. Keď vám ho dispečer pošle, príde aj notifikácia."}</Text>}
+      <Group style={{ marginTop: space.l }}><Row first title="Všetky pristavenia" subtitle="Aj dokončené za posledný deň" tone="link" onPress={() => onModule("pristavenia")} trailing={<Text style={s.chevron}>›</Text>} /></Group>
+    </>}
     {tip && <View style={s.tip}>
       <ModulesMark size={30} />
       <View style={{ flex: 1, gap: 2 }}><Text style={s.tipTitle}>Všetky moduly sú pod žltou ikonou Moduly</Text>
@@ -160,18 +213,19 @@ function FieldHome({ open, location, status, tip, onDismissTip, onOpen, onModule
   </ScrollView>;
 }
 
-function FieldAccount(props: Props & { name: string; email: string | null; onEditBar: () => void }) {
+function FieldAccount(props: Props & { modules: FieldModules; name: string; email: string | null; onEditBar: () => void }) {
   const [version] = useState(appVersion);
   const [linkError, setLinkError] = useState<string | null>(null);
   const busy = props.logoutBusy || props.logoutState.busy;
   return <ScrollView contentContainerStyle={formLayout.content}>
     <View style={formLayout.head}><Text accessibilityRole="header" style={styles.heading}>Účet</Text></View>
     <Group style={{ marginTop: space.m }}>
-      <InfoRow first label={DELIVERY_ROLE_NAME} value={props.name} detail={props.email} />
+      <InfoRow first label={fieldRoleLabel(props.modules, props.session.me.data?.capabilities) || "Účet"} value={props.name} detail={props.email} />
+      {props.modules.branch && <InfoRow label="Pobočky" value={(props.session.me.data?.branches ?? []).map(branch => branch.name).join(", ") || null} />}
       <InfoRow label="Prostredie" value={props.config.environment === "test" ? "Testovací dispečing" : "Produkčný dispečing"} />
       <InfoRow label="Verzia aplikácie" value={versionLabel(version)} />
     </Group>
-    <NotificationSettings settings={props.push} kinds={["handoffs"]} />
+    <NotificationSettings settings={props.push} kinds={pushKinds(false, props.modules)} />
     <SectionHeader title="Informácie" />
     <Group>{ACCOUNT_LINKS.map((link, index) => <Row key={link.path} first={index === 0} title={link.title} tone="link"
       onPress={() => { setLinkError(null); void Linking.openURL(props.config.apiOrigin + link.path).catch(() => setLinkError("Stránku sa nepodarilo otvoriť.")); }} />)}</Group>

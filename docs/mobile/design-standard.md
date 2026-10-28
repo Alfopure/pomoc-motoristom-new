@@ -156,9 +156,13 @@ Moduly, Prehľad a úprava lišty sa z neho poskladajú samy.
 | Prípady | zoznam, detail, založenie, poznámky, prílohy, úlohy, odovzdanie | áno |
 | Moje úlohy | úlohy naprieč prípadmi | áno |
 | Nástroje | vozidlo podľa EČV/VIN, trasa, mapa, flotila | nie (v Moduloch) |
+| Pristavenia | pôvodné pristavenia z odovzdania prípadu (oprávnenie `deliver`) | áno, pre člena bez dispečerskej roly |
+| Moja práca | vlastné jazdy, odvozy, presuny (`deliver`) a odťahy (`drive`): kroky, doklady, fotky | áno, pre člena bez dispečerskej roly |
+| Pobočka | front pobočky, Prevziať, Prideliť, prebiehajúca práca (miesto miestneho dispečera) | áno, pre člena bez dispečerskej roly |
 
 Roly mobilu dnes: dispečer, vedúci dispečer, manažér, administrátor – všetky
-vidia tieto štyri moduly. Viditeľnosť v appke je iba prezentácia; **o prístupe
+vidia prvé štyri moduly. Moduly v teréne odvodí appka zo `field/me`
+(`capabilities`, `branches`). Viditeľnosť v appke je iba prezentácia; **o prístupe
 rozhoduje server pri každej požiadavke**. Neskôr server pošle zoznam modulov
 s úrovňou prístupu (bez prístupu / čítanie / úpravy / správa); modul bez
 prístupu sa nikde nezobrazí. Plánované moduly a roly (výjazdy a pristavenia,

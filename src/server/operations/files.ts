@@ -1,17 +1,22 @@
 import 'server-only';
 import { randomUUID } from 'node:crypto';
 import { createSupabaseAdminClient } from '@/lib/supabase/admin';
-import { getOperationsWorkspace } from './index';
+import { getOperationsWorkspace, operationsWorkspaceFor, type OperationsUser } from './index';
 import { TowingError, boundedBytes } from '@/server/towing/http';
 
 const BUCKET = 'motorist-operation-evidence';
 const MAX_BYTES = 4 * 1024 * 1024;
 const extensions: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'application/pdf': 'pdf' };
 
-async function access(operationId: string, writing = false) {
-  const workspace = await getOperationsWorkspace({ id: operationId });
+/** A field member in the mobile app: only their own open logistics operation, even with office rights. */
+export type FieldEvidenceScope = OperationsUser & { memberId: string };
+
+async function access(operationId: string, writing = false, field?: FieldEvidenceScope) {
+  const workspace = field ? await operationsWorkspaceFor(field, { id: operationId, mine: true }) : await getOperationsWorkspace({ id: operationId });
   const operation = workspace.operations.find(item => item.id === operationId);
   if (!operation || (operation.owner !== 'logistics' && !(workspace.actor.canDispatch && operation.cycleId))) throw new TowingError('not_found', 404, 'Jazda nie je dostupná.');
+  if (field && (operation.owner !== 'logistics' || operation.assigneeId !== field.memberId)) throw new TowingError('not_found', 404, 'Jazda nie je dostupná.');
+  if (field && writing && ['completed', 'cancelled'].includes(operation.status)) throw new TowingError('access_denied', 403, 'Doklady k ukončenej jazde doplní dispečer.');
   if (writing && !workspace.actor.canDispatch && ['completed', 'cancelled'].includes(operation.status)) {
     throw new TowingError('access_denied', 403, 'Doklady k ukončenej jazde doplní dispečer.');
   }
@@ -25,8 +30,8 @@ function matchesType(bytes: Buffer, type: string) {
   return bytes.toString('ascii', 0, 5) === '%PDF-';
 }
 
-export async function uploadOperationFile(operationId: string, request: Request) {
-  const { actor } = await access(operationId, true);
+export async function uploadOperationFile(operationId: string, request: Request, field?: FieldEvidenceScope) {
+  const { actor } = await access(operationId, true, field);
   const type = request.headers.get('content-type')?.split(';')[0] ?? '';
   if (!extensions[type]) throw new TowingError('invalid_file', 415, 'Nahrajte fotografiu JPG, PNG, WebP alebo PDF.');
   const bytes = await boundedBytes(request, MAX_BYTES);
@@ -35,7 +40,7 @@ export async function uploadOperationFile(operationId: string, request: Request)
   const result = await createSupabaseAdminClient().storage.from(BUCKET).upload(reference, bytes, { contentType: type, upsert: false });
   if (result.error) throw new TowingError('storage_unavailable', 503, 'Nahratie dokladu sa nepodarilo potvrdiť.');
   // Recheck current assignment after the storage operation as well.
-  await access(operationId, true);
+  await access(operationId, true, field);
   return { reference };
 }
 

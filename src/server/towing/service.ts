@@ -20,8 +20,10 @@ export function parseTowingCommand(value: Record<string, unknown>, internal = fa
     ...(value.expectedRevision !== undefined ? { expectedRevision: revision(value.expectedRevision) } : {}),
     ...(value.assignmentGeneration !== undefined ? { assignmentGeneration: revision(value.assignmentGeneration) } : {}) };
 }
-export async function executeTowingCommand(actor: TowingMember, command: TowingCommand): Promise<TowingCommandResult> {
+/** `refine` may turn a known refusal into a precise message before the generic mapping. */
+export async function executeTowingCommand(actor: TowingMember, command: TowingCommand, refine?: (error: { code?: string; message?: string }) => void): Promise<TowingCommandResult> {
   const result = await towingAdmin().rpc('motorist_towing_command', { ...actorRpcParams(actor), p_command: command });
+  if (result.error) refine?.(result.error);
   mapRpcError(result.error);
   if (!result.data || typeof result.data !== 'object') throw new TowingError('unavailable', 503, 'Uloženie sa nepodarilo potvrdiť.');
   queueWorkPush(actor.organizationId);

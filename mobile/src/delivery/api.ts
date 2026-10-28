@@ -83,6 +83,10 @@ export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<
       const body = await request("me", { method: "GET", signal });
       const member = object(body.member);
       if (!id(member.id) || member.id !== body.memberId || !text(member.displayName, 160) || !(member.email === null || text(member.email, 320))) throw invalid();
+      // Capabilities and lead seats only choose the modules shown; an older server omits them.
+      if (body.capabilities !== undefined && (!Array.isArray(body.capabilities) || body.capabilities.length > 20 || body.capabilities.some(item => !text(item, 40)))) throw invalid();
+      if (body.branches !== undefined && (!Array.isArray(body.branches) || body.branches.length > 50
+        || body.branches.some(item => { const branch = object(item); return !id(branch.id) || !text(branch.name, 200); }))) throw invalid();
       memberId = body.memberId as string;
       access?.verified(tickets.get(body) ?? -1);
       return body as MobileFieldMe;

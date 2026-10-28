@@ -66,7 +66,8 @@ export async function storeImmutableFile(path: string, bytes: Buffer, mimeType: 
   if (previous.error || !previous.data || previous.data.size !== bytes.length || sha256(Buffer.from(await previous.data.arrayBuffer())) !== sha256(bytes))
     throw new TowingError('file_conflict',409,'Pod týmto identifikátorom už je iný súbor.');
 }
-export async function uploadTowingAttachment(actor: TowingMember, orderId: string, request: Request) {
+/** `requireAssignmentGeneration`: a driver in the app always uploads on the own-assignment path. */
+export async function uploadTowingAttachment(actor: TowingMember, orderId: string, request: Request, options: { requireAssignmentGeneration?: boolean } = {}) {
   const contentType = request.headers.get('content-type');
   if (!contentType?.startsWith('multipart/form-data')) throw new TowingError('invalid_input',415,'Pošlite prílohu ako formulár.');
   const bytes = await boundedBytes(request,MAX_TOWING_FILE + 64_000);
@@ -83,6 +84,7 @@ export async function uploadTowingAttachment(actor: TowingMember, orderId: strin
   const rawRevision = form.get('expectedRevision') ?? form.get('baseRevision');
   const expectedRevision = revision(rawRevision === null ? undefined : Number(rawRevision));
   const generation = form.get('assignmentGeneration');
+  if (options.requireAssignmentGeneration && generation === null) throw new TowingError('invalid_input',400,'Chýba pridelenie zákazky.');
   const assignmentGeneration = generation === null ? undefined : revision(Number(generation));
   const name = file.name.replace(/[\r\n\\/]/g,'_').slice(0,120) || 'priloha';
   const intent = await executeTowingCommand(actor,{commandId,type:'attachment_intent',targetId:orderId,expectedRevision,assignmentGeneration,payload:{id,kind,name,mimeType,size:fileBytes.length}});
