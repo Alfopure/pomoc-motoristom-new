@@ -49,7 +49,8 @@ const config: ExpoConfig = {
     },
     ...(voiceProof ? { entitlements: { "aps-environment": "production" } } : {}),
   },
-  android: { package: "sk.linkapomoci.dispecing" + suffix, blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
+  // Firebase config for Android push (FCM) comes from an EAS file variable; absent locally and in CI.
+  android: { package: "sk.linkapomoci.dispecing" + suffix, ...(process.env.GOOGLE_SERVICES_JSON ? { googleServicesFile: process.env.GOOGLE_SERVICES_JSON } : {}), blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
     "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.FOREGROUND_SERVICE_LOCATION", "android.permission.ACTIVITY_RECOGNITION", "com.google.android.gms.permission.ACTIVITY_RECOGNITION"] },
   // Work notices (tasks, cases, overdue callbacks) through the Expo push service; the
   // voice build keeps its own production APNs entitlement, which the plugin respects.

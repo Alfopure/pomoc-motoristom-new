@@ -37,6 +37,10 @@
       "distribution": "store",
       "credentialsSource": "local"
     },
+    "play-internal": {
+      "extends": "test",
+      "android": { "buildType": "app-bundle", "image": "sdk-57" }
+    },
     "production": {
       "environment": "production",
       "autoIncrement": true,
@@ -44,6 +48,13 @@
     }
   },
   "submit": {
+    "play-internal": {
+      "android": {
+        "serviceAccountKeyPath": "$GOOGLE_PLAY_SERVICE_ACCOUNT_KEY_PATH",
+        "track": "internal",
+        "releaseStatus": "draft"
+      }
+    },
     "testflight": {
       "ios": {
         "appleTeamId": "792TJPXTL3",
