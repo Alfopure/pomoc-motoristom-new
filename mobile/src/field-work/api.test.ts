@@ -52,6 +52,18 @@ describe("field work API", () => {
     expect(new Headers(transport.mock.calls[0][1].headers).get("content-type")).toBe("image/jpeg");
     await expect(api(() => ({ ...scope, reference: `${ORG}/${id(11)}/${id(10)}.jpg` })).client.operationFile(OP, new Uint8Array([1]), "image/jpeg")).rejects.toMatchObject({ status: 502 });
   });
+  it("gets and revokes the operation's background secret with the sign-in session", async () => {
+    const { client, transport } = api(() => ({ ...scope, token: "t".repeat(43), expiresAt: "2026-11-05T08:00:00.000Z" }));
+    await expect(client.operationTracker(OP)).resolves.toEqual({ token: "t".repeat(43), expiresAt: "2026-11-05T08:00:00.000Z" });
+    expect(transport.mock.calls[0][0]).toBe(`https://test.dispecing.linkapomoci.sk/api/mobile/v1/field/operations/${OP}/tracker`);
+    expect(transport.mock.calls[0][1]).toMatchObject({ method: "POST", credentials: "omit" });
+    await expect(api(() => ({ ...scope, token: "short", expiresAt: at })).client.operationTracker(OP)).rejects.toMatchObject({ status: 502 });
+    const revoke = api(() => ({ ...scope, revoked: true }));
+    await revoke.client.operationUntrack(OP);
+    expect(revoke.transport.mock.calls[0][1]).toMatchObject({ method: "DELETE" });
+    await revoke.client.operationUntrack("../me");
+    expect(revoke.transport).toHaveBeenCalledTimes(1);
+  });
   it("reads towing orders and tells a handed-over order apart", async () => {
     await expect(api(() => ({ ...scope, order })).client.towing(ORDER)).resolves.toMatchObject({ number: "OT-1", fields: { pickup: "D1" } });
     const command = { commandId: CMD, type: "submit" as const, expectedRevision: 3, assignmentGeneration: 1, payload: {} };

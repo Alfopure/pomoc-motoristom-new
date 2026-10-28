@@ -172,6 +172,14 @@ podklady pre App Store v `docs/mobile/app-store.md`)
   a nie spoľahlivo (pozri zdroje). Posiela sa kľúčom jedného pristavenia, nie
   prihlásením; bez signálu čaká v telefóne najviac 12 h. Expo Go polohu na
   pozadí nepodporuje: tam sa posiela, kým je aplikácia otvorená.
+- **Poloha počas vlastnej jazdy na pozadí** (28. 10. 2026): rovnaký návrh pre
+  jazdu, odvoz a presun z Mojej práce (stav prijaté, na ceste, na mieste,
+  vozidlo prevzaté): kľúč jednej jazdy (uložený iba jeho odtlačok, migrácia
+  `20261028150000_operation_background_tracking.sql`), vlastná úloha na pozadí
+  `pm-operation-location`, trasa `field/operations/track`, rovnaké obmedzenie
+  20 s / 10 s, 12 h v telefóne a 30 dní na serveri. Jazda z pôvodného
+  pristavenia sa nesleduje druhýkrát (sleduje ju Pristavenia). Kým migrácia
+  v prostredí nie je, posiela sa ako doteraz, kým je aplikácia otvorená.
 - Poloha: o povolenie aplikácia požiada až po prijatí (alebo inom vlastnom
   kroku pristavovača v aplikácii; neskôr aj tlačidlom Zdieľať polohu
   s dispečerom) a potom o „Vždy“; posiela ju najviac raz za 20 s.

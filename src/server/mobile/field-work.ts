@@ -1,4 +1,5 @@
 import "server-only";
+import { randomBytes } from "node:crypto";
 import type { TowingCapability, TowingMember, TowingRole } from "@/domain/towing/types";
 import type { Json } from "@/lib/supabase/database.types";
 import type {
@@ -14,7 +15,7 @@ import { towingEnabled } from "@/server/towing/auth";
 import { uploadTowingAttachment } from "@/server/towing/files";
 import { TowingError } from "@/server/towing/http";
 import { executeTowingCommand, loadTowingWorkspace, parseTowingCommand } from "@/server/towing/service";
-import { readDeliveryPosition } from "./delivery";
+import { readDeliveryPosition, readTrackPositions, trackerHash } from "./delivery";
 import { fieldAdmin, missingSchema, type MobileFieldActor } from "./field-auth";
 
 /** Moja práca in the app: the member's own logistics operations (`deliver`) and towing
@@ -233,6 +234,49 @@ export async function recordOperationPosition(actor: MobileFieldActor, id: strin
   }
   const result = data as { stored?: unknown; active?: unknown } | null;
   if (typeof result?.stored !== "boolean" || typeof result.active !== "boolean") unconfirmed();
+  return { stored: result.stored, active: result.active };
+}
+
+/** A database without 20261028150000 has no background secrets: the open app still sends. */
+function trackerError(error: RpcError): never {
+  if (missingSchema(error.code)) throw new MutationError("Poloha na pozadí počas jazdy ešte nie je v tomto prostredí zapnutá.", 503, "work_background_unavailable");
+  if (error.code === "42501") throw new MutationError("Nemáte prístup k jazdám.", 403, "mobile_no_work_access");
+  if (error.code === "P0002") throw new MutationError("Jazda sa nenašla.", 404);
+  if (error.code === "PT409" && error.message === "Not tracking") throw new MutationError("Polohu môžete posielať počas prijatej jazdy, kým je otvorená.", 409, "work_not_tracking");
+  if (["22023", "22P02", "22007", "22008"].includes(error.code ?? "")) throw new MutationError("Neplatná požiadavka polohy.", 400);
+  return unconfirmed();
+}
+async function trackerCall(actor: MobileFieldActor, id: string, action: "issue" | "revoke", tokenHash: string | null): Promise<Record<string, unknown>> {
+  requireDeliver(actor);
+  const { data, error } = await fieldAdmin().rpc("motorist_operation_tracker", { p_user_id: actor.userId, p_organization_id: actor.organizationId,
+    p_operation_id: pathId(id, "Jazda sa nenašla."), p_action: action, p_token_hash: tokenHash });
+  if (error) trackerError(error);
+  return record(data);
+}
+/** A secret for the member's own accepted operation, so the phone can send its position
+ * in the background (app closed, phone locked) without the sign-in session. Only its
+ * hash reaches the database; it ends with the work, a new secret or the member's logout. */
+export async function issueOperationTracker(actor: MobileFieldActor, id: string): Promise<{ token: string; expiresAt: string }> {
+  const token = randomBytes(32).toString("base64url");
+  const data = await trackerCall(actor, id, "issue", trackerHash(token));
+  if (!isHistoryTimestamp(data.expiresAt)) unconfirmed();
+  return { token, expiresAt: data.expiresAt as string };
+}
+export async function revokeOperationTracker(actor: MobileFieldActor, id: string): Promise<{ revoked: boolean }> {
+  if ((await trackerCall(actor, id, "revoke", null)).revoked !== true) unconfirmed();
+  return { revoked: true };
+}
+/** What the phone kept since its last send, by the operation's secret; `active` false: stop. */
+export async function trackOperationPositions(token: string, value: unknown): Promise<{ stored: number; active: boolean }> {
+  const positions = readTrackPositions(value);
+  const { data, error } = await fieldAdmin().rpc("motorist_operation_track", { p_token_hash: trackerHash(token), p_positions: positions as unknown as Json });
+  if (error) {
+    if (missingSchema(error.code)) throw new MutationError("Poloha počas jazdy ešte nie je v tomto prostredí zapnutá.", 503, "work_position_unavailable");
+    if (["22023", "22P02", "22007", "22008"].includes(error.code ?? "")) throw new MutationError("Neplatné polohy.", 400);
+    unconfirmed();
+  }
+  const result = data as { stored?: unknown; active?: unknown } | null;
+  if (typeof result?.stored !== "number" || !Number.isSafeInteger(result.stored) || result.stored < 0 || typeof result.active !== "boolean") unconfirmed();
   return { stored: result.stored, active: result.active };
 }
 

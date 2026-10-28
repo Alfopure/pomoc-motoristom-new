@@ -59,7 +59,7 @@ function BranchList({ session, active, view, onView, snapshot, error, pending, f
   const unconfirmed = commands.pending.filter(item => item.target.kind === "branch");
   const requests = sortRequests(snapshot?.requests ?? []);
   const queue = requests.filter(waiting), running = requests.filter(item => !waiting(item));
-  const queued = session.branch.data?.groups.reduce((sum, group) => sum + group.counts.queued, 0) ?? null;
+  const queued = session.branch.data ? session.branch.data.requests.filter(waiting).length : null;
   return <ScrollView contentContainerStyle={formLayout.content}>
     <View style={s.header}>
       <Text accessibilityRole="header" style={s.title}>Pobočka</Text>
@@ -181,6 +181,8 @@ function RequestDetail({ session, id, request, groups, canOperateTowing, loading
     <SectionHeader title="Požiadavka" />
     <Group>
       <InfoRow first label="Termín" value={termLabel(shown.dueAt)} />
+      <InfoRow label="Odkiaľ" value={shown.pickup || null} empty="Neuvedené" />
+      <InfoRow label="Kam" value={shown.destination || null} empty="Neuvedené" />
       <InfoRow label="Prípad" value={shown.caseNumber} empty="Bez prípadu" />
       <InfoRow label="Klient" value={shown.customer?.name || null} detail={phone ? formatNumber(phone) : null} empty="Bez kontaktu" />
       <InfoRow label="Vozidlo" value={shown.vehicle} empty="Neurčené" />

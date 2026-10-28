@@ -9,6 +9,11 @@ vi.mock("@/server/default-organization", () => ({ resolveDefaultOrganizationId: 
 const work = await import("./field-work");
 const { GET: workRoute } = await import("@/app/api/mobile/v1/field/work/route");
 const { POST: commandRoute } = await import("@/app/api/mobile/v1/field/operations/[id]/commands/route");
+const { POST: trackerRoute, DELETE: untrackRoute } = await import("@/app/api/mobile/v1/field/operations/[id]/tracker/route");
+const { POST: trackRoute } = await import("@/app/api/mobile/v1/field/operations/track/route");
+const { trackerHash } = await import("./delivery");
+const stableTest = { MOBILE_DELIVERY_ENABLED: "true", MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev", VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",
+  APP_BASE_URL: "https://test.dispecing.linkapomoci.sk", SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co" };
 
 const id = (n: number) => `93000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const ORG = id(1), USER = id(2), MEMBER = id(3), OP = id(4), CMD = id(5), ORDER = id(6), OTHER = id(7);
@@ -132,6 +137,66 @@ describe("Moja práca: operations", () => {
     rpcs({});
     await expect(work.recordOperationPosition(actor, OP, reading)).rejects.toMatchObject({ status: 503, code: "work_position_unavailable" });
     await expect(work.recordOperationPosition(actor, OP, { ...reading, lat: 300 })).rejects.toMatchObject({ status: 400 });
+  });
+  it("issues a background secret whose hash alone reaches the database, and revokes it", async () => {
+    const expiresAt = "2026-11-05T08:00:00.000Z";
+    rpcs({ motorist_operation_tracker: args => args.p_action === "issue" ? { expiresAt } : { revoked: true } });
+    const issued = await work.issueOperationTracker(actor, OP.toUpperCase());
+    expect(issued).toEqual({ token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/), expiresAt });
+    expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_operation_tracker", { p_user_id: USER, p_organization_id: ORG, p_operation_id: OP, p_action: "issue", p_token_hash: trackerHash(issued.token) });
+    await expect(work.revokeOperationTracker(actor, OP)).resolves.toEqual({ revoked: true });
+    expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_operation_tracker", { p_user_id: USER, p_organization_id: ORG, p_operation_id: OP, p_action: "revoke", p_token_hash: null });
+    await expect(work.issueOperationTracker({ ...actor, capabilities: ["drive"] }, OP)).rejects.toMatchObject({ status: 403 });
+    await expect(work.issueOperationTracker(actor, "x")).rejects.toMatchObject({ status: 404 });
+  });
+  it("maps refusals of the background secret; an older database keeps the open app sending", async () => {
+    const refuse = (error: Record<string, unknown>) => rpcs({ motorist_operation_tracker: () => { throw error; } });
+    rpcs({});
+    await expect(work.issueOperationTracker(actor, OP)).rejects.toMatchObject({ status: 503, code: "work_background_unavailable" });
+    refuse({ code: "PT409", message: "Not tracking" });
+    await expect(work.issueOperationTracker(actor, OP)).rejects.toMatchObject({ status: 409, code: "work_not_tracking" });
+    refuse({ code: "P0002", message: "Operation unavailable" });
+    await expect(work.issueOperationTracker(actor, OP)).rejects.toMatchObject({ status: 404 });
+    refuse({ code: "42501", message: "Forbidden" });
+    await expect(work.revokeOperationTracker(actor, OP)).rejects.toMatchObject({ status: 403 });
+    rpcs({ motorist_operation_tracker: () => ({ expiresAt: "soon" }) });
+    await expect(work.issueOperationTracker(actor, OP)).rejects.toMatchObject({ status: 503, code: "work_unconfirmed" });
+  });
+  it("takes background batches by the operation secret alone and says when to stop", async () => {
+    const token = "c".repeat(43), positions = [{ lat: 49.2, lng: 18.7, accuracy: null, recordedAt: "2026-10-28T08:00:00Z" }];
+    rpcs({ motorist_operation_track: () => ({ stored: 1, active: true }) });
+    await expect(work.trackOperationPositions(token, { positions })).resolves.toEqual({ stored: 1, active: true });
+    expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_operation_track", { p_token_hash: trackerHash(token), p_positions: [{ ...positions[0], recordedAt: "2026-10-28T08:00:00.000Z" }] });
+    for (const bad of [{}, { positions: [] }, { positions: Array.from({ length: 101 }, () => positions[0]) }, { positions: [{ ...positions[0], lat: 91 }] }, { positions, extra: 1 }]) {
+      await expect(work.trackOperationPositions(token, bad)).rejects.toMatchObject({ status: 400 });
+    }
+    rpcs({});
+    await expect(work.trackOperationPositions(token, { positions })).rejects.toMatchObject({ status: 503, code: "work_position_unavailable" });
+    rpcs({ motorist_operation_track: () => ({ stored: "1", active: true }) });
+    await expect(work.trackOperationPositions(token, { positions })).rejects.toMatchObject({ status: 503 });
+  });
+  it("answers the background route without a session, only with the secret", async () => {
+    const send = (headers: Record<string, string>) => trackRoute(new Request("https://x/api/mobile/v1/field/operations/track", { method: "POST",
+      headers: { "content-type": "application/json", "x-pm-app-environment": "test", ...headers }, body: JSON.stringify({ positions: [{ lat: 49.2, lng: 18.7, accuracy: 5, recordedAt: "2026-10-28T08:00:00Z" }] }) }));
+    expect((await send({})).status).toBe(401);
+    expect((await send({ authorization: "Bearer " + "b".repeat(43) })).status).toBe(401);
+    for (const [key, value] of Object.entries(stableTest)) vi.stubEnv(key, value);
+    rpcs({ motorist_operation_track: () => ({ stored: 0, active: false }) });
+    const response = await send({ authorization: "Tracker " + "b".repeat(43) });
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(await response.json()).toEqual({ ok: true, apiVersion: 1, environment: "test", stored: 0, active: false });
+    expect(mocks.rpc).not.toHaveBeenCalledWith("motorist_towing_actor", expect.anything());
+    expect((await send({ authorization: "Tracker " + "b".repeat(43), "x-pm-app-environment": "production" })).status).toBe(409);
+    vi.stubEnv("MOBILE_DELIVERY_ENABLED", "");
+    expect((await send({ authorization: "Tracker " + "b".repeat(43) })).status).toBe(503);
+  });
+  it("issues the secret over the member route with the field scope", async () => {
+    for (const [key, value] of Object.entries(stableTest)) vi.stubEnv(key, value);
+    rpcs({ motorist_operation_tracker: args => args.p_action === "issue" ? { expiresAt: "2026-11-05T08:00:00.000Z" } : { revoked: true } });
+    const issued = await trackerRoute(bearer({}), { params: Promise.resolve({ id: OP }) });
+    expect(await issued.json()).toMatchObject({ ok: true, apiVersion: 1, environment: "test", memberId: MEMBER, token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/), expiresAt: "2026-11-05T08:00:00.000Z" });
+    const revoked = await untrackRoute(new Request("https://app.test/api", { method: "DELETE", headers: { authorization: "Bearer x" } }), { params: Promise.resolve({ id: OP }) });
+    expect(await revoked.json()).toMatchObject({ ok: true, memberId: MEMBER, revoked: true });
   });
 });
 

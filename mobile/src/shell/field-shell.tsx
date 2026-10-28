@@ -20,7 +20,7 @@ import type { SharingState } from "../delivery/sharing";
 import { BranchModule, type BranchOpenRequest } from "../branch/module";
 import { waiting } from "../branch/model";
 import { WorkModule, WorkRow, type WorkOpenRequest } from "../field-work/module";
-import { isOpenOperation, workItems } from "../field-work/model";
+import { isOpenOperation, sharesOperationPosition, workItems } from "../field-work/model";
 import type { FieldWorkSession } from "../field-work/session";
 import type { PushSettings } from "../notifications/settings";
 import { isFieldTap, pushTaps, type PushTarget } from "../notifications/taps";
@@ -141,7 +141,8 @@ export function FieldShell(props: Props) {
     {view === "home" && <FieldHome modules={modules} deliveries={openDeliveries} work={items} queue={queue.length} now={now}
       location={location.status === "sharing" || !modules.work ? location : workLocation} status={status}
       tip={preferences.loaded && !preferences.tipDismissed} onDismissTip={() => prefs.dismissTip()} onOpenDelivery={id => open({ kind: "delivery", id })} onOpenWork={openWork}
-      onModule={navigate} errors={{ delivery: modules.delivery && session.list.isError, work: Boolean(work?.list.isError) }} onRefresh={() => { void props.accessRefresh.refresh(); }} />}
+      onModule={navigate} errors={{ delivery: modules.delivery && session.list.isError, work: Boolean(work?.list.isError) }}
+      onRefresh={() => { void props.accessRefresh.refresh(); if (modules.work) void work?.list.refetch(); }} />}
     {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={showAdd} badges={badges}
       onOpen={id => navigate(id)} onMenu={() => setEditing(true)} onEdit={() => setEditing(true)} onAccount={() => go({ ...nav, account: true })} accessRefresh={props.accessRefresh} />}
     {view === "account" && <FieldAccount {...props} modules={modules} name={session.me.data?.member.displayName ?? ""} email={session.me.data?.member.email ?? null} onEditBar={() => setEditing(true)} />}
@@ -165,6 +166,16 @@ export function FieldShell(props: Props) {
   </View>;
 }
 
+/** The Prehľad card under the status: what dispatch sees now and, with accepted work, what to do about it. */
+export function locationText(location: SharingState, accepted: boolean): string {
+  if (location.status === "sharing") return location.background === "always" ? "Dispečer vidí, kde ste, aj pri zamknutom telefóne, kým je práca otvorená."
+    : "Dispečer vidí, kde ste, kým je aplikácia spustená.";
+  if (!accepted) return "Poloha sa posiela až počas práce, ktorú ste prijali.";
+  if (location.status === "denied") return "Poloha nie je povolená, dispečer nevidí, kde ste. Povoľte ju v nastaveniach telefónu.";
+  if (location.status === "error") return "Polohu sa nepodarilo zapnúť. Otvorte prácu a skúste to znova.";
+  return "Máte prijatú prácu, ale poloha sa neposiela. Otvorte ju a ťuknite na Zdieľať polohu s dispečerom.";
+}
+
 /** Prehľad of a field member: what is waiting for them and whether dispatch sees them. */
 function FieldHome({ modules, deliveries, work, queue, now, location, status, tip, onDismissTip, onOpenDelivery, onOpenWork, onModule, errors, onRefresh }: {
   modules: FieldModules; deliveries: ReturnType<typeof sortDeliveries>; work: ReturnType<typeof workItems>; queue: number; now: number; location: SharingState;
@@ -181,15 +192,14 @@ function FieldHome({ modules, deliveries, work, queue, now, location, status, ti
       <View style={[s.cardIcon, { backgroundColor: soft }]}><MapPin size={16} color={ink} accessible={false} /></View>
       <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
         <Text style={s.cardTitle}>{status.label}</Text>
-        <Text style={s.cardText}>{location.status === "sharing" ? location.background === "always" ? "Dispečer vidí, kde ste, kým je pristavenie otvorené."
-          : "Dispečer vidí, kde ste, kým je aplikácia spustená." : "Poloha sa posiela až počas práce, ktorú ste prijali."}</Text>
+        <Text style={s.cardText}>{locationText(location, deliveries.some(delivery => delivery.tracking) || work.some(item => item.kind === "operation" && sharesOperationPosition(item.operation)))}</Text>
       </View>
     </Pressable>}
     {(errors.delivery || errors.work) && <View style={formLayout.notices}><ErrorNotice message={errors.work ? "Prácu sa nepodarilo načítať." : "Pristavenia sa nepodarilo načítať."} onRetry={onRefresh} /></View>}
     {modules.work && <>
       <SectionHeader title="Moja práca" detail={work.length ? String(work.length) : null} />
       {work.length ? <Group>{work.slice(0, 4).map((item, index) => <WorkRow key={item.key} item={item} first={index === 0} now={now} onOpen={onOpenWork} />)}</Group>
-        : <Text style={s.empty}>Teraz nemáte pridelenú žiadnu jazdu ani odťah.</Text>}
+        : <Text style={s.empty}>{errors.work ? "Zoznam práce sa nepodarilo overiť. Skúste obnoviť údaje." : "Teraz nemáte pridelenú žiadnu jazdu ani odťah."}</Text>}
       <Group style={{ marginTop: space.m }}><Row first title="Celá moja práca" tone="link" onPress={() => onModule("praca")} trailing={<Text style={s.chevron}>›</Text>} /></Group>
     </>}
     {modules.branch && <>

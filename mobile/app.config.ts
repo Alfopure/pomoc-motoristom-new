@@ -66,9 +66,9 @@ const config: ExpoConfig = {
   }], ["expo-location", {
     locationWhenInUsePermission: "Aplikácia použije polohu telefónu na váš pokyn pri výbere miesta zásahu a počas pristavenia, jazdy, odvozu či presunu, ktoré ste prijali, aby dispečer videl, kde ste.",
     locationAlwaysPermission: false,
-    // A pristavovač's position goes on with the app in the background or closed, only while
-    // their accepted delivery is open; iOS shows the blue location indicator meanwhile.
-    locationAlwaysAndWhenInUsePermission: "Počas pristavenia, ktoré ste prijali, posiela aplikácia dispečingu vašu polohu aj na pozadí a pri zamknutom telefóne, aby dispečer videl, kde ste. Po skončení pristavenia prestane.",
+    // A field member's position goes on with the app in the background or closed, only while
+    // their accepted delivery or own jazda/odvoz/presun is open; iOS shows the blue location indicator meanwhile.
+    locationAlwaysAndWhenInUsePermission: "Počas pristavenia, jazdy, odvozu či presunu, ktoré ste prijali, posiela aplikácia dispečingu vašu polohu aj na pozadí a pri zamknutom telefóne, aby dispečer videl, kde ste. Po skončení práce prestane.",
     // expo-location links Core Motion; App Store Connect requires this text although the app
     // never asks for motion data (ITMS-90683 on the first TestFlight upload, 22. 10. 2026).
     motionUsagePermission: "Aplikácia údaje o pohybe telefónu nepoužíva a o prístup k nim nežiada.",

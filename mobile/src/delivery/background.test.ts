@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deliverReadings, mergeReadings, parseQueue, parseTrackingState, sendReadings, toReading, type Reading, type TaskDeps, type TrackingState } from "./background";
+import { OPERATION_TRACK_PATH, deliverReadings, mergeReadings, parseQueue, parseTrackingState, sendReadings, toReading, type Reading, type TaskDeps, type TrackingState } from "./background";
 
 const NOW = Date.parse("2026-10-22T10:00:00Z");
 const at = (seconds: number) => new Date(NOW + seconds * 1000).toISOString();
@@ -120,5 +120,11 @@ describe("sending a batch", () => {
     expect(await sendReadings(state, [reading(0)], reply(503, { ok: false, code: "delivery_unavailable" }) as unknown as typeof fetch)).toBe("stop");
     expect(await sendReadings(state, [reading(0)], reply(200, { ok: true, environment: "production", active: true }) as unknown as typeof fetch)).toBe("retry");
     expect(await sendReadings(state, [reading(0)], vi.fn(async () => { throw new TypeError("offline"); }) as unknown as typeof fetch)).toBe("retry");
+  });
+  it("sends an operation's readings to its own route, and stops when its positions are off", async () => {
+    const transport = reply(200);
+    await expect(sendReadings(state, [reading(0)], transport as unknown as typeof fetch, OPERATION_TRACK_PATH)).resolves.toBe("ok");
+    expect(transport.mock.calls[0][0]).toBe("https://test.dispecing.linkapomoci.sk/api/mobile/v1/field/operations/track");
+    expect(await sendReadings(state, [reading(0)], reply(503, { ok: false, code: "work_position_unavailable" }) as unknown as typeof fetch, OPERATION_TRACK_PATH)).toBe("stop");
   });
 });

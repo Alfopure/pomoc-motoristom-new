@@ -58,7 +58,7 @@ import type { DeliverySession } from "../delivery/session";
 import { BranchModule } from "../branch/module";
 import { waiting as awaitingLead } from "../branch/model";
 import { WorkModule, type WorkOpenRequest } from "../field-work/module";
-import { isOpenOperation, workItems } from "../field-work/model";
+import { isOpenOperation, operationStatusLabels, towingStatusLabels, workItems } from "../field-work/model";
 import type { FieldWorkSession } from "../field-work/session";
 
 type Props = {
@@ -173,7 +173,8 @@ export function DispatchShell(props: Props) {
   const deliveryNow = useDeliveryTime(active && Boolean(delivery));
   const deliveries = sortDeliveries(canUseDeliveryCache(delivery?.list.error) ? (delivery?.list.data ?? []).map(item => visibleDelivery(item, deliveryNow)) : [], deliveryNow);
   const openDeliveries = deliveries.filter(item => isOpen(item, deliveryNow));
-  const openWork = work && field.work && canUseDeliveryCache(work.list.error) ? workItems(work.list.data).filter(item => item.kind === "towing" || isOpenOperation(item.operation)).length : 0;
+  const workList = work && field.work && canUseDeliveryCache(work.list.error) ? workItems(work.list.data).filter(item => item.kind === "towing" || isOpenOperation(item.operation)) : [];
+  const openWork = workList.length;
   const branchQueue = work && field.branch ? (work.branch.data?.requests ?? []).filter(awaitingLead).length : 0;
   const fieldBadges = { pristavenia: openDeliveries.length, praca: openWork, pobocka: branchQueue };
 
@@ -327,6 +328,9 @@ export function DispatchShell(props: Props) {
           tip={preferences.loaded && !preferences.tipDismissed} onDismissTip={() => prefs.dismissTip()}
           deliveries={delivery && field.delivery ? { count: delivery.list.data ? openDeliveries.length : null, onOpen: () => navigate("pristavenia"),
             detail: delivery.list.isError ? "Pristavenia nie sú dostupné" : openDeliveries.length ? deliveryStatusLabels[openDeliveries[0].status] : "Žiadne otvorené" } : null}
+          work={work && field.work ? { count: work.list.data ? openWork : null, onOpen: () => navigate("praca"),
+            detail: work.list.isError ? "Práca nie je dostupná" : !workList.length ? "Žiadna pridelená"
+              : workList[0].kind === "operation" ? operationStatusLabels[workList[0].operation.status] : towingStatusLabels[workList[0].order.workStatus] } : null}
           onOpen={homeTarget} onCall={id => openCallContext({ kind: "session", id })}
           onRefresh={() => { void Promise.allSettled([props.accessRefresh.refresh(), callbackSummary.refetch(), consoleQuery.refetch(), queryClient.invalidateQueries({ queryKey: [...queryKey, identity.profileId] })]); }} />;
       }}

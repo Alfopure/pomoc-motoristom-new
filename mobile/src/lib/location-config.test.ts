@@ -31,9 +31,9 @@ describe("resolved location permissions: foreground, and background only for a p
     const plist = resolved.ios?.infoPlist;
     expect(plist?.NSLocationWhenInUseUsageDescription).toContain("na váš pokyn");
     expect(plist?.NSLocationWhenInUseUsageDescription).toContain("počas pristavenia");
-    // Always only for the delivery the pristavovač accepted, with the reason in plain words.
-    expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Počas pristavenia, ktoré ste prijali");
-    expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Po skončení pristavenia prestane");
+    // Always only for the work the field member accepted, with the reason in plain words.
+    expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Počas pristavenia, jazdy, odvozu či presunu, ktoré ste prijali");
+    expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Po skončení práce prestane");
     expect(plist).not.toHaveProperty("NSLocationAlwaysUsageDescription");
     // Required by App Store Connect for the linked Core Motion code; the app never asks.
     expect(plist?.NSMotionUsageDescription).toBe("Aplikácia údaje o pohybe telefónu nepoužíva a o prístup k nim nežiada.");

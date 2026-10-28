@@ -76,7 +76,8 @@ znakov hľadá v prípadoch celej organizácie (číslo, meno, EČV, telefón),
 v hovoroch a v moduloch; ťuk otvorí detail prípadu, detail hovoru alebo modul.
 
 **Prehľad** (`home.tsx`): hľadanie, hovory na účte (ak sú), dlaždice Spätné volania,
-Prípady, Moje úlohy a Telefón; ťuk otvorí príslušný modul. Pod nimi sekcia
+Prípady, Moje úlohy a Telefón, pri vlastnej práci v teréne aj Pristavenia a Moja práca;
+ťuk otvorí príslušný modul. Pod nimi sekcia
 **Treba riešiť**: najviac štyri najnaliehavejšie položky a riadok **Všetky
 upozornenia**. Jednorazový tip ukáže, kde sú Moduly; zmizne po ťuknutí na OK
 alebo po prvej návšteve Modulov.
