@@ -2,9 +2,9 @@ import type { MobilePushPreferences, MobilePushType } from "../../../src/lib/mob
 import { MobileApiError, type MobileTransport } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 
-export const PUSH_TYPES: readonly MobilePushType[] = ["tasks", "task_due", "cases", "callbacks_mine", "callbacks_unclaimed", "handoffs"];
-/** Kinds a server before deliveries does not know yet; they stay on. */
-const OPTIONAL: readonly MobilePushType[] = ["handoffs"];
+export const PUSH_TYPES: readonly MobilePushType[] = ["tasks", "task_due", "cases", "callbacks_mine", "callbacks_unclaimed", "handoffs", "work", "branch"];
+/** Kinds an older server does not know yet (deliveries, work notices); they stay on. */
+const OPTIONAL: readonly MobilePushType[] = ["handoffs", "work", "branch"];
 export type PushRegistration = {
   installationId: string; token: string; platform: "ios" | "android"; appVersion: string | null;
   preferences?: Partial<MobilePushPreferences>;

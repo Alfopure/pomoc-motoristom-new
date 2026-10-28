@@ -5,6 +5,7 @@ import { createSupabaseAdminClient } from '@/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { resolveDefaultOrganizationId } from '@/server/default-organization';
 import { TowingError, mapRpcError, revision, uuid } from '@/server/towing/http';
+import { queueWorkPush } from '@/server/mobile/push-outbox';
 const admin = () => createSupabaseAdminClient() as unknown as SupabaseClient;
 // Domain refusals the user can act on; everything else keeps the shared generic mapping.
 const messages: [RegExp, number, string][] = [
@@ -69,10 +70,21 @@ export function parseBranchCommand(value: Record<string, unknown>): BranchComman
 }
 export async function commandBranch(input: Record<string, unknown>): Promise<BranchReceipt> {
   const user = await currentUser();
+  if (input.action === 'group_settings') return saveGroupSettings(user, input);
   const command = parseBranchCommand(input);
   const result = await admin().rpc('motorist_branch_command', { ...user, p_command: command });
   mapBranchError(result.error);
+  queueWorkPush(user.p_organization_id);
   return result.data as BranchReceipt;
+}
+/** Escalation of waiting work: minutes before a reminder and whether central hears too. */
+async function saveGroupSettings(user: Awaited<ReturnType<typeof currentUser>>, input: Record<string, unknown>): Promise<BranchReceipt> {
+  const payload = (input.payload && typeof input.payload === 'object' ? input.payload : {}) as Record<string, unknown>;
+  const minutes = Number(payload.escalateAfterMinutes);
+  if (!Number.isSafeInteger(minutes) || minutes < 5 || minutes > 1440 || typeof payload.escalateToCentral !== 'boolean') throw new TowingError('invalid_input', 400, 'Zadajte 5 až 1440 minút.');
+  const result = await admin().rpc('motorist_branch_group_settings', { ...user, p_command_id: uuid(input.commandId), p_group_id: uuid(payload.groupId), p_expected_revision: revision(input.expectedRevision), p_escalate_after: minutes, p_escalate_to_central: payload.escalateToCentral });
+  mapBranchError(result.error);
+  return { commandId: uuid(input.commandId), ...(result.data as Pick<BranchReceipt, 'group'>) };
 }
 export async function getBranchReport(query: Record<string, string>): Promise<BranchReport> {
   const user = await currentUser();

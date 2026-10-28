@@ -8,8 +8,9 @@ import { MutationError } from "@/server/mutation-error";
 import type { MotoristActor } from "@/server/api-auth";
 import { mobileEnvironment, requireMobileActor, verifyMobileUser } from "./auth";
 
-/** A pristavovač: a field member (no dispatch profile) who may receive deliveries. */
-export type MobileFieldActor = { userId: string; memberId: string; organizationId: string; displayName: string; email: string | null; version: number };
+/** A field member (no dispatch profile): pristavovač, vodič or miestny dispečer pobočky.
+ * Capabilities decide which field routes it may use; each route checks its own. */
+export type MobileFieldActor = { userId: string; memberId: string; organizationId: string; displayName: string; email: string | null; version: number; capabilities: string[]; roles: string[] };
 
 /** Deliveries to pristavovači in the app. Like telephony, never from a working-branch
  * Preview, and on TEST only from the dedicated stable TEST deployment. */
@@ -23,6 +24,14 @@ export const fieldAdmin = () => createSupabaseAdminClient() as unknown as Supaba
 
 /** User JWT and an active field membership with the delivery capability. */
 export async function requireMobileFieldActor(request: Request): Promise<MobileFieldActor> {
+  const actor = await requireMobileMember(request);
+  if (!actor.capabilities.includes("deliver")) throw new MutationError("Nemáte prístup k pristaveniam.", 403, "mobile_no_field_access");
+  return actor;
+}
+
+/** User JWT and any active field membership. Routes add their own capability or
+ * branch-seat check; the RPCs re-check every command. */
+export async function requireMobileMember(request: Request): Promise<MobileFieldActor> {
   const user = await verifyMobileUser(request);
   if (!mobileDeliveryEnabled()) throw deliveryUnavailable();
   const { data, error } = await fieldAdmin().rpc("motorist_towing_actor", { p_user_id: user.userId });
@@ -31,9 +40,9 @@ export async function requireMobileFieldActor(request: Request): Promise<MobileF
     if (error.code === "42501") throw new MutationError("Nemáte prístup k pristaveniam.", 403, "mobile_no_field_access");
     throw new MutationError("Oprávnenie sa nepodarilo overiť.", 503);
   }
-  const member = data as { id?: unknown; userId?: unknown; organizationId?: unknown; displayName?: unknown; email?: unknown; active?: unknown; version?: unknown; capabilities?: unknown } | null;
+  const member = data as { id?: unknown; userId?: unknown; organizationId?: unknown; displayName?: unknown; email?: unknown; active?: unknown; version?: unknown; capabilities?: unknown; roles?: unknown } | null;
   if (!member || member.active !== true || member.userId !== user.userId || typeof member.organizationId !== "string"
-    || member.organizationId.toLowerCase() !== user.organizationId.toLowerCase() || !Array.isArray(member.capabilities) || !member.capabilities.includes("deliver")
+    || member.organizationId.toLowerCase() !== user.organizationId.toLowerCase() || !Array.isArray(member.capabilities) || member.capabilities.some(item => typeof item !== "string")
     || typeof member.id !== "string" || !isUuid(member.id) || typeof member.displayName !== "string" || typeof member.version !== "number" || !Number.isSafeInteger(member.version)) {
     throw new MutationError("Nemáte prístup k pristaveniam.", 403, "mobile_no_field_access");
   }
@@ -41,7 +50,8 @@ export async function requireMobileFieldActor(request: Request): Promise<MobileF
     throw new MutationError("Organizácia účtu sa zmenila. Obnovte prihlásenie pred pokračovaním.", 409, "expected_organization_mismatch");
   }
   return { userId: user.userId, memberId: member.id.toLowerCase(), organizationId: user.organizationId, displayName: member.displayName,
-    email: typeof member.email === "string" ? member.email : user.email ?? null, version: member.version };
+    email: typeof member.email === "string" ? member.email : user.email ?? null, version: member.version,
+    capabilities: member.capabilities as string[], roles: Array.isArray(member.roles) ? member.roles.filter((role): role is string => typeof role === "string") : [] };
 }
 
 export function fieldScope(actor: MobileFieldActor): MobileFieldScope {
@@ -55,10 +65,10 @@ export async function requireMobilePerson(request: Request): Promise<MobilePerso
   let dispatcher: MotoristActor | null = null;
   try { dispatcher = await requireMobileActor(request); }
   catch (error) { if (!(error instanceof MutationError) || error.code !== "mobile_no_dispatch_profile") throw error; }
-  if (!dispatcher) return { dispatcher: null, field: await requireMobileFieldActor(request) };
+  if (!dispatcher) return { dispatcher: null, field: await requireMobileMember(request) };
   // Without deliveries (switched off, no delivery role, a passing failure) a
   // dispatcher stays a dispatcher.
   if (!mobileDeliveryEnabled()) return { dispatcher, field: null };
-  try { return { dispatcher, field: await requireMobileFieldActor(request) }; }
+  try { return { dispatcher, field: await requireMobileMember(request) }; }
   catch { return { dispatcher, field: null }; }
 }

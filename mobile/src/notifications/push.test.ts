@@ -6,7 +6,7 @@ import { PUSH_DENIED, PUSH_UNAVAILABLE, PushSettings, type PushDevice } from "./
 import { PushTapInbox, readPushTap } from "./taps";
 
 const config = { environment: "test" as const, apiOrigin: "https://test.dispecing.linkapomoci.sk", supabaseUrl: "https://nzpnqdstvkfncflgqlny.supabase.co", publishableKey: "fixture" };
-const ALL: MobilePushPreferences = { tasks: true, task_due: true, cases: true, callbacks_mine: true, callbacks_unclaimed: true, handoffs: true };
+const ALL: MobilePushPreferences = { tasks: true, task_due: true, cases: true, callbacks_mine: true, callbacks_unclaimed: true, handoffs: true, work: true, branch: true };
 const PHONE = "00000000-0000-4000-8000-0000000000f1";
 const ME = "00000000-0000-4000-8000-000000000001";
 const TASK = "00000000-0000-4000-8000-0000000000b1";

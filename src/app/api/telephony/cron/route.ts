@@ -14,7 +14,9 @@ export const dynamic = "force-dynamic";
  * 120 s stays well under the 5-minute schedule, so at most one run is ever in
  * flight without a lock. The budget is split: ledger replay ≤ 60 s from the
  * cron start, ring sweep ≤ 20 s, the remaining telephony jobs ≤ 15 s,
- * reminders/pause warnings/recordings ≤ 15 s, 10 s reserve. Every job in the
+ * reminders/pause warnings/recordings ≤ 15 s, 10 s reserve. Work push notices
+ * (branch escalation + outbox drain) start only before 70 s and are skipped
+ * otherwise; their rows wait for the next tick. Every job in the
  * response carries `startedAt`/`ms` so the split can be checked.
  */
 export const maxDuration = 120;
@@ -148,6 +150,10 @@ async function runPauseEndingWarningMaterialisation(organizationId: string): Pro
 
 /** The overdue-callback push starts only this early in a run (120 s limit). */
 const MOBILE_PUSH_LATEST_START_MS = 75_000;
+/** Work notices start no later than 70 s; nothing is sent after 85 s (claimed rows go back to the
+ * queue), so escalation 8 s + claim/devices + one Expo batch end well before the 120 s limit. */
+const MOBILE_WORK_PUSH_LATEST_START_MS = 70_000;
+const MOBILE_WORK_PUSH_SEND_DEADLINE_MS = 85_000;
 
 /** Overdue callbacks to the dispatchers' phones (off unless MOBILE_PUSH_ENABLED; each
  * callback deadline is announced once, so a repeated tick sends nothing) and the
@@ -167,6 +173,18 @@ async function runMobilePushMaterialisation(organizationId: string, cronStartedA
   let upkeep: Awaited<ReturnType<typeof runMobilePushUpkeep>> = null, upkeepError: unknown = null;
   try { upkeep = await runMobilePushUpkeep(admin, organizationId, new Date()); } catch (error) { upkeepError = error; }
   const result = mobilePushEnabled() ? await runMobileCallbackPush(admin, organizationId, new Date()) : { status: "disabled" as const, detail: { reason: "push_disabled" } };
+  // Work notices: escalate waiting branch work, then drain the outbox, within its own budget.
+  let work: Record<string, unknown> | null = null;
+  if (mobilePushEnabled() && Date.now() - cronStartedAt <= MOBILE_WORK_PUSH_LATEST_START_MS) {
+    // Never fails the callback push job: an outbox problem is reported, the rows wait for the next tick.
+    try {
+      const { drainPushOutbox } = await import("@/server/mobile/push-outbox");
+      const escalated = await admin.rpc("motorist_branch_escalate" as never, { p_organization_id: organizationId } as never).abortSignal(AbortSignal.timeout(8_000));
+      const drained = await drainPushOutbox(admin as never, organizationId, { limit: 50, deadline: cronStartedAt + MOBILE_WORK_PUSH_SEND_DEADLINE_MS });
+      const failures = await admin.rpc("motorist_push_outbox_failures_recent" as never, { p_organization_id: organizationId } as never).abortSignal(AbortSignal.timeout(4_000));
+      work = { escalated: escalated.error ? `error:${escalated.error.code ?? "unknown"}` : escalated.data, ...drained, enqueueFailures24h: failures.error ? null : failures.data };
+    } catch (error) { work = { error: error instanceof Error ? error.message.slice(0, 200) : "failed" }; }
+  }
   if (upkeepError) throw upkeepError;
-  return { job, status: result.status, detail: { ...result.detail, ...(upkeep ? { upkeep } : {}) } };
+  return { job, status: result.status, detail: { ...result.detail, ...(upkeep ? { upkeep } : {}), ...(work ? { work } : {}) } };
 }
