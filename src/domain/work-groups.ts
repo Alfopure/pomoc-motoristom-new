@@ -25,10 +25,11 @@ export function formatDuration(seconds: number | null | undefined): string {
   const hours = Math.floor(seconds / 3600); const minutes = Math.round((seconds % 3600) / 60);
   return minutes ? `${hours} h ${minutes} min` : `${hours} h`;
 }
-/** Display state of a request: the materialized execution wins once it exists. */
-export function workState(request: Pick<WorkRequest, 'status' | 'execution'>): 'queued' | 'claimed' | 'assigned' | 'in_progress' | 'done' | 'cancelled' {
+/** Display state of a request: the materialized execution wins once it exists; `accepted` = the executor took the jazda but has not started it. */
+export function workState(request: Pick<WorkRequest, 'status' | 'execution'>): 'queued' | 'claimed' | 'assigned' | 'accepted' | 'in_progress' | 'done' | 'cancelled' {
   if (request.status === 'cancelled' || request.execution?.cancelled) return 'cancelled';
   if (request.execution?.done) return 'done';
   if (request.execution?.startedAt) return 'in_progress';
+  if (request.status === 'assigned' && request.execution?.status === 'accepted') return 'accepted';
   return request.status === 'assigned' ? 'assigned' : request.status;
 }

@@ -13,6 +13,9 @@ describe('branch work display', () => {
     expect(workState({ status: 'queued', execution: null })).toBe('queued');
     expect(workState({ status: 'claimed', execution: null })).toBe('claimed');
     expect(workState({ status: 'assigned', execution: execution({}) })).toBe('assigned');
+    expect(workState({ status: 'assigned', execution: execution({ status: 'accepted' }) })).toBe('accepted');
+    expect(workState({ status: 'assigned', execution: execution({ status: 'en_route', startedAt: '2026-10-28T08:00:00Z' }) })).toBe('in_progress');
+    expect(workState({ status: 'assigned', execution: execution({ status: 'accepted', cancelled: true }) })).toBe('cancelled');
     expect(workState({ status: 'assigned', execution: execution({ startedAt: '2026-10-28T08:00:00Z' }) })).toBe('in_progress');
     expect(workState({ status: 'assigned', execution: execution({ done: true }) })).toBe('done');
     expect(workState({ status: 'assigned', execution: execution({ cancelled: true }) })).toBe('cancelled');

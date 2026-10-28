@@ -8,8 +8,8 @@ import own from "./branches.module.css";
 import { formatDuration, workKinds, workState, type BranchCommand, type BranchReport, type BranchView, type BranchWorkspace as Workspace, type WorkGroup, type WorkRequest, type WorkRequestKind } from "@/domain/work-groups";
 
 type Tab = "overview" | "work" | "reports" | "team";
-const states: Record<ReturnType<typeof workState>, string> = { queued: "Čaká na prevzatie", claimed: "Prevzaté · na pridelenie", assigned: "Pridelené vykonávateľovi", in_progress: "Prebieha", done: "Vykonané", cancelled: "Zrušené" };
-const executionStatuses: Record<string, string> = { draft: "Na naplánovanie", assigned: "Pridelené", accepted: "Prijaté vodičom", en_route: "Na ceste", arrived: "Na mieste", collected: "Vozidlo prevzaté", completed: "Vykonané", cancelled: "Zrušené", in_progress: "Prebieha", submitted: "Odovzdané na kontrolu", needs_changes: "Na doplnenie" };
+const states: Record<ReturnType<typeof workState>, string> = { queued: "Čaká na prevzatie", claimed: "Prevzaté · na pridelenie", assigned: "Pridelené vykonávateľovi", accepted: "Prijaté vykonávateľom", in_progress: "Prebieha", done: "Vykonané", cancelled: "Zrušené" };
+const executionStatuses: Record<string, string> = { draft: "Na naplánovanie", assigned: "Pridelené", accepted: "Prijaté vykonávateľom", en_route: "Na ceste", arrived: "Na mieste", collected: "Vozidlo prevzaté", completed: "Vykonané", cancelled: "Zrušené", in_progress: "Prebieha", submitted: "Odovzdané na kontrolu", needs_changes: "Na doplnenie" };
 const date = (value: string | null | undefined) => value ? new Intl.DateTimeFormat("sk-SK", { dateStyle: "short", timeStyle: "short", timeZone: "Europe/Bratislava" }).format(new Date(value)) : "Bez termínu";
 const localDate = (value: string | null) => value ? new Date(new Date(value).getTime() - new Date(value).getTimezoneOffset() * 60_000).toISOString().slice(0, 16) : "";
 const iso = (value: FormDataEntryValue | null) => typeof value === "string" && value ? new Date(value).toISOString() : null;
@@ -85,7 +85,7 @@ export function BranchWorkspace({ caseId, cases = [], onOpenCase, standalone = f
     {showCreate && actor.central && <CreateRequest workspace={workspace} caseId={caseId} cases={cases} groupId={groupId} disabled={blocked} onClose={() => setShowCreate(false)} onSubmit={payload => command("create", payload, "Požiadavka bola odoslaná pobočke.", undefined, 0)} />}
     {tab === "overview" && !caseId && <Overview workspace={workspace} groupId={groupId} onOpen={id => { setSelectedId(id); setView("open"); setTab("work"); }} onGroup={id => { setGroupId(id); setTab("work"); setView("queue"); }} />}
     {tab === "work" && <>
-      <div className={styles.toolbar}><Select label="Zobraziť" value={view} onChange={event => { setView(event.target.value as BranchView); setSelectedId(null); }}><option value="open">Otvorená práca</option><option value="queue">Čaká na prevzatie a pridelenie</option><option value="active">Pridelená a prebiehajúca</option><option value="done">Vykonaná a zrušená</option><option value="all">Všetko</option></Select><span className={styles.muted}>{workspace.requests.length} z {workspace.totalCount} požiadaviek</span></div>
+      <div className={styles.toolbar}><Select label="Zobraziť" value={view} onChange={event => { setView(event.target.value as BranchView); setSelectedId(null); }}><option value="open">Otvorená práca</option><option value="queue">Čaká na prevzatie a pridelenie</option><option value="active">Pridelená, prijatá a prebiehajúca</option><option value="done">Vykonaná a zrušená</option><option value="all">Všetko</option></Select><span className={styles.muted}>{workspace.requests.length} z {workspace.totalCount} požiadaviek</span></div>
       <div className={`${styles.layout} ${selected ? styles.layoutWithDetail : ""}`}><div className={styles.list}>
         {workspace.requests.length === 0 && <div className={styles.empty}><ClipboardList size={28} /><h2>Žiadna práca v tomto zobrazení</h2><p>Požiadavka môže prísť aj bez vybraného auta; konkrétny výkon vznikne až pri pridelení.</p></div>}
         {workspace.requests.map(item => <RequestRow key={item.id} request={item} selected={item.id === selectedId} onSelect={() => setSelectedId(item.id)} />)}
@@ -98,9 +98,9 @@ export function BranchWorkspace({ caseId, cases = [], onOpenCase, standalone = f
 
 function RequestRow({ request, selected, onSelect }: { request: WorkRequest; selected: boolean; onSelect: () => void }) {
   const state = workState(request);
-  const overdue = request.dueAt && new Date(request.dueAt) < new Date() && ["queued", "claimed", "assigned"].includes(state);
+  const overdue = request.dueAt && new Date(request.dueAt) < new Date() && ["queued", "claimed", "assigned", "accepted"].includes(state);
   return <button type="button" className={`${styles.row} ${selected ? styles.selected : ""}`} onClick={onSelect}>
-    <div className={styles.rowTop}><span className={styles.kind}>{workKinds[request.kind]} · {request.groupName}</span><span className={`${styles.status} ${state === "queued" ? own.attention : ""}`}>{states[state]}</span></div>
+    <div className={styles.rowTop}><span className={styles.kind}>{workKinds[request.kind]} · {request.groupName}</span><span className={`${styles.status} ${state === "queued" ? own.attention : state === "accepted" ? own.accepted : ""}`}>{states[state]}</span></div>
     <strong>{request.pickup || "Miesto vyzdvihnutia"} <ArrowRight size={14} /> {request.destination || "Cieľ"}</strong>
     <span><Car size={14} /> {request.vehicle ?? "Vozidlo neurčené"} · {request.caseNumber ?? "Bez prípadu"}</span>
     <span><CalendarClock size={14} /> {date(request.dueAt)}{overdue && <b className={styles.waiting}> · po termíne</b>}</span>
@@ -177,7 +177,7 @@ function RequestDetail({ request, workspace, disabled, onClose, onCommand, onOpe
     {["queued", "claimed"].includes(request.status) && <><Button danger disabled={disabled} onClick={() => setCancelOpen(!cancelOpen)}>Zrušiť požiadavku</Button>
       {cancelOpen && <form className={styles.form} onSubmit={event => { event.preventDefault(); onCommand("cancel", { reason: text(new FormData(event.currentTarget), "reason") }, "Požiadavka bola zrušená."); }}><TextArea label="Dôvod zrušenia" name="reason" required maxLength={1000} /><Button danger type="submit" disabled={disabled}>Potvrdiť zrušenie</Button></form>}</>}
 
-    {execution && <div className={styles.panel}><div className={styles.panelHeading}><h3>Vykonanie</h3><span className={styles.status}>{executionStatuses[execution.status] ?? execution.status}</span></div>
+    {execution && <div className={styles.panel}><div className={styles.panelHeading}><h3>Vykonanie</h3><span className={`${styles.status} ${workState(request) === "accepted" ? own.accepted : ""}`}>{executionStatuses[execution.status] ?? execution.status}</span></div>
       <p>{execution.assignee ? `Vykonáva ${execution.assignee}` : "Vodič zatiaľ nepridelený"} · {date(execution.scheduledAt)}{execution.startedAt && <> · štart {date(execution.startedAt)}</>}{execution.finishedAt && <> · koniec {date(execution.finishedAt)}</>}</p>
       {!logistics && <a href={`/zakazky?orderId=${execution.ownerId}`} target="_blank" rel="noreferrer">Otvoriť odťahovú zákazku ↗</a>}
       {logistics && live && !execution.startedAt && <>
