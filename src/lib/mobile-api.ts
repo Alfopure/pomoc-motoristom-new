@@ -48,10 +48,12 @@ export type MobileAppErrorReport = {
   version: string; build: string | null; platform: "ios" | "android"; osVersion: string; preview: boolean;
 };
 /** Kinds of push notifications the dispatcher can switch on or off in Účet. */
-export type MobilePushType = "tasks" | "task_due" | "callbacks_mine" | "callbacks_unclaimed" | "cases" | "handoffs";
+/** `work`: own assigned jazdy/odvozy/presuny/odťahy; `branch`: new or waiting work of the member's branches. */
+export type MobilePushType = "tasks" | "task_due" | "callbacks_mine" | "callbacks_unclaimed" | "cases" | "handoffs" | "work" | "branch";
 export type MobilePushPreferences = Record<MobilePushType, boolean>;
 export type MobilePushRegistration = MobileScope & { preferences: MobilePushPreferences };
-export type MobilePushData = { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" } | { kind: "delivery"; id: string };
+export type MobilePushData = { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" } | { kind: "delivery"; id: string }
+  | { kind: "operation"; id: string } | { kind: "towing"; id: string } | { kind: "branch-request"; id: string };
 /** What a delivered notification carries: where a tap leads and whose phone it was sent to. */
 export type MobilePushPayload = MobilePushData & { profileId: string };
 export type MobileVoiceAttemptEnded = MobileScope & {
@@ -436,7 +438,8 @@ export type MobileHandoffDelivered = MobileScope & {
 
 /** The pristavovač's side: a field member without a dispatch profile. */
 export type MobileFieldScope = { ok: true; apiVersion: 1; environment: MobileEnvironment; memberId: string; checkedAt: string };
-export type MobileFieldMe = MobileFieldScope & { member: { id: string; displayName: string; email: string | null } };
+/** `capabilities` (deliver, drive, …) and `branches` (lead seats) decide which field modules the app shows; the server still authorizes every request. Older servers omit both. */
+export type MobileFieldMe = MobileFieldScope & { member: { id: string; displayName: string; email: string | null }; capabilities?: string[]; branches?: { id: string; name: string }[] };
 export type MobileDelivery = {
   id: string; status: HandoffState; revision: number; publishedVersion: number; caseNumber: string;
   expiresAt: string; createdAt: string; openedAt: string | null; eta: string | null; createdBy: string | null;

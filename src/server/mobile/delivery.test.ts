@@ -29,7 +29,7 @@ function view(overrides: Record<string, unknown> = {}) {
     published: card, events: [{ id: id(8), action: "update", comment: "Odoslané do aplikácie pristavovača", actor: "Dispečing", createdAt: at }], caseNumber: "PM-2026-0042",
     replacementPosition: { lat: 49.21, lng: 18.74, recordedAt: at }, tracking: false, ...overrides };
 }
-const actor = { userId: USER, memberId: MEMBER, organizationId: ORG, displayName: "Pavol", email: null, version: 3 };
+const actor = { userId: USER, memberId: MEMBER, organizationId: ORG, displayName: "Pavol", email: null, version: 3, capabilities: ["deliver"], roles: ["delivery"] };
 const stableTest = { MOBILE_DELIVERY_ENABLED: "true", MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev", VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk",
   APP_BASE_URL: "https://test.dispecing.linkapomoci.sk", SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co" };
 
@@ -49,7 +49,7 @@ describe("pristavovač identity", () => {
   });
 
   it("needs an active field membership of this organization with the delivery capability", async () => {
-    await expect(requireMobileFieldActor(new Request("https://x"))).resolves.toEqual({ userId: USER, memberId: MEMBER, organizationId: ORG, displayName: "Pavol", email: "pavol@example.test", version: 3 });
+    await expect(requireMobileFieldActor(new Request("https://x"))).resolves.toEqual({ userId: USER, memberId: MEMBER, organizationId: ORG, displayName: "Pavol", email: "pavol@example.test", version: 3, capabilities: ["deliver"], roles: ["delivery"] });
     expect(mocks.rpc).toHaveBeenCalledWith("motorist_towing_actor", { p_user_id: USER });
     for (const patch of [{ capabilities: ["drive"] }, { active: false }, { organizationId: id(99) }, { userId: id(98) }]) {
       mocks.rpc.mockResolvedValueOnce({ data: { ...member, ...patch }, error: null });
@@ -69,9 +69,13 @@ describe("pristavovač identity", () => {
     const dispatcher = { userId: USER, profileId: id(7), organizationId: ORG, displayName: "Pavol", role: "dispatcher" };
     mocks.dispatcher.mockResolvedValueOnce(dispatcher);
     await expect(requireMobilePerson(new Request("https://x"))).resolves.toMatchObject({ dispatcher: { profileId: id(7) }, field: { memberId: MEMBER } });
-    // A dispatcher without the delivery role, or with deliveries failing, stays a dispatcher.
+    // Any field membership (here a tow driver) joins the dispatcher, so its own work notices reach the phone.
     mocks.dispatcher.mockResolvedValueOnce(dispatcher);
     mocks.rpc.mockResolvedValueOnce({ data: { ...member, capabilities: ["drive"] }, error: null });
+    await expect(requireMobilePerson(new Request("https://x"))).resolves.toMatchObject({ dispatcher, field: { memberId: MEMBER, capabilities: ["drive"] } });
+    // With the field lookup failing, a dispatcher stays a dispatcher.
+    mocks.dispatcher.mockResolvedValueOnce(dispatcher);
+    mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "42501" } });
     await expect(requireMobilePerson(new Request("https://x"))).resolves.toEqual({ dispatcher, field: null });
     vi.stubEnv("MOBILE_DELIVERY_ENABLED", "");
     mocks.dispatcher.mockResolvedValueOnce(dispatcher);

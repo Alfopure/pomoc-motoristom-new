@@ -16,7 +16,7 @@ import { mobileEnvironment } from "./auth";
  * until its own approval, and a database without the table simply sends nothing. */
 type Admin = SupabaseClient<Database>;
 export type PushTransport = (input: string, init: RequestInit) => Promise<Response>;
-export const MOBILE_PUSH_TYPES: readonly MobilePushType[] = ["tasks", "task_due", "callbacks_mine", "callbacks_unclaimed", "cases", "handoffs"];
+export const MOBILE_PUSH_TYPES: readonly MobilePushType[] = ["tasks", "task_due", "callbacks_mine", "callbacks_unclaimed", "cases", "handoffs", "work", "branch"];
 const TABLE = "motorist_mobile_push_devices";
 const TOKEN = /^Expo(?:nent)?PushToken\[[A-Za-z0-9_-]{8,200}\]$/;
 const EXPO_SEND = "https://exp.host/--/api/v2/push/send";
@@ -33,7 +33,7 @@ export function mobilePushEnabled(env: Record<string, string | undefined> = proc
   return env.MOBILE_PUSH_ENABLED === "true" && canOperateTelephony(env);
 }
 export function defaultPushPreferences(): MobilePushPreferences {
-  return { tasks: true, task_due: true, callbacks_mine: true, callbacks_unclaimed: true, cases: true, handoffs: true };
+  return { tasks: true, task_due: true, callbacks_mine: true, callbacks_unclaimed: true, cases: true, handoffs: true, work: true, branch: true };
 }
 /** Known switches only; anything else in stored or sent preferences is ignored. */
 function storedPreferences(value: unknown): MobilePushPreferences {
