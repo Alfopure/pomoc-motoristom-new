@@ -1,6 +1,6 @@
 import { DIAGNOSTIC_MODULES, DIAGNOSTIC_OPERATIONS, DIAGNOSTIC_OUTCOMES, isDiagnosticUuid } from './types';
 
-const screens = ['dispatch', 'tasks', 'notes', 'tools', 'cases', 'call-center', 'attendance', 'fleet', 'operations', 'partners', 'reports', 'settings'] as const;
+const screens = ['dispatch', 'tasks', 'notes', 'tools', 'cases', 'call-center', 'attendance', 'fleet', 'branches', 'operations', 'partners', 'reports', 'settings'] as const;
 const savePhases = ['idle', 'waiting', 'saving', 'saved', 'error'] as const;
 export type DiagnosticUiContext = {
   state_origin: 'last_committed';

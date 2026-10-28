@@ -29,8 +29,9 @@ export async function getTowingAuthState(): Promise<TowingAuthState> {
   catch (error) { return { authorized: false, reason: error instanceof TowingError ? error.code : 'unavailable', message: error instanceof TowingError ? error.message : 'Zákazky momentálne nie sú dostupné.' }; }
 }
 /** Office first, then towing driving, then the shared field workspace. */
-export function towingLoginDestination(actor: TowingMember): "/zakazky" | "/vodic" | "/moje-jazdy" | null {
+export function towingLoginDestination(actor: TowingMember): "/zakazky" | "/vodic" | "/moje-jazdy" | "/pobocka" | null {
   if (actor.capabilities.some(capability => capability !== 'drive' && capability !== 'deliver')) return '/zakazky';
+  if (actor.roles?.includes('branch')) return '/pobocka';
   if (actor.capabilities.includes('drive')) return '/vodic';
   return actor.capabilities.includes('deliver') ? '/moje-jazdy' : null;
 }

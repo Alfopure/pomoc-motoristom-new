@@ -19,6 +19,7 @@ import {
   BarChart3,
   ArrowLeft,
   BellRing,
+  Building2,
   CalendarDays,
   ChevronDown,
   ClipboardCheck,
@@ -66,6 +67,7 @@ import type { CaseSortState } from "./CaseTable";
 import { FleetModule } from "./FleetModule";
 import { OperationsModule } from "@/components/operations/OperationsModule";
 import { PartnersModule } from "@/components/partners/PartnersModule";
+import { BranchWorkspace } from "@/components/branches/BranchWorkspace";
 import { requestSharedCaseOpen, subscribeSharedCaseOpen } from "./shared-case-navigation";
 import { mergeFleetData, useFleetRefresh } from "./useFleetRefresh";
 import { IntegrationSettings } from "./IntegrationSettings";
@@ -256,7 +258,7 @@ function DispatchConsoleContent({
   viewerProfileId?: string;
   /** The signed-in profile's role; only supervision is gated on it in the console. */
   viewerRole?: AppRole;
-  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy";
+  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy" | "/pobocka";
 }) {
   const { mode: layoutMode } = useLayoutPreview();
   const updateAvailable = useAppUpdate(appVersion);
@@ -918,6 +920,7 @@ function DispatchConsoleContent({
     { group: "daily", icon: Headphones, label: "Ústredňa", shortLabel: "Ústredňa", view: "call-center" },
     { group: "operations", icon: CalendarDays, label: "Dochádzka", shortLabel: "Doch.", view: "attendance" },
     { group: "operations", icon: Truck, label: "Flotila", shortLabel: "Flotila", view: "fleet" },
+    { group: "operations", icon: Building2, label: "Pobočky", shortLabel: "Pobočky", view: "branches" },
     { group: "operations", icon: MapPinned, label: "Výjazdy a odvozy", shortLabel: "Výjazdy", view: "operations" },
     { group: "operations", icon: ClipboardCheck, label: "Partneri", shortLabel: "Partneri", view: "partners" },
     { group: "management", icon: BarChart3, label: "Reporty", shortLabel: "Reporty", view: "reports" },
@@ -2688,6 +2691,9 @@ function DispatchConsoleContent({
       <main className="dispatch-standalone-workspace" hidden={activeView !== "operations"} inert={activeView !== "operations"}>
         {activeView === "operations" && <OperationsModule cases={authorizedCases} onOpenCase={requestSharedCaseOpen} />}
       </main>
+      <main className="dispatch-standalone-workspace" hidden={activeView !== "branches"} inert={activeView !== "branches"}>
+        {activeView === "branches" && <BranchWorkspace cases={authorizedCases} onOpenCase={requestSharedCaseOpen} />}
+      </main>
       <main className="dispatch-standalone-workspace" hidden={activeView !== "partners"} inert={activeView !== "partners"}>
         {activeView === "partners" && <PartnersModule />}
       </main>
@@ -2840,7 +2846,7 @@ function AccountMenu({
   appRelease: AppRelease;
   role?: AppRole;
   signingOut: boolean;
-  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy";
+  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy" | "/pobocka";
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -2923,7 +2929,7 @@ function AccountMenu({
             </span>
           </div>
           <div className="border-t border-zinc-200 p-2">
-            {towingHref && <a href={towingHref} target="_blank" rel="noreferrer" className="flex min-h-11 items-center rounded-lg px-2.5 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{towingHref === "/moje-jazdy" ? "Moje jazdy" : "Zákazky odťahovej služby"} ↗</a>}
+            {towingHref && <a href={towingHref} target="_blank" rel="noreferrer" className="flex min-h-11 items-center rounded-lg px-2.5 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{towingHref === "/moje-jazdy" ? "Moje jazdy" : towingHref === "/pobocka" ? "Pobočka" : "Zákazky odťahovej služby"} ↗</a>}
             {(role === "manager" || role === "admin") && <a href="/monitor" target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)}
               className="flex min-h-11 items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100">Monitor prevádzky <span className="ml-auto text-xs font-normal">↗</span></a>}
             <ReportProblemButton className="min-h-11 w-full rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100" />

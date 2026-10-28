@@ -24,6 +24,6 @@ Lokálne overenie pokrýva databázové transakcie a súbežný konflikt kapacit
 
 ## Otvorené produktové vstupy
 
-Schválený vzor a povinné polia správy o nehode chýbajú. P6 preto ostáva blokované; celý Final CD rozsah nemožno označiť za prijatý. Potrebný vstup a integračný kontrakt sú v [podklade pre správu o nehode](incident-report-template-input.md). Konkrétni príjemcovia, kontakty a ceny sa nastavujú výslovne, bez automatického prevzatia historických údajov alebo odhadovanej ceny. Doručenie skutočných pozvaní/emailov a fyzický mobilný pilot vyžadujú vlastné prevádzkové overenie.
+Majiteľ 27. 10. 2026 spresnil, že správa o nehode má používať bežný verejný vzor. Overený je všeobecný slovenský európsky formulár zo Slovenskej kancelárie poisťovateľov; zdroj, polia a integračný kontrakt sú v [podklade pre správu o nehode](incident-report-template-input.md). Blok chýbajúceho vzoru je vyriešený, implementácia P6/A06 zostáva otvorená; celý Final CD rozsah ešte nie je prijatý. Konkrétni príjemcovia, kontakty a ceny sa nastavujú výslovne, bez automatického prevzatia historických údajov alebo odhadovanej ceny. Doručenie skutočných pozvaní/emailov a fyzický mobilný pilot vyžadujú vlastné prevádzkové overenie.
 
 Rozšírená evidencia opráv, kalendár prenájmov, SWHouse zápisy a automatické pripomienky sú podľa schváleného plánu neskoršia etapa. Nové odkazy na jazdy sa viažu na existujúceho prideleného člena; vytváranie ad-hoc externých vodičov nie je súčasťou tohto webového doplnenia.
