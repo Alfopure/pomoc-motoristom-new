@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MobileOperation, MobileTowingOrder } from "../../../src/lib/mobile-api";
-import { emptyEvidence, evidencePayload, evidenceProblem, nextOperationStep, nextTowingStep, parseOdometer, sharesOperationPosition, towingMissing, towingMultipart, trackedOperation, workItems } from "./model";
+import { awaitsMember, emptyEvidence, evidencePayload, evidenceProblem, nextOperationStep, nextTowingStep, parseOdometer, sharesOperationPosition, towingMissing, towingMultipart, trackedOperation, workItems } from "./model";
 
 const id = (n: number) => `95000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const at = (hour: number) => `2026-10-28T${String(hour).padStart(2, "0")}:00:00Z`;
@@ -32,6 +32,11 @@ describe("Moja práca model", () => {
     const list = { operations: [operation(1, { status: "en_route", scheduledAt: at(15) }), operation(2, { status: "accepted", scheduledAt: at(12) }), operation(3, { scheduledAt: at(9) })], towing: null, unavailable: [] };
     expect(trackedOperation(list)).toBe(id(2));
     expect(trackedOperation({ operations: [operation(4)], towing: null, unavailable: [] })).toBeNull();
+  });
+  it("counts for the bar badge only what waits for the member", () => {
+    const list = { operations: [operation(1), operation(2, { status: "accepted" }), operation(3, { status: "en_route" })],
+      towing: [order(4, { workStatus: "assigned" }), order(5), order(6, { workStatus: "needs_changes" })], unavailable: [] };
+    expect(workItems(list).filter(awaitsMember).map(item => item.key).sort()).toEqual(["operation:" + id(1), "towing:" + id(4), "towing:" + id(6)].sort());
   });
   it("says what an odťah still needs before Odovzdať", () => {
     expect(nextTowingStep({ workStatus: "assigned" }).type).toBe("start");

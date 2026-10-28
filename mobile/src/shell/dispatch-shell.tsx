@@ -58,7 +58,7 @@ import type { DeliverySession } from "../delivery/session";
 import { BranchModule } from "../branch/module";
 import { waiting as awaitingLead } from "../branch/model";
 import { WorkModule, type WorkOpenRequest } from "../field-work/module";
-import { isOpenOperation, operationStatusLabels, towingStatusLabels, workItems } from "../field-work/model";
+import { awaitsMember, isOpenOperation, operationStatusLabels, towingStatusLabels, workItems } from "../field-work/model";
 import type { FieldWorkSession } from "../field-work/session";
 
 type Props = {
@@ -176,7 +176,7 @@ export function DispatchShell(props: Props) {
   const workList = work && field.work && canUseDeliveryCache(work.list.error) ? workItems(work.list.data).filter(item => item.kind === "towing" || isOpenOperation(item.operation)) : [];
   const openWork = workList.length;
   const branchQueue = work && field.branch ? (work.branch.data?.requests ?? []).filter(awaitingLead).length : 0;
-  const fieldBadges = { pristavenia: openDeliveries.length, praca: openWork, pobocka: branchQueue };
+  const fieldBadges = { pristavenia: openDeliveries.length, praca: workList.filter(awaitsMember).length, pobocka: branchQueue };
 
   const go = (next: ShellState) => { setCallSelection(null); setShell(next); };
   const navigate = (id: ModuleId, hovory?: HovoryView) => go(openModule(nav, pins, id, hovory));

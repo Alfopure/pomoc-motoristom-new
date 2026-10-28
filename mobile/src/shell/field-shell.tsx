@@ -20,7 +20,7 @@ import type { SharingState } from "../delivery/sharing";
 import { BranchModule, type BranchOpenRequest } from "../branch/module";
 import { waiting } from "../branch/model";
 import { WorkModule, WorkRow, type WorkOpenRequest } from "../field-work/module";
-import { isOpenOperation, sharesOperationPosition, workItems } from "../field-work/model";
+import { awaitsMember, isOpenOperation, sharesOperationPosition, workItems } from "../field-work/model";
 import type { FieldWorkSession } from "../field-work/session";
 import type { PushSettings } from "../notifications/settings";
 import { isFieldTap, pushTaps, type PushTarget } from "../notifications/taps";
@@ -62,7 +62,7 @@ export function fieldStatus(modules: FieldModules, delivery: SharingState, work:
   const states = [modules.delivery ? delivery : null, modules.work ? work : null].filter((state): state is SharingState => state !== null);
   const shown = states.find(state => state.status === "sharing") ?? states.find(state => state.status === "denied") ?? states.find(state => state.status === "error") ?? OFF;
   const status = locationStatus(shown, open);
-  return { ...status, label: shown.status === "off" && !open && modules.work ? "Bez práce" : status.label, target: modules.work ? "praca" : "pristavenia" };
+  return { ...status, label: shown.status === "off" && !open && modules.work ? "Nič neprebieha" : status.label, target: modules.work ? "praca" : "pristavenia" };
 }
 type FieldTap = { kind: "delivery"; id: string; nonce: number } | (WorkOpenRequest & { module: "praca" }) | { kind: "branch-request"; id: string; nonce: number };
 
@@ -125,7 +125,7 @@ export function FieldShell(props: Props) {
   const items = work && modules.work && canUseDeliveryCache(work.list.error) ? workItems(work.list.data).filter(item => item.kind === "towing" || isOpenOperation(item.operation)) : [];
   const queue = work && modules.branch ? (work.branch.data?.requests ?? []).filter(waiting) : [];
   const status = fieldStatus(modules, location, workLocation, openDeliveries.length + items.length);
-  const badges = { pristavenia: openDeliveries.length, praca: items.length, pobocka: queue.length };
+  const badges = { pristavenia: openDeliveries.length, praca: items.filter(awaitsMember).length, pobocka: queue.length };
   const tabs = barTabs(pins);
   const showAdd = pins.length < Math.min(PIN_LIMIT, available.length);
   const openedInModules = nav.tab === "moduly" && nav.opened !== null && !nav.account;

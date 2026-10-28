@@ -2,7 +2,7 @@ import { useState, useSyncExternalStore } from "react";
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
-import { Building, Navigation, Phone } from "lucide-react-native";
+import { Car, Navigation, Phone, Truck } from "lucide-react-native";
 import type { MobileBranchCommand, MobileBranchGroup, MobileBranchRequest } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
 import { dialable, formatNumber } from "../lib/display";
@@ -92,18 +92,20 @@ function BranchList({ session, active, view, onView, snapshot, error, pending, f
       </>}
     </>}
     <Text style={fieldStyles.note}>Reporty a nastavenie pobočky sú na webe v module Pobočky.</Text>
-    <View style={formLayout.actions}><Button label={fetching ? "Obnovujem…" : "Obnoviť"} secondary disabled={fetching} onPress={onRefresh} /></View>
+    {!error && <View style={formLayout.actions}><Button label={fetching ? "Obnovujem…" : "Obnoviť"} secondary disabled={fetching} onPress={onRefresh} /></View>}
   </ScrollView>;
 }
 
 function RequestRow({ request, first, now, onOpen }: { request: MobileBranchRequest; first: boolean; now: number; onOpen: (id: string) => void }) {
   const state = branchState(request), title = branchKindLabels[request.kind] + (request.vehicle ? " · " + request.vehicle : "");
+  const tow = request.kind === "tow", Icon = tow ? Truck : Car;
   const late = isLate(request.dueAt, now) && (state === "queued" || state === "claimed" || state === "assigned");
   const holder = request.status === "claimed" ? request.claimedByMe ? "Prevzali ste" : "Prevzal(a) " + (request.claimedByName ?? "kolega") : request.execution?.assignee ?? null;
   return <Pressable accessibilityRole="button" accessibilityLabel={"Otvoriť " + title + ", " + branchStateLabels[state]} onPress={() => onOpen(request.id)}
     style={({ pressed }) => [fieldStyles.row, pressed && { backgroundColor: "#ECECF0" }]}>
     {!first && <View style={fieldStyles.separator} />}
-    <View style={[fieldStyles.icon, { backgroundColor: palette.purpleSoft }]}><Building size={19} strokeWidth={2.2} color={palette.purpleText} accessible={false} /></View>
+    <View style={[fieldStyles.icon, { backgroundColor: tow ? palette.orangeSoft : palette.blueSoft }]}>
+      <Icon size={19} strokeWidth={2.2} color={tow ? palette.orangeText : palette.blueText} accessible={false} /></View>
     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
       <Text numberOfLines={2} style={fieldStyles.rowTitle}>{title}</Text>
       <View style={fieldStyles.rowHead}><Tag text={branchStateLabels[state]} tone={branchStateTones[state]} />{late && <Tag text="Po termíne" tone="red" />}

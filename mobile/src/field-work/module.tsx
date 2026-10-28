@@ -83,7 +83,8 @@ function WorkList({ session, active, onOpen }: { session: FieldWorkSession; acti
         : query.data && !query.data.unavailable.length ? <Text style={s.empty}>Teraz nemáte pridelenú žiadnu prácu. Keď vám ju pridelia, nájdete ju tu.</Text>
           : <Text style={s.empty}>Zoznam práce sa nepodarilo overiť. Skúste ho obnoviť.</Text>}
     </>}
-    <View style={formLayout.actions}><Button label={query.isFetching ? "Obnovujem…" : "Obnoviť"} secondary disabled={query.isFetching} onPress={() => { void query.refetch(); }} /></View>
+    {!query.isError && !query.data?.unavailable.length && <View style={formLayout.actions}>
+      <Button label={query.isFetching ? "Obnovujem…" : "Obnoviť"} secondary disabled={query.isFetching} onPress={() => { void query.refetch(); }} /></View>}
   </ScrollView>;
 }
 
@@ -269,7 +270,7 @@ function EvidenceForm({ session, operation, disabled, onSubmit, onClose }: {
 
 type DriverField = keyof MobileTowingDriverFields;
 const TEXT_FIELDS: readonly { key: Exclude<DriverField, "startedAt" | "finishedAt">; label: string; multiline?: boolean }[] = [
-  { key: "destination", label: "Cieľ" }, { key: "performedQuantity", label: "Vykonané (množstvo, km, hodiny)" },
+  { key: "destination", label: "Cieľ", multiline: true }, { key: "performedQuantity", label: "Vykonané (množstvo, km, hodiny)" },
   { key: "driverNotes", label: "Poznámky k práci", multiline: true }, { key: "photoException", label: "Prečo chýbajú fotky (ak chýbajú)", multiline: true },
 ];
 const NO_UPLOADS: UploadsView = { ready: false, enabled: false, busy: false, error: null, uploads: [] };
