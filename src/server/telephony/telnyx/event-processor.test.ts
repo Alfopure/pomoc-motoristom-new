@@ -181,7 +181,7 @@ describe("processTelnyxEvent", () => {
     // event whose whole handling is one row in an unfenced table.
     expect(h.db.log.slice(from).filter((row) => row.table.includes("lease"))).toEqual([]);
 
-    h.db.failNext("motorist_call_events", "insert", "disk full");
+    h.db.failNext("motorist_call_events", "upsert", "disk full");
     const failed = await h.legEvent(call.callControlId, "call.speak.started", {});
     expect(failed).toMatchObject({ status: 500, outcome: "failed" });
     expect(h.rows("motorist_telnyx_webhook_events").at(-1)).toMatchObject({ status: "failed", error: expect.stringContaining("disk full") });

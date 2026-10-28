@@ -638,6 +638,7 @@ export function effectsDeps(deps: SessionRunnerDeps): EffectsDeps {
     monotonicNow: deps.monotonicNow,
     logger: deps.logger,
     callIds: new Map(),
+    endedLegs: new Map(),
     wrapUpSecondsFor: async (profileId) => {
       const { data } = await deps.admin.from("motorist_operator_telephony_settings").select("wrap_up_seconds").eq("profile_id", profileId).maybeSingle();
       return data?.wrap_up_seconds ?? DEFAULT_ROUTING_SETTINGS.wrapUpSecondsDefault;

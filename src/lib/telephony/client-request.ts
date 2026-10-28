@@ -72,6 +72,17 @@ export type TelephonyFetchInit = Omit<RequestInit, "signal"> & {
   onSlow?: () => void;
 };
 
+let mutationEpoch = 0;
+
+/**
+ * Changes whenever a non-GET telephony request starts or settles. A shared read
+ * (`loadRoutingConfig`) is joined only while it is unchanged, so a read begun
+ * after a write never receives a response from before that write.
+ */
+export function telephonyMutationEpoch(): number {
+  return mutationEpoch;
+}
+
 /**
  * `fetch` with a mandatory budget. The caller's signal and our timer are
  * composed into one controller so either can cancel the request, and the two
@@ -88,6 +99,8 @@ export async function telephonyFetch(
   const cancel = runtime.clearTimeout ?? globalThis.clearTimeout;
 
   if (callerSignal?.aborted) throw abortError();
+  const mutation = (rest.method ?? "GET").toUpperCase() !== "GET";
+  if (mutation) mutationEpoch += 1;
 
   const finishPerformance = beginRequestPerformance(input, rest.method);
   const finishTiming = beginBrowserCallStep("request", { operationId });
@@ -129,6 +142,7 @@ export async function telephonyFetch(
     if (timedOut) throw new TelephonyRequestTimeoutError(label, timeoutMs);
     throw error;
   } finally {
+    if (mutation) mutationEpoch += 1;
     cancel(timer);
     if (slowTimer !== null) cancel(slowTimer);
     callerSignal?.removeEventListener("abort", onCallerAbort);

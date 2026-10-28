@@ -22,7 +22,7 @@
  */
 
 import { nextBackoffDelayMs } from "@/lib/telephony/client-request";
-import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { afterRealtimeAuth, createSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 export type TelephonyRealtimeStatus = "connecting" | "connected" | "disconnected";
 
@@ -165,8 +165,12 @@ function openChannel(topic: string, entry: Entry) {
     .on("broadcast", { event: "*" }, () => {
       if (entry.closed) return;
       for (const listener of entry.listeners) listener.onChange();
-    })
-    .subscribe((status) => {
+    });
+  // A join sent before the restored session reaches the socket is refused as
+  // "Unauthorized" by the private topic's policy.
+  afterRealtimeAuth(entry.client, () => {
+    if (entry.closed || entry.channel !== channel) return;
+    channel.subscribe((status) => {
       if (entry.closed) return;
       const next = telephonyRealtimeStatusFrom(status);
       setStatus(entry, next);
@@ -179,6 +183,7 @@ function openChannel(topic: string, entry: Entry) {
       }
       if (next === "disconnected") scheduleReopen(topic, entry);
     });
+  });
 }
 
 function scheduleReopen(topic: string, entry: Entry) {

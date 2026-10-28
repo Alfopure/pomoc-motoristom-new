@@ -80,6 +80,9 @@ export class TelnyxCommandError extends Error {
  */
 export const TELNYX_CALL_GONE_CODES = new Set(["90018", "90003"]);
 
+/** "This call is no longer active": the one call-gone code observed on dead legs in production. */
+export const TELNYX_CALL_ENDED_CODE = "90018";
+
 /**
  * True when Telnyx refused a command because the call is over.
  *

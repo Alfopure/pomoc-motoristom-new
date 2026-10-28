@@ -885,12 +885,16 @@ function DispatchConsoleContent({
     if (source !== "supabase" || activeView !== "call-center") return;
     const initialHistoryRead = window.setTimeout(() => void refreshCallHistory(), 0);
     // History is the least time-critical read here: a call that ended while the
-    // tab was hidden is equally interesting a few seconds later.
+    // tab was hidden is equally interesting a few seconds later. A hidden tab
+    // stops here (the history panel keeps its own leased poll) and the
+    // visibility handler below reads at once when it is shown again.
     let cancelled = false;
     let timeoutId: number | undefined;
     const schedule = () => {
       if (cancelled) return;
       timeoutId = window.setTimeout(async () => {
+        timeoutId = undefined;
+        if (document.visibilityState === "hidden") return;
         await refreshCallHistory();
         schedule();
       }, supportPollDelayMs({ documentHidden: document.visibilityState === "hidden" }));

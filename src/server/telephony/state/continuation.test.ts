@@ -58,7 +58,7 @@ describe("durable transition recovery", () => {
     ["motorist_ring_attempts", "update"],
     ["motorist_ring_group_members", "update"],
     ["motorist_calls", "update"],
-    ["motorist_call_events", "insert"],
+    ["motorist_call_events", "upsert"],
   ] as const)("RC-03 recovers an answer interrupted at %s %s", async (table, operation) => {
     const { h, call, operator } = await ringing();
     const injected = vi.spyOn(h.db, "takeInjectedError");

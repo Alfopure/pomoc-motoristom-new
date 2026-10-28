@@ -47,7 +47,15 @@ async function failedOwner(options: { customer?: boolean; recording?: boolean; r
     h.telnyx.failAlways("gather", gone);
   }
   const entered = gate(), finish = gate();
-  const gather = h.telnyx.client.gather;
+  // Hold the owner at its first waiting-room audio command. A 90018 on the
+  // music ends the customer leg for the rest of that invocation, so its gather
+  // is no longer sent and cannot be the pause point.
+  const playbackStart = h.telnyx.client.playbackStart, gather = h.telnyx.client.gather;
+  vi.spyOn(h.telnyx.client, "playbackStart").mockImplementation(async params => {
+    entered.release();
+    await finish.promise;
+    return playbackStart(params);
+  });
   vi.spyOn(h.telnyx.client, "gather").mockImplementation(async params => {
     entered.release();
     await finish.promise;
@@ -81,7 +89,11 @@ describe("failed owner customer terminal recovery", () => {
     const customer = h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-customer")!;
     expect(Date.parse(String(customer.next_attempt_at))).toBeGreaterThan(h.db.now().getTime());
     expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries.some(entry => entry.commands.some(command => command.kind === "gather"))).toBe(true);
-    expect(h.rows("motorist_provider_commands").filter(row => /\/(gather|playback_start)$/.test(String(row.path)) && row.http_status === 422)).toHaveLength(2);
+    // The music's 90018 ends the customer leg for this invocation: its gather is
+    // refused locally with the same call-gone failure instead of a second send.
+    expect(h.rows("motorist_provider_commands").filter(row => /\/(gather|playback_start)$/.test(String(row.path)) && row.http_status === 422)
+      .map(row => String(row.path).split("/").at(-1))).toEqual(["playback_start"]);
+    expect(h.telnyx.of("gather")).toEqual([]);
     const generation = Number(h.session(call.sessionId).lease_generation);
     const commands = [...h.telnyx.calls];
     expect(retained).toHaveLength(1);

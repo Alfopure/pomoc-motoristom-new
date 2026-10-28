@@ -182,7 +182,7 @@ describe("initial call operation recovery", () => {
 
   it("does not revive an ended exact leg when its materialization checkpoint resumes", async () => {
     const t = prepared();
-    t.h.db.failNext("motorist_call_events", "insert", "audit unavailable");
+    t.h.db.failNext("motorist_call_events", "upsert", "audit unavailable");
     await t.start();
     expect(t.pending()).toHaveLength(1);
     const ended = t.h.now().toISOString();
