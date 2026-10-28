@@ -36,6 +36,8 @@ export type RouteAuthEntry = {
 
 export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   operations: { class: 'session', note: 'Current dispatch profile or active deliver membership; organization-scoped RPC authorizes every command.' },
+  pobocky: { class: 'session', note: 'Central dispatch profile or a current lead seat in an active work group; RPC scopes every request to the actor\'s groups, revisions and command receipts.' },
+  'pobocky/report': { class: 'session', note: 'Same branch actor; aggregates only groups in scope over a bounded period.' },
   'operations/[id]': { class: 'session', note: 'Current organization and assignment checked by operations RPC; revisions and immutable command receipts.' },
   'operations/[id]/files': { class: 'session', note: 'Current operation access on every upload/download; private storage, validated MIME/size and explicit evidence reference.' },
   'operations/[id]/handoffs': { class: 'session', note: 'Current dispatch permission publishes only the assigned member\'s logistics operation; preview hash and revision checked by RPC.' },
