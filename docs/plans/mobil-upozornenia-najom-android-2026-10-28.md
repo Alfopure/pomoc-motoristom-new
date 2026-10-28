@@ -109,15 +109,32 @@ Malý modul **Pobočka**: front na prevzatie, Prevziať, Prideliť (vykonávate�
 
 ### E-mail pre Braňa
 
-> **Predmet:** Prepojenie našej dispečerskej appky s vašimi nájmami
+> **Predmet:** Prenos pristavení z dispečingu do vášho systému ako draft
 >
 > Ahoj Braňo,
 >
-> robíme pre Pomoc motoristom novú dispečerskú aplikáciu: dispečer v nej založí prípad, pobočka ho prevezme a pristavovač dostane jazdu do mobilu. Pri pristavení náhradného auta dnes pristavovač prepisuje tie isté údaje ešte raz do vášho systému.
+> pri dispečingu teraz riešime jednu vec, ktorá nás pri pristaveniach najviac zdržiava: ľudia prepisujú tie isté údaje z dispečingu ručne do vášho systému. Chceli by sme, aby sa po pridelení pristavenia v našej aplikácii **automaticky vytvoril u vás rozpracovaný nájom (draft)**, označený ako **„Prenesené z dispečingu“**. Pristavovač by ho u vás iba otvoril, skontroloval a doplnil, čo chýba. Žiadne prepisovanie z jednej aplikácie do druhej.
 >
-> Chceli by sme to zjednodušiť tak, že naša appka by po pridelení jazdy poslala do vášho systému **rozpracovaný nájom** s tým, čo už vieme (klient, asistenčná služba a jej číslo prípadu, pobočka, termín a miesto, prípadne auto). Pristavovač by ho potom u vás iba otvoril a doplnil zvyšok. Naspäť by nám stačilo číslo toho nájmu, aby sme vedeli, že vznikol.
+> **Čo by sme k vám preniesli (základ):**
+> 1. Označenie „Prenesené z dispečingu“, naše číslo prípadu a jedinečný identifikátor prenosu (aby opakované odoslanie nevytvorilo druhý draft).
+> 2. Objednávateľa / asistenčnú službu a jej číslo prípadu.
+> 3. Klienta: meno alebo firmu, telefón, prípadne e-mail.
+> 4. Vozidlo klienta: EČV, značku a model.
+> 5. Náhradné auto, ak je už vybrané (EČV alebo vaše ID auta) — draft by mal vedieť vzniknúť aj bez neho.
+> 6. Pobočku, ktorá pristavenie robí.
+> 7. Termín a miesto pristavenia, prípadne predpokladaný návrat.
+> 8. Pristavovača, ktorý auto odovzdá, a poznámku k pristaveniu.
 >
-> Dalo by sa to cez vaše API? Ak áno, poslal by som ti podrobnejší technický návrh, aké údaje a ako by sme posielali, a dohodli by sme sa na testovacom prístupe. Pokojne to prejdime aj krátko telefonicky.
+> Rodné čísla, doklady, fotky ani nahrávky by sme neposielali. Naspäť by nám stačilo číslo draftu, jeho stav a ideálne odkaz, aby sme vedeli, že vznikol.
+>
+> **Otázky:**
+> - Dá sa takýto draft vytvoriť cez vaše API? Ak áno, aké polia sú povinné a vie vzniknúť aj bez vybraného auta?
+> - Nerozbije to u vás niečo, napríklad číslovanie nájmov, štatistiky alebo obsadenosť áut? Draft by nemal blokovať auto, kým ho pristavovač nepotvrdí.
+> - Žiadal si od nás prístup k API na register vozidiel (dohľadanie auta podľa EČV). Používaš ho už reálne? Na čo ho využívaš a čo robíš s údajmi o vozidlách, ktoré cez neho dohľadáš?
+>
+> **K vozovému parku:** naša aplikácia už rieši celý vozový park. Pri každom aute je kompletný prehľad: história jázd a prenájmov, platnosť STK a emisnej kontroly, poistenie a diaľničná známka, fotky, opravy a poruchy, poškodenia a ich riešenie, aktuálny stav a pripravenosť auta, poloha z GPS a obsadenosť. Zoznam áut a obsadenosť pritom čítame z vášho systému. Riešiš niečo z toho aj ty? Nechceme robiť duplicitu, takže by sme sa radi dohodli, čo bude viesť ktorý systém.
+>
+> Celkovo: dáva ti to zmysel? Vidíš nejaký problém, alebo by si to navrhol inak? Ak áno, pošlem ti podrobnejší technický návrh a dohodneme sa na testovacom prístupe. Pokojne to prejdime aj telefonicky.
 >
 > Vďaka,
 > …
