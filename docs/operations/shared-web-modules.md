@@ -4,7 +4,7 @@ Zmena patrí do existujúceho dispečingu. TEST je `https://test.dispecing.linka
 
 ## Používanie
 
-- V ponuke modulov sú **Výjazdy a odvozy** a **Partneri a konzultácie**. V detaile prípadu sú súvisiace logistické jazdy, partner a odťahové zákazky. Prepnutie rešpektuje existujúcu ochranu rozpracovanej karty a ponechá telefonický host aplikácie.
+- V ponuke modulov sú **Výjazdy a odvozy** a **Partneri**. V detaile prípadu sú súvisiace logistické jazdy, partner a odťahové zákazky. Prepnutie rešpektuje existujúcu ochranu rozpracovanej karty a ponechá telefonický host aplikácie.
 - Logistická jazda môže čakať bez termínu. Pridelenie vodičovi nevytvorí skutočný začiatok ani rezerváciu času. Potvrdenie termínu a fyzický štart kontrolujú kolízie vodiča a vozidla. Nové použitie náhradného auta vyžaduje potvrdené aktuálne údaje o dostupnosti; odvoz už používaného auta túto podmienku nemá.
 - Návrat patrí ku konkrétnemu miestnemu cyklu používania vozidla. Voľba odvozu vytvorí alebo preplánuje jednu existujúcu návratovú jazdu. Zákazník môže vozidlo vrátiť sám. Prehľad **Návraty** ukazuje otvorené návraty a čakajúce kontroly aj po dokončení pristavenia. Po skutočnom návrate nasleduje kontrola; uzavretie prípadu ani expirácia pôvodného odkazu návrat neodstránia.
 - Dokončená jazda môže mať stav **Dôkazy čakajú**. Kancelária doplní skutočný zdroj, čas a autora údajov; nepotvrdzuje prevzatie za vodiča. Fotografie/PDF sú súkromné a každý prenos znovu overuje oprávnenie.

@@ -45,6 +45,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   'public/operation-handoffs/current': { class: 'public', note: 'Single-operation grant session only; expiry, revocation, assignment generation and snapshot checked on every read.' },
   'public/operation-handoffs/commands': { class: 'public', note: 'Same-origin grant session; limited logistics transitions with revision, command replay and capacity gates. No general case access.' },
   partners: { class: 'session', note: 'Dispatch profile for office commands; portal read requires current versioned partner membership and explicit share.' },
+  'partners/portal': { class: 'session', note: 'Same-origin partner portal; current versioned partner membership re-checked in SQL on every read/command; only own partner cases and allowlisted fields.' },
   'partners/outputs/[id]': { class: 'session', note: 'Private immutable output/PDF; current dispatcher or active partner member plus unrevoked share on every request.' },
   "towing/workspace": { class: "session", note: "Isolated auth.users towing membership; capability and own assignment projection, no legacy profile role." },
   "towing/access": { class: "session", note: "Identity-bound driver access/lease; explicit verified revocation codes." },
