@@ -99,7 +99,7 @@ Malý modul **Pobočka**: front na prevzatie, Prevziať, Prideliť (vykonávate�
 
 **Teraz (bez Braňa):**
 - **Nájomný zámer** pri pristavení: stabilné ID, revízia, väzba na prípad a jazdu; jeden prípad môže mať viac zámerov (výmena auta).
-- **Mapovanie** našich údajov na draft (klient, asistencia + číslo, pobočka, termín a miesto, auto ak je známe) a **náhľad**, čo by sa odoslalo.
+- **Mapovanie** na polia zmluvy v jeho systéme podľa snímky majiteľa (28. 10.): Asistenčná služba, Č. prípadu, Pobočka, Nájomca meno / priezvisko / telefón. Prenajímateľ a Status sú otvorené otázky pre Braňa. Ostatné doplní pristavovač. K tomu **náhľad**, čo by sa odoslalo.
 - **Adaptér** s jasným stavom `nepripojené` → po napojení `čaká / nejasné / draft vytvorený (externé ID, odkaz)`. Nikdy falošné „prenesené“, bez druhého create po timeoute, ak cieľ nepodporuje overenie podľa našej referencie.
 - Tlačidlo v detaile jazdy/prípadu „Pripraviť nájom“, ktoré dnes ukáže náhľad a stav „čaká na napojenie“.
 
