@@ -115,20 +115,19 @@ Malý modul **Pobočka**: front na prevzatie, Prevziať, Prideliť (vykonávate�
 >
 > pri dispečingu teraz riešime jednu vec, ktorá nás pri pristaveniach najviac zdržiava: ľudia prepisujú tie isté údaje z dispečingu ručne do vášho systému. Chceli by sme, aby sa po pridelení pristavenia v našej aplikácii **automaticky vytvoril u vás rozpracovaný nájom (draft)**, označený ako **„Prenesené z dispečingu“**. Pristavovač by ho u vás iba otvoril, skontroloval a doplnil, čo chýba. Žiadne prepisovanie z jednej aplikácie do druhej.
 >
-> **Čo by sme k vám preniesli (základ):**
-> 1. Označenie „Prenesené z dispečingu“, naše číslo prípadu a jedinečný identifikátor prenosu (aby opakované odoslanie nevytvorilo druhý draft).
-> 2. Objednávateľa / asistenčnú službu a jej číslo prípadu.
-> 3. Klienta: meno alebo firmu, telefón, prípadne e-mail.
-> 4. Vozidlo klienta: EČV, značku a model.
-> 5. Náhradné auto, ak je už vybrané (EČV alebo vaše ID auta) — draft by mal vedieť vzniknúť aj bez neho.
-> 6. Pobočku, ktorá pristavenie robí.
-> 7. Termín a miesto pristavenia, prípadne predpokladaný návrat.
-> 8. Pristavovača, ktorý auto odovzdá, a poznámku k pristaveniu.
+> **Čo by sme k vám preniesli** (podľa vašej obrazovky zmluvy):
+> - **Asistenčná služba**
+> - **Č. prípadu**
+> - **Pobočka**
+> - **Nájomca:** meno, priezvisko a telefón
 >
-> Rodné čísla, doklady, fotky ani nahrávky by sme neposielali. Naspäť by nám stačilo číslo draftu, jeho stav a ideálne odkaz, aby sme vedeli, že vznikol.
+> Ostatné (auto, adresu, dátum narodenia, vodiča preberajúceho vozidlo atď.) by doplnil pristavovač u vás ako doteraz. Rodné čísla, doklady, fotky ani nahrávky by sme neposielali. Naspäť by nám stačilo číslo zmluvy (draftu), aby sme vedeli, že vznikol, a aby opakované odoslanie nevytvorilo druhú.
 >
 > **Otázky:**
 > - Dá sa takýto draft vytvoriť cez vaše API? Ak áno, aké polia sú povinné a vie vzniknúť aj bez vybraného auta?
+> - **Prenajímateľ:** koho tam pri prenesenom drafte uviesť? Vieme ho určiť my, alebo ho má vybrať pristavovač?
+> - **Status:** aký status by mal draft mať? Ideálne niečo ako „Prenesené z dispečingu“, aby bolo hneď jasné, odkiaľ prišiel a že ho treba doplniť.
+> - **Č. prípadu:** má tam byť číslo prípadu asistenčnej služby, alebo naše číslo prípadu z dispečingu?
 > - Nerozbije to u vás niečo, napríklad číslovanie nájmov, štatistiky alebo obsadenosť áut? Draft by nemal blokovať auto, kým ho pristavovač nepotvrdí.
 > - Žiadal si od nás prístup k API na register vozidiel (dohľadanie auta podľa EČV). Používaš ho už reálne? Na čo ho využívaš a čo robíš s údajmi o vozidlách, ktoré cez neho dohľadáš?
 >
