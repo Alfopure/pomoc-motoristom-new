@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MobileBranchExecution, MobileBranchRequest } from "../../../src/lib/mobile-api";
-import { branchActions, branchState, executors, sortRequests } from "./model";
+import { branchActions, branchState, branchStateLabels, branchStateTones, executors, sortRequests, waiting } from "./model";
 
 const id = (n: number) => `98000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const GROUP = id(1);
@@ -26,6 +26,16 @@ describe("Pobočka model", () => {
     expect(branchActions(request({ status: "assigned", execution: execution({ cancelled: true }) }), false)).toMatchObject({ reopen: true, assign: null });
     expect(branchState(request({ status: "assigned", execution: execution({ startedAt: "2026-10-28T09:00:00Z" }) }))).toBe("in_progress");
     expect(branchState(request({ status: "assigned", execution: execution({ done: true }) }))).toBe("done");
+  });
+  it("shows the executor's acceptance between Pridelené and Prebieha", () => {
+    const accepted = request({ status: "assigned", execution: execution({ status: "accepted" }) });
+    expect(branchState(request({ status: "assigned", execution: execution() }))).toBe("assigned");
+    expect(branchState(accepted)).toBe("accepted");
+    expect([branchStateLabels.accepted, branchStateTones.accepted]).toEqual(["Prijaté vykonávateľom", "green"]);
+    expect(waiting(accepted)).toBe(false);
+    expect(branchActions(accepted, false).assign).toBe("reassign");
+    expect(branchState(request({ status: "assigned", execution: execution({ status: "en_route", startedAt: "2026-10-28T09:00:00Z" }) }))).toBe("in_progress");
+    expect(branchState(request({ status: "assigned", execution: execution({ status: "accepted", cancelled: true }) }))).toBe("cancelled");
   });
   it("offers only group members who deliver, never for an odťah", () => {
     const groups = [{ id: GROUP, name: "Žilina", receivesNew: true, counts: { queued: 0, claimed: 0, active: 0, overdue: 0 },

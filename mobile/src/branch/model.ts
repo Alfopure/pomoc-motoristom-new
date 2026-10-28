@@ -3,15 +3,16 @@ import type { TagTone } from "../design/detail";
 
 /** Pobočka without any screen: the state of a request and what the local lead may do with it. */
 export const branchKindLabels: Record<MobileBranchKind, string> = { delivery: "Pristavenie", collection: "Odvoz vozidla", transfer: "Presun", tow: "Odťah" };
-export type BranchState = "queued" | "claimed" | "assigned" | "in_progress" | "done" | "cancelled";
-export const branchStateLabels: Record<BranchState, string> = { queued: "Čaká na prevzatie", claimed: "Prevzaté", assigned: "Pridelené", in_progress: "Prebieha", done: "Hotové", cancelled: "Zrušené" };
-export const branchStateTones: Record<BranchState, TagTone> = { queued: "orange", claimed: "yellow", assigned: "blue", in_progress: "blue", done: "gray", cancelled: "gray" };
+export type BranchState = "queued" | "claimed" | "assigned" | "accepted" | "in_progress" | "done" | "cancelled";
+export const branchStateLabels: Record<BranchState, string> = { queued: "Čaká na prevzatie", claimed: "Prevzaté", assigned: "Pridelené", accepted: "Prijaté vykonávateľom", in_progress: "Prebieha", done: "Hotové", cancelled: "Zrušené" };
+export const branchStateTones: Record<BranchState, TagTone> = { queued: "orange", claimed: "yellow", assigned: "blue", accepted: "green", in_progress: "blue", done: "gray", cancelled: "gray" };
 
-/** As on the web: once an execution exists, its state wins. */
+/** As on the web: once an execution exists, its state wins; accepted = the executor took it, not started yet. */
 export function branchState(request: Pick<MobileBranchRequest, "status" | "execution">): BranchState {
   if (request.status === "cancelled" || request.execution?.cancelled) return "cancelled";
   if (request.execution?.done) return "done";
   if (request.execution?.startedAt) return "in_progress";
+  if (request.status === "assigned" && request.execution?.status === "accepted") return "accepted";
   return request.status === "assigned" ? "assigned" : request.status;
 }
 export function waiting(request: Pick<MobileBranchRequest, "status" | "execution">): boolean {

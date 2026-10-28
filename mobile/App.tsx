@@ -195,7 +195,7 @@ function SignIn({ client, config, logoutState }: { client: SupabaseClient; confi
     <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={[styles.content, s.signInContent, { paddingBottom: Math.max(28, insets.bottom + 16) }]}>
       <View style={s.signInHero}>
         <View style={s.signInEmblem}><PhoneCall size={38} strokeWidth={1.8} color={colors.ink} accessible={false} /></View>
-        <Text accessibilityRole="header" style={s.signInHeading}>Váš dispečing vo vrecku</Text>
+        <Text accessibilityRole="header" style={s.signInHeading}>Linka pomoci v teréne aj na dispečingu</Text>
         <Text style={[styles.muted, s.signInDescription]}>Prihláste sa svojím účtom Linky pomoci.</Text>
       </View>
       <Card>

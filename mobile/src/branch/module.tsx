@@ -99,7 +99,7 @@ function BranchList({ session, active, view, onView, snapshot, error, pending, f
 function RequestRow({ request, first, now, onOpen }: { request: MobileBranchRequest; first: boolean; now: number; onOpen: (id: string) => void }) {
   const state = branchState(request), title = branchKindLabels[request.kind] + (request.vehicle ? " · " + request.vehicle : "");
   const tow = request.kind === "tow", Icon = tow ? Truck : Car;
-  const late = isLate(request.dueAt, now) && (state === "queued" || state === "claimed" || state === "assigned");
+  const late = isLate(request.dueAt, now) && (state === "queued" || state === "claimed" || state === "assigned" || state === "accepted");
   const holder = request.status === "claimed" ? request.claimedByMe ? "Prevzali ste" : "Prevzal(a) " + (request.claimedByName ?? "kolega") : request.execution?.assignee ?? null;
   return <Pressable accessibilityRole="button" accessibilityLabel={"Otvoriť " + title + ", " + branchStateLabels[state]} onPress={() => onOpen(request.id)}
     style={({ pressed }) => [fieldStyles.row, pressed && { backgroundColor: "#ECECF0" }]}>

@@ -13,6 +13,7 @@
 .card dt{font-size:11px;color:#71717a}
 .card dd{font-size:20px;font-weight:750}
 .attention{color:#92400e;background:#fef3c7}
+.accepted{color:#166534;background:#dcfce7}
 .note{white-space:pre-wrap;font-size:13px;padding:10px;border-radius:8px;background:#fffbeb;border:1px solid #fde68a}
 .tableWrap{overflow-x:auto;background:white;border:1px solid #e4e4e7;border-radius:10px}
 .table{width:100%;border-collapse:collapse;font-size:13px}
