@@ -38,7 +38,7 @@ const hangupPath = (callControlId: string) => `/calls/${encodeURIComponent(callC
  * `orphan_sweep`, `stale_finalise`, `reconciled`) is not the provider speaking.
  * A failed read returns nothing, so the pass falls back to hanging up.
  */
-async function providerEndedLegs(deps: SessionOwnershipDeps, sessionId: string, legs: readonly TerminationLeg[]): Promise<Set<string>> {
+export async function providerEndedLegs(deps: Pick<SessionOwnershipDeps, "admin" | "organizationId" | "logger">, sessionId: string, legs: readonly Pick<TerminationLeg, "callControlId">[]): Promise<Set<string>> {
   const ended = new Set<string>();
   if (legs.length === 0) return ended;
   const ids = legs.map((leg) => leg.callControlId);

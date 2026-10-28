@@ -17,7 +17,7 @@ import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, failureAudits, failureAuditsComplete, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
-import { isCallGoneError, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { isCallGoneError, TELNYX_CALL_ENDED_CODE, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
 import { pendingAudioStillOwned, recordingCommandOutcome, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
@@ -127,6 +127,10 @@ export type EffectsDeps = {
   /** Existing inbound hangups awaiting exact terminal proof. The owned runner
    * derives this on every invocation, including late HTTP acknowledgements. */
   deferredCommandIds?: ReadonlySet<string>;
+  /** Request-local: legs this invocation knows have ended, keyed by call
+   * control id → the accepted hangup's command id, or null when Telnyx answered
+   * 90018. Never persisted; a call control id is never reused. */
+  endedLegs?: Map<string, string | null>;
 };
 
 export type CommandOutcome = {
@@ -689,7 +693,11 @@ export async function recordCallEvent(
   const rawPayload = event.kind === "telnyx" ? toJson(event.type.includes("recording.")
     ? { recording_id: event.payload.recording_id ?? null, recording_started_at: event.payload.recording_started_at ?? null, recording_ended_at: event.payload.recording_ended_at ?? null, channels: event.payload.channels ?? null }
     : event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target, ...(event.monitorInvitation ? { invitationId: event.monitorInvitation.id, recipientProfileId: event.monitorInvitation.recipientProfileId, expiresAt: event.monitorInvitation.expiresAt } : {}), ...(event.invitationId || event.supervisor?.invitationId ? { invitationId: event.invitationId ?? event.supervisor?.invitationId } : {}) });
-  const inserted = await admin.from("motorist_call_events").insert({
+  // Redelivered webhooks and replayed audits reuse the event id. ON CONFLICT DO
+  // NOTHING on the table's unique key (foundation schema) keeps that a quiet
+  // no-op instead of a 23505 (logged by Postgres, 409 from PostgREST) that the
+  // code then ignores.
+  const inserted = await admin.from("motorist_call_events").upsert({
     organization_id: deps.organizationId,
     call_id: callId,
     provider: "telnyx",
@@ -723,7 +731,7 @@ export async function recordCallEvent(
     handled_status: input.handledStatus,
     provider_timestamp: event.occurredAt,
     received_at: deps.now().toISOString(),
-  });
+  }, { onConflict: "organization_id,provider,event_fingerprint", ignoreDuplicates: true });
   if (inserted.error && !isDuplicate(inserted.error)) fail("call event insert failed", inserted.error);
 }
 
@@ -854,6 +862,66 @@ function isLegAlreadyGone(error: unknown): boolean {
   return error instanceof TelnyxCommandError && (error.status === 404 || error.status === 422);
 }
 
+/**
+ * The refusal Telnyx gives for a leg that has ended (90018), raised locally
+ * instead of sending another command to a leg this invocation already knows
+ * ended. Every existing call-gone branch (tolerant hangup, gather/greeting
+ * metadata, no incident, compensation) behaves as for the provider's answer.
+ */
+class KnownCallGoneError extends TelnyxCommandError {
+  constructor(readonly callControlId: string) {
+    super({ code: TELNYX_CALL_ENDED_CODE, status: 422, detail: "Call has already ended (reported earlier; command not sent)" });
+    this.name = "KnownCallGoneError";
+  }
+}
+
+/**
+ * What an earlier answer in this invocation lets a command skip.
+ *
+ * `media` (audio and its stops) is skipped after a 90018 or an accepted
+ * hangup. Every other command is skipped only after an accepted hangup with a
+ * different command id: a 90018 alone still lets `hangup` and `recording_stop`
+ * reach the provider, because that hangup is the safety net for an inbound
+ * customer leg. The replay of the very hangup that ended a leg still goes
+ * through, so its journalled answer and audit outcome stay unchanged.
+ */
+type LegUse = "media" | "control";
+
+function legEnded(deps: EffectsDeps, leg: string, use: LegUse, replayOf?: string): boolean {
+  const endedBy = deps.endedLegs?.get(leg);
+  if (endedBy === undefined) return false;
+  if (endedBy === null) return use === "media";
+  return !(replayOf && endedBy === replayOf);
+}
+
+function assertLegsLive(deps: EffectsDeps, legs: readonly string[], use: LegUse, replayOf?: string): void {
+  const ended = legs.find((leg) => legEnded(deps, leg, use, replayOf));
+  if (ended) throw new KnownCallGoneError(ended);
+}
+
+/**
+ * Only that exact code on a `/calls/{leg}/actions/*` command marks the leg
+ * ended. Prose matches, other call-gone codes, conference and multi-leg
+ * refusals (which leg?) stay ordinary failures for later commands.
+ */
+function rememberEndedLeg(deps: EffectsDeps, leg: string, error: unknown): void {
+  if (error instanceof TelnyxCommandError && !(error instanceof KnownCallGoneError) &&
+    String(error.code) === TELNYX_CALL_ENDED_CODE && !deps.endedLegs?.has(leg)) deps.endedLegs?.set(leg, null);
+}
+
+/** One call action on one leg; `hangupCommandId` marks the leg ended once Telnyx accepts it. */
+async function toLeg<T>(deps: EffectsDeps, leg: string, use: LegUse, send: () => Promise<T>, hangupCommandId?: string): Promise<T> {
+  assertLegsLive(deps, [leg], use, hangupCommandId);
+  try {
+    const result = await send();
+    if (hangupCommandId && typeof deps.endedLegs?.get(leg) !== "string") deps.endedLegs?.set(leg, hangupCommandId);
+    return result;
+  } catch (error) {
+    rememberEndedLeg(deps, leg, error);
+    throw error;
+  }
+}
+
 function resolvePrompt(deps: EffectsDeps, ctx: ExecutionContext, media: MediaRef | null) {
   const config = readAnnouncementConfig(readMeta(ctx.session).announcements);
   const key = media ? announcementKeyForMedia(media) : null;
@@ -911,23 +979,27 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
     if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
   switch (command.kind) {
-    case "answer":
-      await telnyx.answer({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, clientState: encodeClientState(command.clientState) });
+    case "answer": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "control", () => telnyx.answer({ callControlId: leg, commandId: command.commandId, clientState: encodeClientState(command.clientState) }));
       return { skipped: false };
+    }
     case "hangup":
       try {
-        await telnyx.hangup({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId });
+        const leg = resolveLeg(ctx, command.leg);
+        await toLeg(deps, leg, "control", () => telnyx.hangup({ callControlId: leg, commandId: command.commandId }), command.commandId);
       } catch (error) {
         // The leg is already gone (the far end hung up a moment earlier): that
         // is exactly the outcome we asked for, not a failed transition. Without
         // this, an operator pressing "Ukončiť" on a call the caller just ended
         // gets a 502 for a session that is already terminal.
         if (!isLegAlreadyGone(error)) throw error;
-        return { skipped: true, detail: { reason: command.reason, alreadyGone: true } };
+        return { skipped: true, detail: { reason: command.reason, alreadyGone: true, ...(error instanceof KnownCallGoneError ? { notSent: true } : {}) } };
       }
       return { skipped: false, detail: { reason: command.reason } };
     case "bridge": {
       if (command.recordingConferenceName) return executeRecordedConnection(deps, ctx, command);
+      assertLegsLive(deps, [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)], "control");
       let clientState: string | undefined;
       if (telephonyStabilityEnabled() || hasStabilityContract(ctx.session)) {
         const sourceId = resolveLeg(ctx, command.leg);
@@ -976,14 +1048,20 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         if (admission.error || admission.data !== true) throw new EffectsError("recording_admission_denied");
       });
       await deps.renewLease?.();
-      const recording = await telnyx.recordingStart({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, maxLength: command.maxLength,
-        clientState: encodeClientState({ sid: ctx.session.id, role: "customer", intent: recordingIntent(command.recorderId) }) });
+      const leg = resolveLeg(ctx, command.leg);
+      const recording = await toLeg(deps, leg, "control", () => telnyx.recordingStart({ callControlId: leg, commandId: command.commandId, maxLength: command.maxLength,
+        clientState: encodeClientState({ sid: ctx.session.id, role: "customer", intent: recordingIntent(command.recorderId) }) }));
       return { skipped: false, detail: { providerRecordingId: recording.recordingId } };
     }
     case "recording_stop":
       await deps.renewLease?.();
-      try { await telnyx.recordingStop({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId }); }
-      catch (error) { if (!isCallGoneError(error)) throw error; }
+      try { const leg = resolveLeg(ctx, command.leg); await toLeg(deps, leg, "control", () => telnyx.recordingStop({ callControlId: leg, commandId: command.commandId })); }
+      catch (error) {
+        // After our own accepted hangup the capture ends with the leg; say so
+        // instead of reporting a STOP that was never sent.
+        if (error instanceof KnownCallGoneError) return { skipped: true, detail: { reason: "call_gone", notSent: true } };
+        if (!isCallGoneError(error)) throw error;
+      }
       return { skipped: false };
     case "playback_start": {
       const prompt = resolvePrompt(deps, ctx, command.media);
@@ -995,8 +1073,9 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         clientState: encodeClientState(command.clientState ?? { sid: ctx.session.id, role: "customer", intent: "playback" }),
       };
       if (prompt.url && !command.forceSpeech) {
+        const audioUrl = prompt.url;
         try {
-          await telnyx.playbackStart({ ...common, audioUrl: prompt.url, loop: command.loop });
+          await toLeg(deps, common.callControlId, "media", () => telnyx.playbackStart({ ...common, audioUrl, loop: command.loop }));
           return { skipped: false, detail: { url: prompt.url } };
         } catch (error) {
           if (!canRecoverMediaFailure(ctx.session, error) || !prompt.text || isCallGoneError(error)) throw error;
@@ -1006,14 +1085,17 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         }
       }
       if (prompt.text) {
-        await telnyx.speak({ ...common, payload: prompt.text, voice: prompt.voice });
+        const payload = prompt.text;
+        await toLeg(deps, common.callControlId, "media", () => telnyx.speak({ ...common, payload, voice: prompt.voice }));
         return { skipped: false, detail: { tts: true } };
       }
       return { skipped: true, detail: { reason: "no media base url" } };
     }
-    case "playback_stop":
-      await telnyx.playbackStop({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, stop: "all" });
+    case "playback_stop": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "media", () => telnyx.playbackStop({ callControlId: leg, commandId: command.commandId, stop: "all" }));
       return { skipped: false };
+    }
     case "gather": {
       const leg = resolveLeg(ctx, command.leg);
       const prompt = resolvePrompt(deps, ctx, command.spec.media);
@@ -1038,7 +1120,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       // its fallback text may describe an older menu.
       if (url && !command.spec.forceSpeech && !(prompt.text && invalid?.text && !invalid.url)) {
         try {
-          await telnyx.gatherUsingAudio({ ...common, audioUrl: url, invalidAudioUrl: invalid?.url ?? undefined });
+          await toLeg(deps, leg, "media", () => telnyx.gatherUsingAudio({ ...common, audioUrl: url, invalidAudioUrl: invalid?.url ?? undefined }));
           return { skipped: false, detail: { url, purpose: command.spec.purpose } };
         } catch (error) {
           // Only managed prompts have text proven to match their recording.
@@ -1050,25 +1132,28 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         }
       }
       if (text) {
-        await telnyx.gatherUsingSpeak({ ...common, payload: text, voice: prompt.voice ?? DEFAULT_TTS_VOICE, invalidPayload: invalid?.text ?? undefined });
+        await toLeg(deps, leg, "media", () => telnyx.gatherUsingSpeak({ ...common, payload: text, voice: prompt.voice ?? DEFAULT_TTS_VOICE, invalidPayload: invalid?.text ?? undefined }));
         return { skipped: false, detail: { tts: true, purpose: command.spec.purpose, gatherId } };
       }
       if (command.spec.media === null) {
         // Silent gather: the waiting-room tick, which must not interrupt the
         // `playback_start` loop that carries the music.
-        await telnyx.gather(common);
+        await toLeg(deps, leg, "media", () => telnyx.gather(common));
         return { skipped: false, detail: { silent: true, purpose: command.spec.purpose } };
       }
       throw new EffectsError("gather has no usable audio or text");
     }
-    case "gather_stop":
-      await telnyx.gatherStop({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId });
+    case "gather_stop": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "media", () => telnyx.gatherStop({ callControlId: leg, commandId: command.commandId }));
       return { skipped: false };
+    }
     case "dial":
       return executeDial(deps, ctx, command);
-    case "transfer":
-      await telnyx.transfer({
-        callControlId: resolveLeg(ctx, command.leg),
+    case "transfer": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "control", () => telnyx.transfer({
+        callControlId: leg,
         commandId: command.commandId,
         to: command.to,
         from: command.from ?? undefined,
@@ -1078,8 +1163,9 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         sipRegion: "Europe",
         mediaEncryption: command.to.startsWith("sip:") ? "SRTP" : undefined,
         parkAfterUnbridge: "self",
-      });
+      }));
       return { skipped: false, detail: { to: command.to } };
+    }
     case "conference_create": {
       const conference = await createOrFindConference(telnyx, command.commandId, resolveLeg(ctx, command.leg), command.name);
       ctx.conferenceId = conference.id;
@@ -1108,9 +1194,11 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         commandId: command.commandId,
       });
       return { skipped: false, detail: { supervisorRole: command.supervisorRole } };
-    case "supervisor_role_switch":
-      await telnyx.switchSupervisorRole({ callControlId: resolveLeg(ctx, command.leg), role: command.supervisorRole, commandId: command.commandId });
+    case "supervisor_role_switch": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "control", () => telnyx.switchSupervisorRole({ callControlId: leg, role: command.supervisorRole, commandId: command.commandId }));
       return { skipped: false, detail: { supervisorRole: command.supervisorRole } };
+    }
     case "conference_leave":
       await telnyx.conferenceAction(requireConference(ctx, command), "leave", { call_control_id: resolveLeg(ctx, command.leg), commandId: command.commandId });
       return { skipped: false };
@@ -1360,7 +1448,7 @@ async function settleDial(deps: EffectsDeps, ctx: ExecutionContext, command: Dia
   // paused while their own dial is in flight, and the fresh row is what
   // discovers that tombstone in time to hang the revoked leg up — waiting for
   // the next event lets it be answered first.
-  if (stable && command.profileId) await cancelRevokedOffers(deps, ctx.session, { callControlId: result.callControlId, clientState: command.clientState });
+  if (stable && command.profileId) await cancelRevokedOffers(deps, ctx.session, { callControlId: result.callControlId, clientState: command.clientState, dialed: true });
   return { skipped: false, detail: { callControlId: result.callControlId, to: command.to } };
 }
 
@@ -1463,16 +1551,25 @@ function overlappedAction(ctx: ExecutionContext, command: Command): { callContro
  */
 async function executeOverlappedRun(deps: EffectsDeps, ctx: ExecutionContext, run: readonly Command[]): Promise<Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>> {
   const actions = run.map((command) => overlappedAction(ctx, command));
-  const results = await requireTelnyx(deps).callActionMany(actions.filter((action): action is NonNullable<typeof action> => Boolean(action)));
+  // A leg already reported ended gets its local refusal, not another request.
+  const live = actions.flatMap((action, index) =>
+    action && !(action.action === "hangup" ? legEnded(deps, action.callControlId, "control", action.commandId) : legEnded(deps, action.callControlId, "media"))
+      ? [{ action, index }] : []);
+  const sent = live.length ? await requireTelnyx(deps).callActionMany(live.map(({ action }) => action)) : [];
+  const results = new Map<number, PromiseSettledResult<void>>(live.map(({ index }, position) => [index, sent[position]]));
   const out = new Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>();
   for (const [index, command] of run.entries()) {
-    const outcome = results[index];
+    const action = actions[index];
+    const outcome: PromiseSettledResult<void> | undefined = results.get(index) ??
+      (action ? { status: "rejected", reason: new KnownCallGoneError(action.callControlId) } : undefined);
     const reason = command.kind === "hangup" ? (command as { reason?: string }).reason : undefined;
-    if (!outcome) continue;
+    if (!outcome || !action) continue;
+    if (outcome.status === "rejected") rememberEndedLeg(deps, action.callControlId, outcome.reason);
+    else if (action.action === "hangup" && typeof deps.endedLegs?.get(action.callControlId) !== "string") deps.endedLegs?.set(action.callControlId, action.commandId);
     if (outcome.status === "fulfilled") {
       out.set(commandKey(command), Promise.resolve({ skipped: false, ...(reason ? { detail: { reason } } : {}) }));
     } else if (command.kind === "hangup" && isLegAlreadyGone(outcome.reason)) {
-      out.set(commandKey(command), Promise.resolve({ skipped: true, detail: { reason, alreadyGone: true } }));
+      out.set(commandKey(command), Promise.resolve({ skipped: true, detail: { reason, alreadyGone: true, ...(outcome.reason instanceof KnownCallGoneError ? { notSent: true } : {}) } }));
     } else {
       out.set(commandKey(command), Promise.reject(outcome.reason));
     }
@@ -2179,9 +2276,13 @@ async function executeReduceResult(
         session = await persistTransition(deps, { session: ctx.session, transition: checkpoint, expectedVersion: ctx.session.version, event: input.event });
         ctx.session = session;
       }
-      outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: false, skipped: false, bestEffort: Boolean(command.bestEffort), error: message, ms: deps.now().getTime() - started });
+      // Not sent: the provider already reported this leg ended in this invocation.
+      const knownGone = error instanceof KnownCallGoneError;
+      outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: false, skipped: knownGone, bestEffort: Boolean(command.bestEffort), error: message, ms: deps.now().getTime() - started,
+        ...(knownGone ? { detail: { reason: "call_gone", notSent: true } } : {}) });
       if (command.bestEffort) {
-        deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, command: command.kind, error: message, bestEffort: true });
+        // The first refusal for the leg was logged; its follow-ups are retired quietly.
+        if (!knownGone) deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, command: command.kind, error: message, bestEffort: true });
         if (input.continuation && (isCallGoneError(error) || command.kind !== "recording_start" && command.kind !== "hangup" && command.kind !== "recording_stop")) await checkpointCommand(key);
         continue;
       }

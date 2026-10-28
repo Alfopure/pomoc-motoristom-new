@@ -68,7 +68,7 @@ describe("bounded recovery of initial call setup", () => {
     const { h, call, answer, work, outcomes, timeout } = await setup();
     timeout();
     // Persist the failure obligation even when its first audit INSERT is lost.
-    h.db.failNext("motorist_call_events", "insert", "audit temporarily unavailable");
+    h.db.failNext("motorist_call_events", "upsert", "audit temporarily unavailable");
     await h.process(answer);
     expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries[0].failureAudits?.[0].recorded).not.toBe(true);
     h.advance(52_000);

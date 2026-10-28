@@ -1,6 +1,12 @@
 import "server-only";
 
 import { createECDH, createHash, ECDH } from "node:crypto";
+// DEP0169 (`url.parse()`) in function logs, e.g. after a Telnyx webhook's call
+// push, comes from here: web-push 3.6.7 `src/web-push-lib.js` parses the
+// endpoint with `url.parse()` in `generateRequestDetails` and `sendNotification`.
+// Node skips the warning for callers inside node_modules; Next bundles this
+// package into a server chunk, so it prints once per instance. The endpoint is
+// already checked with WHATWG `URL` in `validatePushEndpoint` below.
 import webpush from "web-push";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";

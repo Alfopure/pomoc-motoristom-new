@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { attachSupabaseRealtimeAuth } from "@/lib/supabase/browser";
+
 import {
   realtimeResubscribeDelayMs,
   resetTelephonyRealtime,
@@ -171,6 +173,55 @@ describe("telephony realtime subscription", () => {
     channels[0].emit();
     channels[0].report("SUBSCRIBED");
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("telephony realtime join after session restore", () => {
+  function managedClient() {
+    const fake = createFakeClient();
+    const subscribed: string[] = [];
+    const original = fake.client.channel.bind(fake.client);
+    fake.client.channel = (topic, options) => {
+      const channel = original(topic, options);
+      const subscribe = channel.subscribe.bind(channel);
+      channel.subscribe = (callback) => { subscribed.push(topic); return subscribe(callback); };
+      return channel;
+    };
+    let restore!: () => void;
+    const restored = new Promise<void>((resolve) => { restore = resolve; });
+    const client = Object.assign(fake.client, {
+      realtime: { setAuth: () => restored },
+      auth: { onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }) },
+    });
+    attachSupabaseRealtimeAuth(client);
+    return { ...fake, client, subscribed, restore };
+  }
+
+  it("joins the private topic only once the restored session is on the socket", async () => {
+    const { client, channels, subscribed, restore } = managedClient();
+    const timers: Array<{ handler: () => void; ms: number }> = [];
+    const statuses: TelephonyRealtimeStatus[] = [];
+    const stop = subscribeTelephonyRealtime({ organizationId: ORG, onChange: () => {}, onStatus: (status) => statuses.push(status), seams: seamsFor(client, timers) });
+
+    expect(channels).toHaveLength(1);
+    expect(subscribed).toEqual([]);
+    expect(statuses).toEqual(["connecting"]);
+
+    restore();
+    await vi.waitFor(() => expect(subscribed).toEqual([`org:${ORG}:telephony`]));
+    channels[0].report("SUBSCRIBED");
+    expect(statuses).toEqual(["connecting", "connected"]);
+    stop();
+  });
+
+  it("never joins a channel whose last listener left while waiting", async () => {
+    const { client, channels, subscribed, restore } = managedClient();
+    const stop = subscribeTelephonyRealtime({ organizationId: ORG, onChange: () => {}, seams: seamsFor(client, []) });
+    stop();
+    restore();
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(channels[0].removed).toBe(true);
+    expect(subscribed).toEqual([]);
   });
 });
 

@@ -33,7 +33,7 @@ describe("immutable command failure obligations", () => {
     const resume = () => owned(() => resumePendingEffects(effectsDeps(h.deps), current()));
     // Simulate the first release's singular JSON already persisted before the
     // newer writer sees it, including a lost initial audit INSERT.
-    h.db.failNext("motorist_call_events", "insert", "audit unavailable");
+    h.db.failNext("motorist_call_events", "upsert", "audit unavailable");
     await resume();
     const pending = readPendingEffects(current());
     const first = pending.entries[0].failureAudits![0];

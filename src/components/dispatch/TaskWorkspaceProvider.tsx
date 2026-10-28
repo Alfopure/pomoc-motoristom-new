@@ -1,6 +1,6 @@
 "use client";
 import { createContext, useContext, useEffect, useLayoutEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { afterRealtimeAuth, createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { TaskWorkspaceStore } from "./task-workspace-store";
 import type { DraftEditorState } from "./useDraftEditors";
@@ -46,8 +46,10 @@ function TaskWorkspaceSession({ children, actorKey, enabled = false, initialTask
       cleanupAuth = () => data.subscription.unsubscribe();
       const organizationId = actorKey?.split(":")[0];
       if (organizationId) {
-        const channel = client.channel(`tasks:${organizationId}`, { config: { private: true } }).on("broadcast", { event: "invalidate" }, schedule).subscribe(status => { if (status === "SUBSCRIBED") schedule(); });
-        cleanupChannel = () => { void client.removeChannel(channel); };
+        const channel = client.channel(`tasks:${organizationId}`, { config: { private: true } }).on("broadcast", { event: "invalidate" }, schedule);
+        // Private joins wait for the restored session; an earlier join is refused.
+        const cancelJoin = afterRealtimeAuth(client, () => { channel.subscribe(status => { if (status === "SUBSCRIBED") schedule(); }); });
+        cleanupChannel = () => { cancelJoin(); void client.removeChannel(channel); };
         store.setOnAccessRevoked(cleanupChannel);
       }
     } catch { /* Polling and resume authorization remain available without Realtime. */ }

@@ -41,7 +41,7 @@ const hold = (h: TelephonyHarness, sessionId: string, id: string) => runSessionE
 
 function projectedHoldEvent(h: TelephonyHarness): string | null {
   const query = h.db.log.at(-1);
-  if (query?.table !== "motorist_call_events" || query.operation !== "insert") return null;
+  if (query?.table !== "motorist_call_events" || query.operation !== "upsert") return null;
   const payload = query.payload as FakeRow;
   const normalized = payload.normalized_payload as FakeRow;
   return normalized.state_after === "held" ? String(payload.event_fingerprint) : null;
@@ -135,7 +135,7 @@ describe("recorded control projection recovery with writer contract 2", () => {
     expect(audits(h, eventId!)).toHaveLength(1);
     const providerCalls = structuredClone(h.telnyx.calls);
     const projectionWrites = h.db.log.filter(query => query.table === "motorist_calls" && query.operation === "update").length;
-    const auditAttempts = () => h.db.log.filter(query => query.table === "motorist_call_events" && query.operation === "insert" &&
+    const auditAttempts = () => h.db.log.filter(query => query.table === "motorist_call_events" && query.operation === "upsert" &&
       (query.payload as FakeRow).event_fingerprint === eventId).length;
     const attemptsBeforeRecovery = auditAttempts();
     fault.mockRestore();
@@ -156,7 +156,7 @@ describe("recorded control projection recovery with writer contract 2", () => {
     let failures = 0;
     const fault = vi.spyOn(h.db, "takeInjectedError").mockImplementation((table, operation) => {
       eventId ??= projectedHoldEvent(h);
-      if (table === "motorist_call_events" && operation === "insert" && projectedHoldEvent(h) === eventId && eventId) {
+      if (table === "motorist_call_events" && operation === "upsert" && projectedHoldEvent(h) === eventId && eventId) {
         failures += 1;
         expect(h.call(sessionId)?.raw_latest_payload).toMatchObject({ state: "held" });
         return { code: "08006", message: "audit insert unavailable", details: null, hint: null };
