@@ -148,6 +148,8 @@ async function runPauseEndingWarningMaterialisation(organizationId: string): Pro
 
 /** The overdue-callback push starts only this early in a run (120 s limit). */
 const MOBILE_PUSH_LATEST_START_MS = 75_000;
+/** Work notices (outbox drain) start no later than this, leaving the reserve intact. */
+const MOBILE_WORK_PUSH_LATEST_START_MS = 90_000;
 
 /** Overdue callbacks to the dispatchers' phones (off unless MOBILE_PUSH_ENABLED; each
  * callback deadline is announced once, so a repeated tick sends nothing) and the
@@ -167,6 +169,16 @@ async function runMobilePushMaterialisation(organizationId: string, cronStartedA
   let upkeep: Awaited<ReturnType<typeof runMobilePushUpkeep>> = null, upkeepError: unknown = null;
   try { upkeep = await runMobilePushUpkeep(admin, organizationId, new Date()); } catch (error) { upkeepError = error; }
   const result = mobilePushEnabled() ? await runMobileCallbackPush(admin, organizationId, new Date()) : { status: "disabled" as const, detail: { reason: "push_disabled" } };
+  // Work notices: escalate waiting branch work, then drain the outbox, within its own budget.
+  let work: Record<string, unknown> | null = null;
+  if (mobilePushEnabled() && Date.now() - cronStartedAt <= MOBILE_WORK_PUSH_LATEST_START_MS) {
+    // Never fails the callback push job: an outbox problem is reported, the rows wait for the next tick.
+    try {
+      const { drainPushOutbox } = await import("@/server/mobile/push-outbox");
+      const escalated = await admin.rpc("motorist_branch_escalate" as never, { p_organization_id: organizationId } as never);
+      work = { escalated: escalated.error ? `error:${escalated.error.code ?? "unknown"}` : escalated.data, ...await drainPushOutbox(admin as never, organizationId, { limit: 100 }) };
+    } catch (error) { work = { error: error instanceof Error ? error.message.slice(0, 200) : "failed" }; }
+  }
   if (upkeepError) throw upkeepError;
-  return { job, status: result.status, detail: { ...result.detail, ...(upkeep ? { upkeep } : {}) } };
+  return { job, status: result.status, detail: { ...result.detail, ...(upkeep ? { upkeep } : {}), ...(work ? { work } : {}) } };
 }

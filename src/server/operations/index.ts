@@ -5,6 +5,7 @@ import { createSupabaseAdminClient } from '@/lib/supabase/admin';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { resolveDefaultOrganizationId } from '@/server/default-organization';
 import { TowingError, mapRpcError, uuid, revision } from '@/server/towing/http';
+import { queueWorkPush } from '@/server/mobile/push-outbox';
 const admin = () => createSupabaseAdminClient() as unknown as SupabaseClient;
 export async function requireOperationsActor(): Promise<OperationsActor> {
   const session = await createSupabaseServerClient();
@@ -40,5 +41,6 @@ export async function commandOperation(command: OperationCommand): Promise<Opera
   const actor = await requireOperationsActor();
   const result = await admin().rpc('motorist_operations_command', { ...params(actor), p_command: command });
   mapRpcError(result.error);
+  queueWorkPush(actor.organizationId);
   return result.data as OperationReceipt;
 }

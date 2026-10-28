@@ -22,7 +22,7 @@ const TOKEN = /^Expo(?:nent)?PushToken\[[A-Za-z0-9_-]{8,200}\]$/;
 const EXPO_SEND = "https://exp.host/--/api/v2/push/send";
 const ROLES = ["dispatcher", "senior_dispatcher", "manager", "admin"] as const;
 /** The app registers again at every start; a phone unused for this long is left alone. */
-const STALE_DEVICE_DAYS = 30;
+export const STALE_DEVICE_DAYS = 30;
 /** Every database read of a delivery is bounded; a slow database skips the notice. */
 const READ_MS = 8_000;
 const CLAIM = "mobile-push:";
@@ -36,7 +36,7 @@ export function defaultPushPreferences(): MobilePushPreferences {
   return { tasks: true, task_due: true, callbacks_mine: true, callbacks_unclaimed: true, cases: true, handoffs: true, work: true, branch: true };
 }
 /** Known switches only; anything else in stored or sent preferences is ignored. */
-function storedPreferences(value: unknown): MobilePushPreferences {
+export function storedPreferences(value: unknown): MobilePushPreferences {
   const result = defaultPushPreferences();
   if (value && typeof value === "object" && !Array.isArray(value)) {
     for (const type of MOBILE_PUSH_TYPES) if (typeof (value as Record<string, unknown>)[type] === "boolean") result[type] = (value as Record<string, boolean>)[type];

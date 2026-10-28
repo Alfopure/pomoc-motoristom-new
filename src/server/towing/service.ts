@@ -3,6 +3,7 @@ import { TOWING_COMMANDS, type TowingCommand, type TowingCommandResult, type Tow
 import { actorRpcParams } from './auth';
 import { towingAdmin } from './client';
 import { mapRpcError, revision, TowingError, uuid } from './http';
+import { queueWorkPush } from '@/server/mobile/push-outbox';
 
 export const internalCommands = new Set(['attachment_intent', 'attachment_finalize', 'issue_document', 'document_result', 'email_intent', 'email_result', 'set_member']);
 export function parseTowingCommand(value: Record<string, unknown>, internal = false): TowingCommand {
@@ -23,6 +24,7 @@ export async function executeTowingCommand(actor: TowingMember, command: TowingC
   const result = await towingAdmin().rpc('motorist_towing_command', { ...actorRpcParams(actor), p_command: command });
   mapRpcError(result.error);
   if (!result.data || typeof result.data !== 'object') throw new TowingError('unavailable', 503, 'Uloženie sa nepodarilo potvrdiť.');
+  queueWorkPush(actor.organizationId);
   return result.data as TowingCommandResult;
 }
 export function workspaceFilters(url: URL) {
