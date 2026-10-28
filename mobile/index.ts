@@ -1,11 +1,11 @@
 import { registerRootComponent } from "expo";
 import App from "./App";
-import { defineDeliveryTask } from "./src/delivery/native-sharing";
+import { defineLocationTasks } from "./src/delivery/native-sharing";
 import { probeNativeVoiceBindings } from "./src/voice/probe";
 
 // Before anything else: iOS may start the app in the background only to hand it a
-// location of a running delivery.
-defineDeliveryTask();
+// location of a running delivery or operation.
+defineLocationTasks();
 
 // The proof profile deliberately fails at boot if native SDK imports are
 // incompatible. The normal app and Expo Go never execute this probe.

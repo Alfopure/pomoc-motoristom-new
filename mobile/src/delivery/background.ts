@@ -3,9 +3,15 @@ import type { MobileDeliveryPositionInput, MobileEnvironment } from "../../../sr
 /** Position of the pristavovač in the background: the app may be in the background,
  * the phone locked, or the app closed by iOS and woken for a location event. The
  * readings go to the server with a secret of the one delivery (not the sign-in
- * session); without signal they wait on the phone and go with the next reading. */
+ * session); without signal they wait on the phone and go with the next reading.
+ * Moja práca follows the member's own operation the same way, under its own task,
+ * Keychain entry, waiting list and route. */
 export const DELIVERY_TASK = "pm-delivery-location";
+export const OPERATION_TASK = "pm-operation-location";
+export const DELIVERY_TRACK_PATH = "/api/mobile/v1/field/track";
+export const OPERATION_TRACK_PATH = "/api/mobile/v1/field/operations/track";
 export type Reading = MobileDeliveryPositionInput;
+/** `deliveryId`: the followed job – the delivery, or the operation in Moja práca's own entry (the stored name stays). */
 export type TrackingState = { version: 1; environment: MobileEnvironment; apiOrigin: string; memberId: string; deliveryId: string; token: string; expiresAt: string };
 export type TrackingStore = { load: () => Promise<TrackingState | null>; save: (state: TrackingState) => Promise<void>; clear: () => Promise<void> };
 export type ReadingQueue = { load: () => Promise<Reading[]>; save: (readings: Reading[]) => Promise<void>; clear: () => Promise<void> };
@@ -97,12 +103,12 @@ async function halt(deps: Pick<TaskDeps, "store" | "queue" | "stopUpdates">) {
   await deps.queue.clear().catch(() => undefined);
 }
 
-/** Sends one batch with the delivery's secret. An ended delivery or a refused secret
- * stops the sharing; no connection keeps the readings for the next try. */
-export async function sendReadings(state: TrackingState, batch: readonly Reading[], transport: typeof fetch = fetch): Promise<SendResult> {
+/** Sends one batch with the job's secret. An ended delivery or operation or a refused
+ * secret stops the sharing; no connection keeps the readings for the next try. */
+export async function sendReadings(state: TrackingState, batch: readonly Reading[], transport: typeof fetch = fetch, path = DELIVERY_TRACK_PATH): Promise<SendResult> {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await transport(state.apiOrigin + "/api/mobile/v1/field/track", {
+    const response = await transport(state.apiOrigin + path, {
       method: "POST", credentials: "omit", signal: controller.signal, body: JSON.stringify({ positions: batch }),
       headers: { Authorization: "Tracker " + state.token, "X-PM-App-Environment": state.environment, "Content-Type": "application/json", Accept: "application/json" },
     });
@@ -110,8 +116,8 @@ export async function sendReadings(state: TrackingState, batch: readonly Reading
     // A batch the server cannot read is dropped, not repeated for ever.
     if (response.status === 400) return "ok";
     const body = await response.json().catch(() => null) as { ok?: unknown; environment?: unknown; active?: unknown; code?: unknown } | null;
-    // Deliveries switched off in this environment: nothing more to send.
-    if (response.status === 503 && body?.code === "delivery_unavailable") return "stop";
+    // Field work or its positions switched off in this environment: nothing more to send.
+    if (response.status === 503 && (body?.code === "delivery_unavailable" || body?.code === "work_position_unavailable")) return "stop";
     if (!response.ok) return "retry";
     if (!body || body.ok !== true || body.environment !== state.environment || typeof body.active !== "boolean") return "retry";
     return body.active ? "ok" : "stop";

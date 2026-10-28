@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import { Car, ClipboardList, FolderOpen, Phone, PhoneMissed, Search, type LucideIcon } from "lucide-react-native";
+import { Briefcase, Car, ClipboardList, FolderOpen, Phone, PhoneMissed, Search, type LucideIcon } from "lucide-react-native";
 import type { MobileActiveCall } from "../../../src/lib/mobile-api";
 import type { MobileCallbackSummary } from "../../../src/lib/mobile-callbacks";
 import { palette, radius, space, type } from "../design/tokens";
@@ -24,6 +24,8 @@ type Props = {
   alerts: { scope: ShellScope; targets: AlertTargets; onAll: () => void } | null;
   /** Someone who also delivers sees their deliveries here. */
   deliveries?: { count: number | null; detail: string; onOpen: () => void } | null;
+  /** Someone who also drives or delivers in Moja práca sees that work here. */
+  work?: { count: number | null; detail: string; onOpen: () => void } | null;
 };
 const toneColors: Record<PresenceTone, [string, string]> = {
   green: [palette.greenSoft, palette.greenText], orange: [palette.orangeSoft, palette.orangeText], red: [palette.redSoft, palette.redText], gray: [palette.fill, palette.secondaryLabel],
@@ -35,7 +37,7 @@ export function todayLabel(now = new Date()): string {
 }
 
 /** What needs attention now: live calls first, then one tile per module. */
-export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scopeNotice, tip, onDismissTip, onOpen, onCall, onRefresh, onSearch, alerts, deliveries }: Props) {
+export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scopeNotice, tip, onDismissTip, onOpen, onCall, onRefresh, onSearch, alerts, deliveries, work }: Props) {
   const counts = callbacks.data?.counts;
   return <ScrollView contentContainerStyle={s.content} refreshControl={<RefreshControl refreshing={false} onRefresh={onRefresh} />}>
     <View style={s.titleRow}><Text accessibilityRole="header" style={s.title}>Prehľad</Text><Text style={s.date}>{todayLabel()}</Text></View>
@@ -61,6 +63,8 @@ export function HomeScreen({ active, phone, callbacks, activeCalls, scope, scope
       <Tile title="Telefón" icon={Phone} colors={toneColors[phone.tone]} value={phone.label} small detail={phone.detail} onPress={() => onOpen("console")} />
       {deliveries && <Tile title="Pristavenia" icon={Car} colors={[palette.blueSoft, palette.blueText]} value={deliveries.count === null ? null : String(deliveries.count)}
         detail={deliveries.detail} onPress={deliveries.onOpen} />}
+      {work && <Tile title="Moja práca" icon={Briefcase} colors={[palette.orangeSoft, palette.orangeText]} value={work.count === null ? null : String(work.count)}
+        detail={work.detail} onPress={work.onOpen} />}
     </View>
     {alerts && <AlertsPreview scope={alerts.scope} active={active} targets={alerts.targets} onAll={alerts.onAll} />}
     {tip && <View style={s.tip}>

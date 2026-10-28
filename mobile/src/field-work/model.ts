@@ -51,6 +51,10 @@ export function nextOperationStep(operation: Pick<MobileOperation, "status" | "k
 export const operationStepLabels: Record<MobileOperationAction, string> = {
   accept: "Prijať jazdu", start: "Začať jazdu", arrive: "Som na mieste", collect: "Vozidlo prevzaté", complete: "Dokončiť jazdu", evidence: "Doklad",
 };
+/** What waits for the member, for the bar badge: Pridelené (a jazda to accept, an odťah to start) and Na doplnenie. */
+export function awaitsMember(item: WorkItem): boolean {
+  return item.kind === "operation" ? item.operation.status === "assigned" : item.order.workStatus === "assigned" || item.order.workStatus === "needs_changes";
+}
 /** Position goes to dispatch from the executor's acceptance until the work ends. */
 export function sharesOperationPosition(operation: Pick<MobileOperation, "status">): boolean {
   return ["accepted", "en_route", "arrived", "collected"].includes(operation.status);
