@@ -1,6 +1,6 @@
 # Pripravenosť mobilnej aplikácie na nasadenie (iPhone)
 
-Aktualizované 24. 10. 2026 po internom vydaní mobilnej fázy 1. Aktuálny
+Aktualizované 27. 10. 2026 po externom beta schválení mobilnej fázy 1. Aktuálny
 [audit spoľahlivosti a plán](reliability-audit-2026-10-22.md) obsahuje zistenia,
 rozsah opráv a otvorené skúšky. Podrobná história F1–F6 je nižšie.
 
@@ -9,7 +9,9 @@ Nový mobilný zdroj sa nesmie zamieňať so staršou nainštalovanou binárkou.
 [Lokálny Xcode build](local-ios-build.md) **0.1.0 (23)** obsahuje opravy
 PR #494, opravu pádu pri štarte z PR #496 aj prvú fázu z PR #507.
 Apple potvrdil dostupnosť
-v internom TestFlighte (`VALID`, `IN_BETA_TESTING`). Release simulátor
+v internom TestFlighte (`VALID`, `IN_BETA_TESTING`); 27. 10. bol ten istý build
+23 schválený aj pre externé beta testovanie a sprístupnený existujúcej skupine
+Externí testeri TEST (`APPROVED`, externé `IN_BETA_TESTING`). Release simulátor
 iOS 27 overil skutočne viditeľné prihlásenie v štyroch scenároch.
 Historická kontrolná verzia s pôvodným lifecycle má zachovaný crash
 s presnou UIKit chybou; jej hashe a nezmenené natívne vstupy boli overené.

@@ -4,6 +4,17 @@ Cieľ: TEST aplikácia v iPhone cez interný TestFlight, bez App Review. Je to T
 variant (TEST server, TEST databáza, telefonovanie zapnuté v aplikácii, OTA vypnuté).
 Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 
+**Externé testovanie, 27. 10. 2026:** na výslovný pokyn majiteľa bol existujúci
+build **0.1.0 (23)** odoslaný na Beta App Review. Apple ho schválil a o
+**07:07 UTC** bolo priamym čítaním API overené `APPROVED`, `VALID` a externé
+`IN_BETA_TESTING`. Build je priradený existujúcej skupine **Externí testeri TEST**;
+verejný pozývací odkaz zostáva vypnutý. Review prihlásenie aj mobilné TEST API
+boli overené, doplnený bol text Čo testovať. Nová binárka sa nezostavovala,
+nepridávali sa noví testeri a produkčný App Store release sa neodosielal.
+Pridanie ďalšieho testera do už schválenej beta verzie nepotrebuje nové
+schvaľovanie buildu; tester prijme pozvánku a jeho aplikačný účet musí mať
+požadované oprávnenia.
+
 **Hlásený problém buildu 21 (23. 10. 2026):** na iOS 27 padá pri štarte,
 pred načítaním JavaScriptu. TestFlight crash feedback ukazuje
 `___UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption_block_invoke`.

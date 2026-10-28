@@ -145,6 +145,7 @@ import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { CaseHandoffPanel } from "./CaseHandoffPanel";
 import { CaseOperationsPanel } from "@/components/operations/OperationsModule";
+import { CaseBranchPanel } from "@/components/branches/BranchWorkspace";
 import { CasePartnerPanel } from "@/components/partners/CasePartnerPanel";
 import { CaseTowingOrdersPanel } from "./CaseTowingOrdersPanel";
 import { useLayoutPreview } from "./LayoutPreview";
@@ -743,6 +744,7 @@ function CaseDetailContent({
       <CaseSummary caseItem={caseItem} assets={assets} operators={operators} identityInHeader={compactEditor && embedded && Boolean(onEditorControlsChange)} />
       <CaseSectionNavigation editing={isEditing} />
       <CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} initiallyExpanded={openHandoff} />
+      <CaseBranchPanel key={`branches:${caseItem.id}`} caseId={caseItem.id} />
       <CaseOperationsPanel key={`operations:${caseItem.id}`} caseId={caseItem.id} />
       <CasePartnerPanel key={`partner:${caseItem.id}`} caseId={caseItem.id} />
       <CaseTowingOrdersPanel key={`towing:${caseItem.id}`} caseId={caseItem.id} caseNumber={caseItem.caseNumber} />
