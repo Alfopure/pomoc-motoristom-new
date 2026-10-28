@@ -54,6 +54,8 @@ $$;
 create function app_private.push_kind(kind text) returns text language sql immutable set search_path='' as $$
  select case kind when 'delivery' then 'pristavenie' when 'collection' then 'odvoz vozidla' when 'transfer' then 'presun vozidla' when 'tow' then 'odťah' else 'práca' end
 $$;
+create function app_private.push_safe_ts(value text) returns timestamptz language plpgsql immutable set search_path='' as $$
+begin return nullif(value,'')::timestamptz; exception when others then return null; end $$;
 -- Slovak agreement: pristavenie is neuter, odvoz/presun/odťah masculine.
 create function app_private.push_kind_title(kind text, adjective text) returns text language sql immutable set search_path='' as $$
  select case when kind='delivery' then case adjective when 'new' then 'Nové' else 'Zrušené' end else case adjective when 'new' then 'Nový' else 'Zrušený' end end || ' ' || app_private.push_kind(kind)
@@ -65,7 +67,8 @@ declare op public.motorist_operations; label text;
 begin
  select * into op from public.motorist_operations where id=new.operation_id;
  label:=app_private.push_kind(op.kind);
- -- A member who holds the live legacy app delivery of this work is notified by that path; never twice.
+ -- Changes made by the legacy app-delivery adapter (handoff trigger) are announced by that path; never twice.
+ if pg_trigger_depth()>1 and exists(select 1 from public.motorist_case_handoffs h where h.operation_id=new.operation_id) then return new; end if;
  if new.assignee_id is not null and exists(select 1 from public.motorist_case_handoffs h where h.operation_id=new.operation_id and h.recipient_member_id=new.assignee_id
    and h.status in ('offered','accepted','en_route','arrived')) then return new; end if;
  if new.assignee_id is distinct from old.assignee_id then
@@ -94,7 +97,7 @@ create function app_private.push_towing_change() returns trigger language plpgsq
 begin
  if new.driver_id is distinct from old.driver_id and new.driver_id is not null and new.work_status not in ('submitted','cancelled') then
   perform app_private.push_enqueue(new.organization_id,new.driver_id,null,'work','tow_assigned','towing',new.id,
-   'tow_assigned:'||new.id||':'||new.assignment_generation||':'||new.driver_id,'Nový odťah',app_private.push_term(nullif(new.fields->>'plannedAt','')::timestamptz),new.assignment_generation);
+   'tow_assigned:'||new.id||':'||new.assignment_generation||':'||new.driver_id,'Nový odťah',app_private.push_term(app_private.push_safe_ts(new.fields->>'plannedAt')),new.assignment_generation);
  end if;
  if new.driver_id is distinct from old.driver_id and old.driver_id is not null then
   perform app_private.push_enqueue(new.organization_id,old.driver_id,null,'work','tow_unassigned','towing',new.id,
@@ -120,16 +123,17 @@ begin
  for m in select gm.member_id from public.motorist_work_group_members gm join public.motorist_towing_memberships tm on tm.id=gm.member_id and tm.active
   where gm.group_id=new.group_id and gm.role='lead' and gm.receives_new loop
   perform app_private.push_enqueue(new.organization_id,m.member_id,null,'branch','branch_new','branch_request',new.id,
-   'branch_new:'||new.id||':'||extract(epoch from new.queued_at)::bigint||':'||m.member_id,'Nová práca: ' || g.name,initcap(app_private.push_kind(new.kind)) || ' čaká na prevzatie.');
+   'branch_new:'||new.id||':'||(extract(epoch from new.queued_at)*1e6)::bigint||':'||m.member_id,'Nová práca: ' || g.name,initcap(app_private.push_kind(new.kind)) || ' čaká na prevzatie.');
  end loop;
  return new;
 end $$;
 create trigger motorist_push_branch after insert or update of group_id,status,routed_at,queued_at on public.motorist_work_requests
  for each row execute function app_private.push_branch_arrival();
 
--- A reported damage reaches the lead who assigned the work while still a lead there, else the dispatcher who created it.
+-- A reported damage reaches the lead who assigned the work while still a lead there,
+-- else the branch's current leads, else the dispatcher who created the work.
 create function app_private.push_damage_report() returns trigger language plpgsql security definer set search_path='' as $$
-declare lead uuid; creator uuid; op public.motorist_operations; label text;
+declare lead uuid; creator uuid; op public.motorist_operations; label text; m record; reached boolean:=false;
 begin
  if new.stage<>'damage' then return new; end if;
  select * into op from public.motorist_operations where id=new.operation_id;
@@ -138,7 +142,15 @@ begin
   where r.operation_id=new.operation_id and e.actor_member_id is not null and app_private.branch_lead(r.organization_id,e.actor_member_id,r.group_id) order by e.created_at desc limit 1;
  if lead is not null then
   perform app_private.push_enqueue(op.organization_id,lead,null,'work','work_problem','operation',op.id,'work_problem:'||new.id||':m:'||lead,'Nahlásené poškodenie',label || ': vykonávateľ nahlásil poškodenie.');
+  reached:=true;
  else
+  for m in select gm.member_id from public.motorist_work_requests r join public.motorist_work_group_members gm on gm.group_id=r.group_id and gm.role='lead'
+   join public.motorist_towing_memberships tm on tm.id=gm.member_id and tm.active where r.operation_id=new.operation_id loop
+   perform app_private.push_enqueue(op.organization_id,m.member_id,null,'work','work_problem','operation',op.id,'work_problem:'||new.id||':m:'||m.member_id,'Nahlásené poškodenie',label || ': vykonávateľ nahlásil poškodenie.');
+   reached:=true;
+  end loop;
+ end if;
+ if not reached then
   select p.id into creator from public.motorist_profiles p where p.organization_id=op.organization_id and p.user_id=op.created_by and p.active and p.kind is distinct from 'ai';
   if creator is not null then
    perform app_private.push_enqueue(op.organization_id,null,creator,'work','work_problem','operation',op.id,'work_problem:'||new.id||':p:'||creator,'Nahlásené poškodenie',label || ': vykonávateľ nahlásil poškodenie.');
@@ -158,12 +170,12 @@ begin
   where wr.organization_id=p_organization_id and wr.status='queued' and wr.queued_at<now()-make_interval(mins=>g.escalate_after_minutes) and wr.queued_at>now()-interval '2 days' limit 200 loop
   for m in select gm.member_id from public.motorist_work_group_members gm join public.motorist_towing_memberships tm on tm.id=gm.member_id and tm.active
    where gm.group_id=r.group_id and gm.role='lead' loop
-   perform app_private.push_enqueue(p_organization_id,m.member_id,null,'branch','branch_waiting','branch_request',r.id,'branch_waiting:'||r.id||':'||extract(epoch from r.queued_at)::bigint||':m:'||m.member_id,
+   perform app_private.push_enqueue(p_organization_id,m.member_id,null,'branch','branch_waiting','branch_request',r.id,'branch_waiting:'||r.id||':'||(extract(epoch from r.queued_at)*1e6)::bigint||':m:'||m.member_id,
     'Práca čaká na prevzatie',r.group_name || ': ' || app_private.push_kind(r.kind) || ' čaká ' || r.waited || ' min.');
   end loop;
   if r.escalate_to_central then
    for m in select p.id from public.motorist_profiles p where p.organization_id=p_organization_id and p.active and p.access_status='active' and p.kind is distinct from 'ai' and p.role in ('senior_dispatcher','manager','admin') loop
-    perform app_private.push_enqueue(p_organization_id,null,m.id,'branch','branch_waiting','branch_request',r.id,'branch_waiting:'||r.id||':'||extract(epoch from r.queued_at)::bigint||':p:'||m.id,
+    perform app_private.push_enqueue(p_organization_id,null,m.id,'branch','branch_waiting','branch_request',r.id,'branch_waiting:'||r.id||':'||(extract(epoch from r.queued_at)*1e6)::bigint||':p:'||m.id,
      'Pobočka neprevzala prácu',r.group_name || ': ' || app_private.push_kind(r.kind) || ' čaká ' || r.waited || ' min.');
    end loop;
   end if;
@@ -179,6 +191,8 @@ create function app_private.push_still_valid(o public.motorist_push_outbox) retu
   when o.profile_id is not null and not exists(select 1 from public.motorist_profiles p where p.id=o.profile_id and p.active and p.access_status='active') then false
   when o.event in ('work_assigned','work_changed') then exists(select 1 from public.motorist_logistics_executions e where e.operation_id=o.subject_id and e.assignee_id=o.member_id
    and e.status not in ('completed','cancelled') and (o.ref_generation is null or e.assignment_generation=o.ref_generation))
+   and not (o.event='work_changed' and exists(select 1 from public.motorist_push_outbox newer where newer.organization_id=o.organization_id and newer.subject_id=o.subject_id
+    and newer.member_id=o.member_id and newer.event='work_changed' and newer.created_at>o.created_at))
   when o.event='tow_assigned' then exists(select 1 from public.motorist_towing_orders t where t.id=o.subject_id and t.driver_id=o.member_id and t.work_status not in ('submitted','cancelled')
    and (o.ref_generation is null or t.assignment_generation=o.ref_generation))
   when o.event='tow_needs_changes' then exists(select 1 from public.motorist_towing_orders t where t.id=o.subject_id and t.driver_id=o.member_id and t.work_status='needs_changes')
@@ -256,6 +270,10 @@ begin
   'fleet',case when (actor->>'central')::boolean then coalesce((select jsonb_agg(jsonb_build_object('id',id,'name',label) order by label) from public.motorist_fleet_assets where organization_id=p_organization_id and kind='replacement_car'),'[]') else '[]' end);
 end $$;
 
+-- Recent notices that could not be queued, for the cron summary.
+create function public.motorist_push_outbox_failures_recent(p_organization_id uuid) returns integer language sql stable security definer set search_path='' as $$
+ select count(*)::integer from public.motorist_push_outbox_failures where organization_id=p_organization_id and created_at>now()-interval '24 hours'
+$$;
 -- Escalation settings of a branch (manager/admin), replay-safe by command id;
 -- the stored command row records who changed what.
 create function public.motorist_branch_group_settings(p_user_id uuid,p_organization_id uuid,p_command_id uuid,p_group_id uuid,p_expected_revision bigint,p_escalate_after integer,p_escalate_to_central boolean)
@@ -280,10 +298,10 @@ begin
  return receipt;
 end $$;
 
-revoke all on function app_private.push_enqueue(uuid,uuid,uuid,text,text,text,uuid,text,text,text,bigint),app_private.push_term(timestamptz),app_private.push_kind(text),app_private.push_kind_title(text,text),
+revoke all on function app_private.push_enqueue(uuid,uuid,uuid,text,text,text,uuid,text,text,text,bigint),app_private.push_term(timestamptz),app_private.push_kind(text),app_private.push_kind_title(text,text),app_private.push_safe_ts(text),
  app_private.push_logistics_change(),app_private.push_towing_change(),app_private.push_branch_arrival(),app_private.push_damage_report(),app_private.work_request_queued_at(),
  app_private.push_still_valid(public.motorist_push_outbox) from public,anon,authenticated,service_role;
-revoke all on function public.motorist_branch_escalate(uuid),public.motorist_push_outbox_claim(uuid,integer),public.motorist_push_outbox_finish(uuid,jsonb),public.motorist_branch_group_settings(uuid,uuid,uuid,uuid,bigint,integer,boolean) from public,anon,authenticated;
-grant execute on function public.motorist_branch_escalate(uuid),public.motorist_push_outbox_claim(uuid,integer),public.motorist_push_outbox_finish(uuid,jsonb),public.motorist_branch_group_settings(uuid,uuid,uuid,uuid,bigint,integer,boolean) to service_role;
+revoke all on function public.motorist_push_outbox_failures_recent(uuid),public.motorist_branch_escalate(uuid),public.motorist_push_outbox_claim(uuid,integer),public.motorist_push_outbox_finish(uuid,jsonb),public.motorist_branch_group_settings(uuid,uuid,uuid,uuid,bigint,integer,boolean) from public,anon,authenticated;
+grant execute on function public.motorist_push_outbox_failures_recent(uuid),public.motorist_branch_escalate(uuid),public.motorist_push_outbox_claim(uuid,integer),public.motorist_push_outbox_finish(uuid,jsonb),public.motorist_branch_group_settings(uuid,uuid,uuid,uuid,bigint,integer,boolean) to service_role;
 notify pgrst, 'reload schema';
 commit;

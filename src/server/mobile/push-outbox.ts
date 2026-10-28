@@ -46,10 +46,19 @@ async function devicesFor(admin: Admin, organizationId: string, rows: readonly O
 }
 
 /** Claims due notices of one organization, sends them and records the outcome. Never throws. */
-export async function drainPushOutbox(admin: Admin, organizationId: string, options: { limit?: number; now?: Date; transport?: PushTransport } = {}): Promise<OutboxDrain> {
+export async function drainPushOutbox(admin: Admin, organizationId: string, options: { limit?: number; now?: Date; transport?: PushTransport; deadline?: number } = {}): Promise<OutboxDrain> {
   const drain: OutboxDrain = { claimed: 0, sent: 0, noDevice: 0, failed: 0 };
   if (!mobilePushEnabled()) return drain;
   let rows: OutboxRow[] = [];
+  let sending = false;
+  const finish = async (results: OutboxOutcome[]) => {
+    // A result that is never recorded leaves the lease to expire, and the row is then given up (at most once).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const finished = await admin.rpc("motorist_push_outbox_finish", { p_organization_id: organizationId, p_results: results }).abortSignal(AbortSignal.timeout(READ_MS));
+      if (!finished.error) return;
+      if (attempt === 1) console.warn(JSON.stringify({ event: "mobile.push.outbox.finish", error: finished.error.code ?? "unknown", rows: results.length }));
+    }
+  };
   try {
     const claim = await admin.rpc("motorist_push_outbox_claim", { p_organization_id: organizationId, p_limit: options.limit ?? 50 }).abortSignal(AbortSignal.timeout(READ_MS));
     if (claim.error) { if (!["PGRST202", "42883"].includes(claim.error.code ?? "")) console.warn(JSON.stringify({ event: "mobile.push.outbox", error: claim.error.code })); return drain; }
@@ -57,26 +66,31 @@ export async function drainPushOutbox(admin: Admin, organizationId: string, opti
     drain.claimed = rows.length;
     if (!rows.length) return drain;
     const owners = await devicesFor(admin, organizationId, rows, options.now ?? new Date());
-    // One phone gets one notice per event and work, even when it is registered for two roles.
+    // Past the caller's deadline nothing is sent; the rows return to the queue with backoff.
+    if (options.deadline !== undefined && Date.now() > options.deadline) {
+      await finish(rows.map(row => ({ id: row.id, lease_id: row.leaseId, outcome: "failed" as const })));
+      drain.failed = rows.length;
+      return drain;
+    }
+    // One phone gets one notice per event and work, even when it is registered for two roles;
+    // the newest row wins (a later new term replaces an earlier one).
     const seen = new Set<string>();
-    const notices: (PushNotice & { rowId: string })[] = rows.flatMap(row => (owners.get((row.memberId ?? row.profileId)!) ?? [])
+    const notices: (PushNotice & { rowId: string })[] = [...rows].reverse().flatMap(row => (owners.get((row.memberId ?? row.profileId)!) ?? [])
       .filter(device => device.preferences[row.type]).flatMap(device => {
         const key = `${device.token}:${row.event}:${"id" in row.target ? row.target.id : ""}`;
         if (seen.has(key)) return [];
         seen.add(key);
         return [{ rowId: row.id, device, title: row.title, body: row.body, data: row.target }];
       }));
+    sending = notices.length > 0;
     const delivered = notices.length ? await deliverPushNotices(admin as never, notices, options.transport) : [];
     const results = outboxOutcomes(rows, notices, delivered);
     for (const result of results) drain[result.outcome === "sent" ? "sent" : result.outcome === "no_device" ? "noDevice" : "failed"] += 1;
-    // A result that is never recorded leaves the lease to expire, and the row is then given up (at most once).
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const finished = await admin.rpc("motorist_push_outbox_finish", { p_organization_id: organizationId, p_results: results }).abortSignal(AbortSignal.timeout(READ_MS));
-      if (!finished.error) break;
-      if (attempt === 1) console.warn(JSON.stringify({ event: "mobile.push.outbox.finish", error: finished.error.code ?? "unknown", rows: results.length }));
-    }
+    await finish(results);
   } catch (error) {
-    // Unfinished rows keep their lease and return to the queue when it expires.
+    // Nothing reached Expo yet: the rows certainly were not sent and go back to the queue.
+    // Otherwise their lease expires and they are given up rather than risk a second notice.
+    if (!sending && rows.length) await finish(rows.map(row => ({ id: row.id, lease_id: row.leaseId, outcome: "failed" as const }))).catch(() => undefined);
     console.warn(JSON.stringify({ event: "mobile.push.outbox", error: error instanceof Error ? error.message : "failed", claimed: drain.claimed }));
   }
   return drain;

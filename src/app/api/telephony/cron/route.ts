@@ -150,8 +150,10 @@ async function runPauseEndingWarningMaterialisation(organizationId: string): Pro
 
 /** The overdue-callback push starts only this early in a run (120 s limit). */
 const MOBILE_PUSH_LATEST_START_MS = 75_000;
-/** Work notices (escalation ≤ 8 s, outbox drain ≤ ~35 s) start no later than this, so the run still ends before 120 s with the heartbeat. */
+/** Work notices start no later than 70 s; nothing is sent after 85 s (claimed rows go back to the
+ * queue), so escalation 8 s + claim/devices + one Expo batch end well before the 120 s limit. */
 const MOBILE_WORK_PUSH_LATEST_START_MS = 70_000;
+const MOBILE_WORK_PUSH_SEND_DEADLINE_MS = 85_000;
 
 /** Overdue callbacks to the dispatchers' phones (off unless MOBILE_PUSH_ENABLED; each
  * callback deadline is announced once, so a repeated tick sends nothing) and the
@@ -178,7 +180,9 @@ async function runMobilePushMaterialisation(organizationId: string, cronStartedA
     try {
       const { drainPushOutbox } = await import("@/server/mobile/push-outbox");
       const escalated = await admin.rpc("motorist_branch_escalate" as never, { p_organization_id: organizationId } as never).abortSignal(AbortSignal.timeout(8_000));
-      work = { escalated: escalated.error ? `error:${escalated.error.code ?? "unknown"}` : escalated.data, ...await drainPushOutbox(admin as never, organizationId, { limit: 50 }) };
+      const drained = await drainPushOutbox(admin as never, organizationId, { limit: 50, deadline: cronStartedAt + MOBILE_WORK_PUSH_SEND_DEADLINE_MS });
+      const failures = await admin.rpc("motorist_push_outbox_failures_recent" as never, { p_organization_id: organizationId } as never).abortSignal(AbortSignal.timeout(4_000));
+      work = { escalated: escalated.error ? `error:${escalated.error.code ?? "unknown"}` : escalated.data, ...drained, enqueueFailures24h: failures.error ? null : failures.data };
     } catch (error) { work = { error: error instanceof Error ? error.message.slice(0, 200) : "failed" }; }
   }
   if (upkeepError) throw upkeepError;

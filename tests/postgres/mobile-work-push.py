@@ -126,7 +126,8 @@ with tempfile.TemporaryDirectory(prefix='pm-push-pg-') as temp:
         check('damage report reaches the lead who assigned the work', [(x['member'], x['event']) for x in outbox(f"subject_id='{op}' and event='work_problem'")] == [(L1, 'work_problem')])
         cmd(MANAGER, 'group_member', {'groupId': ga, 'memberId': L1, 'role': 'member'})
         run(f"insert into motorist_operation_evidence(operation_id,stage,author_user_id,observed_at,source,note,missing_reason,damage_status) values('{op}','damage','{L2}',now(),'observed','Druhé','Bez fotky','open')")
-        check('a lead who lost the seat gets no damage report', len(outbox(f"subject_id='{op}' and event='work_problem'")) == 1 and all(x['memberId'] != L1 or x['event'] != 'work_problem' for x in claim()))
+        probs = outbox(f"subject_id='{op}' and event='work_problem'")
+        check('a lead who lost the seat gets no new damage report; the current leads do', len(probs) == 2 and probs[1]['member'] == L2 and all(x['memberId'] != L1 or x['event'] != 'work_problem' for x in claim()))
         cmd(MANAGER, 'group_member', {'groupId': ga, 'memberId': L1, 'role': 'lead', 'receivesNew': True})
         cmd(L1, 'operate', {'command': {'action': 'cancel', 'expectedRevision': rv(), 'payload': {'reason': 'Klient zrušil'}}}, request=r1['id'], rev=req_rev(r1['id']))
         check('cancellation notifies the executor', (L2, 'work_cancelled') in [(x['member'], x['event']) for x in outbox(f"subject_id='{op}'")])
@@ -144,7 +145,7 @@ with tempfile.TemporaryDirectory(prefix='pm-push-pg-') as temp:
         first_settings = j(settings_sql)
         check('settings replay returns the same receipt', j(settings_sql) == first_settings)
         check('fresh work does not escalate', int(value(f"select public.motorist_branch_escalate('{ORG}')")) == 0)
-        run(f"alter table motorist_work_requests disable trigger motorist_work_request_queued_at;update motorist_work_requests set queued_at=now()-interval '20 minutes' where id='{r2['id']}';alter table motorist_work_requests enable trigger motorist_work_request_queued_at")
+        run(f"alter table motorist_work_requests disable trigger motorist_work_request_queued_at;alter table motorist_work_requests disable trigger motorist_push_branch;update motorist_work_requests set queued_at=now()-interval '20 minutes' where id='{r2['id']}';alter table motorist_work_requests enable trigger motorist_work_request_queued_at;alter table motorist_work_requests enable trigger motorist_push_branch")
         n = int(value(f"select public.motorist_branch_escalate('{ORG}')"))
         esc = outbox(f"subject_id='{r2['id']}' and event='branch_waiting'")
         check('waiting work reminds the branch lead and central leaders once', n == 2 and sorted((x['member'] or x['profile']) for x in esc) == sorted([LB, value(f"select id from motorist_profiles where user_id='{MANAGER}'")])
@@ -173,6 +174,22 @@ with tempfile.TemporaryDirectory(prefix='pm-push-pg-') as temp:
             got = [x for x in claim() if x['target']['id'] == r4['id']]
             finish([{'id': x['id'], 'lease_id': x['leaseId'], 'outcome': 'failed'} for x in got])
         check('five failed attempts end as failed', [x['status'] for x in outbox(f"subject_id='{r4['id']}'")] == ['failed'])
+        # Legacy app delivery: the handoff adapter's own notice is the only one.
+        run(f"update motorist_towing_memberships set active=true where id='{T}'")
+        hid = uid(990)
+        run(f"insert into motorist_case_handoffs(id,organization_id,case_id,recipient_name,recipient_phone,published,token_hash,expires_at) values('{hid}','{ORG}','{uid(40)}','Pristavovač','+421900000009','{{\"pickup\":{{\"address\":\"X\"}}}}'::jsonb,repeat('a',64),now()+interval '1 day')")
+        legacy_op = value(f"select operation_id from motorist_case_handoffs where id='{hid}'")
+        run(f"update motorist_case_handoffs set recipient_member_id='{P}' where id='{hid}'")
+        check('legacy app delivery to a pristavovač creates no second notice', outbox(f"subject_id='{legacy_op}'") == [])
+        # A malformed planned time in a tow order never blocks the driver assignment.
+        r5 = cmd(CENTRAL, 'create', {'groupId': ga, 'kind': 'tow', 'pickup': 'D2'}, rev=0)['request']
+        cmd(LT, 'claim', request=r5['id'], rev=req_rev(r5['id']))
+        t5 = cmd(LT, 'materialize', {}, request=r5['id'], rev=req_rev(r5['id']))['request']['execution']
+        run(f"update motorist_towing_orders set fields=fields||'{{\"contact\":\"Fixture\",\"plannedAt\":\"zajtra ráno\"}}'::jsonb where id='{t5['ownerId']}'")
+        trev5 = int(value(f"select revision from motorist_towing_orders where id='{t5['ownerId']}'"))
+        j("select public.motorist_towing_command('%s','%s',%s,'%s'::jsonb)" % (LT, ORG, lt_version, json.dumps({'commandId': uid(971), 'targetId': t5['ownerId'], 'type': 'assign', 'expectedRevision': trev5, 'payload': {'driverId': T}})))
+        check('malformed planned time does not block assignment', value(f"select driver_id from motorist_towing_orders where id='{t5['ownerId']}'") == T
+              and [x['event'] for x in outbox(f"subject_id='{t5['ownerId']}'")] == ['tow_assigned'])
         for role in ['anon', 'authenticated']:
             check(f'{role} cannot claim or read the outbox', denied(f"set role {role};select public.motorist_push_outbox_claim('{ORG}',1)") and denied(f"set role {role};select * from motorist_push_outbox"))
         print(json.dumps({'passed': len(checks), 'checks': checks}, ensure_ascii=False, indent=1))
