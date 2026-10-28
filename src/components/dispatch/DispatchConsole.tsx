@@ -919,7 +919,7 @@ function DispatchConsoleContent({
     { group: "operations", icon: CalendarDays, label: "Dochádzka", shortLabel: "Doch.", view: "attendance" },
     { group: "operations", icon: Truck, label: "Flotila", shortLabel: "Flotila", view: "fleet" },
     { group: "operations", icon: MapPinned, label: "Výjazdy a odvozy", shortLabel: "Výjazdy", view: "operations" },
-    { group: "operations", icon: ClipboardCheck, label: "Partneri a konzultácie", shortLabel: "Partneri", view: "partners" },
+    { group: "operations", icon: ClipboardCheck, label: "Partneri", shortLabel: "Partneri", view: "partners" },
     { group: "management", icon: BarChart3, label: "Reporty", shortLabel: "Reporty", view: "reports" },
     { group: "management", icon: Settings2, label: "Nastavenia", shortLabel: "Nastav.", view: "settings" },
   ];
