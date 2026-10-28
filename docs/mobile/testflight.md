@@ -4,6 +4,18 @@ Cieľ: TEST aplikácia v iPhone cez interný TestFlight, bez App Review. Je to T
 variant (TEST server, TEST databáza, telefonovanie zapnuté v aplikácii, OTA vypnuté).
 Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 
+**Build 0.1.0 (26), 28. 10. 2026 — poloha na pozadí a UX opravy:** zdroj `dev`
+`8855341a20724cffbb5f5f7971ce19117b39fc55`. Poloha na pozadí aj pre Moju prácu,
+obnova nahrávania odťahu, 18 UX opráv, text povolenia polohy „Vždy“. IPA
+21 348 541 bajtov, SHA-256 `054376c5587f48a4ef139a07887450e0f47dc0c8e7e7a92c0dd60059fe8a4aec`,
+kontrola IPA prešla. Simulátor iOS 27: návrat z pozadia a dva reštarty prešli;
+studený štart pri záťaži Macu (~300) zachytil iba plochu, preto bol zopakovaný
+samostatne po poklese záťaže (prihlásenie viditeľné na dvoch snímkach s odstupom
+15 s, proces beží) a pôvodný záznam ostal ako neúspešný. Kontrolná vzorka buildu 21
+použitá znova: od nej sa zmenili iba texty povolení, komentáre, riadok pre Android
+a profily EAS iba pre Android. Apple: `VALID`, beta review `APPROVED`,
+**Externí testeri TEST** `IN_BETA_TESTING`. Fyzický iPhone neoverený.
+
 **Build 0.1.0 (25), 28. 10. 2026 — Moja práca a Pobočka:** zdroj `dev`
 `df2fa8d638f82fac2984b3c2c20a9251e643f016` (overený na kanonickom TESTe).
 Nové moduly Moja práca (vlastné jazdy, odvozy, presuny a odťahy s krokmi,
