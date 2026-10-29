@@ -90,9 +90,13 @@ Overovacia editácia bola odstránená bez potvrdenia zmien.
 
 Interný návrh ešte nie je sprístupnený testerom. Pred inštaláciou cez Play
 treba dokončiť interný testovací zoznam/opt-in a príslušné nastavenia konzoly.
-Pripravuje sa aj offline skúška štartu skutočného Play APK v softvérovom
-emulátore; samotný build a upload nepreukazujú fyzické doručenie push,
-živú mapu, prihlásenie ani úplnú akceptáciu na zariadení.
+Skutočné Play APK bolo nainštalované do softvérového Android 35 AOSP
+emulátora a jeho hash sa zhodoval s overeným artefaktom. Ochrana pridaná
+Google Play však bez Google Play služieb v emulátore zobrazila požiadavku
+na Google Play; nejde o potvrdenie úspešného štartu aplikácie.
+Samotný build a upload nepreukazujú fyzické doručenie push, živú mapu,
+prihlásenie ani úplnú akceptáciu na zariadení s Google Play.
+Aktuálne doplňujúce skúšky a stav konfigurácie sú v [PR #528](https://github.com/Alfopure/pomoc-motoristom-new/pull/528).
 
 ## Čo je pripravené v kóde
 
