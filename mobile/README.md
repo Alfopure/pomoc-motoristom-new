@@ -7,6 +7,7 @@ Z webu importuje TypeScript typy a čisté spoločné definície stavov a filtro
 prípadov; serverové služby sa do mobilného balíka nezahŕňajú.
 
 Čo chýba na nasadenie a čo vyžaduje Apple: [pripravenosť na nasadenie](../docs/mobile/release-readiness.md).
+Android TEST a Google Play majú vlastný [postup prípravy a vydania](../docs/mobile/android-play.md).
 
 ## Rozsah tejto verzie
 
@@ -202,7 +203,9 @@ API `/api/mobile/v1/*` musí byť nasadené na kanonickom TEST.
 | production | `sk.linkapomoci.dispecing` | `https://dispecing.linkapomoci.sk` | `ifpaeegaesdmljfkdvcn` |
 
 TEST bundle ID je od 22. 10. 2026 registrované u Apple (MICT s. r. o., tím
-`792TJPXTL3`); produkčné bundle ID ani Google Play zatiaľ nie. Variant bez konfigurácie používa development. Produkcia
+`792TJPXTL3`); Android TEST package je od 29. 10. registrovaný aj v Google Play
+a má interný návrh 0.1.0 (7). Produkčné mobilné vydanie nie je pripravené.
+Variant bez konfigurácie používa development. Produkcia
 vyžaduje výslovne production variant aj kompletnú production konfiguráciu.
 URL, projekt a prostredie musia zodpovedať tabuľke; nemajú fallback ani prepínač.
 Mobil posiela `X-PM-App-Environment` a overuje prostredie, verziu aj profil
