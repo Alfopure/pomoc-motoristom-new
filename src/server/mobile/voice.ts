@@ -13,17 +13,18 @@ import { MutationError } from "@/server/mutation-error";
 import { getOperatorDevice } from "@/server/telephony/operator-devices";
 import { createTelephonyDeps, toCallActor, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { readMeta, telnyxSipUri, type LegRow, type SessionRow } from "@/server/telephony/state/types";
-import { nativeVoiceTestEnabled } from "@/lib/app-environment";
+import { isProductionLiveDeployment, nativeVoiceEnabled } from "@/lib/app-environment";
 
 export class NativeLeaseError extends MutationError { readonly code = "native_lease_stale"; }
 class NativeDisabledError extends MutationError { readonly code = "native_voice_disabled"; }
 class NativeOfferPendingError extends MutationError { readonly code = "native_offer_pending"; }
 
-/** Native pilot is separate from the released M1 and the browser/PWA phone.
- * Only the dedicated TEST can opt in; a Preview or production cannot do so. */
+/** Native calling is separate from the released M1 and the browser/PWA phone.
+ * Only the dedicated TEST or the production deployment can opt in, each with its
+ * own flags; a Preview cannot. Cleanup stays possible there after opting out. */
 export async function nativeVoiceDeps(actor: MotoristActor, options: { cleanup?: boolean } = {}): Promise<TelephonyRuntimeDeps> {
-  if (resolveAppEnvironment() !== "test" || !canOperateTelephony()
-    || (!options.cleanup && !nativeVoiceTestEnabled())) {
+  if (!(resolveAppEnvironment() === "test" ? canOperateTelephony() : isProductionLiveDeployment())
+    || (!options.cleanup && !nativeVoiceEnabled())) {
     throw new NativeDisabledError("Mobilné telefonovanie ešte nie je aktivované.", 503);
   }
   return createTelephonyDeps({ organizationId: actor.organizationId, deviceKind: "mobile" });

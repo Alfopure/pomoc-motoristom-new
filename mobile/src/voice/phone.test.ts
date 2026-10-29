@@ -668,6 +668,7 @@ describe("native phone lifecycle", () => {
     resolve({ sessionId: sid, callControlId: "exact-leg", direction: "inbound", role: "callee", displayName: null, number: null }); await tick();
     expect(f.native.disconnect).toHaveBeenCalled(); expect(f.native.authorize).not.toHaveBeenCalled();
     expect(f.phone.state.registration).toBe("error");
+    expect(f.phone.state.error).toBe("Telefonovanie v aplikácii ešte nie je aktivované.");
   });
   it("allows dialing after reconnecting from a fatal outbound authorization error", async () => {
     const f = await connected(); vi.mocked(f.api.start).mockRejectedValueOnce(new MobileApiError("expired auth", 401));

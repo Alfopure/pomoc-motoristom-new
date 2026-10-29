@@ -43,9 +43,11 @@
       "android": { "buildType": "app-bundle", "image": "sdk-57" }
     },
     "production": {
+      "node": "24.14.1",
       "environment": "production",
       "autoIncrement": true,
-      "env": { "APP_VARIANT": "production", "EXPO_PUBLIC_APP_ENV": "production" }
+      "env": { "APP_VARIANT": "production", "EXPO_PUBLIC_APP_ENV": "production" },
+      "ios": { "image": "sdk-57", "env": { "EXPO_PUBLIC_VOICE_PROOF": "1" } }
     }
   },
   "submit": {

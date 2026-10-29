@@ -673,7 +673,7 @@ export class DispatchPhone {
   private fail(error: unknown, preserveOutgoingRequest = false) {
     if (this.stopped) return;
     const message = error instanceof MobileApiError ? error.code === "native_voice_disabled"
-      ? "Telefonovanie v tejto TEST aplikácii ešte nie je aktivované." : error.message : "Telefonovanie sa nepodarilo pripraviť.";
+      ? "Telefonovanie v aplikácii ešte nie je aktivované." : error.message : "Telefonovanie sa nepodarilo pripraviť.";
     this.update({ error: message });
     if (error instanceof MobileApiError && ([401, 403, 502].includes(error.status) || ["native_lease_stale", "native_voice_disabled"].includes(error.code ?? ""))) {
       this.connectionRequested = false;

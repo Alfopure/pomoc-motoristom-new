@@ -74,6 +74,16 @@ describe("the iOS app as App Store Connect receives it", () => {
     sceneLifecycle(ios.infoPlist);
   }, 30_000);
 
+  it("production build with calls: the same calling, location and push configuration on the production bundle", async () => {
+    const ios = await resolvedIos("production", true);
+    expect(ios.bundleIdentifier).toBe("sk.linkapomoci.dispecing");
+    expect([...ios.infoPlist?.UIBackgroundModes ?? []].sort()).toEqual(["audio", "location", "voip"]);
+    expect(ios.entitlements).toEqual({ "aps-environment": "production" });
+    expect(ios.infoPlist).toMatchObject({ CFBundleDisplayName: "Dispatching", ITSAppUsesNonExemptEncryption: false, LinkaNativeVoiceEnabled: true });
+    purposeTexts(ios.infoPlist);
+    sceneLifecycle(ios.infoPlist);
+  }, 30_000);
+
   it.each(["test", "production"] as const)("%s build without calls keeps only the delivery location in the background", async variant => {
     const ios = await resolvedIos(variant, false);
     expect(ios.infoPlist?.UIBackgroundModes).toEqual(["location"]);

@@ -1,4 +1,4 @@
-import { nativePushTestEnabled } from "@/lib/app-environment";
+import { nativePushEnabled, nativePushTestEnabled } from "@/lib/app-environment";
 
 /**
  * Freshness of an operator's browser phone registration.
@@ -42,17 +42,21 @@ export const NATIVE_PUSH_LEASE_MS = 7 * 24 * 60 * 60 * 1000;
  * the router to dial the mobile SIP identity while iOS has suspended JS.
  * A cold launch renews the provider JWT using the user's secured Auth session. */
 export function nativePushLease(device: NativeMobileDevice, now: Date, registered: boolean) {
-  if (!registered || !nativePushTestEnabled() || !device.device_session_id || !device.telnyx_credential_id) return null;
+  if (!registered || !nativePushEnabled() || !device.device_session_id || !device.telnyx_credential_id) return null;
   const credentialExpiry = device.credential_expires_at ? Date.parse(device.credential_expires_at) : Infinity;
   const until = Math.min(now.getTime() + NATIVE_PUSH_LEASE_MS, credentialExpiry);
   if (!(until > now.getTime())) return null;
   return { v: 1, platform: "ios", deviceSessionId: device.device_session_id, until: new Date(until).toISOString() };
 }
 
+/** `environment` is the device row's telephony environment: `development` on
+ * the dedicated TEST, `production` on production (see `telephonyEnvironment`). */
 export function nativeMobilePushReachable(device: NativeMobileDevice | null | undefined, now: Date): boolean {
-  if (!device || !nativePushTestEnabled() || device.environment !== "development"
-    || !device.device_session_id || !device.telnyx_credential_id || !device.sip_username
+  if (!device || !device.device_session_id || !device.telnyx_credential_id || !device.sip_username
     || device.registration_state !== "registered") return false;
+  // Row fields first; the opt-ins (flags before identity) decide the one reachable environment.
+  const expected = nativePushTestEnabled() ? "development" : nativePushEnabled() ? "production" : null;
+  if (!expected || device.environment !== expected) return false;
   const metadata = device.metadata;
   const value = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>).native_voip : null;
   const lease = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;

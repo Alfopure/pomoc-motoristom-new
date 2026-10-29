@@ -29,13 +29,35 @@ describe("pinned iOS voice SDK reconnect lifecycle hook", () => {
     { variant: "test", voice: true, go: false },
     { variant: "test", voice: false, go: true },
     { variant: "test", voice: false, go: false },
+    { variant: "production", voice: true, go: false },
     { variant: "production", voice: false, go: false },
-  ])("requires the native guard only for the explicit TEST voice build ($variant/$voice/$go)", async ({ variant, voice, go }) => {
+  ])("requires the native guard only for an explicit TEST or production voice build ($variant/$voice/$go)", async ({ variant, voice, go }) => {
     vi.stubEnv("APP_VARIANT", variant); vi.stubEnv("EXPO_PUBLIC_APP_ENV", variant);
     vi.stubEnv("EXPO_PUBLIC_VOICE_PROOF", voice ? "1" : "0"); vi.stubEnv("MOBILE_EXPO_GO_PREVIEW", go ? "1" : "0");
     const config = (await import("../app.config")).default;
     expect(config.plugins?.includes("./plugins/with-telnyx-reconnect-guard.cjs")).toBe(voice);
     expect(config.ios?.infoPlist?.LinkaNativeVoiceEnabled).toBe(voice ? true : undefined);
+  });
+
+  it.each([
+    { variant: "development", environment: "test", voice: true, go: false, error: /TEST or production variant/ },
+    { variant: "production", environment: "production", voice: false, go: true, error: /require the TEST variant/ },
+    { variant: "production", environment: "production", voice: true, go: true, error: /require the TEST variant/ },
+    { variant: "test", environment: "test", voice: true, go: true, error: /cannot run in Expo Go/ },
+  ])("refuses native voice outside TEST/production builds and any Expo Go voice ($variant/$voice/$go)", async ({ variant, environment, voice, go, error }) => {
+    vi.stubEnv("APP_VARIANT", variant); vi.stubEnv("EXPO_PUBLIC_APP_ENV", environment);
+    vi.stubEnv("EXPO_PUBLIC_VOICE_PROOF", voice ? "1" : "0"); vi.stubEnv("MOBILE_EXPO_GO_PREVIEW", go ? "1" : "0");
+    await expect(import("../app.config")).rejects.toThrow(error);
+  });
+
+  it("enables native voice only in the iOS side of the production EAS profile, pinned like the verified voice builds", () => {
+    type Profile = { node?: string; env?: Record<string, string>; ios?: { image?: string; env?: Record<string, string> }; android?: { env?: Record<string, string> } };
+    const eas = require("../eas.json") as { build: Record<string, Profile> };
+    const production = eas.build.production;
+    expect(production.env).not.toHaveProperty("EXPO_PUBLIC_VOICE_PROOF");
+    expect(production.android?.env).toBeUndefined();
+    expect(production.ios).toEqual({ image: eas.build["voice-test"].ios?.image, env: { EXPO_PUBLIC_VOICE_PROOF: "1" } });
+    expect(production.node).toBe(eas.build.test.node);
   });
 
   it("injects one post-install guard without replacing React Native's hook", () => {

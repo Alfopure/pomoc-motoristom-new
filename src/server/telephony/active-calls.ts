@@ -1,7 +1,7 @@
 import { loadCallContactNames } from "./contact-names";
 import { normalizeDialNumberForComparison } from "@/lib/telephony/phone";
 import { readPauseReturn } from "@/lib/telephony/presence-policy";
-import { nativeVoiceTestEnabled } from "@/lib/app-environment";
+import { nativeVoiceEnabled } from "@/lib/app-environment";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { telephonyStabilityEnabled } from "./stability";
 import { UNOWNED_READ_MS } from "./ownership";
@@ -366,7 +366,7 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
 }
 
 async function readNativeDevices(deps: ActiveCallsDeps, read: ReturnType<typeof createTransientReadRetry>): Promise<DeviceRow[]> {
-  if (!nativeVoiceTestEnabled()) return [];
+  if (!nativeVoiceEnabled()) return [];
   const result = await read(signal => deps.admin.from("motorist_operator_mobile_devices").select("*")
     .eq("organization_id", deps.organizationId).eq("environment", deps.environment).abortSignal(signal));
   if (result.error) throw new Error(`mobile devices load failed: ${result.error.message}`);
@@ -513,7 +513,7 @@ export function buildPresenceSnapshot(input: {
   }]));
   // The web colleague-call button must use the same reachability as dialing.
   // Keep browser freshness unchanged and merge the opted-in native endpoint.
-  if (nativeVoiceTestEnabled()) for (const device of input.mobileDevices ?? []) {
+  if (nativeVoiceEnabled()) for (const device of input.mobileDevices ?? []) {
     if (!device.sip_username || !device.telnyx_credential_id ||
       !(deviceIsLive(device, input.now) || nativeMobilePushReachable(device, input.now))) continue;
     const browser = devices.get(device.profile_id);

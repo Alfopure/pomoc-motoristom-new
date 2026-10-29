@@ -14,7 +14,7 @@ private struct PhoneError: LocalizedError {
 final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   static let shared = LinkaPhone()
   static var enabled: Bool {
-    Bundle.main.bundleIdentifier == "sk.linkapomoci.dispecing.test"
+    ["sk.linkapomoci.dispecing", "sk.linkapomoci.dispecing.test"].contains(Bundle.main.bundleIdentifier ?? "")
       && Bundle.main.object(forInfoDictionaryKey: "LinkaNativeVoiceEnabled") as? Bool == true
   }
   private var listener: (([String: Any]) -> Void)?

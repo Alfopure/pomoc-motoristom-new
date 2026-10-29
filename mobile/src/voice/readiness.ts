@@ -48,7 +48,7 @@ export function phoneReadiness({ state, configuration, configurationError = fals
   } else if (!configured) {
     title = "Nastavenie volania nie je overené"; tone = "warning"; message = "Obnovte stav. Existujúci hovor sa tým nepreruší.";
   } else if (!configuration?.nativeCallingEnabled) {
-    title = "Telefonovanie zatiaľ nie je aktivované"; tone = "warning"; message = "Mobilné hovory v tejto TEST aplikácii ešte čakajú na aktiváciu.";
+    title = "Telefonovanie zatiaľ nie je aktivované"; tone = "warning"; message = "Hovory v aplikácii ešte nie sú aktivované.";
   } else if (state.microphonePermission === "denied") {
     title = "Povoľte mikrofón"; tone = "warning"; message = "V nastaveniach iPhone povoľte tejto aplikácii mikrofón a potom obnovte stav.";
   } else if (state.takeoverRequired) {

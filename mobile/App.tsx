@@ -21,6 +21,7 @@ import { DispatchShell } from "./src/shell/dispatch-shell";
 import { appVersion, olderThan } from "./src/lib/app-version";
 import { fetchAppStatus } from "./src/lib/app-status";
 import { createErrorReporter, installGlobalErrorReporting, keepError } from "./src/lib/error-reporting";
+import { flushKeptWithProbeFailure } from "./src/voice/probe";
 import { AppErrorBoundary, ErrorReporterContext } from "./src/ui/error-boundary";
 import { UpdateRequired } from "./src/ui/update-required";
 import { createPushApi } from "./src/notifications/api";
@@ -125,9 +126,10 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
   // Errors are reported only for a signed-in operator; reporting never interrupts work.
   const reporter = useMemo(() => createErrorReporter(config, async () => (await client.auth.getSession()).data.session?.access_token ?? null), [config, client]);
   useEffect(() => installGlobalErrorReporting(reporter), [reporter]);
-  // A crash kept on the device goes out once its own user is signed in again.
+  // A crash kept on the device goes out once its own user is signed in again; so does a
+  // production calling build's failed boot proof (that build runs without calling).
   const sessionUser = session?.user.id ?? null;
-  useEffect(() => { reporter.setUser(sessionUser); if (sessionUser) void reporter.flushKept(); }, [sessionUser, reporter]);
+  useEffect(() => { reporter.setUser(sessionUser); if (sessionUser) void flushKeptWithProbeFailure(reporter); }, [sessionUser, reporter]);
   // The release gate is decided once, before the workspace and its phone start; an answer
   // after 2.5 s waits for the next launch, so the gate never closes a running call.
   const [version] = useState(appVersion);
