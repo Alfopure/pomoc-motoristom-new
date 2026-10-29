@@ -71,7 +71,7 @@ export function isTestLiveDeployment(env: AppEnvironmentVariables = process.env)
 export function isProductionLiveDeployment(env: AppEnvironmentVariables = process.env): boolean {
   try {
     assertAppEnvironment(env);
-    if (resolveAppEnvironment(env) !== "production" || env.VERCEL_ENV !== "production" || env.VERCEL_GIT_COMMIT_REF !== "main" ||
+    if (env.MOTORIST_APP_ENV?.trim() !== "production" || env.VERCEL_ENV !== "production" || env.VERCEL_GIT_COMMIT_REF !== "main" ||
       env.VERCEL_PROJECT_ID !== PRODUCTION_VERCEL_PROJECT_ID || env.APP_BASE_URL !== PRODUCTION_APP_ORIGIN) return false;
     return [env.SUPABASE_URL, env.NEXT_PUBLIC_SUPABASE_URL]
       .some(value => value === `https://${PRODUCTION_SUPABASE_REF}.supabase.co`);

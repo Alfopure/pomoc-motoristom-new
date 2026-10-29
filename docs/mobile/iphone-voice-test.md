@@ -238,7 +238,7 @@ sa nemenila.
   zamknutí; platí iba spolu s prvým). Účinkujú len v presnom produkčnom
   nasadení: projekt `prj_DN3smSO1EbGowAmw3nHLQUYoSVJG`, `VERCEL_ENV=production`,
   vetva `main`, `APP_BASE_URL=https://dispecing.linkapomoci.sk`, Supabase
-  `ifpaeegaesdmljfkdvcn` a aplikačné prostredie production. TEST prepínače
+  `ifpaeegaesdmljfkdvcn` a výslovne nastavené `MOTORIST_APP_ENV=production`. TEST prepínače
   produkciu nezapnú, produkčné nezapnú TEST a Preview nezapne nič. Ako v TEST,
   ukončenie hovoru a odpojenie telefónu ostanú v produkcii dostupné aj po
   vypnutí prepínača. Bez prepínačov server hlási `nativeCallingEnabled: false`

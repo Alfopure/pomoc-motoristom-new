@@ -70,7 +70,7 @@ const productionMismatches = [
   { VERCEL_GIT_COMMIT_REF: "dev" }, { VERCEL_GIT_COMMIT_REF: "feature/voice" }, { VERCEL_GIT_COMMIT_REF: undefined },
   { APP_BASE_URL: "https://test.dispecing.linkapomoci.sk" }, { APP_BASE_URL: "https://dispecing-test.vercel.app" },
   { APP_BASE_URL: "https://dispecing.linkapomoci.sk/" }, { APP_BASE_URL: undefined },
-  { MOTORIST_APP_ENV: "test" }, { MOTORIST_APP_ENV: "development" }, { MOTORIST_APP_ENV: "invalid" },
+  { MOTORIST_APP_ENV: undefined }, { MOTORIST_APP_ENV: "" }, { MOTORIST_APP_ENV: "test" }, { MOTORIST_APP_ENV: "development" }, { MOTORIST_APP_ENV: "invalid" },
   { SUPABASE_URL: undefined }, { SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co" },
   { NEXT_PUBLIC_SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co" }, { SUPABASE_PROJECT_REF: "sjcsrygkkmersoczpunh" },
 ];
@@ -81,6 +81,14 @@ describe("production live deployment and native calling opt-ins", () => {
     expect(isProductionLiveDeployment(stableTest)).toBe(false);
     expect(isProductionLiveDeployment({})).toBe(false);
     expect(canOperateTelephony(production)).toBe(true);
+    expect(isProductionLiveDeployment({ ...production, MOTORIST_APP_ENV: " production " })).toBe(true);
+  });
+  it("requires an explicit production application environment, not the Vercel fallback", () => {
+    const implicit = { ...production, MOTORIST_APP_ENV: undefined };
+    expect(resolveAppEnvironment(implicit)).toBe("production");
+    expect(isProductionLiveDeployment(implicit)).toBe(false);
+    expect(nativeVoiceEnabled({ ...implicit, ...productionFlags })).toBe(false);
+    expect(nativePushEnabled({ ...implicit, ...productionFlags })).toBe(false);
   });
   it.each(productionMismatches)("rejects production with a mismatched binding %j", override => {
     expect(isProductionLiveDeployment({ ...production, ...override })).toBe(false);
