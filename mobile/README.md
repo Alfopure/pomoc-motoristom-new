@@ -204,7 +204,8 @@ API `/api/mobile/v1/*` musí byť nasadené na kanonickom TEST.
 
 TEST bundle ID je od 22. 10. 2026 registrované u Apple (MICT s. r. o., tím
 `792TJPXTL3`); Android TEST package je od 29. 10. registrovaný aj v Google Play
-a má interný návrh 0.1.0 (7). Produkčné mobilné vydanie nie je pripravené.
+a má sprístupnené interné TEST vydanie 0.1.0 (7) pre vybraných testerov.
+Produkčné mobilné vydanie nie je pripravené.
 Variant bez konfigurácie používa development. Produkcia
 vyžaduje výslovne production variant aj kompletnú production konfiguráciu.
 URL, projekt a prostredie musia zodpovedať tabuľke; nemajú fallback ani prepínač.

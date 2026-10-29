@@ -19,16 +19,17 @@ do existujúceho Expo projektu a priradený výhradne k
 Credentials potvrdilo priradenie. Kľúč nie je v Gite.
 Po pozvaní účtu majiteľom bolo overené vytvorenie dočasnej editácie,
 čítanie detailov (`defaultLanguage: sk`) a všetkých štyroch kanálov vrátane
-`internal` (HTTP 200). Kanály zatiaľ nemajú vydania. Dočasná editácia bola
-odstránená (HTTP 204); nebola potvrdená ani publikovaná žiadna verzia.
+`internal` (HTTP 200). Pri tomto prvotnom overení boli kanály prázdne. Dočasná
+editácia bola odstránená (HTTP 204) bez publikovania; neskoršie úspešné
+nahratie interného návrhu verzie 7 je uvedené nižšie.
 Podrobný záznam bez tajomstiev je v ignorovanom
 `.context/android-play/access-check.json`.
 
 Prístup do existujúceho Expo projektu `@linkapomoci/linka-pomoci-dispecing`
 je funkčný. Zdroj `07429b8` prešiel 28. 10. `npm run typecheck` a
-`npm run export:android`. Posledný dokončený Android build v EAS je staršie
+`npm run export:android`. Pred touto prípravou bolo v EAS dostupné staršie
 TEST APK **0.1.0 (6)** zo zdroja `133dce63348b245ae9b5e97a72496b384ce5d13f`
-(12. 10.); nepotvrdzuje aktuálny natívny build ani funkčnosť na telefóne.
+(12. 10.); nový overený AAB 0.1.0 (7) je uvedený nižšie.
 FCM V1 kľúč je od 29. 10. priradený v EAS výhradne k TEST Android aplikácii;
 následné čítanie EAS Credentials potvrdilo priradenie. Ten istý servisný účet
 má pre Google projekt overené `cloudmessaging.messages.create`.
@@ -88,14 +89,36 @@ stav **draft** a SHA-256 zhodný s lokálne overeným AAB:
 `45545ba7986ba138598d8270a3fbc0d93c1f56cfead50fbe5b9f92c4586a1f0f`.
 Overovacia editácia bola odstránená bez potvrdenia zmien.
 
-Interný návrh ešte nie je sprístupnený testerom. Pred inštaláciou cez Play
-treba dokončiť interný testovací zoznam/opt-in a príslušné nastavenia konzoly.
+Po nahratí návrhu bol cez existujúcu prihlásenú Play Console vytvorený
+a priradený samostatný tímový zoznam. Google prijal **12 účtov**; štyri
+ďalšie pracovné aliasy odmietol ako neexistujúce Google účty. Zoznam
+neobsahuje AI ani technické skúšobné účty. Adresy zostávajú mimo Gitu.
+Kráľovej Google e-mail majiteľ ešte neposkytol.
+
+Majiteľom požadované interné TEST vydanie bolo následne sprístupnené.
+Čerstvé Google Play API čítanie potvrdilo verziu 7 so stavom **completed**
+v kanáli `internal`; `production`, `beta` a `alpha` zostali prázdne.
+Konzola potvrdila aktívny kanál, dostupnosť pre interných testerov a uložený
+zoznam 12 účtov. [Pripojenie k internému testu](https://play.google.com/apps/internaltest/4701680730012522487)
+vyžaduje prihlásenie jedným z prijatých Google účtov. Kým aplikácia
+neprejde nastavením a kontrolou obchodu, Play zobrazuje dočasný názov
+`sk.linkapomoci.dispecing.test (unreviewed)`.
+
+Jednotlivé e-mailové zoznamy nemožno spravovať cez verejné
+[Play Testers API](https://developers.google.com/android-publisher/api-ref/rest/v3/edits.testers),
+ktoré podporuje iba Google Groups. Ďalšie úpravy zoznamu sa robia v konzole;
+pre túto úlohu nebola potrebná nová skupina ani ďalšie oprávnenia.
+
 Skutočné Play APK bolo nainštalované do softvérového Android 35 AOSP
 emulátora a jeho hash sa zhodoval s overeným artefaktom. Ochrana pridaná
 Google Play však bez Google Play služieb v emulátore zobrazila požiadavku
 na Google Play; nejde o potvrdenie úspešného štartu aplikácie.
-Samotný build a upload nepreukazujú fyzické doručenie push, živú mapu,
-prihlásenie ani úplnú akceptáciu na zariadení s Google Play.
+Z toho istého overeného EAS AAB bol cez `bundletool` vytvorený samostatný
+offline testovací APK s lokálnym testovacím podpisom. V emulátore úspešne
+zobrazil prihlasovaciu obrazovku po studenom štarte aj návrate z pozadia;
+nebol zaznamenaný pád procesu aplikácie. Tento APK sa nenahráva do Play.
+Offline skúška nepotvrdzuje štart Play verzie nainštalovanej cez Google Play,
+úspešné prihlásenie, fyzické doručenie push ani živú mapu na zariadení.
 Aktuálne doplňujúce skúšky a stav konfigurácie sú v [PR #528](https://github.com/Alfopure/pomoc-motoristom-new/pull/528).
 
 ## Čo je pripravené v kóde
