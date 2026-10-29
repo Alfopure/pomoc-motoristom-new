@@ -10,6 +10,7 @@ const configuredProjectId = process.env.EAS_PROJECT_ID?.trim();
 if (configuredProjectId && configuredProjectId !== projectId) throw new Error("EAS_PROJECT_ID must match the dispatch Expo project");
 const expoGoPreview = process.env.MOBILE_EXPO_GO_PREVIEW === "1";
 const voiceProof = process.env.EXPO_PUBLIC_VOICE_PROOF === "1";
+const androidGoogleMapsApiKey = process.env.GOOGLE_MAPS_ANDROID_API_KEY?.trim();
 if ((expoGoPreview || voiceProof) && variant !== "test") throw new Error("Mobile previews require the TEST variant");
 if (expoGoPreview && voiceProof) throw new Error("Native voice proof cannot run in Expo Go");
 
@@ -59,6 +60,7 @@ const config: ExpoConfig = {
   plugins: [["expo-build-properties", { ios: { enableSceneSupport: true } }],
     ["expo-secure-store", { faceIDPermission: "Aplikácia Face ID nepoužíva a o prístup k nemu nežiada." }], "./plugins/with-no-background-fetch.cjs", ["expo-splash-screen", { image: "./assets/splash-icon.png", imageWidth: 180, resizeMode: "contain", backgroundColor: "#F2F2F7" }],
     ["expo-notifications", { defaultChannel: "default" }],
+    ...(androidGoogleMapsApiKey ? [["react-native-maps", { androidGoogleMapsApiKey }] as [string, { androidGoogleMapsApiKey: string }]] : []),
     "./plugins/with-draft-secure-store.cjs", ...(voiceProof ? ["./plugins/with-telnyx-reconnect-guard.cjs"] : []), ["expo-image-picker", {
     photosPermission: "Aplikácia potrebuje prístup k vybranej fotografii na priloženie k prípadu alebo ako doklad k jazde, odvozu či odťahu.",
     cameraPermission: "Aplikácia potrebuje fotoaparát na odfotografovanie prílohy prípadu a dokladov k jazde, odvozu či odťahu (vozidlo, poškodenie, papierový doklad).",
