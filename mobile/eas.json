@@ -39,6 +39,7 @@
     },
     "play-internal": {
       "extends": "test",
+      "distribution": "store",
       "android": { "buildType": "app-bundle", "image": "sdk-57" }
     },
     "production": {
@@ -50,7 +51,6 @@
   "submit": {
     "play-internal": {
       "android": {
-        "serviceAccountKeyPath": "$GOOGLE_PLAY_SERVICE_ACCOUNT_KEY_PATH",
         "track": "internal",
         "releaseStatus": "draft"
       }
