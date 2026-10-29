@@ -52,7 +52,7 @@ import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from ".
 import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, sessionOwnership } from "./ownership";
 import { humansOnly } from "@/server/profile-kind";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
-import { nativeVoiceTestEnabled } from "@/lib/app-environment";
+import { nativeVoiceEnabled } from "@/lib/app-environment";
 
 export { CallActionError } from "./service-errors";
 
@@ -480,7 +480,7 @@ async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): 
       ? deps.admin.from("motorist_operator_telephony_settings").select("delivery_mode").eq("organization_id", deps.organizationId).eq("profile_id", profileId).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
     getOperatorDevice({ ...deviceDeps(deps), deviceKind: "web" }, { organizationId: deps.organizationId, profileId }),
-    nativeVoiceTestEnabled()
+    nativeVoiceEnabled()
       ? getOperatorDevice({ ...deviceDeps(deps), deviceKind: "mobile" }, { organizationId: deps.organizationId, profileId })
       : Promise.resolve(null),
   ]);

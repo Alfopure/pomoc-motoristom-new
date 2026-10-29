@@ -1,9 +1,8 @@
 import type { MobileVoiceReadiness } from "@/lib/mobile-api";
 import {
   canOperateTelephony,
-  isTestLiveDeployment,
-  nativePushTestEnabled,
-  nativeVoiceTestEnabled,
+  nativePushEnabled,
+  nativeVoiceEnabled,
   type AppEnvironmentVariables,
 } from "@/lib/app-environment";
 
@@ -11,9 +10,10 @@ import {
 export function getNativeVoiceReadiness(
   env: AppEnvironmentVariables = process.env,
 ): Pick<MobileVoiceReadiness, "nativeCallingEnabled" | "backgroundIncomingEnabled"> {
-  const nativeCallingEnabled = isTestLiveDeployment(env) && canOperateTelephony(env) && nativeVoiceTestEnabled(env);
+  // Each flag already requires the exact dedicated TEST or production deployment.
+  const nativeCallingEnabled = canOperateTelephony(env) && nativeVoiceEnabled(env);
   return {
     nativeCallingEnabled,
-    backgroundIncomingEnabled: nativeCallingEnabled && nativePushTestEnabled(env),
+    backgroundIncomingEnabled: nativeCallingEnabled && nativePushEnabled(env),
   };
 }

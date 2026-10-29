@@ -5,6 +5,8 @@ export const PRODUCTION_SUPABASE_REF = "ifpaeegaesdmljfkdvcn";
 export const TEST_SUPABASE_REF = "nzpnqdstvkfncflgqlny";
 export const TEST_VERCEL_PROJECT_ID = "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk";
 export const TEST_APP_ORIGIN = "https://test.dispecing.linkapomoci.sk";
+export const PRODUCTION_VERCEL_PROJECT_ID = "prj_DN3smSO1EbGowAmw3nHLQUYoSVJG";
+export const PRODUCTION_APP_ORIGIN = "https://dispecing.linkapomoci.sk";
 
 export function resolveAppEnvironment(env: AppEnvironmentVariables = process.env): AppEnvironment {
   const explicit = env.MOTORIST_APP_ENV?.trim();
@@ -65,6 +67,17 @@ export function isTestLiveDeployment(env: AppEnvironmentVariables = process.env)
   } catch { return false; }
 }
 
+/** Only the production project's main production target, bound to the production database. */
+export function isProductionLiveDeployment(env: AppEnvironmentVariables = process.env): boolean {
+  try {
+    assertAppEnvironment(env);
+    if (resolveAppEnvironment(env) !== "production" || env.VERCEL_ENV !== "production" || env.VERCEL_GIT_COMMIT_REF !== "main" ||
+      env.VERCEL_PROJECT_ID !== PRODUCTION_VERCEL_PROJECT_ID || env.APP_BASE_URL !== PRODUCTION_APP_ORIGIN) return false;
+    return [env.SUPABASE_URL, env.NEXT_PUBLIC_SUPABASE_URL]
+      .some(value => value === `https://${PRODUCTION_SUPABASE_REF}.supabase.co`);
+  } catch { return false; }
+}
+
 /** Preview branches must not claim or sweep devices shared with the stable TEST application. */
 export function canOperateTelephony(env: AppEnvironmentVariables = process.env): boolean {
   try {
@@ -93,4 +106,12 @@ export function nativeVoiceTestEnabled(env: AppEnvironmentVariables = process.en
 }
 export function nativePushTestEnabled(env: AppEnvironmentVariables = process.env): boolean {
   return nativeVoiceTestEnabled(env) && env.MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED === "true";
+}
+/** The dedicated TEST as above, or production with its own flags; a TEST flag never enables production. */
+export function nativeVoiceEnabled(env: AppEnvironmentVariables = process.env): boolean {
+  return nativeVoiceTestEnabled(env) || (isProductionLiveDeployment(env) && env.MOTORIST_NATIVE_VOICE_ENABLED === "true");
+}
+export function nativePushEnabled(env: AppEnvironmentVariables = process.env): boolean {
+  return nativePushTestEnabled(env)
+    || (nativeVoiceEnabled(env) && isProductionLiveDeployment(env) && env.MOTORIST_NATIVE_VOIP_PUSH_ENABLED === "true");
 }

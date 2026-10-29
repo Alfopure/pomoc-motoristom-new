@@ -81,6 +81,12 @@ s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť apli
 - **Poznámka pre kontrolu:** „Interná aplikácia pre dispečerov asistenčnej
   služby Linka pomoci. Prístup len pre zamestnancov, distribúcia ako unlisted.
   Účet pre kontrolu: … Telefonovanie vyžaduje pripojenie k ústredni v module Hovory.“
+- **Telefonovanie v produkčnom builde (2.5.4):** od 29. 10. 2026 má build
+  z profilu `production` natívne telefonovanie (CallKit, PushKit, background
+  režimy `audio` a `voip`); na serveri je vypnuté
+  ([stav](iphone-voice-test.md#produkčné-telefonovanie-pripravené-vypnuté)).
+  Taký build odoslať na kontrolu až vtedy, keď si kontrolór môže hovor
+  vyskúšať, inak hrozí zamietnutie pre nevyužitý `voip` režim.
 - **Notifikácie v produkčnom builde:** Push Notifications na App ID a APNs kľúč
   (.p8) nahratý do Expo (`eas credentials`); plugin `expo-notifications` je
   v `app.config.ts`. Ak má projekt Expo zapnuté zabezpečené posielanie, server

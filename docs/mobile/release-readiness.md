@@ -58,8 +58,9 @@ vizuálnym overením štartu. Apple potvrdil dostupnosť v TestFlighte
 4. Pripraviť presný produkčný release diff. Porovnať potrebné DB objekty
    čítaním katalógu; starý počet PR a zoznam názvov migrácií z 19. 10. nie je
    aktuálny plán SQL. Produkčný projekt a presný SQL musia byť schválené.
-5. Produkčný hlas je stále samostatne vypnutý. Pripraviť presné produkčné
-   APNs/Telnyx zdroje a kódový rozsah až v schválenom vydaní.
+5. Produkčný hlas je od 29. 10. 2026 pripravený v kóde a vypnutý vlastnými
+   prepínačmi ([postup](iphone-voice-test.md#produkčné-telefonovanie-pripravené-vypnuté)).
+   Presné produkčné APNs/Telnyx zdroje pripraviť až v schválenom vydaní.
 6. Dokončiť produkčnú binárku, účet pre kontrolu Apple, metadata, snímky,
    review a nezaradenú distribúciu podľa [podkladov App Store](app-store.md).
 
@@ -140,8 +141,10 @@ podklady pre App Store v `docs/mobile/app-store.md`)
     spustená prichádzajúcim hovorom na pozadí ju uplatní až pri ďalšom štarte.
   - Chyba v samotnom ráme aplikácie (mimo obrazoviek a hovoru) stále odpojí
     telefón; obrazovky, moduly a obrazovka hovoru majú vlastné hranice.
-  - Telefonovanie z produkčnej aplikácie je vypnuté (natívny hlas funguje len
-    pod TEST identifikátorom aplikácie); zapnutie je samostatné rozhodnutie.
+  - Telefonovanie z produkčnej aplikácie je vypnuté: produkčný build a server
+    sú od 29. 10. 2026 pripravené, prepínače `MOTORIST_NATIVE_VOICE_ENABLED`
+    a `MOTORIST_NATIVE_VOIP_PUSH_ENABLED` ostávajú vypnuté; zapnutie je
+    samostatné rozhodnutie.
 
 **F6 – Pristavovač v aplikácii** (na TEST od 22. 10. 2026: PR #482 a #484, migrácie aplikované)
 - Požiadavka majiteľa z 22. 10. 2026: dispečer odovzdá prípad pristavovačovi

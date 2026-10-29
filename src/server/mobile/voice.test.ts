@@ -4,7 +4,7 @@ import type { TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { authorizeNativeOffer, nativeVoiceDeps, requireNativeLease, requireNativeSession } from "./voice";
 import { disconnectDevice, touchDevice } from "@/server/telephony/operator-devices";
 import { TelnyxCommandError } from "@/server/telephony/telnyx/client";
-import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
+import { nativeMobilePushReachable, nativePushLease } from "@/lib/telephony/device-liveness";
 import { callColleague, createRateLimiter, hangupCall } from "@/server/telephony/call-actions";
 import { toEligibilityDevices } from "@/server/telephony/routing/ring-plan";
 import { loadActiveCalls, readActiveCallRows } from "@/server/telephony/active-calls";
@@ -40,6 +40,48 @@ describe("native voice boundaries", () => {
     vi.stubEnv("MOTORIST_NATIVE_VOICE_TEST_ENABLED", "false"); mocks.deps.mockResolvedValue({});
     await nativeVoiceDeps(actor, { cleanup: true }); expect(mocks.deps).toHaveBeenCalledWith({ organizationId: ORG, deviceKind: "mobile" });
     vi.stubEnv("VERCEL_ENV", "preview"); await expect(nativeVoiceDeps(actor, { cleanup: true })).rejects.toMatchObject({ status: 503 });
+  });
+  describe("on the production deployment", () => {
+    function production(flags: Record<string, string> = {}) {
+      vi.unstubAllEnvs();
+      for (const [key, value] of Object.entries({ MOTORIST_APP_ENV: "production", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "main",
+        VERCEL_PROJECT_ID: "prj_DN3smSO1EbGowAmw3nHLQUYoSVJG", APP_BASE_URL: "https://dispecing.linkapomoci.sk",
+        SUPABASE_URL: "https://ifpaeegaesdmljfkdvcn.supabase.co", ...flags })) vi.stubEnv(key, value);
+    }
+    it("creates native dependencies only with the production opt-in, never with the TEST one", async () => {
+      mocks.deps.mockResolvedValue({});
+      production(); await expect(nativeVoiceDeps(actor)).rejects.toMatchObject({ status: 503 });
+      production({ MOTORIST_NATIVE_VOICE_TEST_ENABLED: "true" }); await expect(nativeVoiceDeps(actor)).rejects.toMatchObject({ status: 503 });
+      expect(mocks.deps).not.toHaveBeenCalled();
+      production({ MOTORIST_NATIVE_VOICE_ENABLED: "true" }); await nativeVoiceDeps(actor);
+      expect(mocks.deps).toHaveBeenCalledWith({ organizationId: ORG, deviceKind: "mobile" });
+    });
+    it.each<Record<string, string>>([{ VERCEL_ENV: "preview" }, { VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk" }, { VERCEL_GIT_COMMIT_REF: "dev" },
+      { APP_BASE_URL: "https://dispecing-test.vercel.app" }])("refuses creation and cleanup on a mismatched production binding %j", async change => {
+      production({ MOTORIST_NATIVE_VOICE_ENABLED: "true", ...change });
+      await expect(nativeVoiceDeps(actor)).rejects.toMatchObject({ status: 503 });
+      await expect(nativeVoiceDeps(actor, { cleanup: true })).rejects.toMatchObject({ status: 503 });
+      expect(mocks.deps).not.toHaveBeenCalled();
+    });
+    it("retains cleanup after the production opt-in is removed", async () => {
+      production(); mocks.deps.mockResolvedValue({});
+      await nativeVoiceDeps(actor, { cleanup: true }); expect(mocks.deps).toHaveBeenCalledWith({ organizationId: ORG, deviceKind: "mobile" });
+    });
+    it("leases and reaches only a production device row, only with both production flags", () => {
+      const now = new Date("2026-10-29T10:00:00.000Z");
+      const device = { environment: "production", device_session_id: lease, telnyx_credential_id: "credential", registration_state: "registered",
+        sip_username: "native-production", credential_expires_at: null, metadata: {} };
+      production({ MOTORIST_NATIVE_VOICE_ENABLED: "true", MOTORIST_NATIVE_VOIP_PUSH_ENABLED: "true" });
+      const reachable = { ...device, metadata: { native_voip: nativePushLease(device, now, true) } };
+      expect(reachable.metadata.native_voip).toMatchObject({ v: 1, platform: "ios", deviceSessionId: lease });
+      expect(nativeMobilePushReachable(reachable, now)).toBe(true);
+      expect(nativeMobilePushReachable({ ...reachable, environment: "development" }, now)).toBe(false);
+      production({ MOTORIST_NATIVE_VOICE_ENABLED: "true", MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED: "true" });
+      expect(nativePushLease(device, now, true)).toBeNull(); expect(nativeMobilePushReachable(reachable, now)).toBe(false);
+      vi.unstubAllEnvs(); environment();
+      expect(nativeMobilePushReachable(reachable, now)).toBe(false);
+      expect(nativeMobilePushReachable({ ...reachable, environment: "development" }, now)).toBe(true);
+    });
   });
   it("authorizes only the current operator's exact mobile SIP leg", async () => {
     const { deps, h, offer } = fixture();

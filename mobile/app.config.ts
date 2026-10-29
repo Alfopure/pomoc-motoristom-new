@@ -9,10 +9,13 @@ const projectId = "c7363382-9b12-4e12-9f62-31ec7b8c5623";
 const configuredProjectId = process.env.EAS_PROJECT_ID?.trim();
 if (configuredProjectId && configuredProjectId !== projectId) throw new Error("EAS_PROJECT_ID must match the dispatch Expo project");
 const expoGoPreview = process.env.MOBILE_EXPO_GO_PREVIEW === "1";
-const voiceProof = process.env.EXPO_PUBLIC_VOICE_PROOF === "1";
+// The native calling switch (CallKit, PushKit, boot-time binding proof in index.ts) for the
+// TEST and production iPhone builds; the variable's name predates production calling.
+const nativeVoice = process.env.EXPO_PUBLIC_VOICE_PROOF === "1";
 const androidGoogleMapsApiKey = process.env.GOOGLE_MAPS_ANDROID_API_KEY?.trim();
-if ((expoGoPreview || voiceProof) && variant !== "test") throw new Error("Mobile previews require the TEST variant");
-if (expoGoPreview && voiceProof) throw new Error("Native voice proof cannot run in Expo Go");
+if (expoGoPreview && variant !== "test") throw new Error("Mobile previews require the TEST variant");
+if (nativeVoice && variant === "development") throw new Error("Native voice requires the TEST or production variant");
+if (expoGoPreview && nativeVoice) throw new Error("Native voice proof cannot run in Expo Go");
 
 // Data the app sends to the dispatch service, all for running dispatch work and
 // linked to the signed-in operator; nothing is used for tracking or advertising.
@@ -46,9 +49,9 @@ const config: ExpoConfig = {
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,
       NSMicrophoneUsageDescription: microphoneUse,
-      ...(voiceProof ? { LinkaNativeVoiceEnabled: true, UIBackgroundModes: ["audio", "voip"] } : {}),
+      ...(nativeVoice ? { LinkaNativeVoiceEnabled: true, UIBackgroundModes: ["audio", "voip"] } : {}),
     },
-    ...(voiceProof ? { entitlements: { "aps-environment": "production" } } : {}),
+    ...(nativeVoice ? { entitlements: { "aps-environment": "production" } } : {}),
   },
   // Firebase config for Android push (FCM) comes from an EAS file variable; absent locally and in CI.
   android: { package: "sk.linkapomoci.dispecing" + suffix, ...(process.env.GOOGLE_SERVICES_JSON ? { googleServicesFile: process.env.GOOGLE_SERVICES_JSON } : {}), blockedPermissions: ["android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
@@ -61,7 +64,7 @@ const config: ExpoConfig = {
     ["expo-secure-store", { faceIDPermission: "Aplikácia Face ID nepoužíva a o prístup k nemu nežiada." }], "./plugins/with-no-background-fetch.cjs", ["expo-splash-screen", { image: "./assets/splash-icon.png", imageWidth: 180, resizeMode: "contain", backgroundColor: "#F2F2F7" }],
     ["expo-notifications", { defaultChannel: "default" }],
     ...(androidGoogleMapsApiKey ? [["react-native-maps", { androidGoogleMapsApiKey }] as [string, { androidGoogleMapsApiKey: string }]] : []),
-    "./plugins/with-draft-secure-store.cjs", ...(voiceProof ? ["./plugins/with-telnyx-reconnect-guard.cjs"] : []), ["expo-image-picker", {
+    "./plugins/with-draft-secure-store.cjs", ...(nativeVoice ? ["./plugins/with-telnyx-reconnect-guard.cjs"] : []), ["expo-image-picker", {
     photosPermission: "Aplikácia potrebuje prístup k vybranej fotografii na priloženie k prípadu alebo ako doklad k jazde, odvozu či odťahu.",
     cameraPermission: "Aplikácia potrebuje fotoaparát na odfotografovanie prílohy prípadu a dokladov k jazde, odvozu či odťahu (vozidlo, poškodenie, papierový doklad).",
     microphonePermission: microphoneUse,

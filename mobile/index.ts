@@ -7,8 +7,9 @@ import { probeNativeVoiceBindings } from "./src/voice/probe";
 // location of a running delivery or operation.
 defineLocationTasks();
 
-// The proof profile deliberately fails at boot if native SDK imports are
-// incompatible. The normal app and Expo Go never execute this probe.
+// Every native calling build (TEST and production iPhone) deliberately fails at boot
+// if native SDK imports are incompatible or the calling gate is closed. Builds
+// without calling and Expo Go never execute this probe.
 if (process.env.EXPO_PUBLIC_VOICE_PROOF === "1") {
   probeNativeVoiceBindings();
   console.info("Linka pomoci: native voice import proof passed");

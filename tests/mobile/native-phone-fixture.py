@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Emit the actual LinkaPhone body against controlled SDK/framework adapters.
-Only imports and the explicit TEST bundle gate in the class are adapted. A
+Only imports and the explicit bundle gate in the class are adapted. A
 test invocation adapter selects its actual three/four-argument API. This tests app
 lifecycle logic, not Telnyx signaling, CallKit, APNs, audio or native linkage.
 Execute the emitted file with Swift 5 language mode on a Foundation toolchain.
@@ -19,13 +19,17 @@ for signature in ['func answerWhenAuthorized(', '  func onCallStateUpdated(callS
     if source.count(signature) != 1:
         raise SystemExit('Required unique source method missing: ' + signature)
 source = re.sub(r'^import (AVFoundation|CallKit|PushKit|TelnyxRTC|UIKit)\n', '', source, flags=re.M)
-gate = '''  static var enabled: Bool {
+# Baseline sources gate on the TEST bundle only; current ones on the TEST and production bundles.
+gates = ['''  static var enabled: Bool {
     Bundle.main.bundleIdentifier == "sk.linkapomoci.dispecing.test"
       && Bundle.main.object(forInfoDictionaryKey: "LinkaNativeVoiceEnabled") as? Bool == true
-  }'''
-if source.count(gate) != 1:
-    raise SystemExit('Explicit test bundle gate changed; review adapter')
-source = source.replace(gate, '  static var enabled: Bool { true }')
+  }''', '''  static var enabled: Bool {
+    ["sk.linkapomoci.dispecing", "sk.linkapomoci.dispecing.test"].contains(Bundle.main.bundleIdentifier ?? "")
+      && Bundle.main.object(forInfoDictionaryKey: "LinkaNativeVoiceEnabled") as? Bool == true
+  }''']
+if sum(source.count(gate) for gate in gates) != 1:
+    raise SystemExit('Explicit bundle gate changed; review adapter')
+source = next(source.replace(gate, '  static var enabled: Bool { true }') for gate in gates if gate in source)
 old_signature = 'func expectOutgoing(controlId: String, sessionId: String, number: String) throws'
 new_signature = 'func expectOutgoing(controlId: String, sessionId: String, number: String, genericHandle: Bool = false) throws'
 if source.count(old_signature) + source.count(new_signature) != 1:

@@ -1,5 +1,5 @@
 import "server-only";
-import { nativeVoiceTestEnabled } from "@/lib/app-environment";
+import { nativeVoiceEnabled } from "@/lib/app-environment";
 import { isUuid } from "@/lib/telephony/uuid";
 import type { MobileVoiceHoldInput, MobileVoiceMedia } from "@/lib/mobile-api";
 import type { MotoristActor } from "@/server/api-auth";
@@ -98,7 +98,7 @@ async function mediaFor(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessio
     const rawControl = meta.accepted_device_legs?.[actor.profileId] ?? meta.answered_leg_call_control_id;
     const control = typeof rawControl === "string" && rawControl ? rawControl : null;
     const unavailable: NativeMedia = { version: session.version, state: "unavailable", canHold: false, callControlId: null };
-    if (!control || !nativeVoiceTestEnabled() || session.writer_contract !== 2 ||
+    if (!control || !nativeVoiceEnabled() || session.writer_contract !== 2 ||
         session.ended_at || session.termination_requested_at || !["talking", "held"].includes(session.state))
         return unavailable;
     if (session.direction === "internal") return directInternalMedia(deps, actor, session, lease, unavailable);

@@ -301,11 +301,14 @@ sa ukladá Supabase Auth session a revokovateľné UUID relácie zariadenia;
 nie SIP heslo či Telnyx account key. SDK logovanie aj odosielanie call reports
 sú vypnuté. Pôvodný React Native SDK proof a jeho self-signed transport sa
 odstránili; iPhone používa natívny SDK. Natívny modul je zapnutý len pre TEST
-bundle ID a explicitný voice profil. Produkčný variant ho nemôže aktivovať.
+alebo produkčné bundle ID a explicitný voice prepínač `EXPO_PUBLIC_VOICE_PROOF=1`
+(TEST voice profily; od 29. 10. 2026 aj iOS časť profilu `production`).
 
 Server vyžaduje presnú identitu dedikovaného TEST deploymentu a
-`MOTORIST_NATIVE_VOICE_TEST_ENABLED=true`; Preview ani produkcia mobilný
-pilot nespustia. APNs routing má ďalší samostatný prepínač
+`MOTORIST_NATIVE_VOICE_TEST_ENABLED=true`; Preview ho nespustí. Produkcia má
+vlastné, zatiaľ vypnuté prepínače `MOTORIST_NATIVE_VOICE_ENABLED` a
+`MOTORIST_NATIVE_VOIP_PUSH_ENABLED` ([postup](../docs/mobile/iphone-voice-test.md#produkčné-telefonovanie-pripravené-vypnuté)).
+APNs routing má ďalší samostatný prepínač
 `MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED=true`. Oba sú od 22. 10. 2026 zapnuté
 iba v dedikovanom TEST projekte pre TestFlight pilot (podpis a Telnyx push
 credential sú nastavené, fyzické overenie ostáva). JWT auth platí aj pri vypnutej

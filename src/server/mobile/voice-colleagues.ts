@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { nativeVoiceTestEnabled, resolveAppEnvironment } from "@/lib/app-environment";
+import { nativeVoiceEnabled, resolveAppEnvironment } from "@/lib/app-environment";
 import type { MobileVoiceColleague, MobileVoiceColleagues } from "@/lib/mobile-api";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/database.types";
@@ -66,7 +66,7 @@ export async function getMobileVoiceColleagues(
   const [presence, web, mobile, settings] = await Promise.all([
     admin.from("motorist_operator_presence").select("*").eq("organization_id", actor.organizationId).in("profile_id", ids),
     admin.from("motorist_operator_devices").select("*").eq("organization_id", actor.organizationId).eq("environment", environment).in("profile_id", ids),
-    nativeVoiceTestEnabled()
+    nativeVoiceEnabled()
       ? admin.from("motorist_operator_mobile_devices").select("*").eq("organization_id", actor.organizationId).eq("environment", environment).in("profile_id", ids)
       : Promise.resolve({ data: [], error: null }),
     telephonyStabilityEnabled()
