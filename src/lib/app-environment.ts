@@ -100,18 +100,20 @@ export function canUseMapsIntegration(env: AppEnvironmentVariables = process.env
   } catch { return false; }
 }
 
-/** Separate opt-ins: compiling CallKit does not establish APNs readiness. */
+/** Separate opt-ins: compiling CallKit does not establish APNs readiness.
+ * The flags are read before the deployment identity, which is the costlier check. */
 export function nativeVoiceTestEnabled(env: AppEnvironmentVariables = process.env): boolean {
-  return isTestLiveDeployment(env) && env.MOTORIST_NATIVE_VOICE_TEST_ENABLED === "true";
+  return env.MOTORIST_NATIVE_VOICE_TEST_ENABLED === "true" && isTestLiveDeployment(env);
 }
 export function nativePushTestEnabled(env: AppEnvironmentVariables = process.env): boolean {
-  return nativeVoiceTestEnabled(env) && env.MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED === "true";
+  return env.MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED === "true" && nativeVoiceTestEnabled(env);
 }
 /** The dedicated TEST as above, or production with its own flags; a TEST flag never enables production. */
 export function nativeVoiceEnabled(env: AppEnvironmentVariables = process.env): boolean {
-  return nativeVoiceTestEnabled(env) || (isProductionLiveDeployment(env) && env.MOTORIST_NATIVE_VOICE_ENABLED === "true");
+  return nativeVoiceTestEnabled(env) || (env.MOTORIST_NATIVE_VOICE_ENABLED === "true" && isProductionLiveDeployment(env));
 }
+/** TEST and production identities exclude each other, so production push needs only its own two flags. */
 export function nativePushEnabled(env: AppEnvironmentVariables = process.env): boolean {
-  return nativePushTestEnabled(env)
-    || (nativeVoiceEnabled(env) && isProductionLiveDeployment(env) && env.MOTORIST_NATIVE_VOIP_PUSH_ENABLED === "true");
+  return nativePushTestEnabled(env) || (env.MOTORIST_NATIVE_VOIP_PUSH_ENABLED === "true"
+    && env.MOTORIST_NATIVE_VOICE_ENABLED === "true" && isProductionLiveDeployment(env));
 }

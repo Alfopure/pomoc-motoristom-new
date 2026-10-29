@@ -36,6 +36,10 @@ describe("operator phone readiness", () => {
   it.each([undefined, { ...configuration, nativeCallingEnabled: false, backgroundIncomingEnabled: false }])("does not promise calls with missing or disabled configuration", value => {
     expect(inspect({}, { configuration: value }).tone).not.toBe("success");
   });
+  it("says calling is not activated without naming an environment the production app could show", () => {
+    expect(inspect({}, { configuration: { ...configuration, nativeCallingEnabled: false, backgroundIncomingEnabled: false } }).message)
+      .toBe("Hovory v aplikácii ešte nie sú aktivované.");
+  });
   it("does not show a cached configuration as ready after its refresh failed", () => {
     expect(inspect({}, { configurationError: true }).tone).not.toBe("success");
   });

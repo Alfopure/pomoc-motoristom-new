@@ -50,10 +50,14 @@ describe("pinned iOS voice SDK reconnect lifecycle hook", () => {
     await expect(import("../app.config")).rejects.toThrow(error);
   });
 
-  it("enables native voice only in the iOS side of the production EAS profile", () => {
-    const eas = require("../eas.json") as { build: Record<string, { env?: Record<string, string>; ios?: { env?: Record<string, string> } }> };
-    expect(eas.build.production.env).not.toHaveProperty("EXPO_PUBLIC_VOICE_PROOF");
-    expect(eas.build.production.ios?.env).toEqual({ EXPO_PUBLIC_VOICE_PROOF: "1" });
+  it("enables native voice only in the iOS side of the production EAS profile, pinned like the verified voice builds", () => {
+    type Profile = { node?: string; env?: Record<string, string>; ios?: { image?: string; env?: Record<string, string> }; android?: { env?: Record<string, string> } };
+    const eas = require("../eas.json") as { build: Record<string, Profile> };
+    const production = eas.build.production;
+    expect(production.env).not.toHaveProperty("EXPO_PUBLIC_VOICE_PROOF");
+    expect(production.android?.env).toBeUndefined();
+    expect(production.ios).toEqual({ image: eas.build["voice-test"].ios?.image, env: { EXPO_PUBLIC_VOICE_PROOF: "1" } });
+    expect(production.node).toBe(eas.build.test.node);
   });
 
   it("injects one post-install guard without replacing React Native's hook", () => {

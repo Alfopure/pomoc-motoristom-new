@@ -241,13 +241,18 @@ sa nemenila.
   `ifpaeegaesdmljfkdvcn` a výslovne nastavené `MOTORIST_APP_ENV=production`. TEST prepínače
   produkciu nezapnú, produkčné nezapnú TEST a Preview nezapne nič. Ako v TEST,
   ukončenie hovoru a odpojenie telefónu ostanú v produkcii dostupné aj po
-  vypnutí prepínača. Bez prepínačov server hlási `nativeCallingEnabled: false`
+  vypnutí prepínača: tieto cleanup cesty prejdú bránou nasadenia aj bez
+  prepínačov, ale pôsobia iba cez vlastnú device lease volajúceho, nie na
+  iného používateľa. Bez prepínačov server hlási `nativeCallingEnabled: false`
   a aplikácia pripojenie telefónu neponúkne.
-- **Mobil.** EAS profil `production` nastavuje iba pre iOS
+- **Mobil.** EAS profil `production` (Node 24.14.1, iOS image `sdk-57` ako
+  overené voice buildy) nastavuje iba pre iOS
   `EXPO_PUBLIC_VOICE_PROOF=1` (historický názov prepínača natívneho hlasu).
   Build tým dostane `LinkaNativeVoiceEnabled`, background režimy `audio` a
   `voip` popri `location`, entitlement `aps-environment=production` a Telnyx
-  plugin; pri štarte overí natívny modul. Natívny modul povolí hlas iba
+  plugin. Pri štarte overí natívny modul: TEST build pri chybe skončí,
+  produkčný beží ďalej bez telefonovania a chybu nahlási po prihlásení
+  cez bežné hlásenie chýb. Natívny modul povolí hlas iba
   bundle `sk.linkapomoci.dispecing` a `sk.linkapomoci.dispecing.test`
   s príznakom v Info.plist. Android build prepínač nedostane; Expo Go ostáva
   iba TEST náhľad bez hlasu.
@@ -271,3 +276,8 @@ nastaviť `MOTORIST_NATIVE_VOICE_ENABLED=true`, nasadiť `main` nanovo (nie
 `vercel redeploy`) a overiť health/SHA a hovor v popredí; až po overení
 PushKit registrácie pridať `MOTORIST_NATIVE_VOIP_PUSH_ENABLED=true`. Rollback:
 vypnúť oba prepínače a nasadiť `main` nanovo.
+
+Produkčný iOS build má režim `voip` vždy, aj keď je telefonovanie na serveri
+vypnuté. Ak by malo ostať vypnuté dlhšie, vydať build bez
+`EXPO_PUBLIC_VOICE_PROOF` v iOS časti profilu `production`, aby nevznikol
+problém s Guideline 2.5.4.

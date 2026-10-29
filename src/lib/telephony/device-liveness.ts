@@ -1,4 +1,4 @@
-import { isProductionLiveDeployment, nativePushEnabled } from "@/lib/app-environment";
+import { nativePushEnabled, nativePushTestEnabled } from "@/lib/app-environment";
 
 /**
  * Freshness of an operator's browser phone registration.
@@ -52,9 +52,10 @@ export function nativePushLease(device: NativeMobileDevice, now: Date, registere
 /** `environment` is the device row's telephony environment: `development` on
  * the dedicated TEST, `production` on production (see `telephonyEnvironment`). */
 export function nativeMobilePushReachable(device: NativeMobileDevice | null | undefined, now: Date): boolean {
-  if (!device || !nativePushEnabled() || device.environment !== (isProductionLiveDeployment() ? "production" : "development")
-    || !device.device_session_id || !device.telnyx_credential_id || !device.sip_username
+  if (!device || !device.device_session_id || !device.telnyx_credential_id || !device.sip_username
     || device.registration_state !== "registered") return false;
+  // Row fields first; the opt-ins (flags before identity) decide the one reachable environment.
+  if (device.environment !== (nativePushTestEnabled() ? "development" : nativePushEnabled() ? "production" : null)) return false;
   const metadata = device.metadata;
   const value = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>).native_voip : null;
   const lease = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
