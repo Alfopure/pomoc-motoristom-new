@@ -1,4 +1,5 @@
 import { Platform } from "react-native";
+import type { ErrorReporter } from "../lib/error-reporting";
 import { nativePhone } from "./native";
 
 let unreported: Error | null = null;
@@ -23,4 +24,14 @@ export function takeNativeVoiceProbeFailure(): Error | null {
   const failure = unreported;
   unreported = null;
   return failure;
+}
+
+/** After sign-in: sends an earlier kept crash first, then keeps a production probe failure
+ * the same persistent way, so an offline sign-in does not lose it. */
+export async function flushKeptWithProbeFailure(reporter: Pick<ErrorReporter, "keep" | "flushKept">): Promise<void> {
+  await reporter.flushKept();
+  const failure = takeNativeVoiceProbeFailure();
+  if (!failure) return;
+  reporter.keep(failure);
+  await reporter.flushKept();
 }

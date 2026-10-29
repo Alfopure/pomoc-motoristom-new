@@ -82,6 +82,18 @@ describe("native voice boundaries", () => {
       expect(nativeMobilePushReachable(reachable, now)).toBe(false);
       expect(nativeMobilePushReachable({ ...reachable, environment: "development" }, now)).toBe(true);
     });
+    it("never reaches a row without a telephony environment, with push off or on", () => {
+      const now = new Date("2026-10-29T10:00:00.000Z");
+      const row = { environment: null as unknown as string, device_session_id: lease, telnyx_credential_id: "credential", registration_state: "registered",
+        sip_username: "native-production", credential_expires_at: null,
+        metadata: { native_voip: { v: 1, platform: "ios", deviceSessionId: lease, until: new Date(now.getTime() + 60_000).toISOString() } } };
+      production(); expect(nativeMobilePushReachable(row, now)).toBe(false);
+      production({ MOTORIST_NATIVE_VOICE_ENABLED: "true", MOTORIST_NATIVE_VOIP_PUSH_ENABLED: "true" });
+      expect(nativeMobilePushReachable(row, now)).toBe(false);
+      expect(nativeMobilePushReachable({ ...row, environment: "production" }, now)).toBe(true);
+      vi.unstubAllEnvs(); environment(); expect(nativeMobilePushReachable(row, now)).toBe(false);
+      vi.stubEnv("MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED", "false"); expect(nativeMobilePushReachable(row, now)).toBe(false);
+    });
   });
   it("authorizes only the current operator's exact mobile SIP leg", async () => {
     const { deps, h, offer } = fixture();
