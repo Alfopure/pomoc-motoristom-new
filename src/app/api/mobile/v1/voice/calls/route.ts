@@ -6,12 +6,17 @@ import { startOutboundCall } from "@/server/telephony/call-actions";
 import { readJsonBody, toCallActor } from "@/server/telephony/runtime";
 import { isUuid } from "@/lib/telephony/uuid";
 import { MutationError } from "@/server/mutation-error";
+import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
+/** Measured like the web call start, so the phone's setup time gets the same per-step log line. */
 export async function POST(request: Request) {
+  return withRequestMetrics("call.start", () => start(request), { operation: "call.outbound" });
+}
+async function start(request: Request) {
   try {
-    const actor = await requireMobileActor(request); const deps = await nativeVoiceDeps(actor);
+    const actor = await measureRequestStep("auth", () => requireMobileActor(request)); const deps = await nativeVoiceDeps(actor);
     const body = await readJsonBody<Record<string, unknown>>(request);
     await requireNativeLease(deps, actor, body.deviceSessionId);
     if (typeof body.requestId !== "string" || !isUuid(body.requestId)) throw new MutationError("Chýba identita pokusu o volanie.", 400);

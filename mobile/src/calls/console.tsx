@@ -12,7 +12,7 @@ import { Row } from "../design/list";
 import { PhoneReadinessCard } from "../voice/readiness-ui";
 import { ColleaguesCard } from "../voice/colleagues-ui";
 import type { DispatchPhone, PhoneState } from "../voice/phone";
-import { dialDecision } from "../callbacks/model";
+import { checkDialTarget } from "../callbacks/model";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Údaje sa nepodarilo načítať. Skúste znova.";
 
@@ -33,12 +33,12 @@ export function Console({ api, me, queryKey, active, number, onNumber, phone, ph
     if (!phone || checkingTarget) return;
     setCheckingTarget(true); setTargetError(null);
     try {
-      const decision = dialDecision(await api.callTarget(me.profileId, value));
+      // The check ends before dialing: the button reads "Vytáčam…" while the call is set up.
+      const decision = await checkDialTarget(() => api.callTarget(me.profileId, value), () => setCheckingTarget(false));
       if (decision.kind === "blocked") setTargetError({ number, message: decision.message });
       else if (decision.kind === "dial") await phone.dial(value);
       else Alert.alert(decision.title, decision.message, [{ text: "Zrušiť", style: "cancel" }, { text: "Zavolať", onPress: () => { void phone.dial(value, decision.verificationId); } }]);
     } catch (error) { setTargetError({ number, message: errorMessage(error) }); }
-    finally { setCheckingTarget(false); }
   }
   // The shell polls this key every 30 s for the status shown on every screen.
   const query = useQuery({ queryKey: [...queryKey, "console", me.profileId], queryFn: ({ signal }) => api.console(me.profileId, signal), enabled: active });

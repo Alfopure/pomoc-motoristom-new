@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MobileCallbackRequest } from "../../../src/lib/mobile-callbacks";
-import { callbackUrgency, deadlineText, dialDecision, filterCallbacks, formatWait } from "./model";
+import { callbackUrgency, checkDialTarget, deadlineText, dialDecision, filterCallbacks, formatWait } from "./model";
 
 const base = Date.parse("2026-10-18T09:00:00Z");
 function request(id: string, change: Partial<MobileCallbackRequest> = {}): MobileCallbackRequest {
@@ -51,6 +51,15 @@ describe("dial target decision", () => {
   it("blocks a no-callback number or an incomplete replacement", () => {
     expect(dialDecision({ ...target, status: "blocked", dialNumber: null, verificationId: null })).toMatchObject({ kind: "blocked", message: expect.stringContaining("nedá volať späť") });
     expect(dialDecision({ ...target, status: "verified_alternative", dialNumber: null, verificationId: "v1" }).kind).toBe("blocked");
+  });
+  it("ends the number check before the call is dialed, also when the check fails", async () => {
+    const steps: string[] = [];
+    const decision = await checkDialTarget(async () => { steps.push("read"); return { ...target, status: "original", dialNumber: "+421232408700", verificationId: null }; }, () => steps.push("checked"));
+    steps.push("dial " + (decision.kind === "dial" ? decision.number : decision.kind));
+    expect(steps).toEqual(["read", "checked", "dial +421232408700"]);
+    let checked = false;
+    await expect(checkDialTarget(() => Promise.reject(new Error("offline")), () => { checked = true; })).rejects.toThrow("offline");
+    expect(checked).toBe(true);
   });
 });
 
