@@ -115,6 +115,15 @@ Android TEST a Google Play majú vlastný [postup prípravy a vydania](../docs/m
   aj server, server zapíše iba riadok do záznamov behu. Pád aplikácie sa uloží
   v telefóne a odošle pri ďalšom spustení po prihlásení. Pády natívnej časti
   zbiera Apple (TestFlight a App Store Connect).
+- **Diagnostika hovorov iPhone:** natívny telefón a `DispatchPhone` zapisujú
+  udalosti (kódy dôvodov, príznaky, počty, názvy kľúčov, 8-znakové ID; nikdy
+  číslo, meno, token ani hodnotu pushu) do systémového logu so subsystémom
+  `sk.linkapomoci.voice` (`idevicesyslog | grep sk.linkapomoci.voice`, JS riadky
+  majú predponu `js.`) a do posledných 300 udalostí v súbore aplikácie. Prihlásený
+  operátor ich odošle po skončení hovoru, odmietnutom pushi a návrate do popredia
+  (najviac raz za 30 s, po 100) na `/api/mobile/v1/diagnostics/voice`; server ich
+  znova pretriedi a zapíše jeden riadok `mobile-voice-diag` do záznamov behu.
+  Zapnuté na TEST, na produkcii iba s `MOBILE_VOICE_DIAGNOSTICS_ENABLED=true`.
 - **Nástroje:** samostatný modul v Moduloch (vozidlo, trasa, mapa, flotila).
 - Rozpísané textové formuláre a pôvodné neisté príkazy sa na iPhone ukladajú
   do samostatného chráneného úložiska. Android potrebuje nový natívny build

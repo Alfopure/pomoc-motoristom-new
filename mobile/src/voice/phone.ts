@@ -1,5 +1,6 @@
 import { MobileApiError } from "../lib/api";
 import type { VoiceApi, VoiceCallTarget, VoiceHoldCommand, VoiceHoldResult, VoiceMedia, VoiceMediaState, VoiceOutgoing, VoiceRecording, VoiceStatus, VoiceToken } from "./api";
+import type { DiagnosticFields, VoiceDiagnosticEvent } from "./diagnostics";
 
 export type VoiceEvent = { type: string; callId?: string; callControlId?: string; providerLegId?: string; sessionId?: string; number?: string; state?: string; active?: boolean; muted?: boolean; outgoing?: boolean;
   actionId?: string; held?: boolean; expectedVersion?: number; phase?: "unclaimed" | "dispatched" | "uncertain"; actionLive?: boolean; systemHeld?: boolean; privacyHold?: boolean; media?: Pick<VoiceMedia, "state" | "version" | "canHold">;
@@ -10,7 +11,9 @@ export type NativeMediaSync = Pick<NativeHold, "callId" | "sessionId" | "callCon
 export type MicrophonePermission = "granted" | "denied" | "undetermined" | "unknown";
 export type PhoneSnapshot = { ready: boolean; audioActive: boolean; microphonePermission?: MicrophonePermission; pushRegistered?: boolean; preparedPushCallId?: string | null; pushRejection?: VoiceEvent | null; wasEnabled?: boolean; calls?: VoiceEvent[]; pending: VoiceEvent[]; pendingHolds?: NativeHold[]; pendingSyncs?: NativeMediaSync[] };
 export type NativePhone = {
-  snapshot(): Promise<PhoneSnapshot>; clearPushRejection(id: string): Promise<void>; requestMicrophone(): Promise<boolean>; connect(token: string): Promise<void>; disconnect(): Promise<void>;
+  snapshot(): Promise<PhoneSnapshot>; clearPushRejection(id: string): Promise<void>; requestMicrophone(): Promise<boolean>; connect(token: string): Promise<void>;
+  /** `reason` only names the caller in the device log. */
+  disconnect(reason?: string): Promise<void>;
   authorize(callId: string, sessionId: string, controlId: string): Promise<void>; reject(callId: string): Promise<void>;
   expectOutgoing(controlId: string, sessionId: string, number: string, genericHandle?: boolean): Promise<void>;
   answer(callId: string): Promise<void>; confirmConnected(callId: string): Promise<void>; end(): Promise<void>; mute(muted: boolean): Promise<void>; speaker(enabled: boolean): Promise<void>; dtmf(digits: string): Promise<void>;
@@ -18,6 +21,11 @@ export type NativePhone = {
   syncMedia(callId: string, sessionId: string, controlId: string, state: VoiceMediaState, version: number, canHold: boolean): Promise<void>;
   resolveHold(callId: string, sessionId: string, controlId: string, actionId: string, outcome: "confirmed" | "rejected" | "uncertain", state: VoiceMediaState, version: number, canHold: boolean): Promise<void>;
   subscribe(callback: (event: VoiceEvent) => void): () => void;
+  /** One iPhone device-log line (USB syslog); the bridge keeps only codes, flags, counts and short IDs. */
+  debug?(event: string, fields?: DiagnosticFields): void;
+  /** The persisted device-log ring, oldest first; absent from builds without it. */
+  diagnosticEvents?(): Promise<VoiceDiagnosticEvent[]>;
+  clearDiagnosticEvents?(upToId: number): Promise<void>;
 };
 export type PhoneLeaseStore = { load(): Promise<string | null>; save(id: string): Promise<void>; clear(): Promise<void> };
 export type PhoneDialTarget = VoiceCallTarget;
@@ -39,6 +47,13 @@ export type PhoneState = {
 };
 
 const holdRefused = "Podržanie sa nepodarilo.";
+/** Device-log values: an 8-character ID, and an error's status and code, never its message. */
+const short = (id: string | null | undefined) => id ? id.slice(0, 8) : "none";
+function failure(error: unknown) {
+  if (error instanceof MobileApiError) return { status: error.status, code: error.code ?? "none" };
+  const code = (error as { code?: unknown } | null)?.code;
+  return { status: 0, code: typeof code === "string" ? code : error instanceof Error ? error.name : "unknown" };
+}
 
 /** A retry must repeat the exact original command, including its confirmed target. */
 export function sameDialTarget(left: PhoneDialTarget, right: PhoneDialTarget): boolean {
@@ -102,6 +117,7 @@ export class DispatchPhone {
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   snapshot = () => this.state;
   private current(generation: number) { return !this.stopped && generation === this.generation; }
+  private diag(event: string, fields?: DiagnosticFields) { try { this.native?.debug?.(event, fields); } catch { /* A device log never affects calling. */ } }
   private update(value: Partial<PhoneState>) {
     if (this.stopped) return;
     this.state = { ...this.state, ...value }; for (const notify of this.listeners) notify();
@@ -112,6 +128,8 @@ export class DispatchPhone {
     const generation = this.generation;
     const snapshot = await this.native.snapshot();
     if (!this.current(generation)) return;
+    this.diag("phone.init", { ready: snapshot.ready, was_enabled: snapshot.wasEnabled === true, pending: snapshot.pending.length, calls: snapshot.calls?.length ?? 0,
+      push_rejection: Boolean(snapshot.pushRejection), prepared: Boolean(snapshot.preparedPushCallId), foreground: this.foreground });
     this.applyDiagnostics(snapshot);
     // A push refused during a cold launch arrived before this listener.
     this.pushRejected(snapshot.pushRejection);
@@ -131,7 +149,9 @@ export class DispatchPhone {
     const error = new Error(`${event.reason ?? "unknown"}; metadata keys: ${names(event.keys)}; payload keys: ${names(event.payloadKeys)}; alert: ${alert}`);
     error.name = "VoIPPushRejected";
     // Reported once: native forgets it, so a remount or another login does not repeat it.
-    try { this.reportDiagnostic?.(error); void this.native?.clearPushRejection(event.id).catch(() => {}); } catch { /* A report never affects calling. */ }
+    let reported = false;
+    try { this.reportDiagnostic?.(error); reported = Boolean(this.reportDiagnostic); void this.native?.clearPushRejection(event.id).catch(() => {}); } catch { /* A report never affects calling. */ }
+    this.diag("push.rejected", { reason: event.reason ?? "unknown", reporter: Boolean(this.reportDiagnostic), reported });
   }
   private applyDiagnostics(snapshot: PhoneSnapshot) {
     const permission = snapshot.microphonePermission;
@@ -162,27 +182,36 @@ export class DispatchPhone {
     if (this.connecting) return this.connecting;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.reconnectTimer = null;
     const generation = this.generation;
+    this.diag("phone.connect_start", { takeover, automatic, attempts: this.reconnectAttempts, foreground: this.foreground, token: Boolean(this.token) });
     this.update({ registration: "connecting", takeoverRequired: false, error: null });
     this.connecting = (async () => {
+      let step = "microphone";
       try {
         const microphone = await this.native!.requestMicrophone();
         if (!this.current(generation)) return;
         this.update({ microphonePermission: microphone ? "granted" : "denied" });
         if (!microphone) throw new MobileApiError("Povoľte mikrofón v nastaveniach iPhone.", 403);
         if (!this.current(generation) || (automatic && !this.idleForRecovery())) return;
+        step = "lease";
         this.leaseId ??= await this.leases?.load() ?? null;
         if (!this.current(generation) || (automatic && !this.idleForRecovery())) return;
+        step = "token";
         const token = await this.api.token(this.leaseId ?? undefined, takeover);
         if (!this.current(generation)) { await this.api.disconnect(token.deviceSessionId).catch(() => {}); return; }
         this.leaseId = token.deviceSessionId;
+        step = "save";
         await this.leases?.save(token.deviceSessionId);
         if (!this.current(generation)) return;
         this.token = token;
         if (automatic && !this.idleForRecovery()) return;
+        step = "native";
         await this.native!.connect(token.token);
         if (!this.current(generation)) return;
+        step = "snapshot";
         const pending = await this.native!.snapshot();
         if (!this.current(generation)) return;
+        this.diag("phone.connect_native", { ready: pending.ready, pending: pending.pending.length, holds: pending.pendingHolds?.length ?? 0, push_registered: pending.pushRegistered === true });
+        step = "replay";
         this.applyDiagnostics(pending);
         if (pending.ready) await this.event({ type: "registration", state: "registered" });
         for (const event of pending.pending) void this.event(event);
@@ -194,7 +223,9 @@ export class DispatchPhone {
         for (const event of pending.pendingHolds ?? []) {
           if (event.phase === "unclaimed") await this.handleHold({ type: "heldRequested", ...event });
         }
+        step = "done";
       } catch (error) {
+        this.diag("phone.connect_error", { step, current: this.current(generation), ...failure(error) });
         if (this.current(generation)) {
           // A refusal needs a deliberate action. In particular, recovery never
           // takes the phone from another device or repeats an untrusted reply.
@@ -213,11 +244,13 @@ export class DispatchPhone {
           this.refreshPushRegistration = false; void this.connect();
         }
         this.scheduleRecovery();
+        this.diag("phone.connect_end", { step, current: this.current(generation), registration: this.state.registration, requested: this.connectionRequested });
       }
     })();
     return this.connecting;
   }
   setForeground(value: boolean) {
+    if (value !== this.foreground) this.diag("phone.foreground", { value, registration: this.state.registration, token: Boolean(this.token), requested: this.connectionRequested, call: Boolean(this.state.call) });
     if (value && !this.foreground) this.reconnectAttempts = 0;
     this.foreground = value; this.schedule();
     if (value) void this.refreshDiagnostics();
@@ -353,11 +386,17 @@ export class DispatchPhone {
     const call = this.state.call;
     if (!this.native || !this.token || !call?.connected || !call.media?.canHold || !call.callControlId
       || this.pendingHold || this.state.holdPhase !== "idle" || this.state.nativeSyncPending || this.state.termination
-      || ["DROPPED", "RECONNECTING"].includes(call.state)) return;
+      || ["DROPPED", "RECONNECTING"].includes(call.state)) {
+      this.diag("hold.skip", { token: Boolean(this.token), connected: call?.connected === true, can_hold: call?.media?.canHold === true, control: Boolean(call?.callControlId),
+        pending: Boolean(this.pendingHold), phase: this.state.holdPhase, sync_pending: this.state.nativeSyncPending, termination: Boolean(this.state.termination), state: call?.state ?? "none" });
+      return;
+    }
     const generation = this.generation;
+    this.diag("hold.request", { call: short(call.id), held: call.media.state !== "held", media: call.media.state, version: call.media.version });
     this.update({ holdPhase: "requesting", error: null });
     try { await this.native.requestHold(call.id, call.media.state !== "held"); }
-    catch {
+    catch (error) {
+      this.diag("hold.request_error", { call: short(call.id), ...failure(error) });
       if (this.current(generation) && this.state.call?.id === call.id && !this.pendingHold) {
         this.update({ holdPhase: "idle", error: "Podržanie hovoru sa nepodarilo pripraviť. Skúste znova." });
       }
@@ -415,13 +454,21 @@ export class DispatchPhone {
     if (!this.native || !token || !call || call.id !== event.callId || call.sessionId !== event.sessionId
       || call.callControlId !== event.callControlId || typeof event.held !== "boolean" || !event.actionId
       || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(event.actionId)
-      || !Number.isSafeInteger(event.expectedVersion) || event.expectedVersion! < 0 || this.state.termination) return;
+      || !Number.isSafeInteger(event.expectedVersion) || event.expectedVersion! < 0 || this.state.termination) {
+      this.diag("hold.ignored", { reason: "identity", call: short(event.callId), token: Boolean(token), own_call: call?.id === event.callId,
+        same_session: call?.sessionId === event.sessionId, same_control: call?.callControlId === event.callControlId, termination: Boolean(this.state.termination) });
+      return;
+    }
     if (this.pendingHold) {
       if (this.pendingHold.actionId === event.actionId && this.holdWork !== this.pendingHold) await this.refreshHold();
       return;
     }
     const dispatched = event.phase === "dispatched" || event.phase === "uncertain";
-    if (!dispatched && (!call.connected || !call.media?.canHold || event.expectedVersion !== call.media.version)) return;
+    if (!dispatched && (!call.connected || !call.media?.canHold || event.expectedVersion !== call.media.version)) {
+      this.diag("hold.ignored", { reason: "stale", call: short(call.id), connected: call.connected, can_hold: call.media?.canHold === true,
+        version: call.media?.version ?? -1, expected: event.expectedVersion ?? -1 });
+      return;
+    }
     const command: NativeHold & { leaseId: string } = { callId: call.id, sessionId: call.sessionId, callControlId: event.callControlId!,
       actionId: event.actionId, held: event.held, expectedVersion: event.expectedVersion!, phase: event.phase ?? "unclaimed",
       actionLive: event.actionLive !== false, leaseId: token.deviceSessionId };
@@ -431,6 +478,7 @@ export class DispatchPhone {
     this.holdWork = command; this.update({ holdPhase: "pending", error: null });
     try {
       const claimed = await this.native.claimHold(command.callId, command.actionId);
+      this.diag("hold.claim", { call: short(command.callId), claimed, held: command.held, version: command.expectedVersion });
       if (!this.holdCurrent(command, generation)) return;
       if (!claimed) { this.pendingHold = null; this.update({ holdPhase: "idle" }); return; }
       command.phase = "dispatched";
@@ -455,6 +503,7 @@ export class DispatchPhone {
     finally { if (this.holdWork === command) this.holdWork = null; }
   }
   private async applyHoldResult(command: NativeHold & { leaseId: string }, result: VoiceHoldResult, generation: number, recordingEpoch: number) {
+    this.diag("hold.result", { call: short(command.callId), outcome: result.operation.outcome, media: result.media.state, version: result.media.version, connected: result.connected });
     await this.applyCallStatus(result, generation, true, this.state.call, recordingEpoch);
     if (!this.holdCurrent(command, generation)) return;
     const media = this.state.call!.media!;
@@ -471,6 +520,7 @@ export class DispatchPhone {
     }
   }
   private async holdFailure(command: NativeHold & { leaseId: string }, error: unknown) {
+    this.diag("hold.failure", { call: short(command.callId), ...failure(error) });
     if (error instanceof MobileApiError && ([401, 403].includes(error.status) || ["native_lease_stale", "native_voice_disabled"].includes(error.code ?? ""))) {
       this.fail(error); return;
     }
@@ -558,6 +608,7 @@ export class DispatchPhone {
   private async event(event: VoiceEvent) {
     if (this.stopped || !this.native) return;
     const generation = this.generation;
+    this.diag("phone.event", { type: event.type, call: short(event.callId), state: event.state ?? "none", leg: Boolean(event.providerLegId) });
     try {
       if (event.type === "registration") {
         if (!this.token) return;
@@ -578,6 +629,7 @@ export class DispatchPhone {
         if (!this.pendingHold || this.pendingHold.actionId === event.actionId && this.pendingHold.phase === "unclaimed") {
           // CallKit or the phone refused this phone's own hold before the server was asked.
           const requested = this.pendingHold?.actionId === event.actionId || this.state.holdPhase === "requesting";
+          this.diag("hold.cancelled", { call: short(event.callId), requested, phase: this.state.holdPhase });
           this.pendingHold = null; this.update({ holdPhase: "idle", ...(requested ? { error: holdRefused } : {}) });
         }
       } else if (["holdSyncPending", "holdSynced", "holdSyncFailed"].includes(event.type)) {
@@ -586,51 +638,55 @@ export class DispatchPhone {
         this.pushRejected(event);
       } else if ((event.type === "incoming" || event.type === "push") && event.callId) {
         const id = event.callId;
-        if (this.finished.has(id)) { await this.native.reject(id); return; }
+        if (this.finished.has(id)) { this.diag("offer.done", { call: short(id), type: event.type, outcome: "finished" }); await this.native.reject(id); return; }
         if (this.authorizing.has(id)) {
           // The SDK INVITE of a push being prepared names the leg the push does not.
           if (event.type === "incoming") this.pushInvites.set(id, event);
+          this.diag("offer.done", { call: short(id), type: event.type, outcome: event.type === "incoming" ? "stored_for_push" : "already_authorizing" });
           return;
         }
-        if (this.state.call?.id === id) return;
-        if (this.state.call || this.state.termination) { await this.native.reject(id); return; }
+        if (this.state.call?.id === id) { this.diag("offer.done", { call: short(id), type: event.type, outcome: "current_call" }); return; }
+        if (this.state.call || this.state.termination) { this.diag("offer.done", { call: short(id), type: event.type, outcome: "busy" }); await this.native.reject(id); return; }
         // A real SDK INVITE has a leg UUID, but no control ID until ANSWER.
         // Hold it until the HTTP result establishes the exact outgoing intent.
-        if (this.pendingDial) { this.pendingInvites.set(id, event); return; }
+        if (this.pendingDial) { this.pendingInvites.set(id, event); this.diag("offer.done", { call: short(id), type: event.type, outcome: "stored_for_dial" }); return; }
         this.authorizing.add(id);
-        let replayInvite = false;
+        let replayInvite = false, outcome = "stale";
         try {
           // A push wake may follow hours of suspension. Refresh the provider
           // token and prepare native signaling before forwarding CallKit answer.
           if (!this.token || event.type === "push") await this.connect();
           if (!this.current(generation) || this.finished.has(id)) return;
-          if (!this.token || this.state.registration === "error") { await this.native.reject(id); return; }
+          if (!this.token || this.state.registration === "error") { outcome = "not_ready"; await this.native.reject(id); return; }
           if (event.type === "push") {
             // A push may arrive after a shared connect has already crossed the
             // native bridge. Its completion alone does not prove this push was prepared.
             const snapshot = await this.native.snapshot();
             if (!this.current(generation) || this.finished.has(id)) return;
-            if (snapshot.preparedPushCallId?.toLowerCase() !== id.toLowerCase()
-              && !snapshot.calls?.some(call => call.callId?.toLowerCase() === id.toLowerCase())) {
+            const prepared = snapshot.preparedPushCallId?.toLowerCase() === id.toLowerCase();
+            const invited = Boolean(snapshot.calls?.some(call => call.callId?.toLowerCase() === id.toLowerCase()));
+            this.diag("offer.prepare", { call: short(id), prepared, invited, ready: snapshot.ready });
+            if (!prepared && !invited) {
               await this.native.connect(this.token.token);
               if (!this.current(generation) || this.finished.has(id)) return;
             }
             // Telnyx push metadata names no provider leg (SDK 4.2.2 reads it from the
             // INVITE). The prepared socket's INVITE is authorized by its own leg.
-            if (!event.providerLegId) { replayInvite = true; return; }
+            if (!event.providerLegId) { outcome = "awaiting_invite"; replayInvite = true; return; }
           }
           const identity = event.callControlId ? { callControlId: event.callControlId } : { providerLegId: event.providerLegId };
           const offer = await this.authorizeOffer(this.token.deviceSessionId, identity, id, generation);
           if (!offer || !this.current(generation) || this.finished.has(id)) return;
           const intent = this.outgoingIntent;
-          if (offer.role === "caller" && !intent) { await this.native.reject(id); return; }
+          this.diag("offer.authorized", { call: short(id), role: offer.role, direction: offer.direction, intent: Boolean(intent) });
+          if (offer.role === "caller" && !intent) { outcome = "caller_without_intent"; await this.native.reject(id); return; }
           if (intent && (offer.role !== "caller" || offer.direction !== (intent.kind === "internal" ? "internal" : "outbound")
             || offer.callControlId !== intent.operatorLegCallControlId || offer.sessionId !== intent.sessionId)) {
-            await this.native.reject(id); return;
+            outcome = "intent_mismatch"; await this.native.reject(id); return;
           }
           // Recheck after HTTP: another simultaneous offer may already own UI.
           const activeCall = this.snapshot().call;
-          if (activeCall && activeCall.id !== id) { await this.native.reject(id); return; }
+          if (activeCall && activeCall.id !== id) { outcome = "busy_after_authorization"; await this.native.reject(id); return; }
           // Reserve the single call before crossing the async bridge. Native
           // may synchronously emit ACTIVE/ended while authorize is resolving.
           // A new call starts without an earlier call's error.
@@ -639,7 +695,10 @@ export class DispatchPhone {
             ...(intent ? {} : { error: null }) });
           this.schedule();
           await this.native.authorize(id, offer.sessionId, offer.callControlId);
+          outcome = "authorized";
         } catch (error) {
+          outcome = "error";
+          this.diag("offer.error", { call: short(id), type: event.type, ...failure(error) });
           // Preparing this push or resolving the leg it named failed before the call was
           // reserved. An INVITE that arrived meanwhile names its own leg: authorize that one.
           if (event.type !== "push" || !this.pushInvites.has(id) || this.snapshot().call?.id === id
@@ -648,6 +707,7 @@ export class DispatchPhone {
         } finally {
           this.authorizing.delete(id);
           const invite = this.pushInvites.get(id); this.pushInvites.delete(id);
+          this.diag("offer.done", { call: short(id), type: event.type, outcome, replay: replayInvite && Boolean(invite) });
           this.scheduleRecovery();
           if (replayInvite && invite && this.current(generation) && !this.finished.has(id)) await this.event(invite);
         }
@@ -693,6 +753,7 @@ export class DispatchPhone {
       else if (event.type === "muted") this.update({ muted: event.muted === true });
     } catch (error) {
       if (!this.current(generation)) return;
+      this.diag("phone.event_error", { type: event.type, call: short(event.callId), ...failure(error) });
       if (event.callId) {
         if (this.state.call?.id === event.callId) { this.update({ call: null }); this.schedule(); }
         await this.native.reject(event.callId).catch(() => {});
@@ -712,6 +773,7 @@ export class DispatchPhone {
         // An INVITE can beat the server's provider-leg insert. Only that
         // explicit race is retried; cancelled/foreign offers fail immediately.
         if (!(error instanceof MobileApiError) || error.code !== "native_offer_pending" || attempt === 4) throw error;
+        this.diag("offer.authorize_retry", { call: short(id), attempt });
         await new Promise(resolve => setTimeout(resolve, 400));
       }
     }
@@ -722,7 +784,10 @@ export class DispatchPhone {
     const message = error instanceof MobileApiError ? error.code === "native_voice_disabled"
       ? "Telefonovanie v aplikácii ešte nie je aktivované." : error.message : "Telefonovanie sa nepodarilo pripraviť.";
     this.update({ error: message });
-    if (error instanceof MobileApiError && ([401, 403, 502].includes(error.status) || ["native_lease_stale", "native_voice_disabled"].includes(error.code ?? ""))) {
+    const { status, code } = failure(error);
+    const revoke = error instanceof MobileApiError && ([401, 403, 502].includes(error.status) || ["native_lease_stale", "native_voice_disabled"].includes(error.code ?? ""));
+    this.diag("phone.fail", { status, code, revoke });
+    if (revoke) {
       this.connectionRequested = false;
       if (this.pendingDial && this.state.dialing) this.pendingDial.uncertain = true;
       const ownedSession = this.state.call && (this.state.call.outgoing || this.state.call.connected) ? this.state.call.sessionId : this.outgoingIntent?.sessionId;
@@ -734,7 +799,7 @@ export class DispatchPhone {
       this.pendingHold = null; this.nativeMediaSync = null;
       this.outgoingIntent = null; this.pendingInvites.clear(); this.update({ registration: "error", call: null, holdPhase: "idle", nativeSyncPending: false, dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false,
         pushRegistered: null, lastHeartbeatAt: null, checkingDiagnostics: false, retryTarget: this.pendingDial?.target ?? null }); this.schedule();
-      void this.native?.disconnect().catch(() => {});
+      void this.native?.disconnect("fail:" + (code === "none" ? status : code)).catch(() => {});
     }
   }
   private endSession(sessionId: string): Promise<void> {
@@ -744,8 +809,10 @@ export class DispatchPhone {
     const generation = this.generation;
     this.update({ termination: sessionId }); this.schedule();
     const work = this.api.end(leaseId, sessionId).then(result => {
+      this.diag("session.end", { session: short(sessionId), result: "ok", pending: result.terminationPending });
       if (this.current(generation)) { this.update({ termination: result.terminationPending ? sessionId : null }); this.schedule(); }
     }).catch(error => {
+      this.diag("session.end", { session: short(sessionId), result: "error", ...failure(error) });
       if (!this.current(generation)) return;
       if (error instanceof MobileApiError && error.status === 403 && this.handedAway.has(sessionId)) { this.update({ termination: null }); this.schedule(); return; }
       this.fail(error);
@@ -833,12 +900,15 @@ export class DispatchPhone {
     if (!this.token) return;
     try { await this.api.presence(this.token.deviceSessionId, status); } catch (error) { this.fail(error); throw error; }
   }
-  async disconnect() {
+  /** `reason` names the caller in the device log, e.g. "logout", "unmount" or "replaced". */
+  async disconnect(reason = "explicit") {
+    this.diag("phone.disconnect", { reason, token: Boolean(this.token), call: Boolean(this.state.call), requested: this.connectionRequested });
     this.connectionRequested = false;
     this.generation += 1; this.token = null; this.pendingDial = null; this.pendingHold = null; this.nativeMediaSync = null; this.outgoingIntent = null; this.pendingInvites.clear(); this.schedule();
-    await this.native?.disconnect();
+    await this.native?.disconnect(reason);
     const leaseId = this.leaseId ?? await this.leases?.load();
     if (leaseId) try { await this.api.disconnect(leaseId); } catch (error) {
+      this.diag("phone.disconnect_error", { reason, ...failure(error) });
       // A superseded lease is already disconnected. Provider/network failures
       // retain the saved lease so the user can retry revocation before logout.
       if (!(error instanceof MobileApiError && error.status === 409)) throw error;

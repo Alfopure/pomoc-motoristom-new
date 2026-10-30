@@ -83,6 +83,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/field/deliveries/[id]/tracker": { class: "field-bearer", note: "Issues or revokes the secret for background positions of an own delivery the pristavovač took a step in." },
   "mobile/v1/field/track": { class: "delivery-tracker", note: "Background positions by the per-delivery secret (hash lookup); answers only stored count and whether to go on." },
   "mobile/v1/diagnostics/errors": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Masked app error report; one structured runtime log line, no database write." },
+  "mobile/v1/diagnostics/voice": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Allowlisted sanitized iPhone voice device-log batch; TEST, production only by MOBILE_VOICE_DIAGNOSTICS_ENABLED; one runtime log line, no database write." },
   "mobile/v1/drafts/scope": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Private verified organization scope for account-bound device drafts and expected-organization fencing." },
   "mobile/v1/tasks": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Bounded current-actor assigned or reviewer task overview; no arbitrary actor selection." },
   "mobile/v1/cases": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Scoped bounded case list and allowlisted draft creation owned by the authenticated actor." },

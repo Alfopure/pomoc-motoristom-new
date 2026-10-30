@@ -291,7 +291,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
       if (liveUser() === userId) await onLogout(async () => {
         const beforeDisconnect = phone?.snapshot();
         if (beforeDisconnect?.call || beforeDisconnect?.termination) { setLogoutError("Pred odhlásením ukončite hovor. Koncepty zostali zachované."); throw new Error("Active call prevents logout"); }
-        await phone?.disconnect();
+        await phone?.disconnect("logout");
         // Notices for this account stop reaching the phone; the choice stays for the next sign-in.
         await push.forget();
         // Nothing more about this person's position leaves the phone.

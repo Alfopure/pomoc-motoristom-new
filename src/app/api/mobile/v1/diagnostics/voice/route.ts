@@ -1,0 +1,17 @@
+import { requireMobileActor } from "@/server/mobile/auth";
+import { readMobileJsonBody } from "@/server/mobile/body";
+import { mobileError, mobileJson, mobileScope } from "@/server/mobile/http";
+import { logVoiceDiagnostics, readVoiceDiagnostics, voiceDiagnosticsEnabled } from "@/server/mobile/voice-diagnostics";
+import { MutationError } from "@/server/mutation-error";
+
+export const runtime = "nodejs";
+/** The iPhone's sanitized voice device log; only one runtime log line per batch is kept. */
+export async function POST(request: Request) {
+  try {
+    const actor = await requireMobileActor(request);
+    if (!voiceDiagnosticsEnabled()) throw new MutationError("Diagnostika telefónu je vypnutá.", 403, "voice_diagnostics_disabled");
+    const batch = readVoiceDiagnostics(await readMobileJsonBody(request));
+    logVoiceDiagnostics(actor, batch);
+    return mobileJson({ ...mobileScope(actor), received: batch.events.length });
+  } catch (error) { return mobileError(error, "Diagnostiku telefónu sa nepodarilo prijať."); }
+}

@@ -1,4 +1,7 @@
 var checks: [[String: Any]] = []
+// The persisted device-log ring writes only to this run's temporary file.
+let diagnosticFile = FileManager.default.temporaryDirectory.appendingPathComponent("linka-voice-diagnostics-" + UUID().uuidString + ".json")
+LinkaPhone.diagnosticFile = diagnosticFile
 func check(_ name: String, _ condition: Bool) { checks.append(["name": name, "pass": condition]) }
 func drain() { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
 let session = UUID().uuidString
@@ -341,6 +344,8 @@ do {
   CXCallController.requestError=NSError(domain:"controlled-denial",code:1)
   try! owner.requestHold(callId:id.uuidString,held:true);drain()
   check("CallKit transaction rejection emits cancellation without media command",events.contains{$0["type"] as? String == "heldCancelled"} && heldRows(owner).isEmpty && !call.isMuted)
+  check("device log names the refused hold transaction and its error code",os.Logger.lines.contains{$0.hasPrefix("callkit.request action=hold ") && $0.contains(" error=controlled-denial:1")}
+    && os.Logger.lines.contains{$0.hasPrefix("hold.cancelled ") && $0.contains(" reason=transaction_error")})
   CXCallController.requestError=nil
   try! owner.requestHold(callId:id.uuidString,held:true);Timer.fire(12)
   check("accepted transaction with no delegate delivery has bounded cancellation",events.filter{$0["type"] as? String == "heldCancelled"}.count == 2 && heldRows(owner).isEmpty)
@@ -513,6 +518,9 @@ do {
   check("refused push names its reason and key names", rejected?["reason"] as? String == "missing_voice_sdk_id"
     && rejected?["keys"] as? [String] == ["call_id", "caller_number"] && rejected?["payloadKeys"] as? [String] == ["aps", "metadata"] && rejected?["alertKnown"] as? Bool == true)
   check("refused push diagnostics carry no metadata value", rejected != nil && !String(describing: rejected!).contains("+421900000999"))
+  check("device log shows the push key names and the refusal reason", os.Logger.lines.contains { $0.hasPrefix("push.received ") && $0.contains(" alert=known ")
+    && $0.contains(" keys=call_id,caller_number ") && $0.contains(" has_voice_sdk_id=false ") } && os.Logger.lines.contains { $0.hasPrefix("push.refused ") && $0.contains(" reason=missing_voice_sdk_id") }
+    && os.Logger.lines.contains { $0.hasPrefix("call.finish ") && $0.contains(" reason=failed ") && $0.contains(" source=push_refused") })
   check("refused push stays readable for a cold launch", rejected?["id"] != nil && (owner.snapshot()["pushRejection"] as? [String: Any])?["id"] as? String == rejected?["id"] as? String)
   owner.clearPushRejection(id: UUID().uuidString)
   check("another report cannot forget this refusal", (owner.snapshot()["pushRejection"] as? [String: Any])?["id"] as? String == rejected?["id"] as? String)
@@ -571,6 +579,39 @@ do {
   media(owner, id, "active", 2, false)
   check("a changed hold capability is reported once", CXProvider.last.updateCount == sent + 1 && CXProvider.last.updates[id]?.supportsHolding == false)
   owner.disconnect()
+}
+// Device log (public os_log lines): codes, flags, counts and short IDs only.
+do {
+  let owner = phone()
+  LinkaPhone.diag("js.probe", ["number": "+421 900 000 999", "dashed": "0900-000-999", "code": "fail:401", "id": "3f2a9c1b"])
+  check("device log redacts a phone-number-like value and keeps codes", os.Logger.lines.last == "js.probe code=fail:401 dashed=redacted id=3f2a9c1b number=redacted")
+  owner.disconnect()
+  check("device log names the disconnect reason and the disabled voice flag", os.Logger.lines.contains { $0.hasPrefix("phone.disconnect ") && $0.contains(" reason=native") }
+    && os.Logger.lines.last?.hasPrefix("emit ") == true && os.Logger.lines.contains("voice.enabled source=disconnect value=false was=true"))
+}
+let secrets = ["421900000", "fixture", "Kolega", "memory-token", "fresh-push-token", "next-account-token", "Incoming call!", "Call ended elsewhere"]
+check("device log never carries a number, name, token or push value", !os.Logger.lines.isEmpty && !os.Logger.lines.contains { line in secrets.contains { line.contains($0) } })
+check("every device-log line is an event with key=value codes", os.Logger.lines.allSatisfy { $0.range(of: "^[a-z_.]+( [a-z_]+=[A-Za-z0-9_.:,-]+)*$", options: .regularExpression) != nil })
+do {
+  let ring = LinkaPhone.diagnosticEvents(), ids = ring.compactMap { $0["id"] as? Int }
+  let lineOf = { (event: [String: Any]) -> String in
+    ([event["event"] as? String ?? ""] + (event["fields"] as? [String: String] ?? [:]).sorted { $0.key < $1.key }.map { $0.key + "=" + $0.value }).joined(separator: " ")
+  }
+  check("device-log ring keeps the last 300 events in order", os.Logger.lines.count > 300 && ring.count == 300 && ids == Array(ids.sorted()) && Set(ids).count == 300)
+  check("device-log ring holds exactly the logged lines", ring.map(lineOf) == Array(os.Logger.lines.suffix(300)))
+  check("device-log ring carries no number, name or token", !ring.map(lineOf).contains { line in secrets.contains { line.contains($0) } })
+  Thread.sleep(forTimeInterval: 0.8)
+  LinkaPhone.diagnosticFile = diagnosticFile
+  check("device-log ring survives a relaunch from its file", LinkaPhone.diagnosticEvents().map(lineOf) == ring.map(lineOf)
+    && LinkaPhone.diagnosticEvents().compactMap { $0["id"] as? Int } == ids)
+  LinkaPhone.clearDiagnosticEvents(upToId: ids[294])
+  LinkaPhone.diag("js.probe", ["after": "clear"])
+  Thread.sleep(forTimeInterval: 0.8)
+  LinkaPhone.diagnosticFile = diagnosticFile
+  let kept = LinkaPhone.diagnosticEvents()
+  check("uploaded events are forgotten, later ones keep rising IDs", kept.count == 6 && kept.first?["id"] as? Int == ids[295]
+    && kept.last?["id"] as? Int == ids[299] + 1 && kept.last.map(lineOf) == "js.probe after=clear")
+  try? FileManager.default.removeItem(at: diagnosticFile)
 }
 let passed = checks.allSatisfy { $0["pass"] as? Bool == true }
 let report: [String: Any] = ["kind": "actual-LinkaPhone-methods-controlled-frameworks", "passed": passed, "checks": checks, "physicalDevice": false, "sdkNetworkingExecuted": false]
