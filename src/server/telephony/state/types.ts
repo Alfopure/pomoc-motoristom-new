@@ -297,6 +297,13 @@ export type DialCommand = CommandBase & {
   attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null; applicationDevice?: "web" | "mobile" } | null;
   autoAnswer?: boolean;
   /**
+   * Own-leg dial of a start request only: that request's client `requestId`,
+   * sent as `X-PM-Request` next to `X-PM-Auto-Answer` so the tab still waiting
+   * for exactly this request may answer before the response identifies the
+   * leg (call-speed S3, `own_leg_request_header`).
+   */
+  requestHeader?: string;
+  /**
    * The colleague's leg of a colleague call. Marked for the browser, which
    * otherwise silences invites while its operator is paused; it still rings
    * and is never answered automatically.

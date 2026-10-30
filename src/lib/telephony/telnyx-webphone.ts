@@ -33,8 +33,10 @@ import {
   inviteIsColleagueCall,
   matchAutoAnswer,
   matchExpectedLeg,
+  matchExpectedRequest,
   pruneExpectedLegs,
   rememberExpectedLeg,
+  rememberExpectedRequest,
   reduceWebphone,
   WEBPHONE_HEARTBEAT_MS,
   WEBPHONE_RECOVERY_TIMEOUT_MS,
@@ -42,6 +44,8 @@ import {
   WEBPHONE_INITIAL_STATE,
   webphoneRegistrationView,
   type ExpectedOperatorLeg,
+  type ExpectedOperatorRequest,
+  type InviteIdentity,
   type WebphoneCredentials,
   type WebphoneEffect,
   type WebphoneEvent,
@@ -202,6 +206,10 @@ export class TelnyxWebphone {
   private qualityWarnings = new Map<VoiceQualityWarningCode, number>();
   private qualityWarningsAmbiguous = false;
   private expected: ExpectedOperatorLeg[] = [];
+  /** Start requests armed for early accept (call-speed S3); see `expectOperatorRequest`. */
+  private expectedRequests: ExpectedOperatorRequest[] = [];
+  /** The own leg answered from its request header, until the start response verifies it. */
+  private earlyAccepted: { requestId: string; call: WebphoneSdkCall } | null = null;
   private incomingPolicy: IncomingOfferPolicy = { automaticAllowed: true };
   private withdrawnInvites = new Set<string>();
   private confirmedEndedCallIds = new Set<string>();
@@ -327,6 +335,8 @@ export class TelnyxWebphone {
     this.stopHeartbeat();
     this.clearTimer("expectedLegTimer");
     this.expected = [];
+    this.expectedRequests = [];
+    this.earlyAccepted = null;
     this.callError = null;
     this.dispatch({ type: "stop" }, reason);
     this.disposeAudio();
@@ -337,7 +347,25 @@ export class TelnyxWebphone {
    * answered without the operator touching anything (design §2.2). Correlation
    * is on `telnyxIDs.telnyxCallControlId`, never on arrival order.
    */
-  expectOperatorLeg(input: { callControlId: string; sessionId: string; timingOperationId?: string }): void {
+  expectOperatorLeg({ requestId, ...input }: { callControlId: string; sessionId: string; timingOperationId?: string; requestId?: string }): void {
+    if (requestId) {
+      // The response names the leg exactly; the request header decides nothing more.
+      this.expectedRequests = this.expectedRequests.filter((entry) => entry.requestId !== requestId);
+      const early = this.earlyAccepted?.requestId === requestId ? this.earlyAccepted : null;
+      if (early) {
+        this.earlyAccepted = null;
+        if (early.call.telnyxIDs?.telnyxCallControlId === input.callControlId) {
+          if (this.call?.telnyxIDs?.telnyxCallControlId === input.callControlId) {
+            this.callSessionId = input.sessionId;
+            if (input.timingOperationId) this.callTiming.operationId = input.timingOperationId;
+          }
+          this.publish();
+          return;
+        }
+        // Not the leg this request dialled: end it, then wait for the real one.
+        this.endEarlyAccepted(early.call, "early_accept_mismatch");
+      }
+    }
     // An invite can end before the API response identifies its operator leg.
     // That late response must not reserve the mobile phone for another 90 s.
     if (this.endedCallControlIds.has(input.callControlId)) return;
@@ -350,6 +378,43 @@ export class TelnyxWebphone {
       this.scheduleExpectedLegExpiry();
       this.publish();
     }
+  }
+
+  /**
+   * Early accept of the own leg (call-speed S3, `tuning.webEarlyAccept`): armed
+   * with a start POST's own `requestId` just before it is sent, so the invite
+   * carrying exactly that id (`matchExpectedRequest`) is answered without
+   * waiting for the response. Single use, 30 s. The response still has to
+   * confirm the leg (`expectOperatorLeg` with the same `requestId`), and
+   * `releaseOperatorRequest` ends whatever it did not confirm.
+   */
+  expectOperatorRequest(input: { requestId: string; timingOperationId?: string }): void {
+    if (!this.started) return;
+    this.expectedRequests = rememberExpectedRequest(this.expectedRequests, { ...input, at: this.now() }, this.now());
+    // Only a retried request can find its own invite already ringing.
+    this.autoAnswerCurrentCall();
+  }
+
+  /**
+   * The start request is over. Disarm it and hang up a leg answered under it
+   * that the response did not confirm: a failed start must not leave an open
+   * microphone on a call the console never learnt about.
+   */
+  releaseOperatorRequest(requestId: string): void {
+    this.expectedRequests = this.expectedRequests.filter((entry) => entry.requestId !== requestId);
+    const early = this.earlyAccepted;
+    if (early?.requestId !== requestId) return;
+    this.earlyAccepted = null;
+    this.endEarlyAccepted(early.call, "early_accept_cancelled");
+  }
+
+  /** Ends only that early-accepted leg (never a later call) and reports why. */
+  private endEarlyAccepted(call: WebphoneSdkCall, reason: "early_accept_mismatch" | "early_accept_cancelled"): void {
+    const callControlId = call.telnyxIDs?.telnyxCallControlId;
+    this.log({ event: reason, reason, callControlId });
+    // SDK recovery can replace the Call object while keeping the leg's id.
+    const current = this.call;
+    if (current && (current === call || (callControlId && current.telnyxIDs?.telnyxCallControlId === callControlId))) this.confirmCallEnded(current.id);
   }
 
   /** Server presence controls automatic offers; explicit legs use exact IDs. */
@@ -374,7 +439,9 @@ export class TelnyxWebphone {
   private suppressAutomaticInvite(call: WebphoneSdkCall): boolean {
     if (!RINGING_STATES.has(String(call.state).toLowerCase()) || call.direction !== "inbound") return false;
     const id = call.telnyxIDs?.telnyxCallControlId || call.id;
-    const exact = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now());
+    // An own leg recognised by its exact request id counts as an exact match.
+    const exact = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now()) ??
+      (this.earlyAccepted?.call === call || matchExpectedRequest(this.expectedRequests, { customHeaders: call.options?.customHeaders }, this.now()));
     if (!this.withdrawnInvites.has(id) && (this.incomingPolicy.automaticAllowed || exact || this.callSessionId || this.isColleagueInvite(call))) return false;
     this.recordCallObservation(call, "ringtone_start", { outcome: "suppressed" });
     this.stopRinging();
@@ -1273,17 +1340,32 @@ export class TelnyxWebphone {
     if (!RINGING_STATES.has(state) || String(call.direction ?? "").toLowerCase() !== "inbound") return false;
 
     if (this.suppressAutomaticInvite(call)) return false;
-    const expected = (this.incomingPolicy.automaticAllowed ? matchAutoAnswer : matchExpectedLeg)(
-      this.expected,
-      { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId, customHeaders: call.options?.customHeaders },
-      this.now(),
-    );
+    // Answered early and awaiting its start response: never re-correlate it.
+    if (this.earlyAccepted?.call === call) return false;
+    const invite: InviteIdentity = { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId, customHeaders: call.options?.customHeaders };
+    const exact = matchExpectedLeg(this.expected, invite, this.now());
+    // An exact request id outranks the header-only tiebreaker of `matchAutoAnswer`.
+    if (!exact && this.acceptEarly(call, invite)) return true;
+    const expected = exact ?? (this.incomingPolicy.automaticAllowed ? matchAutoAnswer(this.expected, invite, this.now()) : null);
     if (!expected) return false;
     this.expected = this.expected.filter((entry) => entry.callControlId !== expected.callControlId);
     this.scheduleExpectedLegExpiry();
     this.callSessionId = expected.sessionId;
     if (expected.timingOperationId) this.callTiming.operationId = expected.timingOperationId;
 
+    void this.answerCall(call, "automatic");
+    return true;
+  }
+
+  /** Early accept (call-speed S3): the own leg of a start request still in flight. */
+  private acceptEarly(call: WebphoneSdkCall, invite: InviteIdentity): boolean {
+    const request = matchExpectedRequest(this.expectedRequests, invite, this.now());
+    if (!request) return false;
+    // Single use: this id can never answer a second invite.
+    this.expectedRequests = this.expectedRequests.filter((entry) => entry.requestId !== request.requestId);
+    this.earlyAccepted = { requestId: request.requestId, call };
+    if (request.timingOperationId) this.callTiming.operationId = request.timingOperationId;
+    this.log({ event: "early_accept", reason: "early_accept", callControlId: invite.telnyxCallControlId });
     void this.answerCall(call, "automatic");
     return true;
   }

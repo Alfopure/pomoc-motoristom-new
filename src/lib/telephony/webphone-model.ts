@@ -432,3 +432,59 @@ export function matchAutoAnswer(
   const pending = pruneExpectedLegs(expected, now);
   return pending.length === 1 ? pending[0] : null;
 }
+
+// --- early accept of the own leg (call-speed S3) ------------------------------
+
+/** How long an armed start request may still answer its own leg from the invite. */
+export const EXPECTED_REQUEST_TTL_MS = 30_000;
+
+export type ExpectedOperatorRequest = {
+  /** The start POST's own `requestId`: a UUID this tab generated for one attempt. */
+  requestId: string;
+  timingOperationId?: string;
+  /** Epoch ms when the request was armed. */
+  at: number;
+};
+
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function pruneExpectedRequests(expected: readonly ExpectedOperatorRequest[], now: number): ExpectedOperatorRequest[] {
+  return expected.filter((entry) => now - entry.at < EXPECTED_REQUEST_TTL_MS);
+}
+
+/** Only a well-formed request id is armed; anything else could never be the server's header. */
+export function rememberExpectedRequest(
+  expected: readonly ExpectedOperatorRequest[],
+  next: ExpectedOperatorRequest,
+  now: number,
+): ExpectedOperatorRequest[] {
+  const kept = pruneExpectedRequests(expected, now).filter((entry) => entry.requestId !== next.requestId);
+  return REQUEST_ID.test(next.requestId) ? [...kept, next] : kept;
+}
+
+/** The invite's single `X-PM-Request` value; a missing or repeated header is no identity. */
+export function inviteRequestId(invite: InviteIdentity): string | null {
+  const values = (invite.customHeaders ?? []).filter((header) => header?.name?.toLowerCase() === "x-pm-request");
+  return values.length === 1 ? values[0]?.value?.trim() || null : null;
+}
+
+/**
+ * The own leg of a start request this tab is still waiting for, recognised
+ * before the response names its call-control id. The server sets
+ * `X-PM-Request` only on that request's own-leg dial (`own_leg_request_header`),
+ * and the id is an unguessable UUID this tab generated for that one attempt,
+ * so no inbound offer, pickup, colleague call or other tab's call can carry
+ * it. Both headers are required, a colleague's call never matches, the caller
+ * consumes the match (single use) and the start response still verifies the
+ * exact leg.
+ */
+export function matchExpectedRequest(
+  expected: readonly ExpectedOperatorRequest[],
+  invite: InviteIdentity,
+  now: number,
+): ExpectedOperatorRequest | null {
+  if (!inviteHasAutoAnswerHeader(invite) || inviteIsColleagueCall(invite)) return null;
+  const requestId = inviteRequestId(invite);
+  if (!requestId) return null;
+  return pruneExpectedRequests(expected, now).find((entry) => entry.requestId === requestId) ?? null;
+}

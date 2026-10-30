@@ -3,7 +3,7 @@ import type { Call, IClientOptions, TelnyxRTC } from "@telnyx/webrtc";
 
 import { TelnyxWebphone, isAuthFailure, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
 import type { TelephonyJsonResult } from "./client-request";
-import { EXPECTED_LEG_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_RECOVERY_TIMEOUT_MS } from "./webphone-model";
+import { EXPECTED_LEG_TTL_MS, EXPECTED_REQUEST_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_RECOVERY_TIMEOUT_MS } from "./webphone-model";
 import { isDeviceLive } from "./device-liveness";
 import * as browserTiming from "./browser-call-telemetry";
 import * as browserTransport from "./browser-call-transport";
@@ -1562,6 +1562,242 @@ describe("PA-01/02/10 paused browser offer policy", () => {
     const pickup = fakeCall({ id: "pickup", telnyxIDs: { telnyxCallControlId: "pickup-id", telnyxSessionId: "ts", telnyxLegId: "l" } });
     h.client.emit("telnyx.notification", { type: "callUpdate", call: pickup }); await flush();
     expect(pickup.answered).toBe(true); expect(pickup.hungUp).toBe(false);
+    h.phone.stop();
+  });
+});
+
+describe("early accept of the own leg (call-speed S3)", () => {
+  const REQUEST = "6f1c2a4e-8b3d-4c5e-9f60-7a8b9c0d1e2f";
+  const OTHER = "0b7e5d3c-1a2f-4e6d-8c9b-a0b1c2d3e4f5";
+  const SESSION = "00000000-0000-4000-8000-000000000301";
+  const ownHeaders = (requestId = REQUEST) => [{ name: "X-PM-Auto-Answer", value: "1" }, { name: "X-PM-Request", value: requestId }];
+  const leg = (id: string, customHeaders: Array<{ name: string; value: string }> = ownHeaders()) => fakeCall({ id,
+    telnyxIDs: { telnyxCallControlId: `cc-${id}`, telnyxSessionId: `ts-${id}`, telnyxLegId: `leg-${id}` },
+    options: { remoteCallerNumber: "+421232408718", customHeaders } });
+  const invite = (h: ReturnType<typeof harness>, call: WebphoneSdkCall) => h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+  /** Ends a call the way the SDK reports it, so the next invite starts clean. */
+  const gone = (h: ReturnType<typeof harness>, call: ReturnType<typeof fakeCall>) => { call.hangup(); invite(h, call); };
+  async function ready(options: Parameters<typeof harness>[0] = {}) {
+    const h = harness(options);
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    return h;
+  }
+
+  it("answers its own leg from the request header before the start response, which then confirms it", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const h = await ready({ logger: (entry) => logs.push(entry) });
+    h.phone.expectOperatorRequest({ requestId: REQUEST, timingOperationId: REQUEST });
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(true);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "own", active: true, sessionId: null });
+    expect(logs).toContainEqual(expect.objectContaining({ event: "early_accept", reason: "early_accept", callControlId: "cc-own" }));
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-own", sessionId: SESSION, timingOperationId: REQUEST, requestId: REQUEST });
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(own.hungUp).toBe(false);
+    expect(h.phone.getSnapshot()).toMatchObject({ call: { id: "own", active: true, sessionId: SESSION }, pendingOperatorLegs: 0 });
+    expect(logs.some((entry) => entry.event === "early_accept_mismatch" || entry.event === "early_accept_cancelled")).toBe(false);
+    h.phone.stop();
+  });
+
+  it("hangs up an early leg the start response does not own, then answers the real leg by its id", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const h = await ready({ logger: (entry) => logs.push(entry) });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const wrong = leg("wrong");
+    invite(h, wrong);
+    expect(wrong.answered).toBe(true);
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-real", sessionId: SESSION, requestId: REQUEST });
+    await flush();
+    expect(wrong.hungUp).toBe(true);
+    expect(h.phone.getSnapshot()).toMatchObject({ call: null, pendingOperatorLegs: 1 });
+    expect(logs).toContainEqual(expect.objectContaining({ event: "early_accept_mismatch", reason: "early_accept_mismatch", callControlId: "cc-wrong" }));
+    // Its late SDK update cannot bring the hung-up leg back.
+    invite(h, wrong);
+    expect(h.phone.getSnapshot().call).toBeNull();
+
+    const real = leg("real");
+    invite(h, real);
+    expect(real.answered).toBe(true);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "real", sessionId: SESSION });
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(real.hungUp).toBe(false);
+    h.phone.stop();
+  });
+
+  it("hangs up whatever it answered when the start request fails, and stays disarmed", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const h = await ready({ logger: (entry) => logs.push(entry) });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(true);
+
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(own.hungUp).toBe(true);
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(logs).toContainEqual(expect.objectContaining({ event: "early_accept_cancelled", reason: "early_accept_cancelled" }));
+
+    const late = leg("late");
+    invite(h, late);
+    expect(late.answered).toBe(false);
+    h.phone.stop();
+  });
+
+  it("does not answer a wrong, an already used or an expired request id", async () => {
+    let now = Date.parse("2026-09-03T08:00:00.000Z");
+    const h = await ready({ now: () => now });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+
+    const wrong = leg("wrong", ownHeaders(OTHER));
+    invite(h, wrong);
+    expect(wrong.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "wrong", ringing: true });
+    gone(h, wrong);
+
+    const first = leg("first");
+    invite(h, first);
+    expect(first.answered).toBe(true);
+    gone(h, first);
+    // Single use: a second invite with the same id rings like any other call.
+    const reused = leg("reused");
+    invite(h, reused);
+    expect(reused.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "reused", ringing: true });
+    gone(h, reused);
+
+    h.phone.expectOperatorRequest({ requestId: OTHER });
+    now += EXPECTED_REQUEST_TTL_MS;
+    const expired = leg("expired", ownHeaders(OTHER));
+    invite(h, expired);
+    expect(expired.answered).toBe(false);
+    h.phone.stop();
+  });
+
+  it("never answers an unrelated offer while a request is armed", async () => {
+    const h = await ready();
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const offers = [
+      // An inbound customer offer, a header-only auto-answer leg (no request
+      // identity), a request header without auto-answer, a colleague's call.
+      leg("customer", []),
+      leg("hint", [{ name: "X-PM-Auto-Answer", value: "1" }]),
+      leg("bare", [{ name: "X-PM-Request", value: REQUEST }]),
+      leg("colleague", [...ownHeaders(), { name: "X-PM-Colleague-Call", value: "1" }]),
+    ];
+    for (const offer of offers) {
+      invite(h, offer);
+      expect(offer.answered).toBe(false);
+      expect(h.phone.getSnapshot().call).toMatchObject({ id: offer.id, ringing: true, sessionId: null });
+      gone(h, offer);
+    }
+    // The request is still armed for its own leg alone.
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(true);
+    h.phone.stop();
+  });
+
+  it("answers its own leg on pause, where every automatic offer stays silenced", async () => {
+    const h = await ready();
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: false, requestPending: true });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const offer = leg("offer", [{ name: "X-PM-Auto-Answer", value: "1" }]);
+    invite(h, offer);
+    expect(offer.answered).toBe(false);
+    expect(h.phone.getSnapshot().call?.ringing).toBe(false);
+    gone(h, offer);
+
+    const own = leg("own");
+    invite(h, own);
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: false, requestPending: true, presenceRevision: 1 });
+    await flush();
+    expect(own.answered).toBe(true);
+    expect(own.hungUp).toBe(false);
+    h.phone.expectOperatorLeg({ callControlId: "cc-own", sessionId: SESSION, requestId: REQUEST });
+    h.phone.releaseOperatorRequest(REQUEST);
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: false, requestPending: false, presenceRevision: 2 });
+    await flush();
+    expect(own.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "own", sessionId: SESSION, active: true });
+    h.phone.stop();
+  });
+
+  it("never attributes an early-accepted leg to another pending leg while its answer is in flight", async () => {
+    const h = await ready();
+    h.phone.expectOperatorLeg({ callControlId: "cc-pickup", sessionId: "pickup-session" });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const answer = deferred<void>();
+    const own = leg("own");
+    own.answer = vi.fn(() => answer.promise);
+    invite(h, own);
+    expect(own.answer).toHaveBeenCalledOnce();
+    // A repeated ringing update must not fall through to the header-only tiebreaker.
+    invite(h, own);
+    expect(h.phone.getSnapshot()).toMatchObject({ call: { id: "own", sessionId: null }, pendingOperatorLegs: 1 });
+    own.state = "active";
+    answer.resolve();
+    await flush();
+    h.phone.expectOperatorLeg({ callControlId: "cc-own", sessionId: SESSION, requestId: REQUEST });
+    expect(h.phone.getSnapshot()).toMatchObject({ call: { id: "own", sessionId: SESSION }, pendingOperatorLegs: 1 });
+    h.phone.stop();
+  });
+
+  it("answers only in the tab holding the expectation during a two-tab takeover", async () => {
+    const stale = await ready();
+    const holder = await ready();
+    holder.phone.expectOperatorRequest({ requestId: REQUEST });
+    const atStale = leg("own");
+    invite(stale, atStale);
+    expect(atStale.answered).toBe(false);
+    const atHolder = leg("own");
+    invite(holder, atHolder);
+    expect(atHolder.answered).toBe(true);
+    stale.phone.stop();
+    holder.phone.stop();
+  });
+
+  it("keeps today's correlation when nothing is armed, and when the response beats the invite", async () => {
+    const h = await ready();
+    // Switch off: the console arms nothing, so the header alone answers nothing.
+    const unarmed = leg("unarmed");
+    invite(h, unarmed);
+    expect(unarmed.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "unarmed", ringing: true, sessionId: null });
+    h.phone.expectOperatorLeg({ callControlId: "cc-unarmed", sessionId: SESSION, requestId: REQUEST });
+    expect(unarmed.answered).toBe(true);
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(unarmed.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call?.sessionId).toBe(SESSION);
+    gone(h, unarmed);
+
+    // Armed, but the response arrives first: the exact id governs, as before.
+    h.phone.expectOperatorRequest({ requestId: OTHER });
+    h.phone.expectOperatorLeg({ callControlId: "cc-next", sessionId: "next-session", requestId: OTHER });
+    h.phone.releaseOperatorRequest(OTHER);
+    const next = leg("next", ownHeaders(OTHER));
+    invite(h, next);
+    expect(next.answered).toBe(true);
+    await flush();
+    expect(next.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call?.sessionId).toBe("next-session");
+    h.phone.stop();
+  });
+
+  it("forgets armed requests when the phone stops", async () => {
+    const h = await ready();
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    h.phone.stop();
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(false);
     h.phone.stop();
   });
 });

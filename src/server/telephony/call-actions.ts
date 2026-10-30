@@ -590,10 +590,14 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
       await markSessionFailed(deps, session, "operator_busy");
       throw new CallActionError("Operátor nie je dostupný (prebieha iný hovor).", 409, "operator_busy");
     }
+    // Call-speed S3: the start request's own (validated, single-use) id lets
+    // the waiting tab answer this leg before the response identifies it.
+    const requestHeader = latencyFlagsOf(deps).own_leg_request_header ? readInitialCallPlan(session)?.id : undefined;
     const dial = { kind: "dial" as const, commandId: id, to: plan.sipUri, from: plan.from, role: "operator" as const,
       profileId: actor.profileId, externalNumber: null, clientState: { sid: session.id, role: "operator" as const,
         operatorId: actor.profileId, intent: session.direction === "internal" ? "internal_caller" : "outbound", autoAnswer: true,
-        ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) }, linkTo: null, timeoutSecs: 30, autoAnswer: true, fromDisplayName: plan.fromDisplayName };
+        ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) }, linkTo: null, timeoutSecs: 30, autoAnswer: true, fromDisplayName: plan.fromDisplayName,
+      ...(requestHeader ? { requestHeader } : {}) };
     if (session.writer_contract === 2) {
       const next = emptyTransition();
       next.call = { status: "outbound" };
@@ -614,7 +618,8 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
     try {
       const result = await telnyx.dial({ commandId: id, to: plan.sipUri, from: plan.from, clientState: encodeState(dial.clientState),
         timeoutSecs: 30, timeLimitSecs: LEG_TIME_LIMIT_SECS, sipRegion: "Europe", mediaEncryption: "SRTP",
-        customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }], fromDisplayName: plan.fromDisplayName });
+        customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }, ...(requestHeader ? [{ name: "X-PM-Request", value: requestHeader }] : [])],
+        fromDisplayName: plan.fromDisplayName });
       const effects = effectsFor(deps);
       await upsertDialedLeg(effects, session, dial, result);
       await upsertCallRow(effects, await loadSession(deps, session.id), { status: "outbound" });

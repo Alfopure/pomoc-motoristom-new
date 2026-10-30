@@ -15,6 +15,7 @@ function fakePhone(options: TelnyxWebphoneOptions) {
     emit: (next: WebphoneSnapshot) => { state = next; for (const fn of listeners) fn(next); },
     start: vi.fn(() => { options.onSession?.("new-session"); phone.emit(registered()); }), stop: vi.fn(),
     answer: vi.fn(), hangup: vi.fn(), confirmCallEnded: vi.fn(), toggleMute: vi.fn(), sendDtmf: vi.fn(), expectOperatorLeg: vi.fn(), setIncomingOfferPolicy: vi.fn(), dismissCallError: vi.fn(), takeover: vi.fn(), unlockAudio: vi.fn(), resumeAudio: vi.fn(), confirmRegistration: vi.fn(async () => undefined),
+    expectOperatorRequest: vi.fn(), releaseOperatorRequest: vi.fn(),
   };
   return phone;
 }
@@ -103,6 +104,24 @@ describe("shared browser phone and on-demand mobile", () => {
     await follower.beginOperatorRequest();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(phones[0].setIncomingOfferPolicy).toHaveBeenLastCalledWith(expect.objectContaining({ requestPending: false }));
+  });
+
+  it("routes a follower's early accept to the media owner in request order (call-speed S3)", async () => {
+    create(); const follower = create(); await flush();
+    const requestId = "6f1c2a4e-8b3d-4c5e-9f60-7a8b9c0d1e2f";
+    const order: string[] = [];
+    phones[0].expectOperatorRequest.mockImplementation(() => { order.push("arm"); });
+    phones[0].expectOperatorLeg.mockImplementation(() => { order.push("confirm"); });
+    phones[0].releaseOperatorRequest.mockImplementation(() => { order.push("release"); });
+    follower.expectOperatorRequest({ requestId, timingOperationId: requestId });
+    follower.expectOperatorLeg({ callControlId: "own-leg", sessionId: "own-session", timingOperationId: requestId, requestId });
+    follower.releaseOperatorRequest(requestId);
+    await flush();
+    expect(order).toEqual(["arm", "confirm", "release"]);
+    expect(phones[0].expectOperatorRequest).toHaveBeenCalledWith({ requestId, timingOperationId: requestId });
+    expect(phones[0].expectOperatorLeg).toHaveBeenCalledWith({ callControlId: "own-leg", sessionId: "own-session", timingOperationId: requestId, requestId });
+    expect(phones[0].releaseOperatorRequest).toHaveBeenCalledWith(requestId);
+    expect(phones).toHaveLength(1);
   });
 
   it("uses one SDK across tabs, shares calls, and routes follower controls without sharing credentials", async () => {
