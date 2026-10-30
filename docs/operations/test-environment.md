@@ -17,7 +17,7 @@ Konfigurácia od 2026-09-21 oddeľuje nové Preview nasadenia vrátane vetvy `de
 | Prostredie | Supabase | Organizácia | Aplikácia |
 | --- | --- | --- | --- |
 | Production, vetva `main` | `ifpaeegaesdmljfkdvcn` | AlfoPure, `reqzkjhaquxbbhhalcmm` | `https://dispecing.linkapomoci.sk` |
-| Preview, vetva `dev` a pracovné vetvy | `nzpnqdstvkfncflgqlny` | AlfoSystems, `rwhghkvusmdnaexjvrum`, Free | [Testovacie prostredie (`dev`)](https://test.dispecing.linkapomoci.sk), [záložný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) a nové Preview URL pracovných vetiev |
+| Preview, vetva `dev` a pracovné vetvy | `nzpnqdstvkfncflgqlny` | AlfoPure, `reqzkjhaquxbbhhalcmm`, Pro — trvalý projekt, compute Medium ako produkcia | [Testovacie prostredie (`dev`)](https://test.dispecing.linkapomoci.sk), [záložný dev alias](https://pomoc-motoristom-dispatching-git-dev-alfopures-projects.vercel.app) a nové Preview URL pracovných vetiev |
 
 Obe databázy sú vo Frankfurte (`eu-central-1`). Vercel projekt je `pomoc-motoristom-dispatching` (`prj_DN3smSO1EbGowAmw3nHLQUYoSVJG`, tím `team_56GjBnBw6zGSG83LJAnQCB8T`, región `fra1`).
 
@@ -39,16 +39,24 @@ Overenie vlastnej domény 2026-09-22 zahŕňalo vratnú úpravu testovacieho kon
 
 Po každej budúcej zmene doménového mapovania over DNS, platný HTTPS certifikát, mapovanie na správny READY deployment vetvy `dev`, `GET /api/health/ready`, prihlásenie a použitie testovacieho Supabase ref v aplikácii. Samotný názov hosta izoláciu nedokazuje. Telefónia a externé integrácie zostávajú vypnuté; vlastná doména nie je dôvod registrovať reálne provider webhooky.
 
-## Obnova po pozastavení
+## Trvalý TEST projekt
 
-Supabase môže Free projekt pozastaviť po siedmich dňoch nízkej aktivity. Obnova je ručná cez Dashboard; načítanie aplikácie ju nenahrádza. Aktuálne podmienky obnovy uvádza [Supabase Project Pausing](https://supabase.com/docs/guides/platform/free-project-pausing).
+Projekty sa v Supabase volajú `Pomoc motoristom dispečing – PRODUKCIA` (`ifpaeegaesdmljfkdvcn`) a `Pomoc motoristom dispečing – TEST` (`nzpnqdstvkfncflgqlny`). Rozhoduje vždy ref, nie názov.
 
-1. Otvor [Dashboard testovacieho projektu](https://supabase.com/dashboard/project/nzpnqdstvkfncflgqlny) a over názov `Pomoc motoristom dispatching TEST`, ref a organizáciu AlfoSystems.
-2. Vyber **Restore project** a počkaj na zdravý stav projektu (`ACTIVE_HEALTHY`). Nevytváraj náhradný projekt, kým prebieha obnova.
-3. Over testovaciu databázu a `https://test.dispecing.linkapomoci.sk/api/health/ready`, prípadne aj generovaný dev alias. Produkciu kontroluj iba čítaním `https://dispecing.linkapomoci.sk/api/health/ready`.
-4. Over vypnutú telefóniu a ostatné odchádzajúce integrácie podľa kontrol nižšie. Ak sa pri obnove nezmenili URL ani kľúče, samotná obnova nevyžaduje nový build.
+Od 2026-10-30 je TEST projekt presunutý (Management API `POST /v2/projects/{ref}/transfers` po kontrole `…/transfers/previews`) z Free organizácie AlfoSystems (`rwhghkvusmdnaexjvrum`) do Pro organizácie AlfoPure (`reqzkjhaquxbbhhalcmm`). Ref, URL, kľúče, Auth používatelia, Storage aj dáta zostali rovnaké, preto sa nemenili Vercel premenné, mobilná konfigurácia ani kontroly povoleného ref. Projekty v Pro organizácii sa automaticky nepozastavujú a majú denné zálohy. [Project Transfers](https://supabase.com/docs/guides/platform/project-transfer), [Supabase Project Pausing](https://supabase.com/docs/guides/platform/free-project-pausing).
 
-Ak Dashboard už priamu obnovu neponúka, postupuj podľa aktuálnej dokumentácie Supabase a dostupnej zálohy. Preview nechaj nedostupné, kým nie je test obnovený; neprepínaj ho späť na produkčnú databázu. Nepridávaj cron ani službu na umelé udržiavanie aktivity.
+Spoločná organizácia neznamená spoločnú databázu: TEST je samostatná inštancia s vlastnými kľúčmi a výkonom. Členovia organizácie však vidia oba projekty a Supabase konektor dosiahne oba. Pred každým SQL, migráciou alebo zmenou nastavení uveď presný ref a over ho cez `GET /v1/projects/<ref>`; produkčné kľúče do TESTu nikdy nekopíruj.
+
+Compute TESTu je **Medium (4 GB)** ako produkcia, približne 60 USD mesačne; na pokyn majiteľa 2026-10-30, aby boli TEST a produkcia 1:1 a časy z TESTu porovnateľné. Zmena compute je rozhodnutie majiteľa o nákladoch a spôsobí krátky reštart databázy (pri zmene 2026-10-30 asi 1 minúta); vykonáva sa mimo testovacích hovorov a po nej sa overí `GET /api/health/ready`. [Compute and Disk](https://supabase.com/docs/guides/platform/compute-and-disk).
+
+Ak je TEST nedostupný:
+
+1. Otvor [Dashboard testovacieho projektu](https://supabase.com/dashboard/project/nzpnqdstvkfncflgqlny) a over názov `Pomoc motoristom dispečing – TEST`, ref a organizáciu AlfoPure.
+2. Skontroluj stav projektu a služieb (`GET /v1/projects/nzpnqdstvkfncflgqlny/health`). Nevytváraj náhradný projekt ani branch, kým nie je jasná príčina.
+3. Over `https://test.dispecing.linkapomoci.sk/api/health/ready`. Produkciu kontroluj iba čítaním `https://dispecing.linkapomoci.sk/api/health/ready`.
+4. Ak sa nezmenili URL ani kľúče, obnova databázy nevyžaduje nový build aplikácie.
+
+TEST nechaj nedostupný, kým sa neobnoví; neprepínaj ho na produkčnú databázu. Nepridávaj cron ani službu na umelé udržiavanie aktivity.
 
 ## Obsah kópie a bezpečnostné hranice
 
@@ -94,7 +102,7 @@ Refresh je výslovne vyžiadaná operácia **iba proti testovaciemu cieľu**. Z�
 
 ### 1. Over cieľ a migrácie
 
-Použi Supabase Management API s osobným tokenom uloženým mimo repozitára. Pred zápisom over cez `GET /v1/projects/nzpnqdstvkfncflgqlny` ref, organizáciu `rwhghkvusmdnaexjvrum`, región a stav `ACTIVE_HEALTHY`. Cieľ zápisu musí byť pevne obmedzený na tento ref. Produkciu čítaj cez `POST /v1/projects/ifpaeegaesdmljfkdvcn/database/query` s `read_only: true`; alternatívou pre podporované dotazy je samostatný endpoint `/database/query/read-only`. Kontrakt over v [oficiálnej referencii Management API](https://supabase.com/docs/reference/api/introduction).
+Použi Supabase Management API s osobným tokenom uloženým mimo repozitára. Pred zápisom over cez `GET /v1/projects/nzpnqdstvkfncflgqlny` ref, organizáciu `reqzkjhaquxbbhhalcmm`, región a stav `ACTIVE_HEALTHY`. Cieľ zápisu musí byť pevne obmedzený na tento ref. Produkciu čítaj cez `POST /v1/projects/ifpaeegaesdmljfkdvcn/database/query` s `read_only: true`; alternatívou pre podporované dotazy je samostatný endpoint `/database/query/read-only`. Kontrakt over v [oficiálnej referencii Management API](https://supabase.com/docs/reference/api/introduction).
 
 1. Zostav zoradený zoznam `supabase/migrations/*.sql` z aktuálneho schváleného `dev` a porovnaj ho so `supabase_migrations.schema_migrations` v teste.
 2. Skontroluj jedinečnosť verzií ešte pred aplikáciou. Pri duplicitách nepouži `ON CONFLICT DO NOTHING`: zakrylo by preskočený súbor. Rozpor sa musí vyriešiť skôr, než sa pokračuje.
