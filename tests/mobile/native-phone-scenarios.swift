@@ -393,6 +393,17 @@ do {
   check("late disconnected receipt cannot fulfill action",hold.fulfills == 0)
 }
 do {
+  // iOS delivers the app's own hold request as a new object with the same uuid.
+  let (owner,id,_)=activeFixture();media(owner,id,"active")
+  var events=[[String:Any]]();owner.listen(owner:UUID()){events.append($0)}
+  try! owner.requestHold(callId:id.uuidString,held:true)
+  let delivered=CXCallController.transactions.last!.action as! CXSetHeldCallAction
+  owner.provider(CXProvider.last,perform:delivered)
+  check("own hold request delivered as a copy becomes the hold command, not a competing action",
+    delivered.failures == 0 && heldRows(owner).count == 1 && events.contains{$0["type"] as? String == "heldRequested"} && !events.contains{$0["type"] as? String == "heldCancelled"})
+  owner.disconnect()
+}
+do {
   let (owner,id,call)=activeFixture();media(owner,id,"active")
   try! owner.requestHold(callId:id.uuidString,held:true)
   let requested=CXCallController.transactions.last!.action as! CXSetHeldCallAction
