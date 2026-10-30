@@ -11,7 +11,7 @@ function fixture(report?: (error: Error) => void) {
   let event: (value: VoiceEvent) => void = () => {};
   const native: NativePhone = {
     subscribe: callback => { event = callback; return () => { event = () => {}; }; },
-    snapshot: vi.fn().mockResolvedValue({ ready: true, audioActive: false, pending: [], pushRegistered: true }),
+    snapshot: vi.fn().mockResolvedValue({ ready: true, audioActive: false, pending: [], pushRegistered: true }), clearPushRejection: vi.fn().mockResolvedValue(undefined),
     requestMicrophone: vi.fn().mockResolvedValue(true), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn().mockResolvedValue(undefined),
     authorize: vi.fn().mockResolvedValue(undefined), reject: vi.fn().mockResolvedValue(undefined), expectOutgoing: vi.fn().mockResolvedValue(undefined),
     answer: vi.fn().mockResolvedValue(undefined), confirmConnected: vi.fn().mockResolvedValue(undefined), end: vi.fn().mockResolvedValue(undefined), mute: vi.fn().mockResolvedValue(undefined),
@@ -72,6 +72,14 @@ describe("mobile hold authority and recovery", () => {
     f.emit({ type: "heldCancelled", callId: id, actionId: lease }); await tick();
     expect(f.phone.state).toMatchObject({ holdPhase: "idle", error: "Podržanie sa nepodarilo." });
     expect(f.api.hold).not.toHaveBeenCalled();
+  });
+  it("does not report a hold this phone did not request, nor one refused as the call ends", async () => {
+    const f = await activePhone();
+    f.emit({ type: "heldCancelled", callId: id, actionId: lease }); await tick();
+    expect(f.phone.state).toMatchObject({ holdPhase: "idle", error: null });
+    await f.phone.hold();
+    f.emit({ type: "heldCancelled", callId: id, actionId: lease }); f.emit({ type: "ended", callId: id, sessionId: sid }); await tick();
+    expect(f.phone.state).toMatchObject({ call: null, error: null });
   });
   it("never dispatches an expired unclaimed action", async () => {
     const f = await activePhone(); vi.mocked(f.native.claimHold).mockResolvedValue(false);
@@ -886,15 +894,43 @@ describe("Telnyx VoIP push without a provider leg", () => {
     release(); await tick(); await tick();
     expect(f.api.authorize).not.toHaveBeenCalled(); expect(f.native.authorize).not.toHaveBeenCalled();
   });
-  it("reports a refused push once, by reason and key names only", async () => {
+  it("reports a refused push once, by reason and key names only, then lets native forget it", async () => {
     const report = vi.fn(); const f = fixture(report);
-    const refused: VoiceEvent = { type: "pushRejected", id: lease, reason: "missing_voice_sdk_id", keys: ["call_id", "caller_number"], payloadKeys: ["aps", "metadata"] };
+    const refused: VoiceEvent = { type: "pushRejected", id: lease, reason: "missing_voice_sdk_id", keys: ["call_id", "caller_number"], payloadKeys: ["aps", "metadata"], alertKnown: false };
     vi.mocked(f.native.snapshot).mockResolvedValue({ ready: false, audioActive: false, pending: [], pushRejection: refused });
     await f.phone.initialise(); f.emit(refused); await tick();
     expect(report).toHaveBeenCalledTimes(1);
-    expect(report.mock.calls[0][0]).toMatchObject({ name: "VoIPPushRejected", message: "missing_voice_sdk_id; metadata keys: call_id,caller_number; payload keys: aps,metadata" });
+    expect(report.mock.calls[0][0]).toMatchObject({ name: "VoIPPushRejected", message: "missing_voice_sdk_id; metadata keys: call_id,caller_number; payload keys: aps,metadata; alert: unknown" });
+    expect(f.native.clearPushRejection).toHaveBeenCalledExactlyOnceWith(lease);
     f.emit({ type: "pushRejected", id: sid, reason: "missing_call_id", keys: [], payloadKeys: ["aps"] }); await tick();
-    expect(report).toHaveBeenCalledTimes(2); expect(report.mock.calls[1][0].message).toBe("missing_call_id; metadata keys: none; payload keys: aps");
+    expect(report).toHaveBeenCalledTimes(2); expect(report.mock.calls[1][0].message).toBe("missing_call_id; metadata keys: none; payload keys: aps; alert: none");
+    expect(f.native.clearPushRejection).toHaveBeenLastCalledWith(sid);
+  });
+  it("authorizes a stored INVITE by its own leg when preparing its push fails", async () => {
+    const f = await connected(); let fail!: (error: Error) => void;
+    vi.mocked(f.native.connect).mockResolvedValueOnce(undefined).mockImplementationOnce(() => new Promise<void>((_, reject) => { fail = reject; }));
+    f.emit({ type: "push", callId: id, providerLegId: "" }); await tick();
+    f.emit({ type: "incoming", callId: id, providerLegId: leg }); await tick();
+    fail(new Error("native bridge")); await tick(); await tick();
+    expect(f.api.authorize).toHaveBeenCalledExactlyOnceWith(lease, { providerLegId: leg });
+    expect(f.native.authorize).toHaveBeenCalledExactlyOnceWith(id, sid, "exact-leg");
+    expect(f.native.reject).not.toHaveBeenCalled(); expect(f.phone.state.error).toBeNull();
+  });
+  it("authorizes a stored INVITE by its own leg when the leg its push named is refused", async () => {
+    const f = await connected(); let refuse!: (error: Error) => void;
+    vi.mocked(f.api.authorize).mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+    f.emit({ type: "push", callId: id, providerLegId: id }); await tick();
+    f.emit({ type: "incoming", callId: id, providerLegId: leg }); await tick();
+    refuse(new MobileApiError("expired offer", 409)); await tick(); await tick();
+    expect(vi.mocked(f.api.authorize).mock.calls.map(call => call[1])).toEqual([{ providerLegId: id }, { providerLegId: leg }]);
+    expect(f.native.authorize).toHaveBeenCalledExactlyOnceWith(id, sid, "exact-leg");
+    expect(f.native.reject).not.toHaveBeenCalled();
+  });
+  it("still rejects a push whose preparation fails when no INVITE arrived", async () => {
+    const f = await connected();
+    vi.mocked(f.native.connect).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("native bridge"));
+    f.emit({ type: "push", callId: id, providerLegId: "" }); await tick(); await tick();
+    expect(f.native.reject).toHaveBeenCalledWith(id); expect(f.api.authorize).not.toHaveBeenCalled();
   });
 });
 

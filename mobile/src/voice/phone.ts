@@ -4,13 +4,13 @@ import type { VoiceApi, VoiceCallTarget, VoiceHoldCommand, VoiceHoldResult, Voic
 export type VoiceEvent = { type: string; callId?: string; callControlId?: string; providerLegId?: string; sessionId?: string; number?: string; state?: string; active?: boolean; muted?: boolean; outgoing?: boolean;
   actionId?: string; held?: boolean; expectedVersion?: number; phase?: "unclaimed" | "dispatched" | "uncertain"; actionLive?: boolean; systemHeld?: boolean; privacyHold?: boolean; media?: Pick<VoiceMedia, "state" | "version" | "canHold">;
   /** A refused VoIP push: its own ID, a reason code and key names only, never a value. */
-  id?: string; reason?: string; keys?: string[]; payloadKeys?: string[] };
+  id?: string; reason?: string; keys?: string[]; payloadKeys?: string[]; alertKnown?: boolean };
 export type NativeHold = { callId: string; sessionId: string; callControlId: string; actionId: string; held: boolean; expectedVersion: number; phase: "unclaimed" | "dispatched" | "uncertain"; actionLive: boolean };
 export type NativeMediaSync = Pick<NativeHold, "callId" | "sessionId" | "callControlId" | "actionId" | "held" | "expectedVersion">;
 export type MicrophonePermission = "granted" | "denied" | "undetermined" | "unknown";
 export type PhoneSnapshot = { ready: boolean; audioActive: boolean; microphonePermission?: MicrophonePermission; pushRegistered?: boolean; preparedPushCallId?: string | null; pushRejection?: VoiceEvent | null; wasEnabled?: boolean; calls?: VoiceEvent[]; pending: VoiceEvent[]; pendingHolds?: NativeHold[]; pendingSyncs?: NativeMediaSync[] };
 export type NativePhone = {
-  snapshot(): Promise<PhoneSnapshot>; requestMicrophone(): Promise<boolean>; connect(token: string): Promise<void>; disconnect(): Promise<void>;
+  snapshot(): Promise<PhoneSnapshot>; clearPushRejection(id: string): Promise<void>; requestMicrophone(): Promise<boolean>; connect(token: string): Promise<void>; disconnect(): Promise<void>;
   authorize(callId: string, sessionId: string, controlId: string): Promise<void>; reject(callId: string): Promise<void>;
   expectOutgoing(controlId: string, sessionId: string, number: string, genericHandle?: boolean): Promise<void>;
   answer(callId: string): Promise<void>; confirmConnected(callId: string): Promise<void>; end(): Promise<void>; mute(muted: boolean): Promise<void>; speaker(enabled: boolean): Promise<void>; dtmf(digits: string): Promise<void>;
@@ -37,6 +37,8 @@ export type PhoneState = {
   /** The own call whose transfer is under way; cleared when the call stays with this phone. */
   transferPending: string | null;
 };
+
+const holdRefused = "Podržanie sa nepodarilo.";
 
 /** A retry must repeat the exact original command, including its confirmed target. */
 export function sameDialTarget(left: PhoneDialTarget, right: PhoneDialTarget): boolean {
@@ -125,9 +127,11 @@ export class DispatchPhone {
     if (!event?.id || event.id === this.reportedPushRejection) return;
     this.reportedPushRejection = event.id;
     const names = (list: unknown) => Array.isArray(list) && list.length ? list.filter(key => typeof key === "string").slice(0, 30).join(",") : "none";
-    const error = new Error(`${event.reason ?? "unknown"}; metadata keys: ${names(event.keys)}; payload keys: ${names(event.payloadKeys)}`);
+    const alert = typeof event.alertKnown === "boolean" ? event.alertKnown ? "known" : "unknown" : "none";
+    const error = new Error(`${event.reason ?? "unknown"}; metadata keys: ${names(event.keys)}; payload keys: ${names(event.payloadKeys)}; alert: ${alert}`);
     error.name = "VoIPPushRejected";
-    try { this.reportDiagnostic?.(error); } catch { /* A report never affects calling. */ }
+    // Reported once: native forgets it, so a remount or another login does not repeat it.
+    try { this.reportDiagnostic?.(error); void this.native?.clearPushRejection(event.id).catch(() => {}); } catch { /* A report never affects calling. */ }
   }
   private applyDiagnostics(snapshot: PhoneSnapshot) {
     const permission = snapshot.microphonePermission;
@@ -572,8 +576,9 @@ export class DispatchPhone {
         await this.handleHold(event);
       } else if (event.type === "heldCancelled" && event.callId === this.state.call?.id) {
         if (!this.pendingHold || this.pendingHold.actionId === event.actionId && this.pendingHold.phase === "unclaimed") {
-          // CallKit or the phone refused the hold before the server was asked.
-          this.pendingHold = null; this.update({ holdPhase: "idle", error: "Podržanie sa nepodarilo." });
+          // CallKit or the phone refused this phone's own hold before the server was asked.
+          const requested = this.pendingHold?.actionId === event.actionId || this.state.holdPhase === "requesting";
+          this.pendingHold = null; this.update({ holdPhase: "idle", ...(requested ? { error: holdRefused } : {}) });
         }
       } else if (["holdSyncPending", "holdSynced", "holdSyncFailed"].includes(event.type)) {
         this.mediaSyncEvent(event);
@@ -593,7 +598,7 @@ export class DispatchPhone {
         // Hold it until the HTTP result establishes the exact outgoing intent.
         if (this.pendingDial) { this.pendingInvites.set(id, event); return; }
         this.authorizing.add(id);
-        let awaitInvite = false;
+        let replayInvite = false;
         try {
           // A push wake may follow hours of suspension. Refresh the provider
           // token and prepare native signaling before forwarding CallKit answer.
@@ -612,7 +617,7 @@ export class DispatchPhone {
             }
             // Telnyx push metadata names no provider leg (SDK 4.2.2 reads it from the
             // INVITE). The prepared socket's INVITE is authorized by its own leg.
-            if (!event.providerLegId) { awaitInvite = true; return; }
+            if (!event.providerLegId) { replayInvite = true; return; }
           }
           const identity = event.callControlId ? { callControlId: event.callControlId } : { providerLegId: event.providerLegId };
           const offer = await this.authorizeOffer(this.token.deviceSessionId, identity, id, generation);
@@ -634,11 +639,17 @@ export class DispatchPhone {
             ...(intent ? {} : { error: null }) });
           this.schedule();
           await this.native.authorize(id, offer.sessionId, offer.callControlId);
+        } catch (error) {
+          // Preparing this push or resolving the leg it named failed before the call was
+          // reserved. An INVITE that arrived meanwhile names its own leg: authorize that one.
+          if (event.type !== "push" || !this.pushInvites.has(id) || this.snapshot().call?.id === id
+            || !this.current(generation) || this.finished.has(id)) throw error;
+          replayInvite = true;
         } finally {
           this.authorizing.delete(id);
           const invite = this.pushInvites.get(id); this.pushInvites.delete(id);
           this.scheduleRecovery();
-          if (awaitInvite && invite && this.current(generation) && !this.finished.has(id)) await this.event(invite);
+          if (replayInvite && invite && this.current(generation) && !this.finished.has(id)) await this.event(invite);
         }
       } else if (event.type === "outgoing" && event.callId && event.sessionId) {
         if (this.finished.has(event.callId)) return;
@@ -660,7 +671,9 @@ export class DispatchPhone {
           const call = this.state.call;
           if (this.outgoingIntent?.sessionId === call.sessionId) this.outgoingIntent = null;
           this.pendingHold = null; this.nativeMediaSync = null;
-          this.update({ call: null, holdPhase: "idle", nativeSyncPending: false, audioActive: false, muted: false, speaker: false });
+          // A hold refused as the call ended is not news after it.
+          this.update({ call: null, holdPhase: "idle", nativeSyncPending: false, audioActive: false, muted: false, speaker: false,
+            ...(this.state.error === holdRefused ? { error: null } : {}) });
           if ((call.outgoing || call.connected) && !this.handedAway.has(call.sessionId)) await this.endSession(call.sessionId);
           this.schedule();
         } else if (event.outgoing && event.sessionId) await this.endSession(event.sessionId);

@@ -19,6 +19,7 @@ public final class LinkaVoiceModule: Module {
     }
     Function("isAvailable") { LinkaPhone.enabled }
     AsyncFunction("snapshot") { LinkaPhone.shared.snapshot() }.runOnQueue(.main)
+    AsyncFunction("clearPushRejection") { (id: String) in LinkaPhone.shared.clearPushRejection(id: id) }.runOnQueue(.main)
     AsyncFunction("requestMicrophone") { (promise: Promise) in
       AVAudioSession.sharedInstance().requestRecordPermission { allowed in promise.resolve(allowed) }
     }.runOnQueue(.main)

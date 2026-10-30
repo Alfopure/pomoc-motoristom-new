@@ -63,6 +63,7 @@ class TxClient {
   func connect(txConfig: TxConfig) throws { config = txConfig }
   func processVoIPNotification(txConfig: TxConfig, serverConfiguration: TxServerConfiguration, pushMetaData: [String: Any]) throws { config = txConfig }
   func getCall(callId: UUID) -> Call? { registry[callId] }
-  func disconnect() {}; func disablePushNotifications() {}; func endCallFromCallkit(endAction: CXEndCallAction) { endAction.fulfill() }
+  var declines: [UUID] = []
+  func disconnect() {}; func disablePushNotifications() {}; func endCallFromCallkit(endAction: CXEndCallAction) { declines.append(endAction.callUUID); endAction.fulfill() }
   func setSpeaker() {}; func setEarpiece() {}; func enableAudioSession(audioSession: AVAudioSession) {}; func disableAudioSession(audioSession: AVAudioSession) {}
 }

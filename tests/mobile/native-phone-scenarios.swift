@@ -511,9 +511,56 @@ do {
   push(owner, ["aps": ["alert": "Incoming call!"], "metadata": ["call_id": UUID().uuidString, "caller_number": "+421900000999"]])
   let rejected = events.first { $0["type"] as? String == "pushRejected" }
   check("refused push names its reason and key names", rejected?["reason"] as? String == "missing_voice_sdk_id"
-    && rejected?["keys"] as? [String] == ["call_id", "caller_number"] && rejected?["payloadKeys"] as? [String] == ["aps", "metadata"])
+    && rejected?["keys"] as? [String] == ["call_id", "caller_number"] && rejected?["payloadKeys"] as? [String] == ["aps", "metadata"] && rejected?["alertKnown"] as? Bool == true)
   check("refused push diagnostics carry no metadata value", rejected != nil && !String(describing: rejected!).contains("+421900000999"))
   check("refused push stays readable for a cold launch", rejected?["id"] != nil && (owner.snapshot()["pushRejection"] as? [String: Any])?["id"] as? String == rejected?["id"] as? String)
+  owner.clearPushRejection(id: UUID().uuidString)
+  check("another report cannot forget this refusal", (owner.snapshot()["pushRejection"] as? [String: Any])?["id"] as? String == rejected?["id"] as? String)
+  owner.clearPushRejection(id: rejected?["id"] as? String ?? "")
+  check("a reported refusal is forgotten natively", owner.snapshot()["pushRejection"] is NSNull)
+  events = []
+  push(owner, ["aps": ["alert": "Call ended elsewhere"], "metadata": ["call_id": UUID().uuidString]])
+  push(owner, ["metadata": ["call_id": UUID().uuidString]])
+  let refusals = events.filter { $0["type"] as? String == "pushRejected" }
+  check("an unrecognised alert text is flagged without its value", refusals.count == 2 && refusals[0]["alertKnown"] as? Bool == false
+    && !String(describing: refusals[0]).contains("Call ended elsewhere") && refusals[1]["alertKnown"] == nil)
+  owner.disconnect()
+}
+for viaApp in [false, true] {
+  let owner = phone(), id = UUID()
+  var events: [[String: Any]] = []; owner.listen(owner: UUID()) { events.append($0) }
+  push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture"]])
+  try! owner.connect(token: "fresh-push-token")
+  let client = TxClient.last!
+  if viaApp { owner.reject(callId: id.uuidString) } else {
+    let end = CXEndCallAction(call: id); owner.provider(CXProvider.last, perform: end)
+    check("declined prepared push completes its CallKit action \(viaApp)", end.fulfills == 1 && end.failures == 0)
+  }
+  check("decline before the INVITE reaches Telnyx through the SDK \(viaApp)", client.declines == [id])
+  let call = Call(id, leg: UUID()); client.registry[id] = call; owner.onIncomingCall(call: call)
+  check("an INVITE for a declined call is hung up at once \(viaApp)", call.hangs == 1 && call.answerCount == 0
+    && !events.contains { $0["type"] as? String == "incoming" })
+  owner.disconnect()
+}
+do {
+  let owner = phone(), id = UUID()
+  push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture"]])
+  owner.onClientReady()
+  let sent = CXProvider.last.updateCount
+  owner.onClientReady()
+  check("an unchanged capability is not repeated while CallKit confirms the call", CXProvider.last.updateCount == sent)
+  drain(); owner.onClientReady()
+  check("CallKit hears the capability again once it confirmed the incoming call", CXProvider.last.updateCount == sent + 1 && CXProvider.last.updates[id]?.supportsHolding == false)
+  owner.disconnect()
+}
+do {
+  let owner = phone(), id = UUID()
+  try! owner.expectOutgoing(controlId: "fixture-control", sessionId: session, number: "+421900000123")
+  _ = incoming(owner, id)
+  owner.onClientReady()
+  let sent = CXProvider.last.updateCount
+  owner.provider(CXProvider.last, perform: CXStartCallAction(call: id, handle: CXHandle(type: .phoneNumber, value: "+421900000123")))
+  check("CallKit hears the capability once it starts the outgoing call", CXProvider.last.updateCount == sent + 1 && CXProvider.last.updates[id]?.supportsHolding == false)
   owner.disconnect()
 }
 do {
