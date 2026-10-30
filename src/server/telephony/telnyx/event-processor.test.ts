@@ -7,6 +7,7 @@ import { sessionOwnership } from "../ownership";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { encodeClientState } from "./client-state";
 import { drainDeferredDelivery, INLINE_DRAIN_BUDGET_MS, processTelnyxEvent, replayDeferredSessionEvents } from "./event-processor";
+import { defaultLatencyFlags } from "../latency-flags";
 
 // A pass-through spy: every inline sweep still runs the real sweep, its call
 // shape is just observable.
@@ -416,6 +417,8 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
   it("drains its own deferred row after the holder releases", async () => {
     // A talking call under the fenced contract; the customer's hangup is the deferred fact.
     const { h, call } = await talkingCall({ writerContract: 2, sweepAfterEvent: false });
+    // The ledger deferral itself (`claim_holding_drain` off; S1.3 has its own suite).
+    h.deps.latencyFlags = defaultLatencyFlags();
     // The poll loop measures `Date.now()`, so a clock-only sleep would spin.
     let draining = false;
     let drainSleeps = 0;

@@ -519,6 +519,9 @@ export function emptyTransition(): Transition {
   return { session: {}, legs: [], attempts: [], presence: [], callbacks: [], call: {}, memberTouches: [], notes: [] };
 }
 
+/** The reducer's and the lease-free path's reason for an exact duplicate `call.bridged` (S1.2). */
+export const DUPLICATE_BRIDGE = "leg already bridged";
+
 export function ignoredResult(reason: string): ReduceResult {
   return { next: emptyTransition(), commands: [], compensations: [], guard: null, ignored: reason };
 }
@@ -627,6 +630,8 @@ export type RoutingContext = {
   recordingPolicy?: RecordingRoutingPolicy;
   /** Execution permission only; false must never be treated as policy revocation. */
   recordingLeaseHeld?: boolean;
+  /** `bridged_observation_fast` (call-speed S1.2): an exact duplicate `call.bridged` is ignored, not rewritten. */
+  bridgedObservationFast?: boolean;
   /**
    * Loaded for one transition that needs almost none of this. Anything that
    * plans a further ring step must reload the full context first: presence,

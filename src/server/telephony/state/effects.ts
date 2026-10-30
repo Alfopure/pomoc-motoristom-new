@@ -18,7 +18,7 @@ import { checkpointEffects, commandStillApplies, continuationComplete, criticalD
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
 import { isCallGoneError, TELNYX_CALL_ENDED_CODE, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
-import { pendingAudioStillOwned, recordingCommandOutcome, recordingIntent } from "./recording";
+import { pendingAudioStillOwned, recordingCommandOutcome, recordingFrozenOff, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
 import { attachContactOperations, bindContactConference, contactOperationIntent, readContactHistory, verifyConferenceContact, type ContactProof } from "../contact-proof";
@@ -26,6 +26,7 @@ import { createCallbackObligation, reconcileCallbackContact } from "../callback-
 import { cancelRevokedOffers } from "./cancelled-offers";
 import { SessionConflictError, SessionLeaseLostError } from "../service-errors";
 export { SessionConflictError } from "../service-errors";
+import { latencyFlagsOf, type LatencyFlags } from "../latency-flags";
 import {
   ACTIVE_SESSION_STATES,
   DEFAULT_TTS_VOICE,
@@ -131,7 +132,14 @@ export type EffectsDeps = {
    * control id → the accepted hangup's command id, or null when Telnyx answered
    * 90018. Never persisted; a call control id is never reused. */
   endedLegs?: Map<string, string | null>;
+  /** Resolved by `createTelephonyDeps`; absent means env defaults (`latencyFlagsOf`). */
+  latencyFlags?: LatencyFlags;
 };
+
+/** `internal_lean_path` (call-speed S1.1): colleague calls take the recording-frozen-off paths. */
+function leanInternal(deps: Pick<EffectsDeps, "latencyFlags" | "logger">): boolean {
+  return latencyFlagsOf(deps).internal_lean_path;
+}
 
 export type CommandOutcome = {
   key: string;
@@ -785,13 +793,11 @@ type ExecutionContext = {
  * A presence change keyed to the command keeps it sequential, so the "presence
  * after this command" ordering is untouched.
  */
-function commandMayOverlap(command: Command, session: SessionRow, transition: Transition): boolean {
+function commandMayOverlap(command: Command, session: SessionRow, transition: Transition, lean: boolean): boolean {
   if (!["hangup", "playback_stop", "gather_stop"].includes(command.kind) || !command.bestEffort) return false;
   const key = commandKey(command);
   if (transition.presence.some((change) => change.afterCommandId === key)) return false;
-  const meta = readMeta(session);
-  return meta.recording?.policy.enabled === false && !meta.recording.recorders.length &&
-    !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence;
+  return recordingFrozenOff(session, lean);
 }
 
 /** `prepare_v2` lets these through after a termination; everything else it refuses. */
@@ -819,12 +825,10 @@ function isTerminationBlocked(error: unknown): boolean {
  * Recording is excluded: it keeps its own live view of `pendingAudio` and
  * `commandStillApplies` inspects live recorder state for `recording_start`.
  */
-function providerReadCanReuseSession(session: SessionRow): boolean {
+function providerReadCanReuseSession(session: SessionRow, lean: boolean): boolean {
   const owner = sessionOwnership.getStore();
   if (owner?.contract !== 2 || owner.sessionId !== session.id) return false;
-  const meta = readMeta(session);
-  return meta.recording?.policy.enabled === false && !meta.recording.recorders.length &&
-    !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence;
+  return recordingFrozenOff(session, lean);
 }
 
 async function sessionLegs(deps: EffectsDeps, ctx: ExecutionContext): Promise<LegRow[]> {
@@ -1919,7 +1923,9 @@ async function executeReduceResult(
   // History and fairness are recoverable projections for recorded calls too.
   // START separately ensures the call identity needed for recording admission.
   const recording = readMeta(input.session).recording;
-  const deferProjections = Boolean(input.continuation && !input.databaseOnly && recording);
+  const lean = leanInternal(deps);
+  // A colleague call never records (S1.1): its history may follow audio too.
+  const deferProjections = Boolean(input.continuation && !input.databaseOnly && (recording || recordingFrozenOff(input.session, lean)));
   const owner = sessionOwnership.getStore();
   // These controls already durably staged the session intent under ownership.
   // Their remaining leg patches merely project held/bridged/answered state;
@@ -2076,7 +2082,7 @@ async function executeReduceResult(
         if (checkpointValidity && sessionOwnership.getStore() === checkpointValidity.owner) {
           ctx.session = checkpointValidity.session;
           validitySession = checkpointValidity.session;
-        } else if (!providerReadCanReuseSession(ctx.session)) {
+        } else if (!providerReadCanReuseSession(ctx.session, lean)) {
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
           if (fresh.error) throw new EffectsError("effect validity read failed");
           ctx.session = fresh.data;
@@ -2121,11 +2127,11 @@ async function executeReduceResult(
       // Contract 2 only: `prepare_v2` fences each command on its own
       // generation, so a lease lost while the run is in flight cannot let a
       // stale command through. Contract 1 has no journal to do that.
-      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition) && !overlapped.has(key)) {
+      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition, lean) && !overlapped.has(key)) {
         const run: Command[] = [command];
         for (let next = index + 1; next < dispatchList.length; next += 1) {
           const sibling = dispatchList[next];
-          if (!commandMayOverlap(sibling, ctx.session, transition)) break;
+          if (!commandMayOverlap(sibling, ctx.session, transition, lean)) break;
           if (input.continuation?.completedCommands.includes(commandKey(sibling))) continue;
           run.push(sibling);
         }
@@ -2240,7 +2246,7 @@ async function executeReduceResult(
       if (!awaitingAudio && ["bridge", "conference_join", "conference_leave", "conference_hold", "conference_unhold", "recording_stop", "recording_start"].includes(command.kind)) {
         const provenConference = Boolean(readMeta(ctx.session).recording?.policy.conferenceVerified &&
           (["conference_join", "conference_unhold"].includes(command.kind) || command.kind === "bridge" && executed.detail?.conferenceId));
-        try { await measureControlStage("participants", () => observeParticipants(deps.admin, ctx.session, commandKey(command), deps.now().toISOString(), provenConference, () => callIdentity(deps, ctx.session))); }
+        try { await measureControlStage("participants", () => observeParticipants(deps.admin, ctx.session, commandKey(command), deps.now().toISOString(), provenConference, () => callIdentity(deps, ctx.session), lean)); }
         catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "participant_observation_failed" }); }
       }
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: executed.skipped, bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: executed.detail });
