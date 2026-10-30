@@ -1649,6 +1649,56 @@ describe("early accept of the own leg (call-speed S3)", () => {
     h.phone.stop();
   });
 
+  it("hangs up the wrong early leg even after the real own-leg invite took its place", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const h = await ready({ logger: (entry) => logs.push(entry) });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const wrong = leg("wrong");
+    invite(h, wrong);
+    expect(wrong.answered).toBe(true);
+    // The real own leg arrives before the response names it; the id is used up.
+    const real = leg("real");
+    invite(h, real);
+    expect(real.answered).toBe(false);
+    expect(h.phone.getSnapshot().call?.id).toBe("real");
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-real", sessionId: SESSION, requestId: REQUEST });
+    await flush();
+    expect(wrong.hungUp).toBe(true);
+    expect(logs).toContainEqual(expect.objectContaining({ event: "early_accept_mismatch", callControlId: "cc-wrong" }));
+    expect(real.answered).toBe(true);
+    expect(real.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "real", sessionId: SESSION });
+    // The retired leg's late update never becomes the current call again.
+    invite(h, wrong);
+    expect(h.phone.getSnapshot().call?.id).toBe("real");
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(real.hungUp).toBe(false);
+    h.phone.stop();
+  });
+
+  it("hangs up the early leg when the start fails after another invite became current, and only that leg", async () => {
+    const h = await ready();
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(true);
+    const offer = leg("offer", []);
+    invite(h, offer);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "offer", ringing: true });
+
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(own.hungUp).toBe(true);
+    expect(offer.hungUp).toBe(false);
+    expect(offer.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "offer", ringing: true });
+    invite(h, own);
+    expect(h.phone.getSnapshot().call?.id).toBe("offer");
+    h.phone.stop();
+  });
+
   it("does not answer a wrong, an already used or an expired request id", async () => {
     let now = Date.parse("2026-09-03T08:00:00.000Z");
     const h = await ready({ now: () => now });

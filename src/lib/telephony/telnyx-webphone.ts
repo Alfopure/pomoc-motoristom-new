@@ -398,7 +398,9 @@ export class TelnyxWebphone {
   /**
    * The start request is over. Disarm it and hang up a leg answered under it
    * that the response did not confirm: a failed start must not leave an open
-   * microphone on a call the console never learnt about.
+   * microphone on a call the console never learnt about. That includes a
+   * client-side failure or timeout of a call the server did place; see
+   * `withEarlyAccept` for why that fails safe.
    */
   releaseOperatorRequest(requestId: string): void {
     this.expectedRequests = this.expectedRequests.filter((entry) => entry.requestId !== requestId);
@@ -408,13 +410,28 @@ export class TelnyxWebphone {
     this.endEarlyAccepted(early.call, "early_accept_cancelled");
   }
 
-  /** Ends only that early-accepted leg (never a later call) and reports why. */
+  /**
+   * Ends exactly that early-accepted leg and reports why, whether or not it is
+   * still this tab's current call: a later invite (the real own leg, an
+   * unrelated offer) may have taken that slot, and must itself stay untouched.
+   */
   private endEarlyAccepted(call: WebphoneSdkCall, reason: "early_accept_mismatch" | "early_accept_cancelled"): void {
     const callControlId = call.telnyxIDs?.telnyxCallControlId;
     this.log({ event: reason, reason, callControlId });
     // SDK recovery can replace the Call object while keeping the leg's id.
     const current = this.call;
-    if (current && (current === call || (callControlId && current.telnyxIDs?.telnyxCallControlId === callControlId))) this.confirmCallEnded(current.id);
+    if (current && (current === call || (callControlId && current.telnyxIDs?.telnyxCallControlId === callControlId))) {
+      this.confirmCallEnded(current.id);
+      return;
+    }
+    if (DEAD_STATES.has(String(call.state).toLowerCase())) return;
+    // Retired: its late updates can never become the current call again.
+    this.retiredCalls.add(call);
+    this.confirmedEndedCallIds.add(call.id);
+    this.rememberEndedOperatorLeg(callControlId);
+    this.releaseCallMedia(call);
+    void Promise.resolve().then(() => call.hangup()).catch(() => undefined);
+    this.publish();
   }
 
   /** Server presence controls automatic offers; explicit legs use exact IDs. */
@@ -1544,17 +1561,14 @@ export class TelnyxWebphone {
     this.scheduleExpectedLegExpiry();
   }
 
-  private clearCurrentCall(): void {
-    this.clearOfferObservation();
-    // SDK 2.27 sets Hangup before awaiting BYE (up to 5 seconds), and only
-    // closes its peer afterwards. Release this terminal call's actual tracks
-    // now; signaling and the authoritative server command still finish normally.
-    const remoteStream = this.call?.remoteStream;
-    if (this.call) {
-      this.confirmedEndedCallIds.add(this.call.id);
-      if (this.confirmedEndedCallIds.size > 128) this.confirmedEndedCallIds.delete(this.confirmedEndedCallIds.values().next().value!);
-    }
-    for (const stream of new Set([this.call?.localStream, remoteStream])) {
+  /**
+   * SDK 2.27 sets Hangup before awaiting BYE (up to 5 seconds), and only
+   * closes its peer afterwards. Release a terminal call's actual tracks now;
+   * signaling and the authoritative server command still finish normally.
+   */
+  private releaseCallMedia(call: WebphoneSdkCall | null): void {
+    const remoteStream = call?.remoteStream;
+    for (const stream of new Set([call?.localStream, remoteStream])) {
       for (const track of stream?.getTracks() ?? []) {
         try { track.stop(); } catch { /* Continue releasing the other tracks. */ }
       }
@@ -1563,6 +1577,15 @@ export class TelnyxWebphone {
       this.remoteAudio.pause();
       this.remoteAudio.srcObject = null;
     }
+  }
+
+  private clearCurrentCall(): void {
+    this.clearOfferObservation();
+    if (this.call) {
+      this.confirmedEndedCallIds.add(this.call.id);
+      if (this.confirmedEndedCallIds.size > 128) this.confirmedEndedCallIds.delete(this.confirmedEndedCallIds.values().next().value!);
+    }
+    this.releaseCallMedia(this.call);
     this.finishInviteTiming?.({ outcome: "cancelled" });
     this.finishAudioTiming?.({ outcome: "cancelled" });
     this.finishInviteTiming = null;
