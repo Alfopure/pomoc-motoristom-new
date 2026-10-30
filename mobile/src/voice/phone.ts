@@ -818,6 +818,9 @@ export class DispatchPhone {
       this.diag("session.end", { session: short(sessionId), result: "error", ...failure(error) });
       if (!this.current(generation)) return;
       if (error instanceof MobileApiError && error.status === 403 && this.handedAway.has(sessionId)) { this.update({ termination: null }); this.schedule(); return; }
+      // The other side already ended it: nothing is left to terminate. Keeping the
+      // marker would refuse every later incoming call as busy.
+      if (error instanceof MobileApiError && error.status === 409 && error.code === "not_active") { if (this.state.termination === sessionId) this.update({ termination: null }); this.schedule(); return; }
       this.fail(error);
     }).finally(() => this.ending.delete(sessionId));
     this.ending.set(sessionId, work); return work;
