@@ -224,7 +224,7 @@ export async function measureRequestStep<T>(name: RequestStep, work: () => Promi
 export async function withRequestMetrics(
   route: MeasuredRoute,
   handler: () => Promise<Response>,
-  options: { logger?: (entry: Record<string, unknown>) => void; now?: () => number; operation?: CallPerformanceOperation } = {},
+  options: { logger?: (entry: Record<string, unknown>) => void; now?: () => number; operation?: CallPerformanceOperation; quietBelowMs?: number } = {},
 ): Promise<Response> {
   const now = options.now ?? (() => performance.now());
   const scope = newScope(route, now, options.logger ?? ((entry) => console.info(JSON.stringify(entry))));
@@ -248,7 +248,9 @@ export async function withRequestMetrics(
       } catch { /* Redirects may have immutable headers; preserve the original response. */ }
       return response;
     } finally {
-      finish(scope, { phase: "response", measurement: "handler_response", outcome: status === 202 ? "accepted" : status < 400 ? "ok" : "failed", status, responseBytes, timingHeaders });
+      // A frequent poll keeps its timing headers but logs only when slow or failed.
+      if (options.quietBelowMs !== undefined && status < 400 && now() - scope.started < options.quietBelowMs) scope.finished = true;
+      else finish(scope, { phase: "response", measurement: "handler_response", outcome: status === 202 ? "accepted" : status < 400 ? "ok" : "failed", status, responseBytes, timingHeaders });
     }
   });
 }

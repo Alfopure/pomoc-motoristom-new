@@ -273,6 +273,20 @@ describe("contract 2 dependent waves", () => {
     if (!(name in run.meter.marks)) throw new Error(`${name} never held`);
     return run.meter.marks[name] / WAVE_MS;
   };
+  /** At most the bound, and more than nothing: a broken meter must not pass as a fast path. */
+  const bounded = (actual: number, max: number) => {
+    expect(actual).toBeGreaterThan(0);
+    expect(actual).toBeLessThanOrEqual(max);
+  };
+
+  it("counts waves, not requests: parallel requests share one, dependent ones add up", async () => {
+    const h = harness();
+    const one = await metered(h, async () => {
+      await Promise.all([h.admin.from("motorist_call_sessions").select("id"), h.client.rpc("motorist_provider_pending_commands_v2", {})]);
+      await h.admin.from("motorist_call_legs").select("id");
+    });
+    expect(one).toMatchObject({ requests: 3, waves: 2 });
+  });
 
   async function outbound(h: TelephonyHarness) {
     const start = await metered(h, () => startOutboundCall(rateLimited(h), actor, { to: NUMBERS.customer, requestId: requestId(9101) }));
@@ -295,9 +309,9 @@ describe("contract 2 dependent waves", () => {
     const h = harness();
     const { start, call } = await outbound(h);
     expect(call.operatorLegCallControlId).toBeTruthy();
-    expect(start.requests).toBeLessThanOrEqual(BOUND.outboundStart.requests);
-    expect(sendWave(start, "dial")).toBeLessThanOrEqual(BOUND.outboundStart.toOwnDial);
-    expect(start.waves).toBeLessThanOrEqual(BOUND.outboundStart.resolved);
+    bounded(start.requests, BOUND.outboundStart.requests);
+    bounded(sendWave(start, "dial"), BOUND.outboundStart.toOwnDial);
+    bounded(start.waves, BOUND.outboundStart.resolved);
   });
 
   it.each([1, 2] as const)("starts a colleague call to %i application endpoint(s)", async (endpoints) => {
@@ -306,16 +320,16 @@ describe("contract 2 dependent waves", () => {
       sip_username: "native-colleague", device_session_id: requestId(9103), device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
     const { start, call } = await colleague(h);
     expect(readMeta(h.session(call.sessionId) as SessionRow).internal?.endpoints?.length ?? 1).toBe(endpoints);
-    expect(start.requests).toBeLessThanOrEqual(BOUND.colleagueStart[endpoints].requests);
-    expect(sendWave(start, "dial")).toBeLessThanOrEqual(BOUND.colleagueStart[endpoints].toOwnDial);
-    expect(start.waves).toBeLessThanOrEqual(BOUND.colleagueStart[endpoints].resolved);
+    bounded(start.requests, BOUND.colleagueStart[endpoints].requests);
+    bounded(sendWave(start, "dial"), BOUND.colleagueStart[endpoints].toOwnDial);
+    bounded(start.waves, BOUND.colleagueStart[endpoints].resolved);
 
     // The caller's own leg answers: the colleague is dialled.
     h.telnyx.physical.answered(call.operatorLegCallControlId);
     const answer = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.answered"));
     const colleagueDial = endpoints === 1 ? sendWave(answer, "dial") : Math.min(sendWave(answer, "dial", 0), sendWave(answer, "dial", 1));
-    expect(colleagueDial).toBeLessThanOrEqual(BOUND.internalOwnAnswer[endpoints].toColleagueDial);
-    expect(answer.requests).toBeLessThanOrEqual(BOUND.internalOwnAnswer[endpoints].requests);
+    bounded(colleagueDial, BOUND.internalOwnAnswer[endpoints].toColleagueDial);
+    bounded(answer.requests, BOUND.internalOwnAnswer[endpoints].requests);
   });
 
   it("dials the customer when the operator's own leg answers", async () => {
@@ -324,8 +338,8 @@ describe("contract 2 dependent waves", () => {
     h.telnyx.physical.answered(call.operatorLegCallControlId);
     const answer = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.answered"));
     expect(h.session(call.sessionId).state).toBe("ringing");
-    expect(sendWave(answer, "dial")).toBeLessThanOrEqual(BOUND.outboundOwnAnswer.toCustomerDial);
-    expect(answer.requests).toBeLessThanOrEqual(BOUND.outboundOwnAnswer.requests);
+    bounded(sendWave(answer, "dial"), BOUND.outboundOwnAnswer.toCustomerDial);
+    bounded(answer.requests, BOUND.outboundOwnAnswer.requests);
   });
 
   it("costs little for call.initiated of a leg the dial already recorded", async () => {
@@ -333,7 +347,7 @@ describe("contract 2 dependent waves", () => {
     const { call } = await outbound(h);
     const initiated = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.initiated"));
     expect(initiated.value.outcome).toMatch(/processed|ignored/);
-    expect(initiated.requests).toBeLessThanOrEqual(BOUND.knownInitiated.requests);
+    bounded(initiated.requests, BOUND.knownInitiated.requests);
   });
 
   it("connects a colleague who answers, then observes call.bridged", async () => {
@@ -348,18 +362,18 @@ describe("contract 2 dependent waves", () => {
       meter.watch("callee answered_at", () => Boolean(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === callee)?.answered_at));
     });
     expect(h.session(call.sessionId).state).toBe("talking");
-    expect(sendWave(answer, "bridge")).toBeLessThanOrEqual(BOUND.internalCalleeAnswer.toBridge);
-    expect(markWave(answer, "talking")).toBeLessThanOrEqual(BOUND.internalCalleeAnswer.toTalking);
-    expect(markWave(answer, "callee answered_at")).toBeLessThanOrEqual(BOUND.internalCalleeAnswer.toCalleeAnswered);
-    expect(answer.requests).toBeLessThanOrEqual(BOUND.internalCalleeAnswer.requests);
+    bounded(sendWave(answer, "bridge"), BOUND.internalCalleeAnswer.toBridge);
+    bounded(markWave(answer, "talking"), BOUND.internalCalleeAnswer.toTalking);
+    bounded(markWave(answer, "callee answered_at"), BOUND.internalCalleeAnswer.toCalleeAnswered);
+    bounded(answer.requests, BOUND.internalCalleeAnswer.requests);
 
     const first = await metered(h, () => h.legEvent(callee, "call.bridged"));
     expect(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === callee)?.bridged_at).toBeTruthy();
-    expect(first.requests).toBeLessThanOrEqual(BOUND.firstBridged.requests);
-    expect(first.leases).toBeLessThanOrEqual(BOUND.firstBridged.leases);
+    bounded(first.requests, BOUND.firstBridged.requests);
+    bounded(first.leases, BOUND.firstBridged.leases);
     const duplicate = await metered(h, () => h.legEvent(callee, "call.bridged"));
-    expect(duplicate.requests).toBeLessThanOrEqual(BOUND.duplicateBridged.requests);
-    expect(duplicate.leases).toBeLessThanOrEqual(BOUND.duplicateBridged.leases);
+    bounded(duplicate.requests, BOUND.duplicateBridged.requests);
+    bounded(duplicate.leases, BOUND.duplicateBridged.leases);
   });
 
   it("holds from the web console, first with the conference promotion and later without", async () => {
@@ -370,10 +384,10 @@ describe("contract 2 dependent waves", () => {
     await unholdCall(h.deps, actor, call.sessionId);
     const later = await metered(h, () => holdCall(h.deps, actor, call.sessionId));
     expect(h.session(call.sessionId).state).toBe("held");
-    expect(first.requests).toBeLessThanOrEqual(BOUND.webHoldFirst.requests);
-    expect(first.waves).toBeLessThanOrEqual(BOUND.webHoldFirst.waves);
-    expect(later.requests).toBeLessThanOrEqual(BOUND.webHoldLater.requests);
-    expect(later.waves).toBeLessThanOrEqual(BOUND.webHoldLater.waves);
+    bounded(first.requests, BOUND.webHoldFirst.requests);
+    bounded(first.waves, BOUND.webHoldFirst.waves);
+    bounded(later.requests, BOUND.webHoldLater.requests);
+    bounded(later.waves, BOUND.webHoldLater.waves);
   });
 
   it("holds from the phone, first with the conference promotion and later without", async () => {
@@ -394,9 +408,9 @@ describe("contract 2 dependent waves", () => {
     await changeNativeHold(mobile, phone, call.sessionId, body(9106, false));
     const later = await metered(h, () => changeNativeHold(mobile, phone, call.sessionId, body(9107, true)));
     expect(later.value).toMatchObject({ operation: { outcome: "accepted", held: true } });
-    expect(first.requests).toBeLessThanOrEqual(BOUND.nativeHoldFirst.requests);
-    expect(first.waves).toBeLessThanOrEqual(BOUND.nativeHoldFirst.waves);
-    expect(later.requests).toBeLessThanOrEqual(BOUND.nativeHoldLater.requests);
-    expect(later.waves).toBeLessThanOrEqual(BOUND.nativeHoldLater.waves);
+    bounded(first.requests, BOUND.nativeHoldFirst.requests);
+    bounded(first.waves, BOUND.nativeHoldFirst.waves);
+    bounded(later.requests, BOUND.nativeHoldLater.requests);
+    bounded(later.waves, BOUND.nativeHoldLater.waves);
   });
 });

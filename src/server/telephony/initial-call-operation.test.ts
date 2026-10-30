@@ -372,6 +372,24 @@ describe("hangup before the first dial", () => {
     expect(t.h.call(session.id)?.end_reason ?? null).not.toBe("cancelled_before_dial");
   });
 
+  it("cleans up an unknown first dial once its late call.initiated arrives", async () => {
+    const t = world();
+    t.h.telnyx.loseNextResponse("dial");
+    await expect(start(t, "outbound")).rejects.toMatchObject({ status: 503, code: "provider_outcome_unknown" });
+    const [session] = t.h.rows("motorist_call_sessions") as SessionRow[];
+    expect(t.h.presence(actor.profileId)).toMatchObject({ status: "on_call", current_session_id: session.id });
+    await t.terminate(session.id);
+    // The provider did create the operator's leg; its first event arrives after the hangup.
+    const [own] = [...t.h.telnyx.physical.legs.keys()];
+    const dial = t.h.telnyx.of("dial")[0];
+    expect((await t.h.process(t.h.envelope("call.initiated", { call_control_id: own, call_leg_id: `leg-${own}`, call_session_id: `tsess-${own}`,
+      client_state: dial.params.clientState, to: dial.params.to, from: dial.params.from, direction: "outgoing" }))).outcome).toBe("processed");
+    expect(t.h.telnyx.physical.legs.get(own)?.ended).toBe(true);
+    expect(t.h.session(session.id)).toMatchObject({ state: "ended", ended_at: expect.any(String) });
+    expect(t.h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
+    expect(t.releases.filter(release => release.sessionId === session.id && release.applied)).toHaveLength(1);
+  });
+
   it("leaves a call that dialled before the hangup to the ordinary termination", async () => {
     const t = world();
     const call = await start(t, "outbound");

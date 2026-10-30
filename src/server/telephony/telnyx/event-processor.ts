@@ -22,7 +22,7 @@ import { recordingIntent } from "../state/recording";
 import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, type WebhookClaim } from "./webhook-ledger";
 import { acceptsTestProviderEvent, getTestProviderSafety, hasTestCallProvenance } from "./test-safety";
 import { decodeClientState } from "./client-state";
-import { freezeStartMode, latencyFlagsOf } from "../latency-flags";
+import { freezeStartMode, latencyFlagsOf, providerRegionOf } from "../latency-flags";
 
 /**
  * Telnyx webhook processor (design §2.3).
@@ -330,7 +330,7 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
       called_number: calledNumber,
       started_at: event.occurredAt ?? now.toISOString(),
       metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, announcements: announcementConfigFromMetadata(line?.metadata), ...(lineMode ? { line_inbound_mode: lineMode } : {}), ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}),
-        start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: "inbound", origin: null }) }),
+        start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: "inbound", origin: null, providerRegion: providerRegionOf(deps.config) }) }),
     })
     .select("*")
     .single();
@@ -868,16 +868,16 @@ async function maybeSweep(deps: ProcessorDeps, startedAt: number, waitingFirst =
 }
 
 /**
- * Received → processed for one ledger row, written when it finishes processed.
- * A busy-hint deferral throws before `ownedSessionWork`, so it never logs a
- * lease wait; this line is what shows the cost. `deferrals` counts the row's
- * earlier claims (deferrals plus rare failures or takeovers); the ledger's
- * `deferral_count` is exact. Ledger stamps and counts only.
+ * Received → processed for one ledger row: one compact line, written when it
+ * finishes processed. A busy-hint deferral throws before `ownedSessionWork`,
+ * so it never logs a lease wait; this line is what shows the cost.
+ * `deferrals` counts the row's earlier claims (deferrals plus rare failures or
+ * takeovers); the ledger's `deferral_count` is exact. Stamps and counts only.
  */
 function logWebhookLatency(deps: ProcessorDeps, event: TelephonyEvent, claim: WebhookClaim, sessionId: string, runnerStartedAt: string | null, leaseFree: boolean): void {
   try {
     deps.logger?.({ scope: "webhook-latency", eventId: event.id, eventType: event.type, sessionId, receivedAt: claim.receivedAt, runnerStartedAt,
-      processedAt: nowOf(deps)().toISOString(), deferrals: Math.max(0, claim.attempts - 1), priorRetryState: claim.retryState, attempts: claim.attempts,
+      processedAt: nowOf(deps)().toISOString(), deferrals: Math.max(0, claim.attempts - 1), attempts: claim.attempts,
       path: deps.ledgerReplay ? deps.replaySource ?? "replay" : leaseFree ? "lease_free" : "leased" });
   } catch { /* Telemetry cannot change acknowledgement policy. */ }
 }

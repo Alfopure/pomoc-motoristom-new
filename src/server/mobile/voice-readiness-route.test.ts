@@ -71,6 +71,27 @@ describe("GET authenticated native configuration readiness", () => {
     expect(body.voiceTuning).toEqual({ mobileTokenCache: false, mobileRtcRegion: "auto", mobileTrickleIce: true, mobileRealtimeStatus: false,
       mobileEarlyAccept: true, mobileParallelOffers: false });
   });
+  it("answers with env switches after 1.5 s when the switch read hangs", async () => {
+    vi.stubEnv("MOTORIST_NATIVE_VOICE_TEST_ENABLED", "true");
+    vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ client: { mobileTrickleIce: true } }));
+    const from = f.client.from.bind(f.client);
+    vi.spyOn(f.client, "from").mockImplementation((table) => {
+      const query = from(table);
+      if (table === "motorist_telephony_settings") query.then = () => new Promise(() => {});
+      return query;
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const pending = route.GET(request());
+      await vi.advanceTimersByTimeAsync(1_499);
+      let settled = false;
+      void pending.then(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await (await pending).json()).voiceTuning).toMatchObject({ mobileTrickleIce: true, mobileEarlyAccept: false });
+    } finally { vi.useRealTimers(); }
+  });
   it("reads no switches for a phone that may not call", async () => {
     const body = await (await route.GET(request())).json();
     expect(body).not.toHaveProperty("voiceTuning");

@@ -767,12 +767,11 @@ export async function ownedSessionWork<T>(
   const owner: Ownership = { admin: deps.admin, sessionId, organizationId: deps.organizationId, token,
     generation: claim.generation, contract: claim.contract, deadline: Date.now() + SESSION_WORK_MS,
     acquiredAt: Date.now(), leaseWaitMs: Math.max(0, Date.now() - started) };
-  const timingContext = requestTimingContext();
-  // `holder_*` name what kept the lease, so a deferred webhook (which never
-  // logs a wait of its own) can be matched to its holder by session and time.
+  // `route` and `eventType` name the holder, so a deferred webhook (which never
+  // logs a wait of its own) can be matched to it by session and time.
   const leaseLog = { scope: "lease-timing", sessionId, generation: owner.generation,
-    eventType: options.eventType ?? null, ...timingContext, lease_acquired_at: new Date(owner.acquiredAt).toISOString(),
-    lease_wait_ms: owner.leaseWaitMs, polls, holder_route: timingContext?.route ?? null, holder_event_type: options.eventType ?? null };
+    eventType: options.eventType ?? null, ...requestTimingContext(), lease_acquired_at: new Date(owner.acquiredAt).toISOString(),
+    lease_wait_ms: owner.leaseWaitMs, polls };
   try { deps.logger?.({ ...leaseLog, outcome: "acquired" }); } catch { /* Diagnostic only. */ }
   try { return await sessionOwnership.run(owner, work); }
   finally {

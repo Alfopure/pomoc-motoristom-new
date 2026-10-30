@@ -57,6 +57,19 @@ describe("request metrics", () => {
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private-project|secret|telnyx\.example/);
   });
 
+  it("logs a frequent poll only when it is slow or fails, and keeps its timing headers", async () => {
+    const logger = vi.fn();
+    let time = 0;
+    const run = (ms: number, status: number) => withRequestMetrics("call.action", async () => { time += ms; return Response.json({}, { status }); },
+      { logger, now: () => time, operation: "mobile.call-status", quietBelowMs: 1_000 });
+    const quick = await run(80, 200);
+    expect(quick.headers.get("server-timing")).toMatch(/^total;dur=80\.0/);
+    expect(logger).not.toHaveBeenCalled();
+    await run(1_200, 200);
+    await run(10, 503);
+    expect(logger.mock.calls.map(([entry]) => [entry.ms, entry.status])).toEqual([[1_200, 200], [10, 503]]);
+  });
+
   it("counts new Telnyx API sockets separately, without logging the host", async () => {
     const logger = vi.fn();
     await withRequestMetrics("call.action", async () => {

@@ -6,6 +6,7 @@ import type { Database } from "@/lib/supabase/database.types";
 import type { MobileVoiceTuning } from "@/lib/mobile-api";
 import type { WebCallTuning } from "@/lib/telephony/active-calls-model";
 import type { SessionStartMode } from "./state/types";
+import type { TelnyxConfig } from "./telnyx/env";
 
 /**
  * Call-setup latency switches (call-speed plan S0.1).
@@ -199,12 +200,30 @@ export function concurrentDialFor(flags: LatencyFlags, direction: "outbound" | "
   return flags.concurrent_dial[direction][origin];
 }
 
+/**
+ * The start-mode switches this build implements. A frozen value is a promise
+ * for the rest of the call, so a switch is frozen only once the stage that
+ * ships its behaviour flips it here (S6: concurrent dial with its own-leg
+ * timeout, internal auto-bridge; S5: API region). Until then a session records
+ * what it really does, whatever the flags ask, and no later build can mistake
+ * an earlier session for one that ran the optimisation.
+ */
+const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: false } as const;
+
+/** The Telnyx API region this deployment's client really calls. */
+export function providerRegionOf(config: TelnyxConfig): "us" | "eu" {
+  if (!config.configured) return "us";
+  try { return /(^|\.)telnyx\.eu$/.test(new URL(config.apiBaseUrl).hostname) ? "eu" : "us"; }
+  catch { return "us"; }
+}
+
 /** What a new session keeps for its whole life, whatever the flags say later. */
-export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null }): SessionStartMode {
-  const concurrent = input.direction !== "inbound" && input.origin !== null && concurrentDialFor(flags, input.direction, input.origin);
-  return { concurrent, autoBridge: input.direction === "internal" && flags.internal_auto_bridge,
+export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null; providerRegion: "us" | "eu" }): SessionStartMode {
+  const concurrent = HONOURED_START_SWITCHES.concurrent && input.direction !== "inbound" && input.origin !== null &&
+    concurrentDialFor(flags, input.direction, input.origin);
+  return { concurrent, autoBridge: HONOURED_START_SWITCHES.autoBridge && input.direction === "internal" && flags.internal_auto_bridge,
     ownLegTimeoutSecs: concurrent ? flags.own_leg_timeout_secs_concurrent : SEQUENTIAL_OWN_LEG_TIMEOUT_SECS,
-    apiRegion: flags.api_region, origin: input.origin };
+    apiRegion: HONOURED_START_SWITCHES.apiRegion ? flags.api_region : input.providerRegion, origin: input.origin };
 }
 
 export function webCallTuning(flags: LatencyFlags): WebCallTuning {

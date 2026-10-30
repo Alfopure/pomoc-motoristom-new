@@ -744,6 +744,22 @@ function onInitiated(b: TransitionBuilder, event: TelephonyEvent): ReduceResult 
     return b.note("leg initiated for a terminal session → hangup").result();
   }
 
+  // A leg first reported after a committed termination that found no leg to
+  // end: the operator hung up while their own startup dial had an unknown
+  // outcome. Nothing else ends this call before the leg's own timeout, so hang
+  // it up and end the session as the hangup would have.
+  if (b.session.termination_requested_at && !b.meta.hangup && ACTIVE_SESSION_STATES.has(b.session.state) &&
+    (leg ? !b.legEnded(leg) : state?.sid === b.session.id) && b.openLegs().every(open => open.telnyx_call_control_id === event.callControlId)) {
+    hangupOrphanLeg(b, event.callControlId, leg?.role ?? state?.role ?? "operator");
+    b.setState("ended").patchSession({ ended_at: b.nowIso });
+    b.call.status = "ended";
+    b.call.end_reason = "operator_cancel";
+    b.call.ended_at = b.nowIso;
+    const owner = b.session.answered_by_profile_id;
+    if (owner) b.presenceChange({ profileId: owner, status: "available", sessionId: null, onlyIfSession: b.session.id, reason: "leg after termination" });
+    return b.note("leg initiated after a committed termination → hangup, session ended").result();
+  }
+
   if (!leg) {
     // A leg we dialed (or a transfer target) whose webhook overtook our own upsert.
     if (!state || state.sid !== b.session.id) return ignoredResult("foreign leg");

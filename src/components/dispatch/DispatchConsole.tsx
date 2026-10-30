@@ -10,6 +10,7 @@ import { LayoutPreviewProvider, useLayoutPreview } from "./LayoutPreview";
 import { CalendarWidget } from "./CalendarWidget";
 import { VehicleLookupSearch } from "./VehicleLookupSearch";
 import { CallMonitorInvitations } from "./CallMonitorInvitations";
+import { canInviteMonitor } from "@/lib/telephony/monitor-invitations";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -2386,7 +2387,7 @@ function DispatchConsoleContent({
       )}
 
       {telephonyConfigured && <CallMonitorInvitations key={actorKey} sessionId={telephony.phoneBar.active?.sessionId ?? null}
-        listeningSessionId={telephony.phoneBar.supervising?.sessionId ?? null}
+        inviteAllowed={canInviteMonitor(telephony.phoneBar.active)} listeningSessionId={telephony.phoneBar.supervising?.sessionId ?? null}
         onStop={sessionId => void telephony.stopSupervise(sessionId)} onAccept={telephony.acceptMonitorInvitation} />}
 
       <div className={activeView === "tasks" ? "hidden" : "mobile-workspace-heading flex min-h-16 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-4 py-2.5 lg:hidden"}>

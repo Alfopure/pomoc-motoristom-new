@@ -6,9 +6,9 @@ import { readNativeCallStatus } from "@/server/mobile/voice-hold";
 import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
 
 export const runtime = "nodejs";
-/** The phone's 2 s talking-state poll. */
+/** The phone's 2 s talking-state poll: a log line only when it is slow or fails. */
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
-  return withRequestMetrics("call.action", () => status(request, context), { operation: "mobile.call-status" });
+  return withRequestMetrics("call.action", () => status(request, context), { operation: "mobile.call-status", quietBelowMs: 1_000 });
 }
 async function status(request: Request, context: { params: Promise<{ id: string }> }) {
   try {

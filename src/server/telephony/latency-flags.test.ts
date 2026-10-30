@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createFakeSupabase } from "@/test/fake-supabase";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
+import { FAKE_TELNYX_ENV } from "@/test/fake-telnyx";
 import { callColleague, createRateLimiter, startOutboundCall } from "./call-actions";
 import {
   clearLatencyFlagsCache, concurrentDialFor, defaultLatencyFlags, envLatencyFlags, freezeStartMode, LATENCY_FLAGS_CACHE_TTL_MS,
-  mobileVoiceTuning, readLatencyFlags, SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, webCallTuning, type LatencyFlags,
+  mobileVoiceTuning, providerRegionOf, readLatencyFlags, SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, webCallTuning, type LatencyFlags,
 } from "./latency-flags";
+import { getTelnyxConfig } from "./telnyx/env";
 import { readMeta, type SessionRow } from "./state/types";
 
 const columnMissing = { message: "column motorist_telephony_settings.latency_flags does not exist", code: "42703", details: null, hint: null };
@@ -101,36 +103,41 @@ describe("latency flags", () => {
     expect(reads(fake)).toBe(2);
   });
 
-  it("resolves concurrent dialing by direction and origin device", () => {
+  it("resolves concurrent dialing by direction and origin, but freezes only what this build honours", () => {
     const flags: LatencyFlags = { ...defaultLatencyFlags(), concurrent_dial: { outbound: { web: true, mobile: false }, internal: { web: false, mobile: true } },
       own_leg_timeout_secs_concurrent: 9, internal_auto_bridge: true, api_region: "eu" };
     expect([concurrentDialFor(flags, "outbound", "web"), concurrentDialFor(flags, "outbound", "mobile"),
       concurrentDialFor(flags, "internal", "web"), concurrentDialFor(flags, "internal", "mobile")]).toEqual([true, false, false, true]);
-    expect(freezeStartMode(flags, { direction: "outbound", origin: "web" })).toEqual({ concurrent: true, autoBridge: false, ownLegTimeoutSecs: 9, apiRegion: "eu", origin: "web" });
-    expect(freezeStartMode(flags, { direction: "outbound", origin: "mobile" })).toEqual({ concurrent: false, autoBridge: false,
-      ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "eu", origin: "mobile" });
-    expect(freezeStartMode(flags, { direction: "internal", origin: "mobile" })).toMatchObject({ concurrent: true, autoBridge: true, ownLegTimeoutSecs: 9 });
-    expect(freezeStartMode(flags, { direction: "inbound", origin: null })).toEqual({ concurrent: false, autoBridge: false,
-      ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "eu", origin: null });
+    // S0 implements none of these: the session records the sequential 30 s dial and the region its client calls.
+    for (const [direction, origin] of [["outbound", "web"], ["internal", "mobile"], ["inbound", null]] as const) {
+      expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" })).toEqual({ concurrent: false, autoBridge: false,
+        ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin });
+    }
+    expect(providerRegionOf(getTelnyxConfig({ ...FAKE_TELNYX_ENV, TELNYX_API_BASE_URL: "https://api.telnyx.eu/v2" }))).toBe("eu");
+    expect(providerRegionOf(getTelnyxConfig({ ...FAKE_TELNYX_ENV, TELNYX_API_BASE_URL: "https://api.telnyx.com/v2" }))).toBe("us");
+    expect(providerRegionOf(getTelnyxConfig({}))).toBe("us");
   });
 
-  it("freezes the start mode into every new session, and a later flip leaves it alone", async () => {
+  it("freezes the start mode into every new session as the call really runs, whatever the flags ask", async () => {
     vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
     const h = createTelephonyHarness();
-    const concurrent: LatencyFlags = { ...defaultLatencyFlags(), concurrent_dial: { outbound: { web: true, mobile: false }, internal: { web: true, mobile: false } } };
-    const deps = { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }), latencyFlags: concurrent };
+    const asked: LatencyFlags = { ...defaultLatencyFlags(), concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } },
+      internal_auto_bridge: true, api_region: "eu" };
+    const deps = { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }), latencyFlags: asked };
     const first = await startOutboundCall(deps, { profileId: PROFILES.o1, role: "dispatcher" }, { to: NUMBERS.customer });
     const startMode = (sessionId: string) => readMeta(h.session(sessionId) as SessionRow).start_mode;
-    expect(startMode(first.sessionId)).toEqual({ concurrent: true, autoBridge: false, ownLegTimeoutSecs: 12, apiRegion: "us", origin: "web" });
-
-    deps.latencyFlags = defaultLatencyFlags();
+    const sequential = { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "us" };
+    expect(startMode(first.sessionId)).toEqual({ ...sequential, origin: "web" });
+    // ...which is what happened: a 30 s own-leg dial, and the customer only after it answered.
+    expect(h.telnyx.of("dial").map(dial => dial.params.timeoutSecs)).toEqual([30]);
     h.telnyx.physical.answered(first.operatorLegCallControlId);
     await h.legEvent(first.operatorLegCallControlId, "call.answered");
-    expect(startMode(first.sessionId)).toMatchObject({ concurrent: true });
-    const second = await callColleague(deps, { profileId: PROFILES.o2, role: "dispatcher" }, { targetProfileId: PROFILES.o5 });
-    expect(startMode(second.sessionId)).toEqual({ concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "us", origin: "web" });
+    expect(h.telnyx.of("dial")).toHaveLength(2);
+    expect(startMode(first.sessionId)).toEqual({ ...sequential, origin: "web" });
 
+    const second = await callColleague(deps, { profileId: PROFILES.o2, role: "dispatcher" }, { targetProfileId: PROFILES.o5 });
+    expect(startMode(second.sessionId)).toEqual({ ...sequential, origin: "web" });
     const inbound = await h.inbound({ to: NUMBERS.allianz, answer: false });
-    expect(startMode(inbound.sessionId)).toEqual({ concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "us", origin: null });
+    expect(startMode(inbound.sessionId)).toEqual({ ...sequential, origin: null });
   });
 });

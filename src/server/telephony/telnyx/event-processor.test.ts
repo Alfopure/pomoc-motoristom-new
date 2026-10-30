@@ -27,11 +27,12 @@ describe("processTelnyxEvent", () => {
     expect(audit?.normalized_payload).toMatchObject({ timing: { request_id: response.headers.get("x-request-id"), ingress_at: expect.any(String),
       claimed_at: expect.any(String), lease_acquired_at: expect.any(String), first_command_at: h.now().toISOString(),
       meta: { attempt: 2, delivered_to: "https://example.test/webhook" } } });
+    // The holder of the lease: route and event type.
     expect(h.logs).toContainEqual(expect.objectContaining({ scope: "lease-timing", outcome: "finished", release_confirmed: true, request_id: response.headers.get("x-request-id"),
-      holder_route: "call.webhook", holder_event_type: "call.initiated" }));
+      route: "call.webhook", eventType: "call.initiated" }));
     expect(h.logs.filter(entry => entry.scope === "webhook-latency")).toEqual([{ scope: "webhook-latency", eventId: "timed-delivery", eventType: "call.initiated",
       sessionId: result.sessionId, receivedAt: expect.any(String), runnerStartedAt: h.now().toISOString(), processedAt: h.now().toISOString(),
-      deferrals: 0, priorRetryState: "ready", attempts: 1, path: "leased" }]);
+      deferrals: 0, attempts: 1, path: "leased" }]);
     await h.process(envelope);
     expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook-delivery", outcome: "duplicate", meta: { attempt: 2, delivered_to: "https://example.test/webhook" } }));
   });
@@ -461,8 +462,8 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
     expect(h.session(call.sessionId)).toMatchObject({ state: "wrap_up", lease_token: null });
     // The busy hint never logged a lease wait; received → processed shows what it cost.
     const latency = h.logs.filter(entry => entry.scope === "webhook-latency" && entry.eventId === "deferred-hangup");
-    expect(latency).toEqual([expect.objectContaining({ eventType: "call.hangup", sessionId: call.sessionId, path: "drain", attempts: 2, deferrals: 1,
-      priorRetryState: "deferred", receivedAt: ledgerRow(h, "deferred-hangup").received_at, runnerStartedAt: expect.any(String), processedAt: expect.any(String) })]);
+    expect(latency).toEqual([{ scope: "webhook-latency", eventId: "deferred-hangup", eventType: "call.hangup", sessionId: call.sessionId, path: "drain", attempts: 2, deferrals: 1,
+      receivedAt: ledgerRow(h, "deferred-hangup").received_at, runnerStartedAt: expect.any(String), processedAt: expect.any(String) }]);
   });
 
   it("waits read-only while the holder keeps the lease, then finishes the acknowledged delivery itself", async () => {
