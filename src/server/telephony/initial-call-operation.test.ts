@@ -340,6 +340,25 @@ describe("hangup before the first dial", () => {
     expectCancelled(t, true);
   });
 
+  it("changes nothing when the journal cannot be read after the validity read", async () => {
+    const t = world();
+    const stage = t.h.db.rpcHandlers.get("motorist_stage_transition_v1")!;
+    t.h.db.registerRpc("motorist_stage_transition_v1", async (args, db) => {
+      const staged = await stage(args, db);
+      if ((args.p_main as { entry: { id: string } }).entry.id.startsWith("initial:")) {
+        await t.terminate(args.p_session_id);
+        t.h.db.failNext("motorist_provider_command_lookup_v2", "rpc", "journal unavailable");
+      }
+      return staged;
+    });
+    await expect(start(t, "outbound")).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    const [session] = t.h.rows("motorist_call_sessions") as SessionRow[];
+    expect(t.h.telnyx.of("dial")).toHaveLength(0);
+    expect(t.h.call(session.id)?.end_reason ?? null).not.toBe("cancelled_before_dial");
+    expect(t.h.logs).toContainEqual(expect.objectContaining({ code: "initial_cancellation_unverified", sessionId: session.id }));
+    expect(t.h.rows("motorist_job_incidents")).toHaveLength(0);
+  });
+
   it("leaves a dial whose provider outcome is unknown to the termination machinery", async () => {
     const t = world();
     t.h.telnyx.loseNextResponse("dial");

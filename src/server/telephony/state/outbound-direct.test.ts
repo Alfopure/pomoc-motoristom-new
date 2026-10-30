@@ -141,6 +141,29 @@ describe("direct outgoing provider connection", () => {
     expect(h.call(call.sessionId)).toMatchObject({ end_reason: "operator_left" });
   });
 
+  it("ends the call when the own leg drops while the customer dial's outcome is still unknown", async () => {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    const h = createTelephonyHarness();
+    const call = await startOutboundCall({ ...h.deps, rateLimiter: createRateLimiter() }, actor, { to: NUMBERS.customer });
+    const operator = call.operatorLegCallControlId;
+    h.telnyx.physical.answered(operator);
+    h.telnyx.loseNextResponse("dial");
+    expect((await h.legEvent(operator, "call.answered")).outcome).toBe("failed");
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    expect(h.legs(call.sessionId).some((leg) => leg.role === "customer")).toBe(false);
+
+    await h.legEvent(operator, "call.hangup", { hangup_cause: "normal_clearing" });
+
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: expect.any(String) });
+    expect(h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
+    // The leg the provider did create meets a terminal session and is hung up.
+    const dial = h.telnyx.of("dial")[1];
+    const customer = [...h.telnyx.physical.legs.keys()].find((id) => id !== operator)!;
+    await h.process(h.envelope("call.initiated", { call_control_id: customer, call_leg_id: `leg-${customer}`,
+      client_state: dial.params.clientState, to: NUMBERS.customer, from: NUMBERS.allianz, direction: "outgoing" }));
+    expect(h.telnyx.physical.legs.get(customer)?.ended).toBe(true);
+  });
+
   it("does the same under contract 2, the path production runs", async () => {
     vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
     const h = createTelephonyHarness({ writerContract: 2 });

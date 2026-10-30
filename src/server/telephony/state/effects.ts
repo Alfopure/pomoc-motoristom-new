@@ -2011,17 +2011,32 @@ async function executeReduceResult(
   // its own dial. Retiring that dial as superseded skipped the compensation,
   // which nothing else replaces: `appHangup` needs legs, the sweep needs a
   // customer and presence recovery needs an ended session. Run it instead.
-  const compensateCancelledInitialDial = async (command: Command, key: string): Promise<boolean> => {
+  const compensateCancelledInitialDial = async (command: Command, key: string, refusedByJournal: boolean): Promise<boolean> => {
     const continuation = input.continuation;
     if (!continuation?.id.startsWith("initial:") || command.kind !== "dial" || sessionOwnership.getStore()?.contract !== 2) return false;
-    const next = cancelledBeforeDial(compensations.find(candidate => candidate.forCommand === key)?.next);
+    const refused = compensations.find(candidate => candidate.forCommand === key)?.next;
+    if (!refused) return false;
+    // `prepare_v2` refuses only a command it would dispatch now, so its
+    // refusal proves the provider never took this dial. After the validity
+    // read, ask the journal: an earlier attempt's accepted or unknown dial
+    // keeps today's path (termination hangs up its leg, whose own hangup ends
+    // the call), a recorded refusal keeps its end reason, and an unreadable
+    // journal changes nothing.
+    let outcome: string | null = null;
+    if (!refusedByJournal) {
+      try {
+        const journal = await ownershipRpc<{ outcome?: string } | null>(deps.admin, "motorist_provider_command_lookup_v2",
+          { p_session_id: session.id, p_command_id: command.commandId });
+        outcome = journal ? String(journal.outcome ?? "unknown") : null;
+      } catch (error) {
+        if (error instanceof SessionLeaseLostError) throw error;
+        deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "initial_cancellation_unverified" });
+        return false;
+      }
+      if (outcome !== null && outcome !== "rejected" && outcome !== "rate_limited") return false;
+    }
+    const next = outcome === "rejected" ? refused : cancelledBeforeDial(refused);
     if (!next) return false;
-    // Only a dial the provider never took: an earlier attempt's accepted or
-    // unknown dial keeps today's path, where termination hangs up its leg and
-    // that leg's own hangup ends the call.
-    const journal = await ownershipRpc<{ outcome?: string } | null>(deps.admin, "motorist_provider_command_lookup_v2",
-      { p_session_id: session.id, p_command_id: command.commandId });
-    if (journal && journal.outcome !== "rejected" && journal.outcome !== "rate_limited") return false;
     const current = await loadCompensationState(deps, session.id);
     session = current.session;
     ctx.session = session;
@@ -2037,7 +2052,7 @@ async function executeReduceResult(
     const compensatedResult = await resumePendingEffects(deps, session);
     if (compensatedResult) session = compensatedResult.session;
     ctx.session = session;
-    compensated.push("initial dial cancelled before dispatch");
+    compensated.push(outcome === "rejected" ? "release refused initial dial" : "initial dial cancelled before dispatch");
     return true;
   };
   // The original command remains part of the durable obligation. A cached
@@ -2069,7 +2084,7 @@ async function executeReduceResult(
           if (owner?.contract === 2 && owner.admin === deps.admin && owner.organizationId === deps.organizationId && owner.sessionId === session.id) validitySession = fresh.data;
         }
         if (!commandStillApplies(ctx.session, input.continuation, command)) {
-          if (ctx.session.termination_requested_at && await compensateCancelledInitialDial(command, key)) break;
+          if (ctx.session.termination_requested_at && await compensateCancelledInitialDial(command, key, false)) break;
           await checkpointCommand(key);
           outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: true, bestEffort: Boolean(command.bestEffort), error: null, ms: 0, detail: { reason: "superseded continuation" } });
           continue;
@@ -2244,7 +2259,7 @@ async function executeReduceResult(
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
       if (input.continuation && !providerExecuted && !TEARDOWN_KINDS.has(command.kind) && isTerminationBlocked(error)) {
-        if (await compensateCancelledInitialDial(command, key)) break;
+        if (await compensateCancelledInitialDial(command, key, true)) break;
         // A termination committed by another invocation — the one fact the
         // reused row can be stale about. The validity read would have skipped
         // this command *and every one behind it*, so retiring only this one

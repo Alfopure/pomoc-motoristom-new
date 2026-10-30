@@ -2179,12 +2179,14 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
   // The operator's own leg of an outgoing call ended while the customer still
   // rings. Nobody else can take this call, so the customer must not keep
   // ringing toward a dead phone; `onInternalPartyHangup` is the colleague-call
-  // equivalent.
+  // equivalent. A customer dial whose leg row is not saved yet (outcome still
+  // unknown) ends with the session: its late `call.initiated` meets a terminal
+  // session and is hung up there.
   const customerRinging = b.customerLeg();
   if (b.session.direction === "outbound" && state === "ringing" && meta.ring?.mode === "outbound" && leg.role === "operator" &&
     intent === "outbound" && Boolean(leg.profile_id) && leg.profile_id === b.session.answered_by_profile_id &&
-    customerRinging && !b.legEnded(customerRinging)) {
-    b.cmd(hangupCmd(b, customerRinging, "operator_left"));
+    (!customerRinging || !b.legEnded(customerRinging))) {
+    if (customerRinging) b.cmd(hangupCmd(b, customerRinging, "operator_left"));
     b.setState("ended").patchSession({ ended_at: at });
     b.call.status = "ended";
     b.call.end_reason = answered ? "operator_left" : "operator_leg_unavailable";

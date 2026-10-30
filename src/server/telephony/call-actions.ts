@@ -564,7 +564,12 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
     // untouched new row can have no earlier dispatch to recover.
     const fresh = !recovering && session.version === original.version && session.state === "received" &&
       !session.ended_at && !session.termination_requested_at && !readPendingEffects(session).entries.length;
-    if (!fresh) await endUndialedInitialCall(deps, actor, session, id);
+    if (!fresh) await endUndialedInitialCall(deps, actor, session, id).catch((error: unknown) => {
+      if (error instanceof SessionLeaseLostError) throw error;
+      // The request still answers 409 below; a later attempt can end the session.
+      deps.logger?.({ level: "warn", scope: "call-actions", code: "initial_cancellation_pending", sessionId: session.id,
+        error: error instanceof Error ? error.message : String(error) });
+    });
     const recovered = fresh ? null : await recoverInitialDial(deps, session, id, plan);
     if (recovered) return recovered;
     if (plan.callbackRequestId) {
