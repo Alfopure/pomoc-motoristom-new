@@ -32,6 +32,7 @@ import {
   emptyTransition,
   commandKey,
   announcementKeyForMedia,
+  DUPLICATE_BRIDGE,
   ignoredResult,
   isOpenLeg,
   isSupervisorMode,
@@ -834,6 +835,8 @@ function onBridged(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
     return onLegAnswered(b, synthetic, { alreadyBridged: true, at: event.occurredAt ?? b.nowIso });
   }
   if (b.legEnded(leg)) return ignoredResult("leg already ended");
+  // An exact duplicate would rewrite the same `state` and nothing else.
+  if (b.ctx.bridgedObservationFast && leg.state === "bridged" && leg.bridged_at && leg.answered_at) return ignoredResult(DUPLICATE_BRIDGE);
   const values: LegValues = { state: "bridged" };
   if (!leg.bridged_at) values.bridged_at = event.occurredAt ?? b.nowIso;
   const firstSignal = !leg.answered_at;

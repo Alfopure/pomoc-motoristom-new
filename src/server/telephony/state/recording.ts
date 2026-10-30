@@ -50,6 +50,23 @@ function actionAnnouncementsEnabled(): boolean {
   return process.env.TELNYX_CALL_ACTION_ANNOUNCEMENTS_ENABLED === "true";
 }
 
+/**
+ * A call that can never record: no capture state to keep in step with its
+ * audio, so it may take the lean paths (no continuation, deferred projections,
+ * a reused validity row, overlapping teardown, no participant intervals).
+ *
+ * Either its frozen policy is off with nothing left of earlier capture, or —
+ * with `internal_lean_path` (call-speed S1.1) — it is a colleague call, which
+ * `policyState`/`eligible` never record and which never freezes a policy.
+ */
+export function recordingFrozenOff(session: Pick<SessionRow, "direction" | "metadata">, leanInternal = false): boolean {
+  const meta = readMeta(session);
+  if (meta.announcement_sequence) return false;
+  const recording = meta.recording;
+  if (recording) return recording.policy.enabled === false && !recording.recorders.length && !recording.barrier && !recording.pendingAudio;
+  return leanInternal && session.direction === "internal";
+}
+
 /** A global recording switch alone cannot make a silent call require a media lease. */
 export function requiresRecordingLease(session: SessionRow, context: RoutingContext): boolean {
   const state = policyState(session, context);

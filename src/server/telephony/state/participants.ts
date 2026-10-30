@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
+import { recordingFrozenOff } from "./recording";
 import { isOpenLeg, readMeta, type LegRow, type SessionRow } from "./types";
 
 type Admin = SupabaseClient<Database>;
@@ -39,7 +40,8 @@ function audible(session: SessionRow, leg: LegRow): boolean {
 }
 
 /** Provider/command observations, never voice/name guesses. Replays cannot create duplicate open intervals. */
-export async function observeParticipants(admin: Admin, session: SessionRow, sourceEventId: string, at: string, providerConfirmed: boolean, resolveCallId?: () => Promise<string | null>): Promise<void> {
+export async function observeParticipants(admin: Admin, session: SessionRow, sourceEventId: string, at: string, providerConfirmed: boolean, resolveCallId?: () => Promise<string | null>,
+  leanInternal = false): Promise<void> {
   const recording = readMeta(session).recording;
   // A frozen silent call can never start recording later. Avoid recording-only
   // lookups and interval writes on its bridge/hold/hangup critical path. Keep
@@ -47,6 +49,9 @@ export async function observeParticipants(admin: Admin, session: SessionRow, sou
   // is closed correctly even after the live recording switch is turned off.
   if (recording && recording.policy.enabled === false && recording.recorders.length === 0 &&
     !recording.barrier && !recording.pendingAudio) return;
+  // A colleague call is never recorded (`internal_lean_path`, call-speed S1.1);
+  // its intervals would only feed a manifest that cannot exist.
+  if (!recording && recordingFrozenOff(session, leanInternal)) return;
   // The optional identity comes only from this session runner's successful,
   // organization-scoped call lookup/upsert. Never reuse mutable leg snapshots.
   const [callResult, legsResult, intervalsResult] = await Promise.allSettled([

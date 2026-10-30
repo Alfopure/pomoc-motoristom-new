@@ -56,7 +56,17 @@ async function maybeSweep(deps: TelephonyRuntimeDeps): Promise<void> {
   }
 }
 
-export async function GET() {
+/** How far back a console's `?after=` may reach (S1.4); older asks join the ordinary cache. */
+const FRESH_AFTER_MAX_AGE_MS = 5_000;
+
+/** `?after=<epoch ms>` clamped to now − 5 s … now; absent or malformed is no constraint. */
+function freshAfter(request: Request | undefined, now: number): number | undefined {
+  const raw = request ? new URL(request.url).searchParams.get("after") : null;
+  const value = raw && /^\d{1,16}$/.test(raw) ? Number(raw) : Number.NaN;
+  return Number.isFinite(value) ? Math.min(now, Math.max(now - FRESH_AFTER_MAX_AGE_MS, value)) : undefined;
+}
+
+export async function GET(request?: Request) {
   return withRequestMetrics("call.active", async () => {
     try {
       const actor = await measureRequestStep("auth", () => requireDefaultMotoristActor(TELEPHONY_ROUTE_ROLES));
@@ -69,8 +79,11 @@ export async function GET() {
       const who = { profileId: actor.profileId, canManageAssignments: actor.role === "manager" || actor.role === "admin" || actor.role === "senior_dispatcher" };
 
       // Shared with every other console polling this organisation: the rows are
-      // the same, only "mine" differs.
-      let snapshot = await loadActiveCallsCached(view, who);
+      // the same, only "mine" differs. After a doorbell or its own control write
+      // a console asks for a pass that started no earlier (`fresh_after_write`).
+      const flags = latencyFlagsOf(deps);
+      const minStartedAt = flags.fresh_after_write ? freshAfter(request, (deps.now ?? (() => new Date()))().getTime()) : undefined;
+      let snapshot = await loadActiveCallsCached(view, who, { minStartedAt });
 
       // Terminal sessions are absent from the snapshot, so browser-leg recovery
       // cannot clear their stale owner. This used to run a query of its own on
@@ -93,7 +106,8 @@ export async function GET() {
       after(withBackgroundRequestMetrics(() => maybeSweep(deps)));
 
       // Per response, never in the organisation-wide snapshot cache.
-      return Response.json({ ...snapshot, tuning: webCallTuning(latencyFlagsOf(deps)) }, { headers: { "Cache-Control": "private, no-store" } });
+      return Response.json({ ...snapshot, tuning: { ...webCallTuning(flags), freshAfterWrite: flags.fresh_after_write } },
+        { headers: { "Cache-Control": "private, no-store" } });
     } catch (error) {
       return telephonyErrorResponse(error, "Aktívne hovory sa nepodarilo načítať.");
     }

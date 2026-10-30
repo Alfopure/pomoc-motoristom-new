@@ -6,6 +6,7 @@ import { delayDatabase, WAVE_MS, type DatabaseDelay } from "@/test/delay-databas
 import { changeNativeHold } from "@/server/mobile/voice-hold";
 import { blindTransfer, callColleague, createRateLimiter, hangupCall, holdCall, startOutboundCall, unholdCall } from "../call-actions";
 import type { TelephonyRuntimeDeps } from "../runtime";
+import { defaultLatencyFlags } from "../latency-flags";
 import { readPendingEffects } from "./continuation";
 import { commandKey, readMeta } from "./types";
 import type { SessionRow } from "./types";
@@ -30,6 +31,22 @@ const BOUND = {
   nativeHoldLater: { requests: 57, waves: 49 },
 } as const;
 
+/**
+ * The same scenarios with the S1 switches on (`internal_lean_path`,
+ * `bridged_observation_fast`), measured on 30 Oct 2026 on S0 + S1. `BOUND`
+ * above stays the switch-off contract. Colleague calls take the
+ * recording-frozen-off paths and the lean answer contexts; the first
+ * `call.bridged` writes one fenced row and audits after the lease; an exact
+ * duplicate takes no lease at all. Same two requests of headroom.
+ */
+const BOUND_S1 = {
+  colleagueStart: { 1: { requests: 40, toOwnDial: 15, resolved: 29 }, 2: { requests: 41, toOwnDial: 15, resolved: 29 } },
+  internalOwnAnswer: { 1: { requests: 35, toColleagueDial: 13 }, 2: { requests: 45, toColleagueDial: 13 } },
+  internalCalleeAnswer: { requests: 28, toBridge: 11, toTalking: 7, toCalleeAnswered: 8 },
+  firstBridged: { requests: 19, leases: 1, waves: 13 },
+  duplicateBridged: { requests: 13, leases: 0 },
+} as const;
+
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
@@ -37,7 +54,10 @@ const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
 /** Contract 2 — generation leases and the fenced provider journal — is what production runs. */
 function harness() {
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
-  return createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+  const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+  // `BOUND` is the contract with every latency switch off, whatever the environment says.
+  h.deps.latencyFlags = defaultLatencyFlags();
+  return h;
 }
 
 async function talking(h: TelephonyHarness) {
@@ -374,6 +394,66 @@ describe("contract 2 dependent waves", () => {
     const duplicate = await metered(h, () => h.legEvent(callee, "call.bridged"));
     bounded(duplicate.requests, BOUND.duplicateBridged.requests);
     bounded(duplicate.leases, BOUND.duplicateBridged.leases);
+  });
+
+  describe("with the S1 switches (internal_lean_path, bridged_observation_fast)", () => {
+    const lean = (h: TelephonyHarness) => {
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), internal_lean_path: true, bridged_observation_fast: true };
+      return h;
+    };
+
+    it.each([1, 2] as const)("starts a colleague call to %i endpoint(s) and dials the colleague from the lean context", async (endpoints) => {
+      const h = lean(endpoints === 2 ? nativeWorld() : harness());
+      if (endpoints === 2) h.db.seed("motorist_operator_mobile_devices", [{ organization_id: ORG, profile_id: PROFILES.o2, environment: "development",
+        sip_username: "native-colleague", device_session_id: requestId(9103), device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
+      const { start, call } = await colleague(h);
+      bounded(start.requests, BOUND_S1.colleagueStart[endpoints].requests);
+      bounded(sendWave(start, "dial"), BOUND_S1.colleagueStart[endpoints].toOwnDial);
+      bounded(start.waves, BOUND_S1.colleagueStart[endpoints].resolved);
+
+      h.telnyx.physical.answered(call.operatorLegCallControlId);
+      const answer = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.answered"));
+      expect(h.session(call.sessionId).state).toBe("ringing");
+      const colleagueDial = endpoints === 1 ? sendWave(answer, "dial") : Math.min(sendWave(answer, "dial", 0), sendWave(answer, "dial", 1));
+      bounded(colleagueDial, BOUND_S1.internalOwnAnswer[endpoints].toColleagueDial);
+      bounded(answer.requests, BOUND_S1.internalOwnAnswer[endpoints].requests);
+      // Strictly below the switch-off bounds above.
+      expect(BOUND_S1.internalOwnAnswer[endpoints].toColleagueDial).toBeLessThan(BOUND.internalOwnAnswer[endpoints].toColleagueDial);
+    });
+
+    it("connects a colleague who answers, records call.bridged without staging and acknowledges a duplicate lease-free", async () => {
+      const h = lean(harness());
+      const { call } = await colleague(h);
+      h.telnyx.physical.answered(call.operatorLegCallControlId);
+      await h.legEvent(call.operatorLegCallControlId, "call.answered");
+      const callee = String(h.openLegFor(call.sessionId, PROFILES.o2)!.telnyx_call_control_id);
+      h.telnyx.physical.answered(callee);
+      const answer = await metered(h, () => h.legEvent(callee, "call.answered"), meter => {
+        meter.watch("talking", () => h.session(call.sessionId).state === "talking");
+        meter.watch("callee answered_at", () => Boolean(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === callee)?.answered_at));
+      });
+      expect(h.session(call.sessionId).state).toBe("talking");
+      bounded(sendWave(answer, "bridge"), BOUND_S1.internalCalleeAnswer.toBridge);
+      bounded(markWave(answer, "talking"), BOUND_S1.internalCalleeAnswer.toTalking);
+      bounded(markWave(answer, "callee answered_at"), BOUND_S1.internalCalleeAnswer.toCalleeAnswered);
+      bounded(answer.requests, BOUND_S1.internalCalleeAnswer.requests);
+
+      const first = await metered(h, () => h.legEvent(callee, "call.bridged"));
+      expect(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === callee)?.bridged_at).toBeTruthy();
+      bounded(first.requests, BOUND_S1.firstBridged.requests);
+      bounded(first.leases, BOUND_S1.firstBridged.leases);
+      bounded(first.waves, BOUND_S1.firstBridged.waves);
+      const duplicate = await metered(h, () => h.legEvent(callee, "call.bridged"));
+      expect(duplicate.value.outcome).toBe("ignored");
+      bounded(duplicate.requests, BOUND_S1.duplicateBridged.requests);
+      // Lease-free: none at all, not merely few.
+      expect(duplicate.leases).toBe(BOUND_S1.duplicateBridged.leases);
+      // Below the switch-off contract on every measured step.
+      expect(BOUND_S1.internalCalleeAnswer.toBridge).toBeLessThan(BOUND.internalCalleeAnswer.toBridge);
+      expect(BOUND_S1.internalCalleeAnswer.toCalleeAnswered).toBeLessThan(BOUND.internalCalleeAnswer.toCalleeAnswered);
+      expect(BOUND_S1.firstBridged.requests).toBeLessThan(BOUND.firstBridged.requests);
+      expect(BOUND_S1.duplicateBridged.requests).toBeLessThan(BOUND.duplicateBridged.requests);
+    });
   });
 
   it("holds from the web console, first with the conference promotion and later without", async () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 import { resetActiveCallsCache } from "@/server/telephony/active-calls";
+import { defaultLatencyFlags } from "@/server/telephony/latency-flags";
 import { CUSTOMER_DRAIN_MIN_BUDGET_MS } from "@/server/telephony/routing/ring-plan";
 
 let harness: ReturnType<typeof createTelephonyHarness>;
@@ -174,5 +175,42 @@ describe("GET /api/telephony/calls/active", () => {
     expect(response.status).toBe(503);
     expect(background.after).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toEqual({ error: "Telefónia nie je nakonfigurovaná.", code: "not_configured" });
+  });
+
+  describe("?after= (fresh_after_write, call-speed S1.4)", () => {
+    const passes = () => harness.db.log.filter(row => row.table === "motorist_call_sessions" && row.operation === "select").length;
+    const poll = (after?: number) => GET(new Request(`https://test.local/api/telephony/calls/active${after === undefined ? "" : `?after=${after}`}`));
+
+    it("is ignored, and reported off, while the switch is off", async () => {
+      harness.deps.latencyFlags = defaultLatencyFlags();
+      await poll();
+      const before = passes();
+      harness.advance(1);
+      const body = await (await poll(harness.now().getTime())).json() as { tuning: { freshAfterWrite: boolean } };
+
+      expect(passes()).toBe(before);
+      expect(body.tuning.freshAfterWrite).toBe(false);
+    });
+
+    it("starts a pass only when the cached one predates the change, clamped to the last five seconds", async () => {
+      harness.deps.latencyFlags = { ...defaultLatencyFlags(), fresh_after_write: true };
+      await poll();
+      const before = passes();
+
+      // Same instant as the cached pass: joined.
+      const joined = await (await poll(harness.now().getTime())).json() as { tuning: { freshAfterWrite: boolean } };
+      expect(passes()).toBe(before);
+      expect(joined.tuning.freshAfterWrite).toBe(true);
+      // Older than five seconds clamps to five seconds ago: still joined.
+      await poll(harness.now().getTime() - 60_000);
+      expect(passes()).toBe(before);
+      // Malformed: no constraint.
+      await GET(new Request("https://test.local/api/telephony/calls/active?after=soon"));
+      expect(passes()).toBe(before);
+      // Later than the pass (a future value clamps to now): a new one.
+      harness.advance(1);
+      await poll(harness.now().getTime() + 60_000);
+      expect(passes()).toBe(before + 1);
+    });
   });
 });
