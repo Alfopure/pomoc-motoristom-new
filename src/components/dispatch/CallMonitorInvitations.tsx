@@ -7,8 +7,8 @@ const empty: Inbox = { enabled: false, invitations: [], targets: [] };
 const control = "min-h-11 rounded-lg border border-white/30 bg-zinc-800 px-3 py-2 text-base text-white disabled:opacity-50";
 
 /** No microphone controls: provider monitor role is the authority for receive-only audio. */
-export function CallMonitorInvitations({ sessionId, listeningSessionId, onStop, onAccept }: {
-  sessionId: string | null; listeningSessionId: string | null; onStop: (sessionId: string) => void; onAccept?: (sessionId: string, invitationId: string) => Promise<void>;
+export function CallMonitorInvitations({ sessionId, inviteAllowed = true, listeningSessionId, onStop, onAccept }: {
+  sessionId: string | null; inviteAllowed?: boolean; listeningSessionId: string | null; onStop: (sessionId: string) => void; onAccept?: (sessionId: string, invitationId: string) => Promise<void>;
 }) {
   const [inbox, setInbox] = useState<Inbox>(empty);
   const [open, setOpen] = useState(false);
@@ -58,11 +58,11 @@ export function CallMonitorInvitations({ sessionId, listeningSessionId, onStop, 
   const sent = visible.filter(invitation => invitation.mine && (invitation.sessionId === sessionId || invitation.status === "disconnecting"));
   if (!inbox.enabled && !visible.length) return null;
   return <div className="w-full shrink-0 bg-zinc-900 px-3 py-2 text-sm text-white" data-testid="call-monitor-invitations">
-    {(sessionId || received.length > 0 || sent.length > 0) && <button type="button" className={control} aria-expanded={open} onClick={() => setOpen(value => !value)}>
+    {((sessionId && inviteAllowed) || received.length > 0 || sent.length > 0) && <button type="button" className={control} aria-expanded={open} onClick={() => setOpen(value => !value)}>
       Pozvané počúvanie{received.length ? ` (${received.length})` : ""}
     </button>}
     {(open || received.length > 0 || sent.some(invitation => invitation.status === "disconnecting")) && <section aria-label="Pozvané počúvanie" className="mt-2 flex flex-wrap items-start gap-3 rounded-xl border border-white/20 p-3">
-      {sessionId && inbox.enabled && <form className="flex min-w-0 flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); if (recipient) void act(sessionId, { action: "invite", recipientProfileId: recipient }); }}>
+      {sessionId && inviteAllowed && inbox.enabled && <form className="flex min-w-0 flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); if (recipient) void act(sessionId, { action: "invite", recipientProfileId: recipient }); }}>
         <label className="min-w-0">Poslucháč<select aria-label="Pozvať poslucháča" className={`${control} mt-1 block max-w-full`} value={recipient} onChange={event => setRecipient(event.target.value)}>
           <option value="">Vyber operátora</option>{inbox.targets.map(target => <option key={target.profileId} value={target.profileId} disabled={!target.available}>{target.displayName}{!target.available ? " – nedostupný" : ""}</option>)}
         </select></label>

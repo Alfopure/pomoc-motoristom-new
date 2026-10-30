@@ -1523,6 +1523,8 @@ export type Database = {
         queue_escalate_after_seconds: number;
         inbound_call_mode: "ring_first" | "queue_first";
         routing_version: number;
+        /** Call-speed switches (`latency-flags.ts`); absent until migration 20261031090000. */
+        latency_flags?: Json;
         created_at: Timestamp;
         updated_at: Timestamp;
       }>;

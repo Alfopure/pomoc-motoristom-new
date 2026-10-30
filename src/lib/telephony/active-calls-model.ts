@@ -93,10 +93,14 @@ export type ActiveCallPayload = {
   mine: boolean;
 };
 
+/** Browser latency switches; every default is today's behaviour (call-speed S0.1). */
+export type WebCallTuning = { webEarlyAccept: boolean; webRtcRegion: "auto" | "eu"; webPrefetchIce: boolean; targetLocalFirst: boolean };
+
 export type ActiveCallsPayload = {
   checkedAt: string;
   configured: boolean;
   pausedPickupEnabled?: boolean;
+  tuning?: WebCallTuning;
   /** Organisation whose Realtime topic carries telephony changes. */
   organizationId: string;
   actorProfileId: string;

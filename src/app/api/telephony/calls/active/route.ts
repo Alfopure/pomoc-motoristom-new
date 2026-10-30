@@ -3,6 +3,7 @@ import { after } from "next/server";
 
 import { requireDefaultMotoristActor } from "@/server/api-auth";
 import { loadActiveCalls, loadActiveCallsCached } from "@/server/telephony/active-calls";
+import { latencyFlagsOf, webCallTuning } from "@/server/telephony/latency-flags";
 import { recoverOwnEndedSessionPresence } from "@/server/telephony/presence-recovery";
 import { sweepOverdueRingSteps } from "@/server/telephony/routing/ring-plan";
 import { createTelephonyDeps, TELEPHONY_ROUTE_ROLES, telephonyConfiguredOrResponse, telephonyErrorResponse, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
@@ -91,7 +92,8 @@ export async function GET() {
       // its lease or provider. Send the snapshot before any sweep work begins.
       after(withBackgroundRequestMetrics(() => maybeSweep(deps)));
 
-      return Response.json(snapshot, { headers: { "Cache-Control": "private, no-store" } });
+      // Per response, never in the organisation-wide snapshot cache.
+      return Response.json({ ...snapshot, tuning: webCallTuning(latencyFlagsOf(deps)) }, { headers: { "Cache-Control": "private, no-store" } });
     } catch (error) {
       return telephonyErrorResponse(error, "Aktívne hovory sa nepodarilo načítať.");
     }

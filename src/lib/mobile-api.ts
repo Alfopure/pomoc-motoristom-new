@@ -14,9 +14,19 @@ export type MobileScope = {
 };
 export type MobileDraftScope = MobileScope & { organizationId: string };
 /** Configuration opt-ins only; not provider, device, push-delivery or audio acceptance. */
+/** Phone latency switches; every default is today's behaviour, and a build ignores keys it does not know. */
+export type MobileVoiceTuning = {
+  mobileTokenCache: boolean;
+  mobileRtcRegion: "auto" | "eu";
+  mobileTrickleIce: boolean;
+  mobileRealtimeStatus: boolean;
+  mobileEarlyAccept: boolean;
+  mobileParallelOffers: boolean;
+};
 export type MobileVoiceReadiness = MobileScope & {
   nativeCallingEnabled: boolean;
   backgroundIncomingEnabled: boolean;
+  voiceTuning?: MobileVoiceTuning;
 };
 export type MobileVoiceColleague = {
   profileId: string;

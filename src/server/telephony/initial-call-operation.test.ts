@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createTelephonyHarness, NUMBERS, PROFILES } from "@/test/telephony-harness";
-import { startOutboundCall, createRateLimiter, type CallActor } from "./call-actions";
+import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
+import { callColleague, startOutboundCall, createRateLimiter, type CallActor } from "./call-actions";
 import { initialOperationIdentity } from "./initial-call-operation";
 import { createTelnyxClient } from "./telnyx/client";
 import { getTelnyxConfig } from "./telnyx/env";
@@ -256,5 +256,148 @@ describe("initial call operation recovery", () => {
     await expect(startOutboundCall(t.deps, actor, { ...input, to: "+421900000099" })).rejects.toMatchObject({ status: 409, code: "request_id_conflict" });
     expect(t.fetch).toHaveBeenCalledTimes(0);
     expect(t.h.rows("motorist_call_sessions")).toHaveLength(1);
+  });
+});
+
+/**
+ * A hangup can commit its termination (`terminate_v2`) before the startup's own
+ * dial reaches the provider. The startup entry's compensation is the only
+ * thing that ends such a session and frees its operator.
+ */
+describe("hangup before the first dial", () => {
+  function world() {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    const releases: Array<{ sessionId: unknown; applied: boolean }> = [];
+    const transition = h.db.rpcHandlers.get("motorist_presence_transition_v1")!;
+    h.db.registerRpc("motorist_presence_transition_v1", async (args, db) => {
+      const result = await transition(args, db) as { applied: boolean };
+      if (args.p_action === "release") releases.push({ sessionId: args.p_session_id, applied: result.applied });
+      return result;
+    });
+    // What `hangupCall` commits before it waits for the lease.
+    const terminate = (id: unknown) => h.db.rpcHandlers.get("motorist_session_terminate_v2")!({ p_organization_id: ORG, p_session_id: id }, h.db);
+    const deps = { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) };
+    return { h, deps, releases, terminate };
+  }
+  type World = ReturnType<typeof world>;
+  const start = (t: World, kind: "outbound" | "internal") => kind === "outbound"
+    ? startOutboundCall(t.deps, actor, { to: NUMBERS.customer, requestId: "00000000-0000-4000-8000-0000000005c1" })
+    : callColleague(t.deps, actor, { targetProfileId: PROFILES.o2, requestId: "00000000-0000-4000-8000-0000000005c2" });
+
+  function expectCancelled(t: World, reserved: boolean) {
+    const [session] = t.h.rows("motorist_call_sessions") as SessionRow[];
+    expect(t.h.telnyx.of("dial")).toHaveLength(0);
+    expect(session).toMatchObject({ state: "ended", ended_at: expect.any(String), termination_requested_at: expect.any(String) });
+    expect(readPendingEffects(session).entries).toEqual([]);
+    expect(t.h.call(session.id)).toMatchObject({ status: "ended", end_reason: "cancelled_before_dial" });
+    expect(t.h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
+    // Released exactly once when the startup had reserved the operator; never reserved, never touched.
+    expect(t.releases.filter(release => release.sessionId === session.id && release.applied)).toHaveLength(reserved ? 1 : 0);
+  }
+
+  it.each(["outbound", "internal"] as const)("ends an %s call terminated between INSERT and the lease, before any reservation", async (kind) => {
+    const t = world();
+    const acquire = t.h.db.rpcHandlers.get("motorist_session_lease_acquire_v2")!;
+    let first = true;
+    t.h.db.registerRpc("motorist_session_lease_acquire_v2", async (args, db) => {
+      if (first) { first = false; await t.terminate(args.p_session_id); }
+      return acquire(args, db);
+    });
+    const revision = t.h.presence(actor.profileId).presence_revision;
+    await expect(start(t, kind)).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    expectCancelled(t, false);
+    expect(t.h.presence(actor.profileId).presence_revision).toBe(revision);
+  });
+
+  it.each(["outbound", "internal"] as const)("compensates an %s dial that prepare_v2 refuses after staging", async (kind) => {
+    const t = world();
+    const prepare = t.h.db.rpcHandlers.get("motorist_provider_command_prepare_v2")!;
+    let terminated = false;
+    t.h.db.registerRpc("motorist_provider_command_prepare_v2", async (args, db) => {
+      if (args.p_path === "/calls" && !terminated) {
+        terminated = true;
+        expect(t.h.presence(actor.profileId)).toMatchObject({ status: "on_call", current_session_id: args.p_session_id });
+        await t.terminate(args.p_session_id);
+      }
+      return prepare(args, db);
+    });
+    await expect(start(t, kind)).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    expect(terminated).toBe(true);
+    expectCancelled(t, true);
+  });
+
+  it("compensates a dial whose validity read already sees the termination", async () => {
+    const t = world();
+    const stage = t.h.db.rpcHandlers.get("motorist_stage_transition_v1")!;
+    t.h.db.registerRpc("motorist_stage_transition_v1", async (args, db) => {
+      const staged = await stage(args, db);
+      const entry = (args.p_main as { entry: { id: string } }).entry;
+      if (entry.id.startsWith("initial:")) await t.terminate(args.p_session_id);
+      return staged;
+    });
+    await expect(start(t, "outbound")).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    expectCancelled(t, true);
+  });
+
+  it("changes nothing when the journal cannot be read after the validity read", async () => {
+    const t = world();
+    const stage = t.h.db.rpcHandlers.get("motorist_stage_transition_v1")!;
+    t.h.db.registerRpc("motorist_stage_transition_v1", async (args, db) => {
+      const staged = await stage(args, db);
+      if ((args.p_main as { entry: { id: string } }).entry.id.startsWith("initial:")) {
+        await t.terminate(args.p_session_id);
+        t.h.db.failNext("motorist_provider_command_lookup_v2", "rpc", "journal unavailable");
+      }
+      return staged;
+    });
+    await expect(start(t, "outbound")).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    const [session] = t.h.rows("motorist_call_sessions") as SessionRow[];
+    expect(t.h.telnyx.of("dial")).toHaveLength(0);
+    expect(t.h.call(session.id)?.end_reason ?? null).not.toBe("cancelled_before_dial");
+    expect(t.h.logs).toContainEqual(expect.objectContaining({ code: "initial_cancellation_unverified", sessionId: session.id }));
+    expect(t.h.rows("motorist_job_incidents")).toHaveLength(0);
+  });
+
+  it("leaves a dial whose provider outcome is unknown to the termination machinery", async () => {
+    const t = world();
+    t.h.telnyx.loseNextResponse("dial");
+    await expect(start(t, "outbound")).rejects.toMatchObject({ status: 503, code: "provider_outcome_unknown" });
+    const [session] = t.h.rows("motorist_call_sessions") as SessionRow[];
+    expect(readPendingEffects(session).entries).toHaveLength(1);
+    await t.terminate(session.id);
+    // The retry resumes the staged dial: the provider may have taken it, so it is not "cancelled before dial".
+    await expect(start(t, "outbound")).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    expect(t.h.telnyx.of("dial")).toHaveLength(1);
+    expect(t.h.call(session.id)?.end_reason ?? null).not.toBe("cancelled_before_dial");
+  });
+
+  it("cleans up an unknown first dial once its late call.initiated arrives", async () => {
+    const t = world();
+    t.h.telnyx.loseNextResponse("dial");
+    await expect(start(t, "outbound")).rejects.toMatchObject({ status: 503, code: "provider_outcome_unknown" });
+    const [session] = t.h.rows("motorist_call_sessions") as SessionRow[];
+    expect(t.h.presence(actor.profileId)).toMatchObject({ status: "on_call", current_session_id: session.id });
+    await t.terminate(session.id);
+    // The provider did create the operator's leg; its first event arrives after the hangup.
+    const [own] = [...t.h.telnyx.physical.legs.keys()];
+    const dial = t.h.telnyx.of("dial")[0];
+    expect((await t.h.process(t.h.envelope("call.initiated", { call_control_id: own, call_leg_id: `leg-${own}`, call_session_id: `tsess-${own}`,
+      client_state: dial.params.clientState, to: dial.params.to, from: dial.params.from, direction: "outgoing" }))).outcome).toBe("processed");
+    expect(t.h.telnyx.physical.legs.get(own)?.ended).toBe(true);
+    expect(t.h.session(session.id)).toMatchObject({ state: "ended", ended_at: expect.any(String) });
+    expect(t.h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
+    expect(t.releases.filter(release => release.sessionId === session.id && release.applied)).toHaveLength(1);
+  });
+
+  it("leaves a call that dialled before the hangup to the ordinary termination", async () => {
+    const t = world();
+    const call = await start(t, "outbound");
+    await t.terminate(call.sessionId);
+    // A retried POST of the same request must not rewrite the dialled call as cancelled.
+    await expect(start(t, "outbound")).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    expect(t.h.telnyx.of("dial")).toHaveLength(1);
+    expect(t.h.session(call.sessionId)).toMatchObject({ state: "received", ended_at: null });
+    expect(t.h.call(call.sessionId)?.end_reason ?? null).not.toBe("cancelled_before_dial");
   });
 });

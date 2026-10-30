@@ -94,7 +94,10 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
 // Reviewed increase 58 → 59: the bounded transient-read helper adds only
 // function definitions and reuses the existing ownership module. It performs
 // no import-time I/O and adds no package or heavy application dependency.
-const MAX_MODULES = 59;
+// Reviewed increase 59 → 60: the call-speed latency switches (latency-flags.ts)
+// freeze a new inbound session's start mode. Pure functions plus a cached
+// settings read at deps creation, with type-only imports and no import-time I/O.
+const MAX_MODULES = 60;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);

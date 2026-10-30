@@ -4,6 +4,8 @@ export const CALL_PERFORMANCE_OPERATIONS = [
   "call.hold", "call.unhold", "call.park", "call.defer", "call.consult", "call.cancel-consult",
   "call.complete-transfer", "call.transfer", "call.add-party", "call.leave", "call.supervise",
   "call.stop-supervise", "call.reconcile", "call.party-mute", "call.party-unmute", "call.party-kick",
+  // Phone routes; server-side request metrics only, never derived from a web path.
+  "mobile.voice-token", "mobile.offer", "mobile.hold", "mobile.hold-status", "mobile.call-status",
 ] as const;
 export type CallPerformanceOperation = typeof CALL_PERFORMANCE_OPERATIONS[number];
 export function isCallPerformanceOperation(value: unknown): value is CallPerformanceOperation {

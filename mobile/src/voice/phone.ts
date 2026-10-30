@@ -199,7 +199,9 @@ export class DispatchPhone {
         this.leaseId ??= await this.leases?.load() ?? null;
         if (!this.current(generation) || (automatic && !this.idleForRecovery())) return;
         step = "token";
+        this.diag("token.start", { takeover, automatic });
         const token = await this.api.token(this.leaseId ?? undefined, takeover);
+        this.diag("token.end", { outcome: "ok" });
         if (!this.current(generation)) { await this.api.disconnect(token.deviceSessionId).catch(() => {}); return; }
         this.leaseId = token.deviceSessionId;
         step = "save";
@@ -557,6 +559,7 @@ export class DispatchPhone {
     this.pendingDial ??= { requestId: this.uuid(), target, uncertain: false };
     const generation = this.generation, leaseId = this.token.deviceSessionId;
     let createdSession: string | null = null;
+    this.diag("call.tap", { kind: target.kind });
     this.update({ dialing: true, error: null, retryTarget: null });
     try {
       const command = this.pendingDial;
@@ -565,6 +568,7 @@ export class DispatchPhone {
         : command.target.kind === "callback"
           ? await this.api.startCallback(leaseId, command.requestId, command.target.callbackRequestId, command.target.verificationId)
           : await this.api.start(leaseId, command.requestId, command.target.number, command.target.verificationId, command.target.caseId);
+      this.diag("call.start_response", { kind: target.kind, outcome: "ok", session: short(outgoing.sessionId) });
       createdSession = outgoing.sessionId;
       if (!this.current(generation)) {
         if (!this.retainsOutgoingCommand(command.requestId, outgoing.sessionId)) await this.api.end(leaseId, outgoing.sessionId).catch(() => {});
@@ -577,7 +581,7 @@ export class DispatchPhone {
       const invites = [...this.pendingInvites.values()]; this.pendingInvites.clear();
       for (const event of invites) await this.event(event);
       this.schedule();
-    } catch (error) { if (this.current(generation)) {
+    } catch (error) { if (!createdSession) this.diag("call.start_response", { kind: target.kind, outcome: "error", ...failure(error) }); if (this.current(generation)) {
       if (createdSession) { this.pendingDial = null; this.outgoingIntent = null; await this.endSession(createdSession); }
       const denied = error instanceof MobileApiError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
       if (!createdSession && this.pendingDial && !denied) this.pendingDial.uncertain = true;

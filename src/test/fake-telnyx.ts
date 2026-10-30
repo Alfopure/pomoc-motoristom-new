@@ -56,6 +56,10 @@ export type PhysicalProvider = {
 export type FakeTelnyx = {
   client: TelnyxClient;
   calls: FakeTelnyxCall[];
+  /** When each journalled command left for the provider (`Date.now()`), for wave counting. */
+  sent: Array<{ method: string; at: number }>;
+  /** Every journalled command waits this long at the provider; 0 (the default) adds no await. */
+  setFetchDelay(ms: number): void;
   physical: PhysicalProvider;
   /** Provider executes the operation but its HTTP acknowledgement is lost. */
   loseNextResponse(method: string): void;
@@ -136,6 +140,8 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   if (!config.configured) throw new Error("fake telnyx needs a configured env");
   const liveGate: TelnyxLiveGate = { callsEnabled: true, smsEnabled: true, ...(options.liveGate ?? {}) };
   const calls: FakeTelnyxCall[] = [];
+  const sends: FakeTelnyx["sent"] = [];
+  let fetchDelayMs = 0;
   const oneShot = new Map<string, Error[]>();
   const callStatuses = new Map<string, FakeCallStatus>();
   const callIdentities = new Map<string, { callLegId: string; callSessionId: string }>();
@@ -192,8 +198,10 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     const outcome = await dispatchJournaled(
       journal,
       async () => {
+        sends.push({ method, at: Date.now() });
         recordOnly(method, params);
         options?.onSend?.();
+        if (fetchDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, fetchDelayMs));
         const injected = takeFailure(method);
         // A provider that answers 4xx has answered: the journal records the
         // refusal, and a replay of the same command gets it back rather than
@@ -509,6 +517,8 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   return {
     client,
     calls,
+    sent: sends,
+    setFetchDelay(ms) { fetchDelayMs = ms; },
     physical,
     loseNextResponse(method) { lostResponses.set(method, (lostResponses.get(method) ?? 0) + 1); },
     nextId,
@@ -536,6 +546,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     },
     reset() {
       calls.length = 0;
+      sends.length = 0;
       physicalLegs.clear(); bridgePairs.clear(); conferenceParticipants.clear(); accepted.clear();
       conferenceParticipantSnapshots.clear(); conferenceParticipantFlags.clear();
       callStatuses.clear(); callIdentities.clear();

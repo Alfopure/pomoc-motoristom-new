@@ -540,3 +540,13 @@ test("the phase 4 statistics views are service-role only and agree with the Type
   assert.match(statsMigration, /answer_seconds <= 20\)::bigint as answered_within_20s/);
   assert.match(wallboard, /SERVICE_LEVEL_SECONDS = 20/);
 });
+
+test("the call-speed latency switches column is additive and changes no privilege", () => {
+  const sql = readFileSync(new URL("../supabase/migrations/20261031090000_telephony_latency_flags.sql", import.meta.url), "utf8")
+    .replace(/--[^\n]*/g, "");
+  // The application reads env alone while the column is absent, so it may only be added.
+  assert.match(sql, /alter table public\.motorist_telephony_settings\s+add column if not exists latency_flags jsonb not null default '\{\}'::jsonb check \(jsonb_typeof\(latency_flags\) = 'object'\);/);
+  assert.doesNotMatch(sql, /\b(drop|rename|truncate|delete|update|insert)\b/i);
+  // The settings table keeps its lock-down: members select, only the service role writes.
+  assert.doesNotMatch(sql, /\b(grant|revoke|policy|security definer)\b/i);
+});

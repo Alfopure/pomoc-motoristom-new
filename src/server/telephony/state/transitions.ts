@@ -744,6 +744,22 @@ function onInitiated(b: TransitionBuilder, event: TelephonyEvent): ReduceResult 
     return b.note("leg initiated for a terminal session → hangup").result();
   }
 
+  // A leg first reported after a committed termination that found no leg to
+  // end: the operator hung up while their own startup dial had an unknown
+  // outcome. Nothing else ends this call before the leg's own timeout, so hang
+  // it up and end the session as the hangup would have.
+  if (b.session.termination_requested_at && !b.meta.hangup && ACTIVE_SESSION_STATES.has(b.session.state) &&
+    (leg ? !b.legEnded(leg) : state?.sid === b.session.id) && b.openLegs().every(open => open.telnyx_call_control_id === event.callControlId)) {
+    hangupOrphanLeg(b, event.callControlId, leg?.role ?? state?.role ?? "operator");
+    b.setState("ended").patchSession({ ended_at: b.nowIso });
+    b.call.status = "ended";
+    b.call.end_reason = "operator_cancel";
+    b.call.ended_at = b.nowIso;
+    const owner = b.session.answered_by_profile_id;
+    if (owner) b.presenceChange({ profileId: owner, status: "available", sessionId: null, onlyIfSession: b.session.id, reason: "leg after termination" });
+    return b.note("leg initiated after a committed termination → hangup, session ended").result();
+  }
+
   if (!leg) {
     // A leg we dialed (or a transfer target) whose webhook overtook our own upsert.
     if (!state || state.sid !== b.session.id) return ignoredResult("foreign leg");
@@ -2176,6 +2192,27 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
     return b.note(stillSupervising ? "one supervisor leg of several left" : "supervisor left").result();
   }
 
+  // The operator's own leg of an outgoing call ended while the customer still
+  // rings. Nobody else can take this call, so the customer must not keep
+  // ringing toward a dead phone; `onInternalPartyHangup` is the colleague-call
+  // equivalent. A customer dial whose leg row is not saved yet (outcome still
+  // unknown) ends with the session: its late `call.initiated` meets a terminal
+  // session and is hung up there.
+  const customerRinging = b.customerLeg();
+  if (b.session.direction === "outbound" && state === "ringing" && meta.ring?.mode === "outbound" && leg.role === "operator" &&
+    intent === "outbound" && Boolean(leg.profile_id) && leg.profile_id === b.session.answered_by_profile_id &&
+    (!customerRinging || !b.legEnded(customerRinging))) {
+    if (customerRinging) b.cmd(hangupCmd(b, customerRinging, "operator_left"));
+    b.setState("ended").patchSession({ ended_at: at });
+    b.call.status = "ended";
+    b.call.end_reason = answered ? "operator_left" : "operator_leg_unavailable";
+    b.call.ended_at = at;
+    releaseTalkingOperators(b, false);
+    b.note("operator leg ended while the customer was ringing → customer hung up");
+    finishIfQuiet(b, at);
+    return b.result();
+  }
+
   // 1. An offer that ended without being answered.
   if (!answered) {
     if (intent === "pickup" && meta.pickup?.by === leg.profile_id) b.patchMeta({ pickup: null });
@@ -2716,6 +2753,11 @@ export class CallActionRejected extends Error {
   }
 }
 
+/** Customer-call controls that a colleague call refuses; hangup, defer, pickup, party mute and recording stay. */
+const INTERNAL_UNSUPPORTED_ACTIONS: ReadonlySet<AppEvent["type"]> = new Set<AppEvent["type"]>([
+  "hold", "unhold", "park", "blind_transfer", "consult", "complete_transfer", "cancel_consult", "add_party", "invite_monitor", "supervise",
+]);
+
 function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
   if (event.type === "sweep") return onSweep(b);
   // Ending an invited listener remains valid after the customer/session ends.
@@ -2725,6 +2767,12 @@ function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
     return appStopSupervise(b, event);
   }
   if (!ACTIVE_SESSION_STATES.has(b.session.state)) throw new CallActionRejected("Hovor už nie je aktívny.", 409, "not_active");
+  // A colleague call has no customer: `customerLeg()` is the colleague's own
+  // leg, which no `park_after_unbridge` protects, so a conference promotion
+  // or transfer would hang up the colleague and end the call.
+  if (b.session.direction === "internal" && INTERNAL_UNSUPPORTED_ACTIONS.has(event.type)) {
+    throw new CallActionRejected("Pri hovore s kolegom táto akcia nie je dostupná.", 409, "not_supported_internal");
+  }
   const customer = b.customerLeg();
   if (!customer || b.legEnded(customer)) {
     // Cancellation also repairs an active session whose legs have all ended;

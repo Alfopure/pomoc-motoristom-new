@@ -49,7 +49,8 @@ import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "./telnyx/clien
 import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
-import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, sessionOwnership } from "./ownership";
+import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, ownershipRpc, sessionOwnership } from "./ownership";
+import { freezeStartMode, latencyFlagsOf, providerRegionOf } from "./latency-flags";
 import { humansOnly } from "@/server/profile-kind";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { nativeVoiceEnabled } from "@/lib/app-environment";
@@ -563,6 +564,12 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
     // untouched new row can have no earlier dispatch to recover.
     const fresh = !recovering && session.version === original.version && session.state === "received" &&
       !session.ended_at && !session.termination_requested_at && !readPendingEffects(session).entries.length;
+    if (!fresh) await endUndialedInitialCall(deps, actor, session, id).catch((error: unknown) => {
+      if (error instanceof SessionLeaseLostError) throw error;
+      // The request still answers 409 below; a later attempt can end the session.
+      deps.logger?.({ level: "warn", scope: "call-actions", code: "initial_cancellation_pending", sessionId: session.id,
+        error: error instanceof Error ? error.message : String(error) });
+    });
     const recovered = fresh ? null : await recoverInitialDial(deps, session, id, plan);
     if (recovered) return recovered;
     if (plan.callbackRequestId) {
@@ -655,6 +662,32 @@ async function completeDurableInitialDial(deps: CallActionDeps, session: Session
   const accepted = await recoverInitialDial(deps, current, id, plan);
   if (accepted) return accepted;
   throw new CallActionError("Úvodný krok hovoru zostáva nedokončený. Zopakujte overenie pôvodnej požiadavky.", 503, "initial_call_pending");
+}
+
+/**
+ * A hangup committed its termination after INSERT and before this request
+ * reached the lease. Nothing was reserved or dialled, and no later event would
+ * ever end the session: `appHangup` needs legs, the sweep a customer leg. End
+ * it as cancelled once the journal proves its dial was never prepared; the
+ * request still answers 409 `initial_call_ended`.
+ */
+async function endUndialedInitialCall(deps: CallActionDeps, actor: CallActor, session: SessionRow, dialCommandId: string): Promise<void> {
+  if (session.writer_contract !== 2 || !session.termination_requested_at || session.ended_at || session.state !== "received" ||
+    readPendingEffects(session).entries.length || sessionOwnership.getStore()?.contract !== 2) return;
+  if (await ownershipRpc<unknown>(deps.admin, "motorist_provider_command_lookup_v2", { p_session_id: session.id, p_command_id: dialCommandId })) return;
+  const now = nowOf(deps).toISOString();
+  const cancelled = emptyTransition();
+  cancelled.session = { state: "ended", ended_at: now };
+  cancelled.call = { status: "ended", end_reason: "cancelled_before_dial", ended_at: now };
+  // No `onlyIfToken`: this request reserved nothing, so there is no token to
+  // match. `onlyIfSession` binds the release to this session, and a presence
+  // holding another owner's token is never released without that token.
+  cancelled.presence = [{ profileId: actor.profileId, status: "available", sessionId: null, onlyIfSession: session.id, reason: "cancelled before dial" }];
+  cancelled.notes = ["initial dial cancelled before dispatch"];
+  const staged = await stageEffects(effectsFor(deps), { session, expectedVersion: session.version,
+    event: { kind: "app", type: "sweep", id: `initial-cancelled:${dialCommandId}`, actorProfileId: actor.profileId, occurredAt: now },
+    result: { next: cancelled, commands: [], compensations: [], guard: null, ignored: null } });
+  await resumePendingEffects(effectsFor(deps), staged);
 }
 
 // --- in-call actions ---------------------------------------------------------
@@ -1099,6 +1132,8 @@ async function superviseCallOwned(deps: CallActionDeps, actor: CallActor, sessio
   }
   if (!invitationId && !canSuperviseRole(actor.role)) throw new CallActionError("Dozor nad hovorom je dostupný len pre manažéra alebo administrátora.", 403, "forbidden");
   const session = await loadSession(deps, sessionId);
+  // Also refuses an invitation created before colleague calls refused monitoring.
+  if (session.direction === "internal") throw internalCallUnsupported();
   if (!TALKING_STATES.has(session.state)) throw new CallActionError("Dozor je možný len pri prebiehajúcom hovore.", 409, "not_active");
   if (invitationId) {
     const invitation = (session.metadata as import("./state/types").SessionMeta).monitorInvitations?.[invitationId];
@@ -1178,9 +1213,15 @@ async function requireActiveMonitorProfile(deps: CallActionDeps, profileId: stri
   return data;
 }
 
+/** The reducer's colleague-call refusal, before any further read, reservation or dial. */
+function internalCallUnsupported(): CallActionError {
+  return new CallActionError("Pri hovore s kolegom táto akcia nie je dostupná.", 409, "not_supported_internal");
+}
+
 export async function inviteCallMonitor(deps: CallActionDeps, actor: CallActor, sessionId: string, recipientProfileId: string): Promise<CallActionResult> {
   await requireMonitorInvitations(deps);
   const session = await conferenceSession(deps, actor, sessionId);
+  if (session.direction === "internal") throw internalCallUnsupported();
   if (recipientProfileId === actor.profileId) throw new CallActionError("Nemôžeš pozvať seba.", 400);
   const recipient = await requireActiveMonitorProfile(deps, recipientProfileId);
   await requireLiveDevice(deps, recipientProfileId, "Telefón poslucháča nie je pripojený.");
@@ -1287,7 +1328,8 @@ async function createSession(
       caller_number: input.callerNumber,
       called_number: input.calledNumber,
       started_at: nowOf(deps).toISOString(),
-      metadata: toJson({ ...input.metadata, environment: deps.environment }),
+      metadata: toJson({ ...input.metadata, environment: deps.environment,
+        start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: input.direction, origin: deps.deviceKind ?? "web", providerRegion: providerRegionOf(deps.config) }) }),
     })
     .select("*")
     .single();

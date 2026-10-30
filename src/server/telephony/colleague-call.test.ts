@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { completeCallAnnouncements } from "@/test/complete-call-announcements";
 import { createTelephonyHarness, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
-import { callColleague, CallActionError, createRateLimiter, hangupCall, INTERNAL_CALL_CUSTOMER_RESERVE, pickupWaitingCall, type CallActionDeps, type CallActor } from "./call-actions";
-import { runSessionEvent } from "./session-runner";
+import { callColleague, CallActionError, createRateLimiter, hangupCall, holdCall, INTERNAL_CALL_CUSTOMER_RESERVE, pickupWaitingCall, type CallActionDeps, type CallActor } from "./call-actions";
+import { loadRoutingContext, loadSessionSnapshot, runSessionEvent } from "./session-runner";
+import { CallActionRejected, reduce } from "./state/transitions";
+import type { AppEvent } from "./state/types";
 import { loadCallPushCandidates } from "./call-notifications";
 
 /**
@@ -107,6 +109,16 @@ describe.each(MODES)("colleague call ($name)", ({ stability, writerContract }) =
     for (const profileId of [PROFILES.o1, PROFILES.o2]) expect(h.presence(profileId)).toMatchObject({ status: "available", current_session_id: null });
   });
 
+  it("stops ringing the colleague when the caller's own leg drops first", async () => {
+    const h = world();
+    const call = await ringing(h);
+    await h.legEvent(call.caller, "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(hungUp(h, call.callee)).toBe(true);
+    expect(h.session(call.sessionId).state).toBe("ended");
+    expect(h.call(call.sessionId)).toMatchObject({ status: "ended" });
+    for (const profileId of [PROFILES.o1, PROFILES.o2]) expect(h.presence(profileId)).toMatchObject({ status: "available", current_session_id: null });
+  });
+
   it("ends the caller's leg too when the colleague declines", async () => {
     const h = world();
     const call = await ringing(h);
@@ -178,6 +190,37 @@ describe.each(MODES)("colleague call ($name)", ({ stability, writerContract }) =
     expect(h.session(call.sessionId)).toMatchObject({ state: "ended", presence_pickup: null });
     expect(h.presence(PROFILES.o2)).toMatchObject({ status: paused ? "paused" : "available", current_session_id: null });
     expect(h.presence(PROFILES.o1)).toMatchObject({ status: "available", current_session_id: null });
+  });
+
+  // Holding a colleague call promoted it to a conference from the caller's leg,
+  // which hung up the colleague: reproduced on TEST on 30 Oct.
+  it.each(["hold", "unhold", "park", "blind_transfer", "consult", "complete_transfer", "cancel_consult", "add_party", "invite_monitor", "supervise"] as const)(
+    "refuses %s on a colleague call without a command", async (type) => {
+      const h = world();
+      const call = await talking(h);
+      const snapshot = await loadSessionSnapshot(h.deps, call.sessionId);
+      const event: AppEvent = { kind: "app", id: randomUUID(), type, actorProfileId: PROFILES.o1, occurredAt: h.now().toISOString(),
+        target: { kind: "number", number: "+421900000000", label: "Číslo" },
+        supervisor: { profileId: PROFILES.o4, sipUri: "sip:gencred004@sip.telnyx.com", mode: "monitor", label: "Manažér" } };
+      const context = await loadRoutingContext(h.deps, snapshot.session, event, snapshot.legs);
+      let refused: unknown = null;
+      try { reduce(snapshot.session, snapshot.legs, snapshot.attempts, event, context); }
+      catch (error) { refused = error; }
+      expect(refused).toBeInstanceOf(CallActionRejected);
+      expect(refused).toMatchObject({ status: 409, code: "not_supported_internal" });
+    });
+
+  it("answers a hold of a colleague call with 409 and keeps both people connected", async () => {
+    const h = world();
+    const call = await talking(h);
+    const commands = h.telnyx.calls.length;
+    expect(await fail(holdCall(deps(h), jana, call.sessionId))).toMatchObject({ status: 409, code: "not_supported_internal" });
+    expect(h.telnyx.calls).toHaveLength(commands);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "talking", conference_id: null });
+    expect(h.legs(call.sessionId).filter((leg) => !leg.ended_at).map((leg) => leg.telnyx_call_control_id).sort()).toEqual([call.caller, call.callee].sort());
+    // Hanging up stays available.
+    await hangupCall(deps(h), jana, call.sessionId);
+    expect(hungUp(h, call.callee)).toBe(true);
   });
 
   it("wakes a paused colleague's mobile with the caller's name", async () => {

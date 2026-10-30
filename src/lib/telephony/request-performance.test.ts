@@ -12,6 +12,8 @@ describe("database-free request performance", () => {
     expect(callPerformanceOperation("/api/telephony/calls/private/unknown")).toBeUndefined();
     expect(readRequestPerformance([{ id: id(1), operation: "call.hold", ms: 22.55, outcome: "ok", phone: "secret", requestId: "secret" }])).toEqual([{id:id(1),operation:"call.hold",ms:22.6,outcome:"ok"}]);
     expect(readRequestPerformance([{id:id(1),operation:"call.hold",ms:-1,outcome:"ok"}, {id:id(2),operation:"call.hold",ms:Infinity,outcome:"ok"}])).toEqual([]);
+    // Phone routes are measured by the server; a browser row claiming one is dropped.
+    expect(readRequestPerformance([{id:id(3),operation:"mobile.hold",ms:5,outcome:"ok"}, {id:id(4),operation:"mobile.call-status",ms:5,outcome:"ok"}])).toEqual([]);
   });
   it("bounds pending observations, counts evictions, and never clears unacknowledged or newer measurements", () => {
     let now = 0; const queue = new RequestPerformanceQueue(() => now);

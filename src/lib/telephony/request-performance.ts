@@ -18,7 +18,8 @@ export function readRequestPerformance(value: unknown): BrowserRequestPerformanc
   return value.slice(0, REQUEST_PERFORMANCE_BATCH_LIMIT).flatMap(item => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
     const row = item as Record<string, unknown>;
-    if (typeof row.id !== "string" || !UUID.test(row.id) || seen.has(row.id) || !isCallPerformanceOperation(row.operation) ||
+    // `mobile.*` operations are measured by the server only; a browser cannot report them.
+    if (typeof row.id !== "string" || !UUID.test(row.id) || seen.has(row.id) || !isCallPerformanceOperation(row.operation) || row.operation.startsWith("mobile.") ||
       typeof row.ms !== "number" || !Number.isFinite(row.ms) || row.ms < 0 || row.ms > Number.MAX_SAFE_INTEGER ||
       typeof row.outcome !== "string" || !outcomes.has(row.outcome)) return [];
     seen.add(row.id);

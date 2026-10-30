@@ -27,7 +27,7 @@ const controlStages = new Set<string>(CONTROL_STAGES);
 
 export type RequestStep = "auth" | "auth.token" | "auth.profile" | "db" | "lease" | "provider" | "checkpoint" | "read" | "write"
   | "routing.snapshot" | "routing.configuration" | "routing.eligibility" | "guard.stage" | ControlStep;
-export type MeasuredRoute = "case.get" | "case.save" | "case.create" | "case.action" | "case.assign" | "sms.send" | "document.upload" | "document.generate" | "integration.lookup" | "call.start" | "call.action" | "call.webhook" | "call.active" | "dispatch.refresh" | "fleet.refresh";
+export type MeasuredRoute = "case.get" | "case.save" | "case.create" | "case.action" | "case.assign" | "sms.send" | "document.upload" | "document.generate" | "integration.lookup" | "call.start" | "call.action" | "call.webhook" | "call.active" | "call.token" | "call.offer" | "dispatch.refresh" | "fleet.refresh";
 
 type Metric = { count: number; ms: number; dbCount?: number; dbMs?: number };
 type RequestMetrics = {
@@ -45,13 +45,16 @@ type RequestMetrics = {
   dbMaxMs: number | null;
   dbAborts: number;
   connectsAtStart: number;
+  telnyxConnectsAtStart: number;
   eluAtStart: ReturnType<typeof performance.eventLoopUtilization>;
 };
 
 const requests = new AsyncLocalStorage<RequestMetrics>();
 const controlStageScope = new AsyncLocalStorage<{ request: RequestMetrics; metric: Metric; finished: boolean }>();
 const databaseHosts = new Set<string>();
+const telnyxHosts = new Set<string>();
 let databaseConnects = 0;
+let telnyxConnects = 0;
 
 // Undici pools sockets across requests. This is an instance-window count,
 // deliberately not an attribution to whichever request happened to create it.
@@ -59,6 +62,7 @@ channel("undici:client:connected").subscribe((message) => {
   try {
     const host = (message as { connectParams?: { hostname?: string } }).connectParams?.hostname;
     if (host && databaseHosts.has(host)) databaseConnects += 1;
+    else if (host && telnyxHosts.has(host)) telnyxConnects += 1;
   } catch { /* Diagnostics callbacks must never affect the transport. */ }
 });
 
@@ -66,6 +70,14 @@ export function registerDatabaseOrigin(input: RequestInfo | URL): void {
   try {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     if (url.pathname.startsWith("/rest/v1/") && databaseHosts.size < 16) databaseHosts.add(url.hostname);
+  } catch { /* No URLs or credentials enter the log. */ }
+}
+
+/** The Telnyx API host(s) whose new sockets are counted; like the database, only a count is ever logged. */
+export function registerTelnyxOrigin(input: string | URL): void {
+  try {
+    const url = new URL(typeof input === "string" ? input : input.href);
+    if (telnyxHosts.size < 4) telnyxHosts.add(url.hostname);
   } catch { /* No URLs or credentials enter the log. */ }
 }
 
@@ -97,7 +109,7 @@ export function requestTimingContext(): { request_id: string; ingress_at: string
 function newScope(route: MeasuredRoute, now: () => number, logger: RequestMetrics["logger"], parent?: RequestMetrics): RequestMetrics {
   return { id: parent?.id ?? randomUUID(), ingressAt: parent?.ingressAt ?? new Date().toISOString(), route, operation: parent?.operation,
     started: now(), now, logger, steps: {}, finished: false, dbIssued: 0, dbFirstMs: null, dbMaxMs: null, dbAborts: 0,
-    connectsAtStart: databaseConnects, eluAtStart: performance.eventLoopUtilization() };
+    connectsAtStart: databaseConnects, telnyxConnectsAtStart: telnyxConnects, eluAtStart: performance.eventLoopUtilization() };
 }
 
 function finish(scope: RequestMetrics, detail: Record<string, unknown>): void {
@@ -115,6 +127,7 @@ function finish(scope: RequestMetrics, detail: Record<string, unknown>): void {
       dbFirstMs: scope.dbFirstMs === null ? null : round(scope.dbFirstMs),
       dbMaxMs: scope.dbMaxMs === null ? null : round(scope.dbMaxMs), dbAborts: scope.dbAborts,
       dbConnects: databaseConnects - scope.connectsAtStart, dbConnectsScope: "instance-window",
+      telnyxConnects: telnyxConnects - scope.telnyxConnectsAtStart,
       instanceEventLoopUtilization: performance.eventLoopUtilization(scope.eluAtStart).utilization, ...detail });
   } catch { /* Telemetry must never change the result of a committed operation. */ }
 }
@@ -211,7 +224,7 @@ export async function measureRequestStep<T>(name: RequestStep, work: () => Promi
 export async function withRequestMetrics(
   route: MeasuredRoute,
   handler: () => Promise<Response>,
-  options: { logger?: (entry: Record<string, unknown>) => void; now?: () => number; operation?: CallPerformanceOperation } = {},
+  options: { logger?: (entry: Record<string, unknown>) => void; now?: () => number; operation?: CallPerformanceOperation; quietBelowMs?: number } = {},
 ): Promise<Response> {
   const now = options.now ?? (() => performance.now());
   const scope = newScope(route, now, options.logger ?? ((entry) => console.info(JSON.stringify(entry))));
@@ -235,7 +248,9 @@ export async function withRequestMetrics(
       } catch { /* Redirects may have immutable headers; preserve the original response. */ }
       return response;
     } finally {
-      finish(scope, { phase: "response", measurement: "handler_response", outcome: status === 202 ? "accepted" : status < 400 ? "ok" : "failed", status, responseBytes, timingHeaders });
+      // A frequent poll keeps its timing headers but logs only when slow or failed.
+      if (options.quietBelowMs !== undefined && status < 400 && now() - scope.started < options.quietBelowMs) scope.finished = true;
+      else finish(scope, { phase: "response", measurement: "handler_response", outcome: status === 202 ? "accepted" : status < 400 ? "ok" : "failed", status, responseBytes, timingHeaders });
     }
   });
 }
