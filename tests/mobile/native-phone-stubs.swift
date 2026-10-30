@@ -30,7 +30,7 @@ class PKPushPayload { var dictionaryPayload: [String: Any]; init(_ data: [String
 protocol CXProviderDelegate: AnyObject {}
 class CXHandle { enum HandleType: Hashable { case phoneNumber, generic }; let type: HandleType; let value: String; init(type: HandleType, value: String) { self.type = type; self.value = value } }
 class CXProviderConfiguration { var supportsVideo = false; var supportedHandleTypes: Set<CXHandle.HandleType> = []; var maximumCallGroups = 1; var maximumCallsPerCallGroup = 1 }
-enum CXCallEndedReason { case failed, remoteEnded }
+enum CXCallEndedReason { case failed, remoteEnded, unanswered, answeredElsewhere }
 class CXCallUpdate { var remoteHandle: CXHandle?; var localizedCallerName: String?; var hasVideo = false; var supportsHolding = false; var supportsGrouping = false; var supportsUngrouping = false }
 class CXAction { let uuid = UUID(); var timeoutDate = Date().addingTimeInterval(30); var isComplete = false; var fulfills = 0; var failures = 0; func fulfill() { fulfills += 1; isComplete = true }; func fail() { failures += 1; isComplete = true } }
 class CXCallAction: CXAction { let callUUID: UUID; init(call: UUID) { callUUID = call } }
@@ -41,7 +41,7 @@ class CXSetHeldCallAction: CXCallAction { let isOnHold: Bool; init(call: UUID, o
 class CXSetMutedCallAction: CXCallAction { let isMuted: Bool; init(call: UUID, muted: Bool) { isMuted = muted; super.init(call: call) } }
 class CXTransaction { let action: CXAction; init(action: CXAction) { self.action = action } }
 class CXCallController { static var transactions: [CXTransaction] = []; static var requestError: Error?; func request(_ transaction: CXTransaction, completion: @escaping (Error?) -> Void) { Self.transactions.append(transaction); completion(Self.requestError) } }
-class CXProvider { var updates: [UUID: CXCallUpdate] = [:]; func reportCall(with id: UUID, updated: CXCallUpdate) { updates[id] = updated }; static var last: CXProvider!; let configuration: CXProviderConfiguration; init(configuration: CXProviderConfiguration) { self.configuration = configuration; Self.last = self }; func setDelegate(_ delegate: CXProviderDelegate, queue: DispatchQueue) {}; func reportNewIncomingCall(with: UUID, update: CXCallUpdate, completion: @escaping (Error?) -> Void) { completion(nil) }; func reportCall(with: UUID, endedAt: Date, reason: CXCallEndedReason) {}; func reportOutgoingCall(with: UUID, startedConnectingAt: Date) {}; func reportOutgoingCall(with: UUID, connectedAt: Date) {} }
+class CXProvider { var updates: [UUID: CXCallUpdate] = [:]; var updateCount = 0; var incoming: [UUID] = []; var ended: [UUID: CXCallEndedReason] = [:]; func reportCall(with id: UUID, updated: CXCallUpdate) { updates[id] = updated; updateCount += 1 }; static var last: CXProvider!; let configuration: CXProviderConfiguration; init(configuration: CXProviderConfiguration) { self.configuration = configuration; Self.last = self }; func setDelegate(_ delegate: CXProviderDelegate, queue: DispatchQueue) {}; func reportNewIncomingCall(with id: UUID, update: CXCallUpdate, completion: @escaping (Error?) -> Void) { incoming.append(id); completion(nil) }; func reportCall(with id: UUID, endedAt: Date, reason: CXCallEndedReason) { ended[id] = reason }; func reportOutgoingCall(with: UUID, startedConnectingAt: Date) {}; func reportOutgoingCall(with: UUID, connectedAt: Date) {} }
 struct CallTerminationReason: Equatable {}
 enum CallState: Equatable { case NEW, CONNECTING, RINGING, ACTIVE, HELD; case DONE(reason: CallTerminationReason? = nil), RECONNECTING(reason: Reason), DROPPED(reason: Reason); enum Reason { case networkSwitch, networkLost } }
 struct CallInfo { let callId: UUID; var callerNumber: String? = "fixture"; var callerName: String? = "fixture" }
@@ -63,6 +63,7 @@ class TxClient {
   func connect(txConfig: TxConfig) throws { config = txConfig }
   func processVoIPNotification(txConfig: TxConfig, serverConfiguration: TxServerConfiguration, pushMetaData: [String: Any]) throws { config = txConfig }
   func getCall(callId: UUID) -> Call? { registry[callId] }
-  func disconnect() {}; func disablePushNotifications() {}; func endCallFromCallkit(endAction: CXEndCallAction) { endAction.fulfill() }
+  var declines: [UUID] = []
+  func disconnect() {}; func disablePushNotifications() {}; func endCallFromCallkit(endAction: CXEndCallAction) { declines.append(endAction.callUUID); endAction.fulfill() }
   func setSpeaker() {}; func setEarpiece() {}; func enableAudioSession(audioSession: AVAudioSession) {}; func disableAudioSession(audioSession: AVAudioSession) {}
 }

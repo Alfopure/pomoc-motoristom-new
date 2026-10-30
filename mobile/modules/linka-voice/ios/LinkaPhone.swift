@@ -52,6 +52,8 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   private var outgoingTimer: Timer?
   private var finishedCalls = [UUID]()
   private var preparedPush: UUID?
+  /** A push refused before JS listened (cold launch) is still reported from the snapshot. */
+  private var lastPushRejection: [String: Any]?
 
   // Server media and CallKit state are separate. SDK ACTIVE/HELD cannot prove
   // conference media, and a historical receipt cannot override current media.
@@ -84,6 +86,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     let control: String
   }
   private var media = [UUID: Media]()
+  private var reportedHoldable = [UUID: Bool]()
   private var holds = [UUID: HoldCommand]()
   private var holdTimers = [UUID: Timer]()
   private var mirrors = [UUID: HoldMirror]()
@@ -119,11 +122,15 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     if wasBlocked != blocked || (state == "active" && !blocked) { applyMicrophone(id, call) }
   }
   private func updateHoldCapability(_ id: UUID) {
-    let update = CXCallUpdate()
-    update.supportsHolding = ready && established.contains(id) && recoveryTimers[id] == nil
+    let holdable = ready && established.contains(id) && recoveryTimers[id] == nil
       && media[id]?.canHold == true && ["active", "held"].contains(media[id]?.state ?? "")
       && holds[id] == nil && mirrors[id] == nil
       && systemHeld.contains(id) == (media[id]?.state == "held")
+    // The status poll repeats this every 2 s; CallKit hears only a change.
+    guard reportedHoldable[id] != holdable else { return }
+    reportedHoldable[id] = holdable
+    let update = CXCallUpdate()
+    update.supportsHolding = holdable
     provider?.reportCall(with: id, updated: update)
   }
   private func exactMediaCall(_ callId: String, _ sessionId: String, _ controlId: String) throws -> (UUID, Call) {
@@ -364,7 +371,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   }
 
   func snapshot() -> [String: Any] {
-    return ["ready": ready, "audioActive": audioActive, "microphonePermission": microphonePermission(), "preparedPushCallId": preparedPush?.uuidString as Any? ?? NSNull(), "pushRegistered": pushToken != nil && pushToken == registeredPushToken && ready,
+    return ["ready": ready, "audioActive": audioActive, "microphonePermission": microphonePermission(), "preparedPushCallId": preparedPush?.uuidString as Any? ?? NSNull(), "pushRejection": lastPushRejection as Any? ?? NSNull(), "pushRegistered": pushToken != nil && pushToken == registeredPushToken && ready,
      "wasEnabled": UserDefaults.standard.bool(forKey: "linka.voice.enabled"), "calls": Array(calls.keys).compactMap { id -> [String: Any]? in
        guard let session = sessions[id], let call = currentCall(id) ?? (recoveryTimers[id] != nil ? calls[id] : nil) else { return nil }
        return ["type": "restored", "callId": id.uuidString, "sessionId": session, "callControlId": controls[id] ?? "", "muted": userMuted.contains(id), "privacyHold": privacyHold.contains(id), "systemHeld": systemHeld.contains(id), "media": media[id].map { ["state": $0.state, "version": $0.version, "canHold": $0.canHold] as [String: Any] } as Any? ?? NSNull(), "number": outgoingLabels[id] ?? call.callInfo?.callerNumber ?? "",
@@ -435,8 +442,10 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   }
   func reject(callId: String) {
     guard let id = UUID(uuidString: callId) else { return }
-    if preparedPush == id, sessions[id] != nil, calls[id] == nil {
-      // Decline a verified push even before its actual INVITE arrives.
+    if preparedPush == id, calls[id] == nil {
+      // A push names no leg, so it is prepared before authorization. Decline it
+      // through the SDK's decline_push login even before its INVITE; a later
+      // INVITE for this finished call is hung up on arrival.
       client?.endCallFromCallkit(endAction: CXEndCallAction(call: id))
     } else { callForEnding(id)?.hangup() }
     finish(id, reason: .failed)
@@ -482,7 +491,8 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     provider.reportNewIncomingCall(with: id, update: update) { [weak self] error in
       // PushKit completion follows the immediate native report, never a JS/network wait.
       completion()
-      if error != nil { DispatchQueue.main.async { self?.reject(callId: id.uuidString) } }
+      // A capability report sent before CallKit knew the call is not suppressed later.
+      DispatchQueue.main.async { if error != nil { self?.reject(callId: id.uuidString) } else { self?.reportedHoldable.removeValue(forKey: id) } }
     }
     expireUnanswered(id)
   }
@@ -501,7 +511,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     detachHold(id); failMirror(id)
     holdTimers.removeValue(forKey: id)?.invalidate()
     mirrorActionIds = mirrorActionIds.filter { $0.value != id }
-    holds.removeValue(forKey: id); media.removeValue(forKey: id); systemHeld.remove(id); userMuted.remove(id); privacyHold.remove(id)
+    holds.removeValue(forKey: id); media.removeValue(forKey: id); reportedHoldable.removeValue(forKey: id); systemHeld.remove(id); userMuted.remove(id); privacyHold.remove(id)
     if let request = requestedHolds.removeValue(forKey: id) { failLive(request); emit(["type": "heldCancelled", "callId": id.uuidString, "actionId": request.uuid.uuidString]) }
     provider?.reportCall(with: id, endedAt: Date(), reason: reason)
     reported.remove(id); pushes.removeValue(forKey: id); calls.removeValue(forKey: id); controls.removeValue(forKey: id); authorizedLegs.removeValue(forKey: id)
@@ -527,19 +537,57 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
     guard type == .voIP else { completion(); return }
     let metadata = payload.dictionaryPayload["metadata"] as? [String: Any] ?? [:]
-    let id = (metadata["call_id"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
+    let callId = (metadata["call_id"] as? String).flatMap(UUID.init(uuidString:))
+    // Telnyx also pushes "Missed call!" / "Answered Elsewhere" for an offer that
+    // ended before this phone answered. It ends that call; it is never a new one.
+    let alert = (payload.dictionaryPayload["aps"] as? [String: Any])?["alert"] as? String
+    let cleanup: CXCallEndedReason? = alert == "Missed call!" ? .unanswered : alert == "Answered Elsewhere" ? .answeredElsewhere : nil
+    if let cleanup { endFromPush(callId, reason: cleanup, completion: completion); return }
+    let id = callId ?? UUID()
     // Report every VoIP delivery, including malformed/late pushes. Invalid
     // offers are ended immediately rather than violating PushKit's report rule.
     reportIncoming(id, number: metadata["caller_number"] as? String, name: metadata["caller_name"] as? String, completion: completion)
-    guard let callId = metadata["call_id"] as? String, UUID(uuidString: callId) != nil,
-      let sdkId = metadata["voice_sdk_id"] as? String, !sdkId.isEmpty,
-      let legId = metadata["telnyx_leg_id"] as? String, UUID(uuidString: legId) != nil,
-      !finishedCalls.contains(id), reported.count == 1, calls.isEmpty || calls[id] != nil,
-      UserDefaults.standard.bool(forKey: "linka.voice.enabled") else { reject(callId: id.uuidString); return }
+    // Telnyx push metadata names the call and SDK session, not the provider leg:
+    // SDK 4.2.2 reads telnyx_leg_id only from the INVITE, matched by call_id.
+    let refusal: String? = callId == nil ? "missing_call_id" : (metadata["voice_sdk_id"] as? String ?? "").isEmpty ? "missing_voice_sdk_id"
+      : finishedCalls.contains(id) ? "finished_call" : reported.count != 1 || !(calls.isEmpty || calls[id] != nil) ? "another_call"
+      : !UserDefaults.standard.bool(forKey: "linka.voice.enabled") ? "voice_disabled" : nil
+    if let refusal {
+      // Key names only, never a value: the next device test shows what arrived.
+      var rejection: [String: Any] = ["type": "pushRejected", "id": UUID().uuidString, "reason": refusal,
+        "keys": metadata.keys.sorted().prefix(30).map { String($0.prefix(40)) },
+        "payloadKeys": payload.dictionaryPayload.keys.map { String(String(describing: $0).prefix(40)) }.sorted().prefix(30).map { $0 }]
+      // Whether an alert text is one Telnyx documents, so a new cleanup text shows up.
+      if let alert { rejection["alertKnown"] = ["Incoming call!", "Missed call!", "Answered Elsewhere"].contains(alert) }
+      lastPushRejection = rejection; emit(rejection)
+      reject(callId: id.uuidString); return
+    }
     pushes[id] = metadata
     // JS refreshes the short-lived provider JWT before preparing the socket.
     // Never reuse the token from before iOS suspended the application.
-    emit(["type": "push", "callId": id.uuidString, "providerLegId": legId])
+    emit(["type": "push", "callId": id.uuidString, "providerLegId": metadata["telnyx_leg_id"] as? String ?? ""])
+  }
+  /** JS reported this refusal; a remount or another login does not report it again. */
+  func clearPushRejection(id: String) {
+    if lastPushRejection?["id"] as? String == id { lastPushRejection = nil }
+  }
+  /** Ends a known, not yet answered offer, then satisfies PushKit with a
+   * placeholder call ended at once, as Telnyx's SDK demo does. Apple requires a
+   * report for every VoIP push, so this happens even during an established call:
+   * iOS may briefly show call waiting and keep a blank Recents entry. */
+  private func endFromPush(_ id: UUID?, reason: CXCallEndedReason, completion: @escaping () -> Void) {
+    // A late notice about the offer never ends a call this phone answered.
+    if let id, !established.contains(id), answering[id] == nil, reported.contains(id) || calls[id] != nil || pushes[id] != nil {
+      callForEnding(id)?.hangup(); finish(id, reason: reason)
+    }
+    guard let provider else { completion(); return }
+    let placeholder = UUID(), update = CXCallUpdate()
+    update.remoteHandle = CXHandle(type: .generic, value: " ")
+    update.hasVideo = false; update.supportsHolding = false; update.supportsGrouping = false; update.supportsUngrouping = false
+    provider.reportNewIncomingCall(with: placeholder, update: update) { _ in
+      completion()
+      provider.reportCall(with: placeholder, endedAt: Date(), reason: reason)
+    }
   }
 
   func providerDidReset(_ provider: CXProvider) { disconnect() }
@@ -615,12 +663,15 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
     guard outbound.contains(action.callUUID), let call = currentCall(action.callUUID), sessions[action.callUUID] != nil else { action.fail(); return }
     provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
+    // CallKit knows the call only now; an earlier capability report may have been lost.
+    reportedHoldable.removeValue(forKey: action.callUUID); updateHoldCapability(action.callUUID)
     answerExact(call, id: action.callUUID, action: action)
   }
   func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
     let id = action.callUUID
-    // Never let an unverified push initiate SDK login through a decline.
-    if preparedPush == id, sessions[id] != nil, calls[id] == nil { client?.endCallFromCallkit(endAction: action) }
+    // A prepared push (our own fresh login) is declined through the SDK even
+    // before its INVITE; the decline_push login never answers.
+    if preparedPush == id, calls[id] == nil { client?.endCallFromCallkit(endAction: action) }
     else { callForEnding(id)?.hangup(); action.fulfill() }
     finish(id, reason: .remoteEnded)
   }
@@ -673,9 +724,10 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onIncomingCall(call: call) }; return }
     guard let id = call.callInfo?.callId else { call.hangup(); return }
     guard !finishedCalls.contains(id) else { call.hangup(); return }
-    if let metadata = pushes[id] {
-      guard let pushedLeg = metadata["telnyx_leg_id"] as? String,
-        let expectedLeg = UUID(uuidString: pushedLeg), call.telnyxLegId == expectedLeg else {
+    // The INVITE answers its push by call_id, as in the SDK. Telnyx push metadata
+    // names no leg; a leg it does name must be exactly this INVITE's.
+    if let pushedLeg = pushes[id]?["telnyx_leg_id"] as? String, !pushedLeg.isEmpty {
+      guard let expectedLeg = UUID(uuidString: pushedLeg), call.telnyxLegId == expectedLeg else {
         call.hangup(); finish(id, reason: .failed); return
       }
     }

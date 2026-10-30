@@ -58,6 +58,12 @@ export type DialDecision =
   | { kind: "confirm"; number: string; verificationId: string; title: string; message: string }
   | { kind: "blocked"; message: string };
 
+/** The directory decision for a number about to be dialed. `checked` runs as soon as the decision
+ * (or a failure) is known, before any dialing, so the call setup is not shown as a number check. */
+export async function checkDialTarget(read: () => Promise<MobileCallTarget["target"]>, checked: () => void): Promise<DialDecision> {
+  try { return dialDecision(await read()); } finally { checked(); }
+}
+
 /** Directory decision before dialing; the server repeats it when the call starts. */
 export function dialDecision(target: MobileCallTarget["target"]): DialDecision {
   if (target.status === "original") return { kind: "dial", number: target.originalNumber };

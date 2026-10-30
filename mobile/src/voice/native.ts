@@ -10,7 +10,7 @@ export function nativePhone(): NativePhone | null {
   const module = requireOptionalNativeModule<Bridge>("LinkaVoice");
   if (!module?.isAvailable()) return null;
   return {
-    snapshot: () => module.snapshot(), requestMicrophone: () => module.requestMicrophone(),
+    snapshot: () => module.snapshot(), clearPushRejection: id => module.clearPushRejection(id), requestMicrophone: () => module.requestMicrophone(),
     connect: token => module.connect(token), disconnect: () => module.disconnect(),
     authorize: (callId, sessionId, controlId) => module.authorize(callId, sessionId, controlId), reject: callId => module.reject(callId),
     expectOutgoing: (controlId, sessionId, number, genericHandle = false) => module.expectOutgoing(controlId, sessionId, number, genericHandle),

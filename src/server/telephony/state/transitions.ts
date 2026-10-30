@@ -1573,8 +1573,11 @@ function canDirectConnectOutbound(b: TransitionBuilder): boolean {
 function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): ReduceResult {
   if (b.session.state !== "received") return b.note("own leg answered outside received").result();
   const meta = b.meta;
-  if (b.session.direction === "internal" && intent === "internal_caller" && leg.role === "operator" && leg.profile_id &&
-      meta.internal?.by === leg.profile_id && b.session.answered_by_profile_id === leg.profile_id) {
+  // The caller's own leg is the accepted endpoint of the call it placed; hold
+  // authority and the other-device protections need its exact control ID.
+  if (leg.role === "operator" && leg.profile_id && b.session.answered_by_profile_id === leg.profile_id &&
+      (b.session.direction === "internal" && intent === "internal_caller" && meta.internal?.by === leg.profile_id ||
+       b.session.direction === "outbound" && intent === "outbound" && meta.outbound?.by === leg.profile_id)) {
     rememberAcceptedDeviceLeg(b, leg);
   }
   if (intent !== "outbound" && meta.internal?.endpoints?.length) return fanoutInternalColleague(b, leg);
@@ -2879,6 +2882,11 @@ function appPark(b: TransitionBuilder, customer: LegRow, event: AppEvent): Reduc
   b.cmd(hangupCmd(b, operator, "parked", false));
   b.patchSession({ parked_at: b.nowIso, answered_by_profile_id: null, hold_started_at: null, conference_id: null, conference_name: null });
   b.patchMeta({ park: { by: event.actorProfileId, at: b.nowIso }, previous_operator: operator.profile_id ?? null, conference: null });
+  // The parked leg no longer answers the call: whoever picks it up, the same phone
+  // included, is offered and accepted anew.
+  const accepted = { ...b.meta.accepted_device_legs };
+  if (operator.profile_id) delete accepted[operator.profile_id];
+  b.patchMeta({ answered_leg_call_control_id: null, accepted_device_legs: accepted });
   enterWaiting(b, customer, "parked", "parked");
   b.leg(customer.telnyx_call_control_id, { state: "answered" });
   // Finish disconnecting the operator and starting waiting audio before reading

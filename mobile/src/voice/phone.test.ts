@@ -7,11 +7,11 @@ const lease = "00000000-0000-4000-8000-000000000001", sid = "00000000-0000-4000-
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const phones: DispatchPhone[] = [];
 afterEach(() => { for (const phone of phones) phone.dispose(); phones.length = 0; vi.useRealTimers(); });
-function fixture() {
+function fixture(report?: (error: Error) => void) {
   let event: (value: VoiceEvent) => void = () => {};
   const native: NativePhone = {
     subscribe: callback => { event = callback; return () => { event = () => {}; }; },
-    snapshot: vi.fn().mockResolvedValue({ ready: true, audioActive: false, pending: [], pushRegistered: true }),
+    snapshot: vi.fn().mockResolvedValue({ ready: true, audioActive: false, pending: [], pushRegistered: true }), clearPushRejection: vi.fn().mockResolvedValue(undefined),
     requestMicrophone: vi.fn().mockResolvedValue(true), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn().mockResolvedValue(undefined),
     authorize: vi.fn().mockResolvedValue(undefined), reject: vi.fn().mockResolvedValue(undefined), expectOutgoing: vi.fn().mockResolvedValue(undefined),
     answer: vi.fn().mockResolvedValue(undefined), confirmConnected: vi.fn().mockResolvedValue(undefined), end: vi.fn().mockResolvedValue(undefined), mute: vi.fn().mockResolvedValue(undefined),
@@ -31,7 +31,7 @@ function fixture() {
   };
   const store = { load: vi.fn().mockResolvedValue(lease), save: vi.fn().mockResolvedValue(undefined), clear: vi.fn().mockResolvedValue(undefined) };
   const uuid = vi.fn(() => id);
-  const phone = new DispatchPhone(api, native, uuid, store); phones.push(phone);
+  const phone = new DispatchPhone(api, native, uuid, store, report); phones.push(phone);
   return { phone, api, native, store, uuid, emit: (value: VoiceEvent) => event(value) };
 }
 async function connected() { const f = fixture(); await f.phone.initialise(); await f.phone.connect(); return f; }
@@ -66,6 +66,20 @@ describe("mobile hold authority and recovery", () => {
     expect(f.native.resolveHold).toHaveBeenCalledWith(id, sid, "exact-leg", lease, "confirmed", "held", 9, true);
     expect(f.phone.state.call).toMatchObject({ connected: true, media: { state: "held" } });
     expect(f.phone.state.holdPhase).toBe("idle");
+  });
+  it("says so on the call screen when CallKit refuses a hold before the server is asked", async () => {
+    const f = await activePhone(); await f.phone.hold();
+    f.emit({ type: "heldCancelled", callId: id, actionId: lease }); await tick();
+    expect(f.phone.state).toMatchObject({ holdPhase: "idle", error: "Podržanie sa nepodarilo." });
+    expect(f.api.hold).not.toHaveBeenCalled();
+  });
+  it("does not report a hold this phone did not request, nor one refused as the call ends", async () => {
+    const f = await activePhone();
+    f.emit({ type: "heldCancelled", callId: id, actionId: lease }); await tick();
+    expect(f.phone.state).toMatchObject({ holdPhase: "idle", error: null });
+    await f.phone.hold();
+    f.emit({ type: "heldCancelled", callId: id, actionId: lease }); f.emit({ type: "ended", callId: id, sessionId: sid }); await tick();
+    expect(f.phone.state).toMatchObject({ call: null, error: null });
   });
   it("never dispatches an expired unclaimed action", async () => {
     const f = await activePhone(); vi.mocked(f.native.claimHold).mockResolvedValue(false);
@@ -847,6 +861,77 @@ describe("native phone lifecycle", () => {
     expect(f.phone.state.call).toBeNull(); expect(f.api.end).not.toHaveBeenCalled();
   });
 
+});
+
+describe("Telnyx VoIP push without a provider leg", () => {
+  const leg = "00000000-0000-4000-8000-0000000000aa";
+  it("prepares native signaling and authorizes the INVITE by its own leg, never an empty one", async () => {
+    const f = await connected(); vi.mocked(f.native.connect).mockClear();
+    f.emit({ type: "push", callId: id, providerLegId: "" }); await tick();
+    expect(f.native.connect).toHaveBeenCalled(); expect(f.api.authorize).not.toHaveBeenCalled();
+    expect(f.native.reject).not.toHaveBeenCalled(); expect(f.phone.state.call).toBeNull();
+    f.emit({ type: "incoming", callId: id, providerLegId: leg }); await tick();
+    expect(f.api.authorize).toHaveBeenCalledExactlyOnceWith(lease, { providerLegId: leg });
+    expect(f.native.authorize).toHaveBeenCalledExactlyOnceWith(id, sid, "exact-leg");
+    expect(f.phone.state.call).toMatchObject({ id, sessionId: sid, state: "RINGING", outgoing: false });
+  });
+  it("replays an INVITE that arrived while its push was being prepared", async () => {
+    const f = await connected(); let release!: () => void;
+    vi.mocked(f.native.connect).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    f.emit({ type: "push", callId: id, providerLegId: "" }); await tick();
+    f.emit({ type: "incoming", callId: id, providerLegId: leg }); await tick();
+    expect(f.api.authorize).not.toHaveBeenCalled();
+    release(); await tick(); await tick();
+    expect(f.api.authorize).toHaveBeenCalledExactlyOnceWith(lease, { providerLegId: leg });
+    expect(f.native.authorize).toHaveBeenCalledExactlyOnceWith(id, sid, "exact-leg");
+    expect(f.native.reject).not.toHaveBeenCalled();
+  });
+  it("does not replay the INVITE of a push that ended while it was prepared", async () => {
+    const f = await connected(); let release!: () => void;
+    vi.mocked(f.native.connect).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    f.emit({ type: "push", callId: id, providerLegId: "" }); await tick();
+    f.emit({ type: "incoming", callId: id, providerLegId: leg }); f.emit({ type: "ended", callId: id }); await tick();
+    release(); await tick(); await tick();
+    expect(f.api.authorize).not.toHaveBeenCalled(); expect(f.native.authorize).not.toHaveBeenCalled();
+  });
+  it("reports a refused push once, by reason and key names only, then lets native forget it", async () => {
+    const report = vi.fn(); const f = fixture(report);
+    const refused: VoiceEvent = { type: "pushRejected", id: lease, reason: "missing_voice_sdk_id", keys: ["call_id", "caller_number"], payloadKeys: ["aps", "metadata"], alertKnown: false };
+    vi.mocked(f.native.snapshot).mockResolvedValue({ ready: false, audioActive: false, pending: [], pushRejection: refused });
+    await f.phone.initialise(); f.emit(refused); await tick();
+    expect(report).toHaveBeenCalledTimes(1);
+    expect(report.mock.calls[0][0]).toMatchObject({ name: "VoIPPushRejected", message: "missing_voice_sdk_id; metadata keys: call_id,caller_number; payload keys: aps,metadata; alert: unknown" });
+    expect(f.native.clearPushRejection).toHaveBeenCalledExactlyOnceWith(lease);
+    f.emit({ type: "pushRejected", id: sid, reason: "missing_call_id", keys: [], payloadKeys: ["aps"] }); await tick();
+    expect(report).toHaveBeenCalledTimes(2); expect(report.mock.calls[1][0].message).toBe("missing_call_id; metadata keys: none; payload keys: aps; alert: none");
+    expect(f.native.clearPushRejection).toHaveBeenLastCalledWith(sid);
+  });
+  it("authorizes a stored INVITE by its own leg when preparing its push fails", async () => {
+    const f = await connected(); let fail!: (error: Error) => void;
+    vi.mocked(f.native.connect).mockResolvedValueOnce(undefined).mockImplementationOnce(() => new Promise<void>((_, reject) => { fail = reject; }));
+    f.emit({ type: "push", callId: id, providerLegId: "" }); await tick();
+    f.emit({ type: "incoming", callId: id, providerLegId: leg }); await tick();
+    fail(new Error("native bridge")); await tick(); await tick();
+    expect(f.api.authorize).toHaveBeenCalledExactlyOnceWith(lease, { providerLegId: leg });
+    expect(f.native.authorize).toHaveBeenCalledExactlyOnceWith(id, sid, "exact-leg");
+    expect(f.native.reject).not.toHaveBeenCalled(); expect(f.phone.state.error).toBeNull();
+  });
+  it("authorizes a stored INVITE by its own leg when the leg its push named is refused", async () => {
+    const f = await connected(); let refuse!: (error: Error) => void;
+    vi.mocked(f.api.authorize).mockImplementationOnce(() => new Promise((_, reject) => { refuse = reject; }));
+    f.emit({ type: "push", callId: id, providerLegId: id }); await tick();
+    f.emit({ type: "incoming", callId: id, providerLegId: leg }); await tick();
+    refuse(new MobileApiError("expired offer", 409)); await tick(); await tick();
+    expect(vi.mocked(f.api.authorize).mock.calls.map(call => call[1])).toEqual([{ providerLegId: id }, { providerLegId: leg }]);
+    expect(f.native.authorize).toHaveBeenCalledExactlyOnceWith(id, sid, "exact-leg");
+    expect(f.native.reject).not.toHaveBeenCalled();
+  });
+  it("still rejects a push whose preparation fails when no INVITE arrived", async () => {
+    const f = await connected();
+    vi.mocked(f.native.connect).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("native bridge"));
+    f.emit({ type: "push", callId: id, providerLegId: "" }); await tick(); await tick();
+    expect(f.native.reject).toHaveBeenCalledWith(id); expect(f.api.authorize).not.toHaveBeenCalled();
+  });
 });
 
 describe("callback and confirmed-target dialing", () => {

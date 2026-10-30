@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useContext, useEffect, useMemo, useSyncExternalStore } from "react";
 import { randomUUID } from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -7,6 +7,7 @@ import type { MobileConfig } from "../lib/config";
 import { createVoiceApi } from "./api";
 import { nativePhone } from "./native";
 import { DispatchPhone, type PhoneState } from "./phone";
+import { ErrorReporterContext } from "../ui/error-boundary";
 
 const idle: PhoneState = { supported: false, registration: "unregistered", takeoverRequired: false, call: null, termination: null,
   dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false, error: null,
@@ -15,6 +16,7 @@ const noSubscribe = () => () => {};
 const idleSnapshot = () => idle;
 
 export function useDispatchPhone(config: MobileConfig, client: SupabaseClient, userId: string, profileId: string | null, active: boolean) {
+  const reporter = useContext(ErrorReporterContext);
   const phone = useMemo(() => {
     if (!profileId) return null;
     const native = nativePhone();
@@ -29,8 +31,8 @@ export function useDispatchPhone(config: MobileConfig, client: SupabaseClient, u
       load: () => SecureStore.getItemAsync(key),
       save: id => SecureStore.setItemAsync(key, id, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY }),
       clear: () => SecureStore.deleteItemAsync(key),
-    });
-  }, [config, client, userId, profileId]);
+    }, error => reporter?.report("error", error, "voice-push"));
+  }, [config, client, userId, profileId, reporter]);
   useEffect(() => {
     if (!phone) return;
     void phone.initialise().catch(() => {});
