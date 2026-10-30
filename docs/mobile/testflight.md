@@ -4,6 +4,22 @@ Cieľ: TEST aplikácia v iPhone cez interný TestFlight, bez App Review. Je to T
 variant (TEST server, TEST databáza, telefonovanie zapnuté v aplikácii, OTA vypnuté).
 Produkčná aplikácia je samostatné vydanie so schválením majiteľa.
 
+**Build 0.1.0 (27), 30. 10. 2026 — opravy telefonovania po fyzickom teste:** zdroj
+`dev` `0a218cb5328f28a62ac07b0847ab5b9cc7ca78dc` (PR #530, #531, #532; overený na
+kanonickom TESTe). Prichádzajúci hovor cez VoIP push už nevyžaduje údaj
+`telnyx_leg_id`, ktorý Telnyx v pushi neposiela (predtým „Call Failed“ po 1–2 s);
+podržanie aj pri odchádzajúcom hovore; „Vytáčam…“ namiesto dlhého „Overujem
+číslo…“; CallKit aktualizácia iba pri zmene. IPA 21 364 846 bajtov, SHA-256
+`47a46ea1a0ef8cbae8fbd63aa8b650b30d5f380aac0069e40ef30bc3bfbd233e`, kontrola IPA
+prešla (25/25). Natívne vstupy sa zmenili, preto bola kontrolná vzorka zostavená
+nanovo z tohto zdroja so starým štartom bez scén: na simulátore iOS 27 sa pri oboch
+spusteniach do 20 s ukončila (záznam o páde sa nevytvoril). Release simulátor:
+studený štart (dvakrát), návrat z pozadia a prvý reštart vizuálne overené
+(prihlásenie TEST). **Výnimka:** druhý reštart sa nevykonal — simulátor na Macu
+opakovane zlyhal (timeout pri záťaži ~340, potom nenaštartoval, `launchd_sim`
+sa nepripojil); scenár opakuje prvý reštart. Apple: `VALID`, beta review
+`APPROVED`, interná aj externá skupina `IN_BETA_TESTING`. Fyzický iPhone neoverený.
+
 **Build 0.1.0 (26), 28. 10. 2026 — poloha na pozadí a UX opravy:** zdroj `dev`
 `8855341a20724cffbb5f5f7971ce19117b39fc55`. Poloha na pozadí aj pre Moju prácu,
 obnova nahrávania odťahu, 18 UX opráv, text povolenia polohy „Vždy“. IPA
