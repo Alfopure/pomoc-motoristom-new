@@ -5,16 +5,16 @@ import { mobileEnvironment } from "./auth";
 
 // The iPhone voice device log (LinkaPhone.diag and DispatchPhone's lines, prefixed "js.").
 // A new event name or field key is added here too; anything else is dropped.
-const NATIVE_EVENTS = ["call.answer", "call.answer_sdk", "call.authorize", "call.end", "call.expect_outgoing", "call.finish", "call.mute", "call.outgoing",
+const NATIVE_EVENTS = ["call.answer", "call.answer_sdk", "call.authorize", "call.connected", "call.end", "call.expect_outgoing", "call.finish", "call.mute", "call.outgoing",
   "call.outgoing_timeout", "call.recovery", "call.reject", "callkit.answer", "callkit.audio", "callkit.end", "callkit.held", "callkit.mute",
   "callkit.outgoing_connected", "callkit.placeholder", "callkit.report_incoming", "callkit.request", "callkit.reset", "callkit.start", "callkit.timeout",
   "callkit.update", "emit", "hold.cancelled", "hold.claim", "hold.detach", "hold.media", "hold.mirror_failed", "hold.mirror_request", "hold.request",
   "hold.resolve", "phone.connect", "phone.connect_error", "phone.disconnect", "phone.start", "push.accepted", "push.cleanup", "push.received", "push.refused",
-  "pushkit.token", "pushkit.token_invalidated", "sdk.error", "sdk.invite", "sdk.ready", "sdk.remote_ended", "sdk.socket_disconnected", "sdk.state", "voice.enabled"];
-const JS_EVENTS = ["hold.cancelled", "hold.claim", "hold.failure", "hold.ignored", "hold.request", "hold.request_error", "hold.result", "hold.skip",
+  "pushkit.token", "pushkit.token_invalidated", "sdk.error", "sdk.invite", "sdk.ready", "sdk.remote_ended", "sdk.socket_connected", "sdk.socket_disconnected", "sdk.state", "voice.enabled"];
+const JS_EVENTS = ["call.start_response", "call.tap", "hold.cancelled", "hold.claim", "hold.failure", "hold.ignored", "hold.request", "hold.request_error", "hold.result", "hold.skip",
   "offer.authorize_retry", "offer.authorized", "offer.done", "offer.error", "offer.prepare", "phone.connect_end", "phone.connect_error", "phone.connect_native",
   "phone.connect_start", "phone.disconnect", "phone.disconnect_error", "phone.event", "phone.event_error", "phone.fail", "phone.foreground", "phone.init",
-  "phone.inputs", "push.rejected", "session.end"];
+  "phone.inputs", "push.rejected", "session.end", "token.end", "token.start"];
 export const VOICE_DIAGNOSTIC_EVENTS: ReadonlySet<string> = new Set([...NATIVE_EVENTS, ...JS_EVENTS.map(name => "js." + name)]);
 export const VOICE_DIAGNOSTIC_KEYS: ReadonlySet<string> = new Set(["action", "action_live", "active", "alert", "answer_pending", "answered", "answering",
   "attempt", "attempts", "authorized", "automatic", "busy", "call", "call_id_valid", "calls", "can_hold", "changed", "claimed", "cleanup", "client", "code",

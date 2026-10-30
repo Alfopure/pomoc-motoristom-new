@@ -656,6 +656,9 @@ export function appendJourneyEvidence(previous: unknown, entry: JourneyEvidenceE
 
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
+/** `origin` is the device that started the call; null for an inbound call. */
+export type SessionStartMode = { concurrent: boolean; autoBridge: boolean; ownLegTimeoutSecs: number; apiRegion: "us" | "eu"; origin: "web" | "mobile" | null };
+
 export type SessionMeta = {
   holdControl?: { commandId: string; held: boolean; customerControlId: string } | null;
   holdRecovery?: { commandId: string; customerControlId: string; operatorControlId: string } | null;
@@ -695,6 +698,12 @@ export type SessionMeta = {
   } | null;
   outbound?: { to: string; by: string; from: string; case_id?: string | null } | null;
   outbound_auto_bridge?: { commandId: string; operatorControlId: string; startedAt: string } | null;
+  /**
+   * Latency switches frozen at creation (`latency-flags.ts`): flipping a flag
+   * never changes a call already in progress. Older sessions have none and
+   * behave as all-off.
+   */
+  start_mode?: SessionStartMode;
   /**
    * Colleague call. Names are frozen display text; `caller_display` is the
    * caller's name already reduced to SIP display characters (older sessions

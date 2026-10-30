@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { channel } from "node:diagnostics_channel";
 
-import { measureControlStage, measureRequestStep, observeDatabaseTimeout, recordRequestStep, registerDatabaseOrigin, requestStepCount, withBackgroundRequestMetrics, withRequestMetrics, type ControlStage } from "./request-metrics";
+import { measureControlStage, measureRequestStep, observeDatabaseTimeout, recordRequestStep, registerDatabaseOrigin, registerTelnyxOrigin, requestStepCount, withBackgroundRequestMetrics, withRequestMetrics, type ControlStage } from "./request-metrics";
 
 describe("request metrics", () => {
   it("starts independent after counters with the response request identity", async () => {
@@ -53,8 +53,21 @@ describe("request metrics", () => {
       finished.abort();
       return Response.json({});
     }, { logger });
-    expect(logger.mock.calls[0][0]).toMatchObject({ dbConnects: 1, dbConnectsScope: "instance-window", dbAborts: 1 });
-    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private-project|secret|telnyx/);
+    expect(logger.mock.calls[0][0]).toMatchObject({ dbConnects: 1, dbConnectsScope: "instance-window", dbAborts: 1, telnyxConnects: 0 });
+    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private-project|secret|telnyx\.example/);
+  });
+
+  it("counts new Telnyx API sockets separately, without logging the host", async () => {
+    const logger = vi.fn();
+    await withRequestMetrics("call.action", async () => {
+      registerTelnyxOrigin("https://api.private-telnyx.example/v2");
+      channel("undici:client:connected").publish({ connectParams: { hostname: "api.private-telnyx.example" } });
+      channel("undici:client:connected").publish({ connectParams: { hostname: "api.private-telnyx.example" } });
+      channel("undici:client:connected").publish({ connectParams: { hostname: "unregistered.example" } });
+      return Response.json({});
+    }, { logger });
+    expect(logger.mock.calls[0][0]).toMatchObject({ telnyxConnects: 2, dbConnects: 0 });
+    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private-telnyx|unregistered/);
   });
 
   it("counts an already expired caller deadline but not cancellation or a completed request", async () => {

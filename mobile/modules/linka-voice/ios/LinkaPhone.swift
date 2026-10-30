@@ -482,7 +482,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       }
     }
     func onClientReady() { deliver { $0.onClientReady() } }
-    func onSocketConnected() {}
+    func onSocketConnected() { deliver { _ in LinkaPhone.diag("sdk.socket_connected") } }
     func onSocketDisconnected() { deliver { $0.onSocketDisconnected() } }
     func onClientError(error: Error) { deliver { $0.onClientError(error: error) } }
     func onPushDisabled(success: Bool, message: String) {}
@@ -992,6 +992,8 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     if case .RECONNECTING = callState { beginRecovery(callId) }
     if sessions[callId] != nil, currentCall(callId) == nil { return }
     if callState == .ACTIVE {
+      // First media of this call: with `sdk.invite`, the device half of answer → talking.
+      if !established.contains(callId) { diag("call.connected", ["call": callId, "authorized": sessions[callId] != nil]) }
       established.insert(callId)
       timers.removeValue(forKey: callId)?.invalidate()
       recoveryTimers.removeValue(forKey: callId)?.invalidate()

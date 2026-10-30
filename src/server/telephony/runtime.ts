@@ -17,6 +17,7 @@ import { createTelnyxClient, resolveTelnyxLiveGate, TelnyxCommandError, type Tel
 import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "./telnyx/env";
 import { createTelnyxRequestLogger } from "./telnyx/request-telemetry";
 import type { ProcessorDeps } from "./telnyx/event-processor";
+import { readLatencyFlags } from "./latency-flags";
 
 /**
  * Shared wiring for the telephony API routes (design §4 Phase 2).
@@ -110,8 +111,13 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
   let callNotificationsScheduled = false;
 
   let telnyx: TelnyxClient | null = null;
+  // Separate selects in one round: a deployment ahead of the latency-flags
+  // migration must never lose its live gate to the missing column.
+  const [data, latencyFlags] = await Promise.all([
+    config.configured ? readLiveGateSettings(admin, organizationId) : null,
+    readLatencyFlags(admin, organizationId, { logger: options.logger ?? telephonyLogger }),
+  ]);
   if (config.configured) {
-    const data = await readLiveGateSettings(admin, organizationId);
     telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data), testProvenanceContext: { admin, organizationId },
       onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger) });
   }
@@ -122,6 +128,7 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
     config,
     organizationId,
     environment,
+    latencyFlags,
     deviceKind: options.deviceKind,
     sweepAfterEvent: options.sweepAfterEvent,
     logger: options.logger ?? telephonyLogger,

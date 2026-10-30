@@ -52,6 +52,7 @@ import {
 import type { TelnyxClient } from "./telnyx/client";
 import type { TelnyxClientState } from "./telnyx/client-state";
 import type { TelnyxConfig } from "./telnyx/env";
+import type { LatencyFlags } from "./latency-flags";
 
 /**
  * Runs one event through the per-session pipeline shared by the webhook
@@ -85,6 +86,8 @@ export type SessionRunnerDeps = {
   maxConflictRetries?: number;
   /** Registers best-effort after-response work; never performs push under the session lease. */
   onCallTransition?: (sessionId: string) => void;
+  /** Resolved by `createTelephonyDeps`; absent means env defaults (`latencyFlagsOf`). */
+  latencyFlags?: LatencyFlags;
 };
 
 export const LEASE_WAIT_MS = 3_000;
@@ -764,9 +767,12 @@ export async function ownedSessionWork<T>(
   const owner: Ownership = { admin: deps.admin, sessionId, organizationId: deps.organizationId, token,
     generation: claim.generation, contract: claim.contract, deadline: Date.now() + SESSION_WORK_MS,
     acquiredAt: Date.now(), leaseWaitMs: Math.max(0, Date.now() - started) };
+  const timingContext = requestTimingContext();
+  // `holder_*` name what kept the lease, so a deferred webhook (which never
+  // logs a wait of its own) can be matched to its holder by session and time.
   const leaseLog = { scope: "lease-timing", sessionId, generation: owner.generation,
-    eventType: options.eventType ?? null, ...requestTimingContext(), lease_acquired_at: new Date(owner.acquiredAt).toISOString(),
-    lease_wait_ms: owner.leaseWaitMs, polls };
+    eventType: options.eventType ?? null, ...timingContext, lease_acquired_at: new Date(owner.acquiredAt).toISOString(),
+    lease_wait_ms: owner.leaseWaitMs, polls, holder_route: timingContext?.route ?? null, holder_event_type: options.eventType ?? null };
   try { deps.logger?.({ ...leaseLog, outcome: "acquired" }); } catch { /* Diagnostic only. */ }
   try { return await sessionOwnership.run(owner, work); }
   finally {

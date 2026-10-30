@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeSupabase } from "@/test/fake-supabase";
 import * as route from "@/app/api/mobile/v1/voice/readiness/route";
 import { ROUTE_AUTH_REGISTRY } from "@/server/route-auth-registry";
+import { clearLatencyFlagsCache } from "@/server/telephony/latency-flags";
 
 const mocks = vi.hoisted(() => ({ claims: vi.fn(), admin: vi.fn(), organization: vi.fn(), telephony: vi.fn() }));
 vi.mock("@supabase/supabase-js", () => ({ createClient: () => ({ auth: { getClaims: mocks.claims } }) }));
@@ -41,8 +42,9 @@ beforeEach(() => {
 });
 afterEach(() => {
   expect(mocks.telephony).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
-  expect(f.db.log.every(query => query.table === "motorist_profiles" && query.operation === "select")).toBe(true);
-  vi.unstubAllGlobals(); vi.unstubAllEnvs();
+  // The profile, and for a phone that may call the organisation's latency switches.
+  expect(f.db.log.every(query => ["motorist_profiles", "motorist_telephony_settings"].includes(query.table) && query.operation === "select")).toBe(true);
+  vi.unstubAllGlobals(); vi.unstubAllEnvs(); clearLatencyFlagsCache();
 });
 
 describe("GET authenticated native configuration readiness", () => {
@@ -56,7 +58,23 @@ describe("GET authenticated native configuration readiness", () => {
   it("returns both explicit opt-ins without constructing provider dependencies", async () => {
     vi.stubEnv("MOTORIST_NATIVE_VOICE_TEST_ENABLED", "true"); vi.stubEnv("MOTORIST_NATIVE_VOIP_PUSH_TEST_ENABLED", "true");
     const response = await route.GET(request()); expect(response.status).toBe(200); expectPrivate(response);
-    expect(await response.json()).toMatchObject({ nativeCallingEnabled: true, backgroundIncomingEnabled: true });
+    expect(await response.json()).toMatchObject({ nativeCallingEnabled: true, backgroundIncomingEnabled: true,
+      voiceTuning: { mobileTokenCache: false, mobileRtcRegion: "auto", mobileTrickleIce: false, mobileRealtimeStatus: false,
+        mobileEarlyAccept: false, mobileParallelOffers: false } });
+  });
+  it("passes the organisation's phone switches, env first and the database over it", async () => {
+    vi.stubEnv("MOTORIST_NATIVE_VOICE_TEST_ENABLED", "true");
+    vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ client: { mobileTrickleIce: true, mobileRtcRegion: "eu" }, hold_fast_web: true }));
+    f.db.seed("motorist_telephony_settings", [{ organization_id: organizationId, latency_flags: { client: { mobileRtcRegion: "auto", mobileEarlyAccept: true } } }]);
+    const body = await (await route.GET(request())).json();
+    // Only the phone's keys travel; server switches stay on the server.
+    expect(body.voiceTuning).toEqual({ mobileTokenCache: false, mobileRtcRegion: "auto", mobileTrickleIce: true, mobileRealtimeStatus: false,
+      mobileEarlyAccept: true, mobileParallelOffers: false });
+  });
+  it("reads no switches for a phone that may not call", async () => {
+    const body = await (await route.GET(request())).json();
+    expect(body).not.toHaveProperty("voiceTuning");
+    expect(f.db.log.some(query => query.table === "motorist_telephony_settings")).toBe(false);
   });
   it("returns false on an authenticated working Preview even if native flags are true", async () => {
     vi.stubEnv("VERCEL_ENV", "preview"); vi.stubEnv("MOTORIST_NATIVE_VOICE_TEST_ENABLED", "true");

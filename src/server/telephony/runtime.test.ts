@@ -11,6 +11,7 @@ import { OperatorDeviceError } from "./operator-devices";
 import { PresenceServiceError } from "./presence-service";
 import { TelnyxCommandError } from "./telnyx/client";
 import { SessionEventDeferredError, SessionLeaseBusyError } from "./service-errors";
+import { clearLatencyFlagsCache } from "./latency-flags";
 
 let harness: ReturnType<typeof createTelephonyHarness>;
 const notifications = vi.hoisted(() => ({ after: vi.fn(), notify: vi.fn(), captureError: vi.fn() }));
@@ -54,6 +55,7 @@ describe("telephony runtime", () => {
   beforeEach(() => {
     harness = createTelephonyHarness();
     clearLiveGateCache();
+    clearLatencyFlagsCache();
     notifications.after.mockReset();
     notifications.notify.mockReset().mockResolvedValue({ sent: 0, failed: 0 });
     notifications.captureError.mockReset().mockResolvedValue({ accepted: false, eventId: null });
@@ -106,9 +108,10 @@ describe("telephony runtime", () => {
     const deps = await createTelephonyDeps({ logger });
     const commandId = "bb824028-87c9-442f-bfac-ac527f733493";
     await deps.telnyx!.bridge({ callControlId: "PRIVATE_CALL_CONTROL_TOKEN", targetCallControlId: "PRIVATE_TARGET_TOKEN", commandId });
-    expect(logger).toHaveBeenCalledExactlyOnceWith({ scope: "telnyx-http", level: "info", method: "POST", path: "/calls/:id/actions/bridge",
+    // The other line is the instance's one effective-latency-flags record.
+    expect(logger.mock.calls.filter(([entry]) => entry.scope !== "latency-flags")).toEqual([[{ scope: "telnyx-http", level: "info", method: "POST", path: "/calls/:id/actions/bridge",
       commandId, status: 200, ms: expect.any(Number), retried: false, errorCode: null, cached: false,
-      attempts: [{ startedAtMs: expect.any(Number), dispatchAfterMs: expect.any(Number), headersMs: expect.any(Number), ms: expect.any(Number), status: 200 }] });
+      attempts: [{ startedAtMs: expect.any(Number), dispatchAfterMs: expect.any(Number), headersMs: expect.any(Number), ms: expect.any(Number), status: 200 }] }]]);
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/PRIVATE_|KEYtest/);
   });
 
@@ -122,7 +125,26 @@ describe("telephony runtime", () => {
     const from = vi.spyOn(harness.admin, "from");
     await createTelephonyDeps();
     await createTelephonyDeps();
-    expect(from.mock.calls.filter((call) => String(call[0]) === "motorist_telephony_settings")).toHaveLength(1);
+    // One live-gate select and one latency-flags select, each reused.
+    expect(from.mock.calls.filter((call) => String(call[0]) === "motorist_telephony_settings")).toHaveLength(2);
+  });
+
+  it("keeps the live gate and env switches when the latency-flags column is missing", async () => {
+    vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ hold_fast_web: true }));
+    const from = harness.client.from.bind(harness.client);
+    vi.spyOn(harness.client, "from").mockImplementation((table) => {
+      const query = from(table);
+      const select = query.select.bind(query);
+      query.select = (columns, options) => {
+        if (columns === "latency_flags") query.then = (fulfilled, rejected) => Promise.resolve({ data: null, count: null, status: 400, statusText: "Bad Request",
+          error: { message: "column latency_flags does not exist", code: "42703", details: null, hint: null } }).then(fulfilled, rejected);
+        return select(columns, options);
+      };
+      return query;
+    });
+    const deps = await createTelephonyDeps();
+    expect(deps.telnyx?.liveGate).toEqual({ callsEnabled: true, smsEnabled: false });
+    expect(deps.latencyFlags).toMatchObject({ hold_fast_web: true, internal_lean_path: false });
   });
 
   it("fails the live gate closed when the settings row switches calls off", async () => {

@@ -1,6 +1,7 @@
 import { requireMobileActor } from "@/server/mobile/auth";
 import { mobileError, mobileJson, mobileScope } from "@/server/mobile/http";
 import { authorizeNativeOffer, nativeVoiceDeps } from "@/server/mobile/voice";
+import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
 import { readJsonBody } from "@/server/telephony/runtime";
 
 export const runtime = "nodejs";
@@ -13,10 +14,14 @@ function logOffer(body: unknown, outcome: Record<string, unknown>) {
     hasControlId: typeof value.callControlId === "string", ...outcome }));
 }
 
+/** Stands between the INVITE and the phone's answer. */
 export async function POST(request: Request) {
+  return withRequestMetrics("call.offer", () => authorize(request), { operation: "mobile.offer" });
+}
+async function authorize(request: Request) {
   let body: unknown = null;
   try {
-    const actor = await requireMobileActor(request); const deps = await nativeVoiceDeps(actor);
+    const actor = await measureRequestStep("auth", () => requireMobileActor(request)); const deps = await nativeVoiceDeps(actor);
     body = await readJsonBody(request);
     const result = await authorizeNativeOffer(deps, actor, body as Record<string, unknown>);
     logOffer(body, { outcome: "authorized", sessionId: result.sessionId, direction: result.direction, role: result.role });

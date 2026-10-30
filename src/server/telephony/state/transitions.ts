@@ -2176,6 +2176,25 @@ function onPartyHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent,
     return b.note(stillSupervising ? "one supervisor leg of several left" : "supervisor left").result();
   }
 
+  // The operator's own leg of an outgoing call ended while the customer still
+  // rings. Nobody else can take this call, so the customer must not keep
+  // ringing toward a dead phone; `onInternalPartyHangup` is the colleague-call
+  // equivalent.
+  const customerRinging = b.customerLeg();
+  if (b.session.direction === "outbound" && state === "ringing" && meta.ring?.mode === "outbound" && leg.role === "operator" &&
+    intent === "outbound" && Boolean(leg.profile_id) && leg.profile_id === b.session.answered_by_profile_id &&
+    customerRinging && !b.legEnded(customerRinging)) {
+    b.cmd(hangupCmd(b, customerRinging, "operator_left"));
+    b.setState("ended").patchSession({ ended_at: at });
+    b.call.status = "ended";
+    b.call.end_reason = answered ? "operator_left" : "operator_leg_unavailable";
+    b.call.ended_at = at;
+    releaseTalkingOperators(b, false);
+    b.note("operator leg ended while the customer was ringing → customer hung up");
+    finishIfQuiet(b, at);
+    return b.result();
+  }
+
   // 1. An offer that ended without being answered.
   if (!answered) {
     if (intent === "pickup" && meta.pickup?.by === leg.profile_id) b.patchMeta({ pickup: null });
@@ -2716,6 +2735,11 @@ export class CallActionRejected extends Error {
   }
 }
 
+/** Customer-call controls that a colleague call refuses; hangup, defer, pickup, party mute and recording stay. */
+const INTERNAL_UNSUPPORTED_ACTIONS: ReadonlySet<AppEvent["type"]> = new Set<AppEvent["type"]>([
+  "hold", "unhold", "park", "blind_transfer", "consult", "complete_transfer", "cancel_consult", "add_party", "invite_monitor", "supervise",
+]);
+
 function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
   if (event.type === "sweep") return onSweep(b);
   // Ending an invited listener remains valid after the customer/session ends.
@@ -2725,6 +2749,12 @@ function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
     return appStopSupervise(b, event);
   }
   if (!ACTIVE_SESSION_STATES.has(b.session.state)) throw new CallActionRejected("Hovor už nie je aktívny.", 409, "not_active");
+  // A colleague call has no customer: `customerLeg()` is the colleague's own
+  // leg, which no `park_after_unbridge` protects, so a conference promotion
+  // or transfer would hang up the colleague and end the call.
+  if (b.session.direction === "internal" && INTERNAL_UNSUPPORTED_ACTIONS.has(event.type)) {
+    throw new CallActionRejected("Pri hovore s kolegom táto akcia nie je dostupná.", 409, "not_supported_internal");
+  }
   const customer = b.customerLeg();
   if (!customer || b.legEnded(customer)) {
     // Cancellation also repairs an active session whose legs have all ended;

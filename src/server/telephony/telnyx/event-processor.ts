@@ -22,6 +22,7 @@ import { recordingIntent } from "../state/recording";
 import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, type WebhookClaim } from "./webhook-ledger";
 import { acceptsTestProviderEvent, getTestProviderSafety, hasTestCallProvenance } from "./test-safety";
 import { decodeClientState } from "./client-state";
+import { freezeStartMode, latencyFlagsOf } from "../latency-flags";
 
 /**
  * Telnyx webhook processor (design §2.3).
@@ -46,6 +47,8 @@ export type ProcessorDeps = SessionRunnerDeps & {
   sweepAfterEvent?: boolean;
   /** Internal durable replay; never changes the envelope authorization rules. */
   ledgerReplay?: "cron" | "correlation";
+  /** Diagnostics only: a replay from this host's session-inbox drain rather than the cron. */
+  replaySource?: "drain";
   replayCorrelated?: boolean;
   /** Sessions the inline sweep may re-drive (default `INLINE_SWEEP_LIMIT`). */
   sweepLimit?: number;
@@ -326,7 +329,8 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
       caller_number: callerNumber,
       called_number: calledNumber,
       started_at: event.occurredAt ?? now.toISOString(),
-      metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, announcements: announcementConfigFromMetadata(line?.metadata), ...(lineMode ? { line_inbound_mode: lineMode } : {}), ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}) }),
+      metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, announcements: announcementConfigFromMetadata(line?.metadata), ...(lineMode ? { line_inbound_mode: lineMode } : {}), ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}),
+        start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: "inbound", origin: null }) }),
     })
     .select("*")
     .single();
@@ -503,6 +507,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
   const effects = effectsDeps(deps);
   let session: SessionRow | null = null;
   let processingStarted = false;
+  let runnerStartedAt: string | null = null;
   try {
     session = await findSession(deps.admin, deps.organizationId, event);
     const correlatedExistingSession = session !== null;
@@ -552,9 +557,12 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       event.type !== "call.recording.saved" && event.type !== "conference.recording.saved";
     if (leaseFree) {
       processingStarted = true;
+      runnerStartedAt = now().toISOString();
       await recordCallEvent(effectsDeps(deps), { session: ownedSession, event, handledStatus: "processed",
         stateBefore: ownedSession.state, stateAfter: ownedSession.state, notes: ["bookkeeping"], commands: [] });
-      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+      if (await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger })) {
+        logWebhookLatency(deps, event, claim, ownedSession.id, runnerStartedAt, true);
+      }
       const bookkeeping = done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", notes: ["bookkeeping", "lease-free"] });
       if (deps.deferMaintenance) {
         try { deps.deferMaintenance(() => maybeSweep(deps, started)); }
@@ -571,9 +579,12 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     const ignoreReason = eventClass === "control" ? await leaseFreeIgnoreReason(deps, ownedSession, event) : null;
     if (ignoreReason) {
       processingStarted = true;
+      runnerStartedAt = now().toISOString();
       await recordCallEvent(effects, { session: ownedSession, event, handledStatus: "ignored",
         stateBefore: ownedSession.state, stateAfter: ownedSession.state, notes: [ignoreReason, "lease-free"], commands: [] });
-      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+      if (await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger })) {
+        logWebhookLatency(deps, event, claim, ownedSession.id, runnerStartedAt, true);
+      }
       logResult(deps, event, claim, ownedSession.id, "ignored", [], started, now);
       const ignored = done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "ignored", notes: [ignoreReason, "lease-free"] });
       // Same after-response work as a reducer ignore: this host may drain the
@@ -602,6 +613,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     let setupRecovery: SessionRow | null = null;
     const result = await ownedSessionWork({ ...deps, leaseWaitMs: WEBHOOK_LEASE_WAIT_MS }, ownedSession.id, async () => {
       processingStarted = true;
+      runnerStartedAt = now().toISOString();
       if (eventClass === "bookkeeping") {
         if (event.type === "call.recording.saved" || event.type === "conference.recording.saved") {
           const payload = event.payload;
@@ -656,7 +668,9 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // inbox claim must not keep the next answer behind one more DB round trip.
     // Failed-owner bookkeeping stays in the scope above for terminal recovery.
     if (result.outcome === "processed" || result.outcome === "ignored") {
-      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+      if (await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger })) {
+        logWebhookLatency(deps, event, claim, ownedSession.id, runnerStartedAt, false);
+      }
     }
     // The owned scope has exited before optional maintenance. A failed apply
     // may still have durable effects pending; its ledger failure stays truthful.
@@ -853,6 +867,21 @@ async function maybeSweep(deps: ProcessorDeps, startedAt: number, waitingFirst =
   }
 }
 
+/**
+ * Received → processed for one ledger row, written when it finishes processed.
+ * A busy-hint deferral throws before `ownedSessionWork`, so it never logs a
+ * lease wait; this line is what shows the cost. `deferrals` counts the row's
+ * earlier claims (deferrals plus rare failures or takeovers); the ledger's
+ * `deferral_count` is exact. Ledger stamps and counts only.
+ */
+function logWebhookLatency(deps: ProcessorDeps, event: TelephonyEvent, claim: WebhookClaim, sessionId: string, runnerStartedAt: string | null, leaseFree: boolean): void {
+  try {
+    deps.logger?.({ scope: "webhook-latency", eventId: event.id, eventType: event.type, sessionId, receivedAt: claim.receivedAt, runnerStartedAt,
+      processedAt: nowOf(deps)().toISOString(), deferrals: Math.max(0, claim.attempts - 1), priorRetryState: claim.retryState, attempts: claim.attempts,
+      path: deps.ledgerReplay ? deps.replaySource ?? "replay" : leaseFree ? "lease_free" : "leased" });
+  } catch { /* Telemetry cannot change acknowledgement policy. */ }
+}
+
 function logResult(deps: ProcessorDeps, event: TelephonyEvent, claim: WebhookClaim, sessionId: string, outcome: string, commands: CommandOutcome[], started: number, now: () => Date): void {
   deps.logger?.({
     scope: "webhook",
@@ -1022,7 +1051,7 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       if (waitMs) await (deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(waitMs);
       if (Date.now() >= deadline) break;
       const replay = await processTelnyxEvent({ ...deps, ledgerReplay: row.retry_state === "deferred" ? "cron" : "correlation",
-        replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope);
+        replaySource: "drain", replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope);
       if (mirror) mirrorsReplayed++; else replayed++;
       if (customerTerminalOnly && replayed >= limit) break;
       if (replay.outcome === "busy" || replay.error?.includes("SessionLeaseBusyError")) break;

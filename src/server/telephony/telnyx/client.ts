@@ -1,5 +1,5 @@
 import "server-only";
-import { measureRequestStep } from "@/server/request-metrics";
+import { measureRequestStep, registerTelnyxOrigin } from "@/server/request-metrics";
 import { recordProviderDispatch, sessionOwnership, type Ownership } from "../ownership";
 import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../provider-journal";
 
@@ -426,6 +426,8 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     throw new TelephonyNotConfiguredError();
   }
   const configured: TelnyxConfigured = config;
+  // New provider sockets are counted next to the database's (`telnyxConnects`).
+  registerTelnyxOrigin(configured.apiBaseUrl);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? TELNYX_COMMAND_TIMEOUT_MS;
   const sleep = options.sleep ?? defaultSleep;

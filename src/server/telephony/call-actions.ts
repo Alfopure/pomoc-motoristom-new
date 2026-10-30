@@ -49,7 +49,8 @@ import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "./telnyx/clien
 import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
-import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, sessionOwnership } from "./ownership";
+import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, ownershipRpc, sessionOwnership } from "./ownership";
+import { freezeStartMode, latencyFlagsOf } from "./latency-flags";
 import { humansOnly } from "@/server/profile-kind";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { nativeVoiceEnabled } from "@/lib/app-environment";
@@ -563,6 +564,7 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
     // untouched new row can have no earlier dispatch to recover.
     const fresh = !recovering && session.version === original.version && session.state === "received" &&
       !session.ended_at && !session.termination_requested_at && !readPendingEffects(session).entries.length;
+    if (!fresh) await endUndialedInitialCall(deps, actor, session, id);
     const recovered = fresh ? null : await recoverInitialDial(deps, session, id, plan);
     if (recovered) return recovered;
     if (plan.callbackRequestId) {
@@ -655,6 +657,29 @@ async function completeDurableInitialDial(deps: CallActionDeps, session: Session
   const accepted = await recoverInitialDial(deps, current, id, plan);
   if (accepted) return accepted;
   throw new CallActionError("Úvodný krok hovoru zostáva nedokončený. Zopakujte overenie pôvodnej požiadavky.", 503, "initial_call_pending");
+}
+
+/**
+ * A hangup committed its termination after INSERT and before this request
+ * reached the lease. Nothing was reserved or dialled, and no later event would
+ * ever end the session: `appHangup` needs legs, the sweep a customer leg. End
+ * it as cancelled once the journal proves its dial was never prepared; the
+ * request still answers 409 `initial_call_ended`.
+ */
+async function endUndialedInitialCall(deps: CallActionDeps, actor: CallActor, session: SessionRow, dialCommandId: string): Promise<void> {
+  if (session.writer_contract !== 2 || !session.termination_requested_at || session.ended_at || session.state !== "received" ||
+    readPendingEffects(session).entries.length || sessionOwnership.getStore()?.contract !== 2) return;
+  if (await ownershipRpc<unknown>(deps.admin, "motorist_provider_command_lookup_v2", { p_session_id: session.id, p_command_id: dialCommandId })) return;
+  const now = nowOf(deps).toISOString();
+  const cancelled = emptyTransition();
+  cancelled.session = { state: "ended", ended_at: now };
+  cancelled.call = { status: "ended", end_reason: "cancelled_before_dial", ended_at: now };
+  cancelled.presence = [{ profileId: actor.profileId, status: "available", sessionId: null, onlyIfSession: session.id, reason: "cancelled before dial" }];
+  cancelled.notes = ["initial dial cancelled before dispatch"];
+  const staged = await stageEffects(effectsFor(deps), { session, expectedVersion: session.version,
+    event: { kind: "app", type: "sweep", id: `initial-cancelled:${dialCommandId}`, actorProfileId: actor.profileId, occurredAt: now },
+    result: { next: cancelled, commands: [], compensations: [], guard: null, ignored: null } });
+  await resumePendingEffects(effectsFor(deps), staged);
 }
 
 // --- in-call actions ---------------------------------------------------------
@@ -1287,7 +1312,8 @@ async function createSession(
       caller_number: input.callerNumber,
       called_number: input.calledNumber,
       started_at: nowOf(deps).toISOString(),
-      metadata: toJson({ ...input.metadata, environment: deps.environment }),
+      metadata: toJson({ ...input.metadata, environment: deps.environment,
+        start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: input.direction, origin: deps.deviceKind ?? "web" }) }),
     })
     .select("*")
     .single();
