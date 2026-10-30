@@ -8,6 +8,20 @@ class Timer {
   func invalidate() { valid = false }
   static func fire(_ interval: TimeInterval) { let timers = scheduled.filter { $0.valid && $0.interval == interval }; for timer in timers { timer.valid = false; timer.callback(timer) } }
 }
+// Unified logging adapter: keeps each public device-log line for privacy checks.
+struct OSLogPrivacy { static let `public` = OSLogPrivacy() }
+struct OSLogMessage: ExpressibleByStringInterpolation {
+  struct StringInterpolation: StringInterpolationProtocol {
+    var text = ""
+    init(literalCapacity: Int, interpolationCount: Int) {}
+    mutating func appendLiteral(_ literal: String) { text += literal }
+    mutating func appendInterpolation(_ value: String, privacy: OSLogPrivacy) { text += value }
+  }
+  let text: String
+  init(stringLiteral value: String) { text = value }
+  init(stringInterpolation: StringInterpolation) { text = stringInterpolation.text }
+}
+enum os { struct Logger { static var lines: [String] = []; init(subsystem: String, category: String) {}; func notice(_ message: OSLogMessage) { Self.lines.append(message.text) } } }
 enum AVAuthorizationStatus { case authorized, denied, restricted, notDetermined }
 enum AVMediaType: Equatable { case audio, video }
 class AVCaptureDevice {

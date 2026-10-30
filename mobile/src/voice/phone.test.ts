@@ -1148,3 +1148,25 @@ describe("transfer and recording of the own call", () => {
     expect(f.api.transfer).not.toHaveBeenCalled();
   });
 });
+
+describe("device diagnostics", () => {
+  it("logs reason codes and passes the disconnect reason, never a number, name or provider token", async () => {
+    const f = fixture(); const debug = vi.fn(); f.native.debug = debug;
+    await f.phone.initialise(); await f.phone.connect();
+    // Native INVITE events also carry the caller's name.
+    f.emit({ type: "incoming", callId: id, providerLegId: id, number: "+421900000001", name: "Ján Novák" } as VoiceEvent); await tick();
+    await f.phone.disconnect("logout");
+    expect(f.native.disconnect).toHaveBeenLastCalledWith("logout");
+    expect(debug.mock.calls.map(([event]) => event)).toEqual(expect.arrayContaining(["phone.init", "phone.connect_start", "phone.connect_end", "offer.authorized", "phone.disconnect"]));
+    expect(debug).toHaveBeenCalledWith("offer.done", expect.objectContaining({ outcome: "authorized" }));
+    expect(debug).toHaveBeenCalledWith("phone.disconnect", expect.objectContaining({ reason: "logout" }));
+    const logged = JSON.stringify(debug.mock.calls);
+    for (const secret of ["421900000001", "Ján", "Novák", "memory-only-provider-jwt", "exact-leg", sid, lease]) expect(logged).not.toContain(secret);
+  });
+  it("names a revoking failure in the native disconnect", async () => {
+    const f = await connected();
+    vi.mocked(f.api.authorize).mockRejectedValueOnce(new MobileApiError("stale", 409, "native_lease_stale"));
+    f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
+    expect(f.native.disconnect).toHaveBeenCalledWith("fail:native_lease_stale");
+  });
+});

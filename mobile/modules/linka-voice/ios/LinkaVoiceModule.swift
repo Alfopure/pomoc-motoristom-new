@@ -24,7 +24,12 @@ public final class LinkaVoiceModule: Module {
       AVAudioSession.sharedInstance().requestRecordPermission { allowed in promise.resolve(allowed) }
     }.runOnQueue(.main)
     AsyncFunction("connect") { (token: String) in try LinkaPhone.shared.connect(token: token) }.runOnQueue(.main)
-    AsyncFunction("disconnect") { LinkaPhone.shared.disconnect() }.runOnQueue(.main)
+    // The reason only names the caller in the device log; older bundles omit it.
+    AsyncFunction("disconnect") { (reason: String?) in LinkaPhone.shared.disconnect(reason: reason ?? "js") }.runOnQueue(.main)
+    // A JS device-log line; LinkaPhone.diag sanitizes it again and touches no phone state.
+    Function("debug") { (event: String, fields: [String: String]) in LinkaPhone.diag("js." + event, fields) }
+    AsyncFunction("diagnosticEvents") { LinkaPhone.diagnosticEvents() }
+    AsyncFunction("clearDiagnosticEvents") { (upToId: Int) in LinkaPhone.clearDiagnosticEvents(upToId: upToId) }
     AsyncFunction("authorize") { (callId: String, sessionId: String, controlId: String) in try LinkaPhone.shared.authorize(callId: callId, sessionId: sessionId, controlId: controlId) }.runOnQueue(.main)
     AsyncFunction("reject") { (callId: String) in LinkaPhone.shared.reject(callId: callId) }.runOnQueue(.main)
     AsyncFunction("answer") { (callId: String) in try LinkaPhone.shared.answer(callId: callId) }.runOnQueue(.main)

@@ -240,7 +240,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   // The query may hold a copy of the marker, so its shape is what counts.
   const fieldOnly = Boolean(me.data && "fieldOnly" in me.data);
   const identity = usableMobileIdentity(me.data && !("fieldOnly" in me.data) ? me.data : undefined, me.error);
-  const { phone, state: phoneState } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
+  const { phone, state: phoneState, finishDiagnostics } = useDispatchPhone(config, client, userId, identity?.profileId ?? null, active);
   const push = useMemo(() => new PushSettings(createPushDevice(config.environment, userId), createPushApi(config, async () => {
     if (liveUser() !== userId) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
     const { data } = await client.auth.getSession();
@@ -291,7 +291,9 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
       if (liveUser() === userId) await onLogout(async () => {
         const beforeDisconnect = phone?.snapshot();
         if (beforeDisconnect?.call || beforeDisconnect?.termination) { setLogoutError("Pred odhlásením ukončite hovor. Koncepty zostali zachované."); throw new Error("Active call prevents logout"); }
-        await phone?.disconnect();
+        // The next operator on this iPhone never uploads this one's call diagnostics.
+        await finishDiagnostics?.();
+        await phone?.disconnect("logout");
         // Notices for this account stop reaching the phone; the choice stays for the next sign-in.
         await push.forget();
         // Nothing more about this person's position leaves the phone.

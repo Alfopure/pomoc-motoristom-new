@@ -15,10 +15,10 @@ parser.add_argument('--source', type=pathlib.Path, default=pathlib.Path('mobile/
 parser.add_argument('--output', type=pathlib.Path, required=True)
 args = parser.parse_args()
 source = args.source.read_text()
-for signature in ['func answerWhenAuthorized(', '  func onCallStateUpdated(callState: CallState, callId: UUID) {\n    guard Thread.isMainThread', 'func snapshot()', 'func disconnect()', 'func provider(_ provider: CXProvider, perform action: CXStartCallAction)']:
+for signature in ['func answerWhenAuthorized(', '  func onCallStateUpdated(callState: CallState, callId: UUID) {\n    guard Thread.isMainThread', 'func snapshot()', 'func disconnect(', 'func provider(_ provider: CXProvider, perform action: CXStartCallAction)']:
     if source.count(signature) != 1:
         raise SystemExit('Required unique source method missing: ' + signature)
-source = re.sub(r'^import (AVFoundation|CallKit|PushKit|TelnyxRTC|UIKit)\n', '', source, flags=re.M)
+source = re.sub(r'^import (AVFoundation|CallKit|PushKit|TelnyxRTC|UIKit|os)\n', '', source, flags=re.M)
 # Baseline sources gate on the TEST bundle only; current ones on the TEST and production bundles.
 gates = ['''  static var enabled: Bool {
     Bundle.main.bundleIdentifier == "sk.linkapomoci.dispecing.test"
