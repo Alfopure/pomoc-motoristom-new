@@ -49,6 +49,12 @@ Pri DB zmene pripraviť presný SQL, cieľový projekt, poradie voči kódu a kr
 
 Migračné timestampy sa medzi projektmi historicky líšia. Pred novou konkrétnou migráciou porovnať príslušné objekty a ich definície s ledgerom oboch projektov, zaznamenať ekvivalentné už aplikované zmeny a aplikovať len chýbajúci autorizovaný SQL. Hromadné prepisovanie migračnej histórie nie je podmienkou bežného release.
 
+**Skoré prijatie vlastnej vetvy (call-speed S3).** Pred zapnutím `own_leg_request_header` a `client.webEarlyAccept` v danom projekte musia byť v jeho databáze aplikované migrácie `20261031100000_telephony_realtime_doorbell` a `20261031100100_call_sessions_service_only`. Bez nich vidí identitu prebiehajúceho štartu hovoru každý člen organizácie (Realtime aj priamy select). Aplikácia overuje `sip_uri_calling_preference` credential connection iba na TESTe (TEST guard v `src/server/telephony/telnyx/client.ts`). Pred zapnutím v produkcii ju preto treba len čítaním overiť aj tam:
+- `GET /v2/credential_connections/<TELNYX_CREDENTIAL_CONNECTION_ID>` → `active` a `sip_uri_calling_preference`;
+- outbound voice profile tejto connection → `enabled`.
+
+Očakáva sa `internal`. Toto nastavenie prijíma SIP URI hovory iba zo spojení v tom istom účte a potrebuje ho aj naše vytáčanie operátora. Pri `unrestricted` môže vetvu operátora vytočiť ktokoľvek, kto pozná jeho SIP URI, a S3 sa nezapína. Výsledok sa zapíše do release PR. Kontrola nič nemení.
+
 Pre telefonickú zmenu je funkčným dôkazom reálny hovor cez overené samostatné TEST zdroje podľa [autorizovanej telefónnej politiky](test-phone-number-policy.md). Bežné TEST volania už nevyžadujú zoznam jednotlivých telefónov; to nepovoľuje automatické kontaktovanie skopírovaných zákazníkov. Vypnutý hlasový TEST ani úspešný build funkčný dôkaz nenahradí. Ak majiteľ aj tak výslovne žiada produkciu ako prvú, agent pravdivo zaznamená tento neoverený rozsah a vykoná primeranú kontrolu po nasadení.
 
 ## Stav pôvodného auditu k 6. 10. 2026

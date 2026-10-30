@@ -1429,7 +1429,8 @@ function dialParams(command: DialCommand): DialParams {
     sipRegion: "Europe",
     mediaEncryption: isSip ? "SRTP" : undefined,
     customHeaders: command.colleagueCall ? [{ name: COLLEAGUE_CALL_HEADER, value: "1" }]
-      : command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" }] : undefined,
+      : command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" },
+        ...(command.requestHeader ? [{ name: "X-PM-Request", value: command.requestHeader }] : [])] : undefined,
     fromDisplayName: command.fromDisplayName,
     // Supervision attaches to a live call at dial time; the caller's bridge is
     // never touched. `supervisor_role` is only meaningful together with it.
