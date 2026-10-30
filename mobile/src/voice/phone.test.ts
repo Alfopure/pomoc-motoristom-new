@@ -557,6 +557,14 @@ describe("native phone lifecycle", () => {
     f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick(); expect(f.phone.state.call?.connected).toBe(true);
     expect(f.native.confirmConnected).toHaveBeenCalledWith(id);
   });
+  it("clears termination when the server reports the call already ended, so the next call is not busy", async () => {
+    const f = await connected(); f.emit({ type: "outgoing", callId: id, sessionId: sid });
+    vi.mocked(f.api.end).mockRejectedValueOnce(new MobileApiError("Hovor už nie je aktívny.", 409, "not_active"));
+    f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await tick();
+    f.emit({ type: "ended", callId: id, sessionId: sid, outgoing: true }); await tick();
+    expect(f.phone.state.termination).toBeNull(); expect(f.phone.state.registration).not.toBe("error");
+    expect(f.native.disconnect).not.toHaveBeenCalled();
+  });
   it("retains pending termination after local CallKit has ended", async () => {
     const f = await connected(); f.emit({ type: "outgoing", callId: id, sessionId: sid });
     vi.mocked(f.api.end).mockResolvedValue({ terminationPending: true }); await f.phone.end(); f.emit({ type: "ended", callId: id }); await tick();
