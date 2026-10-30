@@ -1573,8 +1573,11 @@ function canDirectConnectOutbound(b: TransitionBuilder): boolean {
 function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): ReduceResult {
   if (b.session.state !== "received") return b.note("own leg answered outside received").result();
   const meta = b.meta;
-  if (b.session.direction === "internal" && intent === "internal_caller" && leg.role === "operator" && leg.profile_id &&
-      meta.internal?.by === leg.profile_id && b.session.answered_by_profile_id === leg.profile_id) {
+  // The caller's own leg is the accepted endpoint of the call it placed; hold
+  // authority and the other-device protections need its exact control ID.
+  if (leg.role === "operator" && leg.profile_id && b.session.answered_by_profile_id === leg.profile_id &&
+      (b.session.direction === "internal" && intent === "internal_caller" && meta.internal?.by === leg.profile_id ||
+       b.session.direction === "outbound" && intent === "outbound" && meta.outbound?.by === leg.profile_id)) {
     rememberAcceptedDeviceLeg(b, leg);
   }
   if (intent !== "outbound" && meta.internal?.endpoints?.length) return fanoutInternalColleague(b, leg);
