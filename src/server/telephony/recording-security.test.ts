@@ -21,7 +21,54 @@ function fixture() {
  vi.stubEnv('SUPABASE_URL','https://isolated.supabase.co');vi.stubEnv('SUPABASE_PUBLISHABLE_KEY','synthetic-public-key');
  return {...fake,sign};
 }
-afterEach(()=>{vi.unstubAllGlobals();vi.unstubAllEnvs();});
+afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();vi.unstubAllEnvs();});
+describe('recording read accountability',()=>{
+ it('coalesces repeated detail reads durably, without storing transcript text or signed URLs',async()=>{
+  const f=fixture();vi.spyOn(Date,'now').mockReturnValue(Date.parse('2026-10-30T10:00:10Z'));
+  await Promise.all([getCallRecordingDetail(f.admin,actor('manager'),call),getCallRecordingDetail(f.admin,actor('manager'),call)]);
+  const entries=f.db.rows('motorist_audit_log');expect(entries).toHaveLength(1);
+  expect(entries[0]).toMatchObject({organization_id:org,actor_profile_id:manager,action:'telephony.recording.detail.read',entity_type:'telephony_call',entity_id:call,
+   after_payload:{callId:call,sourceRevision:1,windowStart:'2026-10-30T10:00:00.000Z',windowSeconds:60}});
+  expect(JSON.stringify(entries)).not.toContain('Private synthetic');expect(JSON.stringify(entries)).not.toContain('token=secret');
+ });
+ it('separates readers, source revisions, and minute windows',async()=>{
+  const f=fixture();const now=vi.spyOn(Date,'now').mockReturnValue(Date.parse('2026-10-30T10:00:10Z'));
+  await getCallRecordingDetail(f.admin,actor('manager'),call);
+  await getCallRecordingDetail(f.admin,{...actor('manager'),profileId:id(60)},call);
+  f.db.update('motorist_calls',{recording_source_revision:2},row=>row.id===call);
+  await getCallRecordingDetail(f.admin,actor('manager'),call);
+  now.mockReturnValue(Date.parse('2026-10-30T10:01:10Z'));
+  await getCallRecordingDetail(f.admin,actor('manager'),call);
+  expect(f.db.rows('motorist_audit_log')).toHaveLength(4);
+ });
+ it('does not release transcript content when the durable audit cannot be confirmed',async()=>{
+  const f=fixture();f.db.failNext('motorist_audit_log','upsert','Private database detail');
+  await expect(getCallRecordingDetail(f.admin,actor('manager'),call)).rejects.toMatchObject({status:503,code:'recording_read_audit_unavailable'});
+ });
+ it('does not describe rejected or redacted reads as content access',async()=>{
+  const f=fixture();await getCallRecordingDetail(f.admin,actor('dispatcher'),call);
+  f.db.update('motorist_call_recordings',{restricted_at:new Date().toISOString()},row=>row.id===rec);
+  await getCallRecordingDetail(f.admin,actor('manager'),call);
+  expect(f.db.rows('motorist_audit_log')).toHaveLength(0);
+ });
+ it('coalesces audio range reads separately from transcript/detail access',async()=>{
+  const f=fixture();vi.spyOn(Date,'now').mockReturnValue(Date.parse('2026-10-30T10:00:10Z'));
+  vi.stubGlobal('fetch',vi.fn().mockImplementation(async()=>new Response(new Uint8Array(4),{status:206,headers:{'content-range':'bytes 0-3/8','content-length':'4'}})));
+  await getCallRecordingDetail(f.admin,actor('manager'),call);
+  for(let i=0;i<2;i++){
+   const response=await getRecordingAudio(f.admin,actor('manager'),call,rec,new Request('https://app.test/audio',{headers:{Range:'bytes=0-3'}}));
+   expect((await response.arrayBuffer()).byteLength).toBe(4);
+  }
+  const entries=f.db.rows('motorist_audit_log');expect(entries).toHaveLength(2);
+  expect(entries.find(row=>row.action==='telephony.recording.audio.read')).toMatchObject({actor_profile_id:manager,entity_type:'telephony_recording',entity_id:rec,after_payload:{callId:call,sourceRevision:1}});
+ });
+ it('cancels the upstream stream without releasing audio when its audit fails',async()=>{
+  const f=fixture(),cancel=vi.fn();f.db.failNext('motorist_audit_log','upsert','Private database detail');
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(new ReadableStream({cancel}),{status:206,headers:{'content-range':'bytes 0-7/8','content-length':'8'}})));
+  await expect(getRecordingAudio(f.admin,actor('manager'),call,rec,new Request('https://app.test/audio'))).rejects.toMatchObject({status:503,code:'recording_read_audit_unavailable'});
+  expect(cancel).toHaveBeenCalledOnce();
+ });
+});
 describe('recording service authorization',()=>{
  it.each(['PT409','40001'])('maps %s after the source read to a conflict without retrying recording deletion',async code=>{
   const f=fixture();

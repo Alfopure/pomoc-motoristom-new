@@ -1,4 +1,5 @@
 import "server-only";
+import type { MotoristActor } from "./api-auth";
 import { loadWorkspaceCapabilities } from "./workspace-capabilities";
 import { createWorkspaceTask, TASK_WORKSPACE_ROLES } from "./tasks";
 import { taskWorkspaceSystemEnabled } from "./task-system-gate";
@@ -1067,7 +1068,7 @@ export async function backfillAssistanceDirectoryFromCases(authorize?: Organizat
 }
 
 /** `category` is the operator's own label for the batch; anything else falls back to the file type. */
-export async function uploadCaseAttachments(caseId: string, files: File[], note?: string, authorize?: OrganizationAuthorizer, category?: string) {
+export async function uploadCaseAttachments(caseId: string, files: File[], note?: string, authorize?: (organizationId: string) => Promise<MotoristActor>, category?: string) {
   if (!nonEmpty(caseId)) {
     throw new MutationError("Chýba prípad.", 400);
   }
@@ -1077,14 +1078,18 @@ export async function uploadCaseAttachments(caseId: string, files: File[], note?
 
   const supabase = createSupabaseAdminClient();
   const organization = await resolveOrganization(supabase);
-  await authorizeOrganizationAccess(authorize, organization.id);
+  const actor = await (authorize ?? (await import("./api-auth")).requireMotoristActor)(organization.id);
+  if (actor.organizationId !== organization.id) throw new MutationError("Nemáte oprávnenie upraviť tento prípad.", 403);
   const caseRow = await getCase(supabase, organization.id, caseId);
-  const ownerId = caseRow.owner_id ?? (await resolveDefaultOwnerId(supabase, organization.id));
-  const existingAttachments = attachmentMetadataPayloadFromJson(caseRow.attachments_metadata);
+  // Preserve existing metadata verbatim, including fields written by mobile.
+  if (caseRow.attachments_metadata !== null && !Array.isArray(caseRow.attachments_metadata)) {
+    throw new MutationError("Prílohy prípadu sa nepodarilo načítať.", 500);
+  }
+  const existingAttachments = caseRow.attachments_metadata ?? [];
   const createdAt = new Date().toISOString();
   const uploadedAttachments: CaseAttachmentInput[] = [];
   const uploadedPaths: string[] = [];
-  let metadataUpdated = false;
+  let saveSubmitted = false;
 
   files.forEach(validateCaseAttachmentFile);
 
@@ -1112,52 +1117,30 @@ export async function uploadCaseAttachments(caseId: string, files: File[], note?
       });
     }
 
-    const nextAttachments = [...existingAttachments, ...uploadedAttachments];
-    await throwOnResult(
-      supabase
-        .from("motorist_cases")
-        .update({ attachments_metadata: trustedAttachmentMetadataPayload(nextAttachments) })
-        .eq("organization_id", organization.id)
-        .eq("id", caseId),
-    );
-    metadataUpdated = true;
-
-    await insertSingle<CaseEventRow>(
-      supabase
-        .from("motorist_case_events")
-        .insert({
-          organization_id: organization.id,
-          case_id: caseId,
-          actor_profile_id: ownerId,
-          event_type: "attachments_uploaded",
-          title: "Dokumenty nahraté",
-          body: `${uploadedAttachments.length} súbor(ov) bolo uložených do privátneho storage.`,
-          payload: { source: "case_attachments", attachments: trustedAttachmentMetadataPayload(uploadedAttachments) },
-        })
-        .select("*")
-        .single(),
-    );
-    await audit(supabase, organization.id, ownerId, "case.attachments.upload", "motorist_cases", caseId, {
-      count: uploadedAttachments.length,
-    });
+    const attachments = trustedAttachmentMetadataPayload(uploadedAttachments) as Json[];
+    const identity = caseMutationIdentity({ mutationId: crypto.randomUUID(), source: "web_case_attachments",
+      organizationId: organization.id, actorId: actor.profileId, caseId, expectedUpdatedAt: caseRow.updated_at, attachments });
+    // The revision check, metadata, history and audit share one transaction.
+    // Once submitted, even a failed response may represent a committed save:
+    // never restore an old array or delete potentially referenced objects.
+    // Only an explicit revision conflict proves this transaction rolled back.
+    saveSubmitted = true;
+    await commitAtomicCaseSave(supabase, { organizationId: organization.id, actorId: actor.profileId, caseId,
+      expectedUpdatedAt: caseRow.updated_at, identity, related: [], fieldLabels: { attachments_metadata: "prílohy" },
+      casePatch: { attachments_metadata: [...existingAttachments, ...attachments] } });
   } catch (error) {
-    if (metadataUpdated) {
-      const restoreResult = await supabase
-        .from("motorist_cases")
-        .update({ attachments_metadata: trustedAttachmentMetadataPayload(existingAttachments) })
-        .eq("organization_id", organization.id)
-        .eq("id", caseId);
-
-      if (restoreResult.error) {
-        console.warn("Case attachment metadata restore failed:", restoreResult.error.message);
+    const revisionConflict = error instanceof MutationError && error.code === "CASE_REVISION_CONFLICT";
+    if ((!saveSubmitted || revisionConflict) && uploadedPaths.length > 0) {
+      try {
+        const cleanupResult = await supabase.storage.from(CASE_ATTACHMENTS_BUCKET).remove(uploadedPaths);
+        if (cleanupResult.error) throw cleanupResult.error;
+      } catch {
+        // Cleanup cannot mask the original conflict or expose storage details.
+        console.warn("Case attachment cleanup failed", { code: "CASE_ATTACHMENT_CLEANUP_FAILED" });
       }
     }
-
-    if (uploadedPaths.length > 0) {
-      const cleanupResult = await supabase.storage.from(CASE_ATTACHMENTS_BUCKET).remove(uploadedPaths);
-      if (cleanupResult.error) {
-        console.warn("Case attachment cleanup failed:", cleanupResult.error.message);
-      }
+    if (saveSubmitted && (!(error instanceof MutationError) || error.status >= 500)) {
+      throw new MutationError("Výsledok nahratia sa nepodarilo overiť. Pred opakovaním obnovte prílohy prípadu.", 500, "CASE_SAVE_UNCONFIRMED");
     }
     throw error;
   }

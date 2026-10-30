@@ -39,6 +39,16 @@ Write audit entries for:
 - changing pobočky, cenníky, fleet assets, or integration settings,
 - changing user roles or organization settings.
 
+Recording reads are recorded in `motorist_audit_log` before content is returned.
+`telephony.recording.audio.read`, `telephony.recording.detail.read` and
+`telephony.recording.own_review.read` identify the verified actor, organization,
+resource and source revision. Repeated ranges or detail polling share one durable
+event per actor/resource/revision and UTC minute; this records authorized access,
+not exact playback counts or completed downloads. The row ID correlates that
+access window. Audit payloads contain no transcript text, audio URLs or tokens.
+If the audit cannot be confirmed, content reads return 503; rejected/redacted
+requests are not reported as successful content access.
+
 ## Retention and GDPR Notes
 
 Retention is not final until legal review. The foundation assumes retention policies will be configured for recordings, transcripts, SMS, and case history. The schema should make deletion, export, and restricted access possible without redesign.
