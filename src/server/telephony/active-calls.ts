@@ -256,12 +256,20 @@ export function resetActiveCallsCache(): void {
 export async function loadActiveCallsCached(
   deps: ActiveCallsDeps,
   actor: { profileId: string; canManageAssignments: boolean },
+  /**
+   * `fresh_after_write` (call-speed S1.4): only a pass that started at or
+   * after this instant may answer — the console's doorbell or its own control
+   * write happened then, and an earlier pass can predate it. Tabs asking for
+   * the same or an older instant still share one pass.
+   */
+  options: { minStartedAt?: number } = {},
 ): Promise<ActiveCallsSnapshot> {
   const now = (deps.now ?? (() => new Date()))();
   const key = `${deps.organizationId}:${deps.environment}`;
   const at = now.getTime();
   let entry = rowsCache.get(key);
-  if (!entry || !entry.pending && (at - entry.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < entry.at)) {
+  if (!entry || !entry.pending && (at - entry.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < entry.at) ||
+    options.minStartedAt !== undefined && entry.at < options.minStartedAt) {
     entry = { at, pending: true, rows: readActiveCallRows(deps) };
     rowsCache.set(key, entry);
   }

@@ -100,7 +100,8 @@ export type ActiveCallsPayload = {
   checkedAt: string;
   configured: boolean;
   pausedPickupEnabled?: boolean;
-  tuning?: WebCallTuning;
+  /** `freshAfterWrite`: the server honours `?after=` (`fresh_after_write`, call-speed S1.4). */
+  tuning?: WebCallTuning & { freshAfterWrite?: boolean };
   /** Organisation whose Realtime topic carries telephony changes. */
   organizationId: string;
   actorProfileId: string;

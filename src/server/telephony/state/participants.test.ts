@@ -24,6 +24,26 @@ describe("participant evidence", () => {
     expect(h.db.log).toEqual([]);
   });
 
+  it("skips a colleague call's interval work only under internal_lean_path, and never a recorded call's", async () => {
+    const h = createTelephonyHarness();
+    const call = await h.inbound();
+    const answered = h.session(call.sessionId) as SessionRow;
+    const internal = { ...answered, direction: "internal", metadata: toJson({ ...readMeta(answered), recording: undefined }) } as SessionRow;
+
+    h.db.log.length = 0;
+    await observeParticipants(h.admin, internal, "colleague-bridged", h.now().toISOString(), true, undefined, true);
+    expect(h.db.log).toEqual([]);
+    // Switch off: today's reads.
+    await observeParticipants(h.admin, internal, "colleague-bridged", h.now().toISOString(), true);
+    expect(h.db.log.length).toBeGreaterThan(0);
+    // A recorded call keeps writing its intervals with the switch on.
+    const recorded = { ...answered, state: "talking", metadata: toJson({ ...readMeta(answered),
+      recording: { ...readMeta(answered).recording!, policy: { ...readMeta(answered).recording!.policy, enabled: true } } }) } as SessionRow;
+    h.db.log.length = 0;
+    await observeParticipants(h.admin, recorded, "recorded-bridged", h.now().toISOString(), true, undefined, true);
+    expect(h.db.log.some(row => row.table === "motorist_call_participant_intervals")).toBe(true);
+  });
+
   it("closes existing recorded evidence even when the call's policy is now disabled", async () => {
     const h = createTelephonyHarness();
     const call = await h.inbound();

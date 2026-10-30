@@ -7,6 +7,7 @@ import { emptyTransition, readMeta, type SessionRow } from "./state/types";
 import { effectsDeps, ownedSessionWork } from "./session-runner";
 import { sessionOwnership } from "./ownership";
 import { TelnyxCommandError } from "./telnyx/client";
+import { defaultLatencyFlags } from "./latency-flags";
 
 // Timers may wake slightly early; cross the fake SQL due time without polling.
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms + 5));
@@ -17,10 +18,12 @@ function gate() {
 }
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-async function failedOwner(options: { customer?: boolean; recording?: boolean; rejectAudio?: boolean } = {}) {
+async function failedOwner(options: { customer?: boolean; recording?: boolean; rejectAudio?: boolean; claimHolding?: boolean } = {}) {
   vi.stubEnv("TELNYX_CALL_ACTION_ANNOUNCEMENTS_ENABLED", "false");
   for (const name of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED", "TELNYX_RECORDING_CONFERENCE_VERIFIED", "TELNYX_RECORDING_TRANSFER_VERIFIED", "TELNYX_RECORDING_CHANNELS_VERIFIED"]) vi.stubEnv(name, "false");
   const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+  // Pinned: the fixture asserts which drain owns the deferred customer hangup.
+  h.deps.latencyFlags = { ...defaultLatencyFlags(), claim_holding_drain: options.claimHolding === true };
   if (options.recording) {
     for (const name of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED", "TELNYX_RECORDING_CONFERENCE_VERIFIED", "TELNYX_RECORDING_TRANSFER_VERIFIED", "TELNYX_RECORDING_CHANNELS_VERIFIED"]) vi.stubEnv(name, "true");
     h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(), inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
@@ -72,8 +75,9 @@ async function failedOwner(options: { customer?: boolean; recording?: boolean; r
     const customer = await h.legEvent(call.callControlId, "call.hangup", {}, "deferred-customer");
     // Durably deferred with its own drain retained: acknowledged, not redelivered.
     expect(customer).toMatchObject({ status: 200, outcome: "deferred" });
+    // With the claim-holding drain (S1.3) its host keeps the claim instead.
     expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-customer"))
-      .toMatchObject({ retry_state: "deferred", delivery_count: 1 });
+      .toMatchObject(options.claimHolding ? { status: "queued", retry_state: "ready", delivery_count: 1 } : { retry_state: "deferred", delivery_count: 1 });
     expect(retained).toHaveLength(1);
     customerSelfDrain = retained.shift()!;
   }
@@ -116,6 +120,25 @@ describe("failed owner customer terminal recovery", () => {
     expect(h.telnyx.calls.slice(commands.length).filter(command =>
       ["dial", "bridge", "playbackStart", "speak", "gather", "gatherUsingSpeak", "gatherUsingAudio"].includes(command.method))).toEqual([]);
     expect(retained).toHaveLength(1);
+  });
+
+  it("with the claim-holding drain, the customer's own host ends the call once the failed owner releases", async () => {
+    const { h, call, retained, finish, owner, customerSelfDrain } = await failedOwner({ claimHolding: true });
+    finish.release();
+    expect(await owner).toMatchObject({ status: 200, outcome: "failed" });
+    const commands = [...h.telnyx.calls];
+
+    // Both retained: the owner's recovery finds no deferred row; the held
+    // claim's host finishes its own fact, once, without resending audio.
+    await Promise.all([retained[0](), customerSelfDrain!()]);
+
+    const customer = h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "deferred-customer")!;
+    expect(customer).toMatchObject({ status: "processed", attempts: 1, deferral_count: 0, delivery_count: 1 });
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: customer.occurred_at });
+    expect(h.session(call.sessionId).pending_effects).toBeNull();
+    expect(h.presence(PROFILES.o1).current_session_id).toBeNull();
+    expect(h.telnyx.calls.slice(commands.length).filter(command =>
+      ["dial", "bridge", "playbackStart", "speak", "gather", "gatherUsingSpeak", "gatherUsingAudio"].includes(command.method))).toEqual([]);
   });
 });
 
