@@ -6,6 +6,7 @@ import { getSupabasePublicEnv } from "@/lib/supabase/env";
 import { recordingError, recordingPermissions, recordingUuid, requireRecordingSource } from "./recording-service";
 import { sourceRestricted } from "./recording-source";
 import { RECORDINGS_BUCKET } from "./recording-storage";
+import { auditRecordingRead } from "./recording-read-audit";
 
 export const AUDIO_RANGE_MAX = 8 * 1024 * 1024;
 export function recordingByteRange(header: string | null, total: number): { start: number; end: number } {
@@ -49,9 +50,15 @@ export async function getRecordingAudio(admin: SupabaseClient<Database>, actor: 
   }
   // Re-check after signing/downloading headers so a concurrent deletion cannot
   // turn a valid old signed URL into a new authorized browser stream.
-  const refreshed = await requireRecordingSource(admin, actor, callId);
-  if (sourceRestricted(refreshed) || !(await recordingPermissions(admin, actor)).full) {
-    await upstream.body.cancel(); recordingError("Prístup k nahrávke sa zmenil.", 410);
+  try {
+    const refreshed = await requireRecordingSource(admin, actor, callId);
+    if (sourceRestricted(refreshed) || !(await recordingPermissions(admin, actor)).full) {
+      recordingError("Prístup k nahrávke sa zmenil.", 410);
+    }
+    await auditRecordingRead(admin, actor, { kind: "audio", callId, recordingId, sourceRevision: r.source_revision });
+  } catch (error) {
+    await upstream.body.cancel().catch(() => {});
+    throw error;
   }
   let delivered = 0;
   const stream = upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({

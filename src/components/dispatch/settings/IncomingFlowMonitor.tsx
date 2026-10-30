@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ArrowDown, Clock3, GitBranch, LockKeyhole, Phone, RefreshCw } from "lucide-react";
 import { incomingFlowSignature, type CallJourney, type CallJourneysResponse } from "@/lib/telephony/call-journey";
 import type { IncomingFlow } from "@/lib/telephony/incoming-flow";
@@ -18,8 +18,9 @@ export function IncomingFlowMonitor({ lineId, savedFlow, dirty }: { lineId: stri
   const now = useCallJourneyClock(calls.length > 0);
   const stale = Boolean(resource.error || (resource.observedAt !== null && now - resource.observedAt > JOURNEY_STALE_MS));
   const firstId = calls[0]?.sessionId ?? null;
-  // Keep the selected call visible when it ends and leaves the active list.
-  useEffect(() => { if (selectedId === null && firstId) setSelectedId(firstId); }, [selectedId, firstId]);
+  // Remember the first call, rather than deriving selection from the active list:
+  // its detail must stay visible after the call ends and leaves that list.
+  if (selectedId === null && firstId !== null) setSelectedId(firstId);
   // A denied list read clears its data and must also remove any private detail.
   const selected = resource.data ? selectedId ?? firstId : null;
   const selectedJourney = calls.find(call => call.sessionId === selected);

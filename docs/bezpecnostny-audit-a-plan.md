@@ -1,5 +1,7 @@
 # Bezpečnostný audit & plán opravy — motorist-app
 
+> **Historický dokument (júl 2026), nie aktuálny bezpečnostný stav.** Počty, nálezy, hodnotenie a tvrdenia o CI/monitoringu nižšie platia pre vtedajšiu revíziu. Pred použitím ich over proti dnešnému kódu; aktuálny vývojový postup a kontroly sú v [development.md](development.md) a [CONTRIBUTING.md](../CONTRIBUTING.md).
+
 > **Zdroj:** audit repozitára (júl 2026). Obsahuje manažérske zhrnutie + **FINÁLNY plán opravy schválený konsenzom**
 > (ralplan: Planner → Architect → 2× Critic, **3 iterácie, verdikt APPROVE**). Všetky faktické tvrdenia v pláne sú
 > **overené proti aktuálnemu kódu** (čísla routes, riadky, guard vzory).

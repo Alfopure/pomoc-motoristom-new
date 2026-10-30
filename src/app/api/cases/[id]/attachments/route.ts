@@ -1,6 +1,6 @@
 import { withRequestMetrics } from "@/server/request-metrics";
 import { loadDispatchData } from "@/data/dispatch-repository";
-import { motoristAccessGuard, requireMotoristOrgMember } from "@/server/api-auth";
+import { motoristAccessGuard, requireMotoristActor, requireMotoristOrgMember } from "@/server/api-auth";
 import { createCaseAttachmentSignedUrl, MutationError, uploadCaseAttachments } from "@/server/motorist-mutations";
 
 export const runtime = "nodejs";
@@ -18,7 +18,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       const note = stringFormValue(formData.get("note"));
       const category = stringFormValue(formData.get("category"));
 
-      const attachments = await uploadCaseAttachments(id, files, note, requireMotoristOrgMember, category);
+      const attachments = await uploadCaseAttachments(id, files, note, requireMotoristActor, category);
       committed = true;
       const dispatchData = await loadDispatchData();
 

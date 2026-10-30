@@ -2,10 +2,24 @@ name: Mobile checks
 
 on:
   pull_request:
-    paths: ["mobile/**", "src/lib/mobile-api.ts", ".github/workflows/mobile.yml"]
+    paths:
+      - "mobile/**"
+      - "src/lib/**"
+      - "src/domain/**"
+      - "src/server/mobile/**"
+      - "src/app/api/mobile/**"
+      - "tests/mobile/**"
+      - ".github/workflows/mobile.yml"
   push:
     branches: [dev, main]
-    paths: ["mobile/**", "src/lib/mobile-api.ts", ".github/workflows/mobile.yml"]
+    paths:
+      - "mobile/**"
+      - "src/lib/**"
+      - "src/domain/**"
+      - "src/server/mobile/**"
+      - "src/app/api/mobile/**"
+      - "tests/mobile/**"
+      - ".github/workflows/mobile.yml"
   workflow_dispatch:
 
 permissions:
