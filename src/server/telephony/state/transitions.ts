@@ -2882,6 +2882,11 @@ function appPark(b: TransitionBuilder, customer: LegRow, event: AppEvent): Reduc
   b.cmd(hangupCmd(b, operator, "parked", false));
   b.patchSession({ parked_at: b.nowIso, answered_by_profile_id: null, hold_started_at: null, conference_id: null, conference_name: null });
   b.patchMeta({ park: { by: event.actorProfileId, at: b.nowIso }, previous_operator: operator.profile_id ?? null, conference: null });
+  // The parked leg no longer answers the call: whoever picks it up, the same phone
+  // included, is offered and accepted anew.
+  const accepted = { ...b.meta.accepted_device_legs };
+  if (operator.profile_id) delete accepted[operator.profile_id];
+  b.patchMeta({ answered_leg_call_control_id: null, accepted_device_legs: accepted });
   enterWaiting(b, customer, "parked", "parked");
   b.leg(customer.telnyx_call_control_id, { state: "answered" });
   // Finish disconnecting the operator and starting waiting audio before reading
