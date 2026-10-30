@@ -2,11 +2,13 @@ import { MobileApiError } from "../lib/api";
 import type { VoiceApi, VoiceCallTarget, VoiceHoldCommand, VoiceHoldResult, VoiceMedia, VoiceMediaState, VoiceOutgoing, VoiceRecording, VoiceStatus, VoiceToken } from "./api";
 
 export type VoiceEvent = { type: string; callId?: string; callControlId?: string; providerLegId?: string; sessionId?: string; number?: string; state?: string; active?: boolean; muted?: boolean; outgoing?: boolean;
-  actionId?: string; held?: boolean; expectedVersion?: number; phase?: "unclaimed" | "dispatched" | "uncertain"; actionLive?: boolean; systemHeld?: boolean; privacyHold?: boolean; media?: Pick<VoiceMedia, "state" | "version" | "canHold"> };
+  actionId?: string; held?: boolean; expectedVersion?: number; phase?: "unclaimed" | "dispatched" | "uncertain"; actionLive?: boolean; systemHeld?: boolean; privacyHold?: boolean; media?: Pick<VoiceMedia, "state" | "version" | "canHold">;
+  /** A refused VoIP push: its own ID, a reason code and key names only, never a value. */
+  id?: string; reason?: string; keys?: string[]; payloadKeys?: string[] };
 export type NativeHold = { callId: string; sessionId: string; callControlId: string; actionId: string; held: boolean; expectedVersion: number; phase: "unclaimed" | "dispatched" | "uncertain"; actionLive: boolean };
 export type NativeMediaSync = Pick<NativeHold, "callId" | "sessionId" | "callControlId" | "actionId" | "held" | "expectedVersion">;
 export type MicrophonePermission = "granted" | "denied" | "undetermined" | "unknown";
-export type PhoneSnapshot = { ready: boolean; audioActive: boolean; microphonePermission?: MicrophonePermission; pushRegistered?: boolean; preparedPushCallId?: string | null; wasEnabled?: boolean; calls?: VoiceEvent[]; pending: VoiceEvent[]; pendingHolds?: NativeHold[]; pendingSyncs?: NativeMediaSync[] };
+export type PhoneSnapshot = { ready: boolean; audioActive: boolean; microphonePermission?: MicrophonePermission; pushRegistered?: boolean; preparedPushCallId?: string | null; pushRejection?: VoiceEvent | null; wasEnabled?: boolean; calls?: VoiceEvent[]; pending: VoiceEvent[]; pendingHolds?: NativeHold[]; pendingSyncs?: NativeMediaSync[] };
 export type NativePhone = {
   snapshot(): Promise<PhoneSnapshot>; requestMicrophone(): Promise<boolean>; connect(token: string): Promise<void>; disconnect(): Promise<void>;
   authorize(callId: string, sessionId: string, controlId: string): Promise<void>; reject(callId: string): Promise<void>;
@@ -81,11 +83,16 @@ export class DispatchPhone {
   private nativeSyncRevision = 0;
   private refreshPushRegistration = false;
   private pendingInvites = new Map<string, VoiceEvent>();
+  /** An SDK INVITE that arrived while its own push was being prepared. */
+  private pushInvites = new Map<string, VoiceEvent>();
   private authorizing = new Set<string>();
   private finished = new Set<string>();
   private ending = new Map<string, Promise<void>>();
   private listeners = new Set<() => void>();
-  constructor(private api: VoiceApi, private native: NativePhone | null, private uuid: () => string, private leases?: PhoneLeaseStore) {
+  private reportedPushRejection: string | null = null;
+  constructor(private api: VoiceApi, private native: NativePhone | null, private uuid: () => string, private leases?: PhoneLeaseStore,
+    /** The app's error report; it receives a refused VoIP push's reason and key names. */
+    private reportDiagnostic?: (error: Error) => void) {
     this.state = { supported: Boolean(native), registration: "unregistered", takeoverRequired: false, call: null, termination: null,
       dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false, error: null,
       microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false, transferPending: null };
@@ -104,12 +111,23 @@ export class DispatchPhone {
     const snapshot = await this.native.snapshot();
     if (!this.current(generation)) return;
     this.applyDiagnostics(snapshot);
+    // A push refused during a cold launch arrived before this listener.
+    this.pushRejected(snapshot.pushRejection);
     for (const call of snapshot.calls ?? []) {
       if (call.callId && call.sessionId) this.update({ call: { id: call.callId, sessionId: call.sessionId, number: call.number ?? null,
         callControlId: call.callControlId, state: call.state ?? "CONNECTING", outgoing: call.outgoing === true, connected: false }, muted: call.muted === true, audioActive: snapshot.audioActive });
     }
     for (const sync of snapshot.pendingSyncs ?? []) this.mediaSyncEvent({ type: "holdSyncPending", ...sync });
     if (snapshot.pending.length || snapshot.wasEnabled) await this.connect();
+  }
+  /** Reports a refused VoIP push once: its reason and key names, which hold no number or token. */
+  private pushRejected(event: VoiceEvent | null | undefined) {
+    if (!event?.id || event.id === this.reportedPushRejection) return;
+    this.reportedPushRejection = event.id;
+    const names = (list: unknown) => Array.isArray(list) && list.length ? list.filter(key => typeof key === "string").slice(0, 30).join(",") : "none";
+    const error = new Error(`${event.reason ?? "unknown"}; metadata keys: ${names(event.keys)}; payload keys: ${names(event.payloadKeys)}`);
+    error.name = "VoIPPushRejected";
+    try { this.reportDiagnostic?.(error); } catch { /* A report never affects calling. */ }
   }
   private applyDiagnostics(snapshot: PhoneSnapshot) {
     const permission = snapshot.microphonePermission;
@@ -554,20 +572,28 @@ export class DispatchPhone {
         await this.handleHold(event);
       } else if (event.type === "heldCancelled" && event.callId === this.state.call?.id) {
         if (!this.pendingHold || this.pendingHold.actionId === event.actionId && this.pendingHold.phase === "unclaimed") {
-          this.pendingHold = null; this.update({ holdPhase: "idle" });
+          // CallKit or the phone refused the hold before the server was asked.
+          this.pendingHold = null; this.update({ holdPhase: "idle", error: "Podržanie sa nepodarilo." });
         }
       } else if (["holdSyncPending", "holdSynced", "holdSyncFailed"].includes(event.type)) {
         this.mediaSyncEvent(event);
+      } else if (event.type === "pushRejected") {
+        this.pushRejected(event);
       } else if ((event.type === "incoming" || event.type === "push") && event.callId) {
         const id = event.callId;
         if (this.finished.has(id)) { await this.native.reject(id); return; }
-        if (this.authorizing.has(id)) return;
+        if (this.authorizing.has(id)) {
+          // The SDK INVITE of a push being prepared names the leg the push does not.
+          if (event.type === "incoming") this.pushInvites.set(id, event);
+          return;
+        }
         if (this.state.call?.id === id) return;
         if (this.state.call || this.state.termination) { await this.native.reject(id); return; }
         // A real SDK INVITE has a leg UUID, but no control ID until ANSWER.
         // Hold it until the HTTP result establishes the exact outgoing intent.
         if (this.pendingDial) { this.pendingInvites.set(id, event); return; }
         this.authorizing.add(id);
+        let awaitInvite = false;
         try {
           // A push wake may follow hours of suspension. Refresh the provider
           // token and prepare native signaling before forwarding CallKit answer.
@@ -584,6 +610,9 @@ export class DispatchPhone {
               await this.native.connect(this.token.token);
               if (!this.current(generation) || this.finished.has(id)) return;
             }
+            // Telnyx push metadata names no provider leg (SDK 4.2.2 reads it from the
+            // INVITE). The prepared socket's INVITE is authorized by its own leg.
+            if (!event.providerLegId) { awaitInvite = true; return; }
           }
           const identity = event.callControlId ? { callControlId: event.callControlId } : { providerLegId: event.providerLegId };
           const offer = await this.authorizeOffer(this.token.deviceSessionId, identity, id, generation);
@@ -605,7 +634,12 @@ export class DispatchPhone {
             ...(intent ? {} : { error: null }) });
           this.schedule();
           await this.native.authorize(id, offer.sessionId, offer.callControlId);
-        } finally { this.authorizing.delete(id); this.scheduleRecovery(); }
+        } finally {
+          this.authorizing.delete(id);
+          const invite = this.pushInvites.get(id); this.pushInvites.delete(id);
+          this.scheduleRecovery();
+          if (awaitInvite && invite && this.current(generation) && !this.finished.has(id)) await this.event(invite);
+        }
       } else if (event.type === "outgoing" && event.callId && event.sessionId) {
         if (this.finished.has(event.callId)) return;
         const previous = this.state.call?.id === event.callId && this.state.call.sessionId === event.sessionId ? this.state.call : null;

@@ -78,12 +78,18 @@ do {
 }
 do {
   let owner = phone(), id = UUID(), leg = UUID()
-  let payload = PKPushPayload(["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture", "telnyx_leg_id": leg.uuidString]])
+  var events: [[String: Any]] = []; owner.listen(owner: UUID()) { events.append($0) }
+  // Telnyx VoIP push metadata documented for SDK 4.2.2: no provider leg.
+  let payload = PKPushPayload(["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture", "caller_name": "fixture", "caller_number": "fixture"]])
   owner.pushRegistry(PKPushRegistry(queue: .main), didReceiveIncomingPushWith: payload, for: .voIP, completion: {})
+  check("documented push without a leg is kept, never ended", !events.contains { $0["type"] as? String == "ended" }
+    && events.contains { $0["type"] as? String == "push" && $0["callId"] as? String == id.uuidString && $0["providerLegId"] as? String == "" })
   let action = CXAnswerCallAction(call: id); owner.provider(CXProvider.last, perform: action)
   try! owner.connect(token: "fresh-push-token")
   check("push preparation exposes only its exact ID", owner.snapshot()["preparedPushCallId"] as? String == id.uuidString)
   let call = Call(id, leg: leg); TxClient.last.registry[id] = call; owner.onIncomingCall(call: call)
+  check("push INVITE emits incoming with its own leg", events.contains { $0["type"] as? String == "incoming" && $0["callId"] as? String == id.uuidString && $0["providerLegId"] as? String == leg.uuidString }
+    && !events.contains { $0["type"] as? String == "ended" })
   check("CallKit answer waits for backend authorization", call.answerCount == 0 && !action.isComplete)
   try! owner.authorize(callId: id.uuidString, sessionId: session, controlId: "fixture-control")
   check("authorized push answers actual matching INVITE", call.answerCount == 1)
@@ -462,6 +468,61 @@ do {
   owner.provider(CXProvider.last,perform:mirror)
   media(owner,id,"unavailable",3,false)
   check("unavailable media cannot release settled held privacy",call.isMuted && (owner.snapshot()["calls"] as? [[String:Any]])?.first?["privacyHold"] as? Bool == true)
+  owner.disconnect()
+}
+func push(_ owner: LinkaPhone, _ payload: [String: Any], completion: @escaping () -> Void = {}) {
+  owner.pushRegistry(PKPushRegistry(queue: .main), didReceiveIncomingPushWith: PKPushPayload(payload), for: .voIP, completion: completion)
+}
+do {
+  let owner = phone(), id = UUID()
+  push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture", "telnyx_leg_id": UUID().uuidString]])
+  let call = Call(id, leg: UUID()); TxClient.last.registry[id] = call; owner.onIncomingCall(call: call)
+  check("a leg named by the push must be the INVITE's", call.hangs == 1 && CXProvider.last.ended[id] == .failed)
+  owner.disconnect()
+}
+let cleanups: [(String, CXCallEndedReason)] = [("Missed call!", .unanswered), ("Answered Elsewhere", .answeredElsewhere)]
+for (alert, reason) in cleanups {
+  let owner = phone(), id = UUID()
+  var events: [[String: Any]] = []; owner.listen(owner: UUID()) { events.append($0) }
+  push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture"]])
+  var completed = false
+  push(owner, ["aps": ["alert": alert], "metadata": ["call_id": id.uuidString]]) { completed = true }
+  check("\(alert) push ends its known offer with its reason", CXProvider.last.ended[id] == reason
+    && events.contains { $0["type"] as? String == "ended" && $0["callId"] as? String == id.uuidString })
+  let placeholder = CXProvider.last.incoming.last!
+  check("\(alert) push reports and ends one placeholder for PushKit", completed && CXProvider.last.incoming.count == 2 && placeholder != id && CXProvider.last.ended[placeholder] == reason)
+  check("\(alert) push never reports a failed call", !CXProvider.last.ended.values.contains(.failed) && !events.contains { $0["type"] as? String == "pushRejected" })
+  owner.disconnect()
+}
+do {
+  let owner = phone(); var completed = false
+  push(owner, ["aps": ["alert": "Missed call!"], "metadata": ["call_id": UUID().uuidString]]) { completed = true }
+  check("missed-call push for an unknown call only satisfies PushKit", completed && CXProvider.last.incoming.count == 1 && CXProvider.last.ended.count == 1 && !CXProvider.last.ended.values.contains(.failed))
+  owner.disconnect()
+}
+do {
+  let (owner, id, call) = activeFixture()
+  push(owner, ["aps": ["alert": "Answered Elsewhere"], "metadata": ["call_id": id.uuidString]])
+  check("late answered-elsewhere push never ends an established call", call.hangs == 0 && CXProvider.last.ended[id] == nil && (owner.snapshot()["calls"] as? [[String: Any]])?.count == 1)
+  owner.disconnect()
+}
+do {
+  let owner = phone(); var events: [[String: Any]] = []; owner.listen(owner: UUID()) { events.append($0) }
+  push(owner, ["aps": ["alert": "Incoming call!"], "metadata": ["call_id": UUID().uuidString, "caller_number": "+421900000999"]])
+  let rejected = events.first { $0["type"] as? String == "pushRejected" }
+  check("refused push names its reason and key names", rejected?["reason"] as? String == "missing_voice_sdk_id"
+    && rejected?["keys"] as? [String] == ["call_id", "caller_number"] && rejected?["payloadKeys"] as? [String] == ["aps", "metadata"])
+  check("refused push diagnostics carry no metadata value", rejected != nil && !String(describing: rejected!).contains("+421900000999"))
+  check("refused push stays readable for a cold launch", rejected?["id"] != nil && (owner.snapshot()["pushRejection"] as? [String: Any])?["id"] as? String == rejected?["id"] as? String)
+  owner.disconnect()
+}
+do {
+  let (owner, id, _) = activeFixture(); media(owner, id, "active")
+  let sent = CXProvider.last.updateCount
+  for _ in 0..<5 { media(owner, id, "active") }
+  check("unchanged media sends no repeated CallKit update", CXProvider.last.updateCount == sent && CXProvider.last.updates[id]?.supportsHolding == true)
+  media(owner, id, "active", 2, false)
+  check("a changed hold capability is reported once", CXProvider.last.updateCount == sent + 1 && CXProvider.last.updates[id]?.supportsHolding == false)
   owner.disconnect()
 }
 let passed = checks.allSatisfy { $0["pass"] as? Bool == true }
