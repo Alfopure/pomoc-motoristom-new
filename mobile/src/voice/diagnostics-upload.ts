@@ -3,49 +3,75 @@ import type { MobileConfig } from "../lib/config";
 import type { VoiceDiagnosticEvent } from "./diagnostics";
 
 export type DiagnosticsUploadResult = { status: number; code?: string };
-export type DiagnosticsUploader = { request(): void; dispose(): void };
+export type DiagnosticsUploader = { request(): void; dispose(): void;
+  /** Logout: sends what is pending now if it can, then forgets the whole ring. */
+  finish(): Promise<void> };
+/** The operator whose events the ring holds; the ring is one per device, not per account. */
+export type DiagnosticsOwner = { id: string; load(): Promise<string | null>; save(id: string): Promise<void> };
 type Options = {
   events: () => Promise<VoiceDiagnosticEvent[]>; clear: (upToId: number) => Promise<void>;
-  send: (events: VoiceDiagnosticEvent[]) => Promise<DiagnosticsUploadResult>;
-  /** The shortest time between two uploads, and the wait after a trigger for its trailing events. */
-  interval?: number; settle?: number; now?: () => number;
+  send: (events: VoiceDiagnosticEvent[]) => Promise<DiagnosticsUploadResult>; owner?: DiagnosticsOwner;
+  /** The shortest time between two uploads, the wait after a trigger for its trailing events,
+   * and the most a logout waits for its upload. */
+  interval?: number; settle?: number; finishWithin?: number; now?: () => number;
 };
-const BATCH = 100, BATCH_CHARACTERS = 48_000, BATCHES = 3;
+const BATCH = 100, BATCH_CHARACTERS = 48_000, BATCHES = 3, EVERYTHING = Number.MAX_SAFE_INTEGER;
 
 /** Uploads the native device-log ring a moment after a trigger (a call ended, a refused push,
  * the app came forward), at most once per interval. Events are forgotten only after a 2xx;
- * anything else waits for the next trigger. A server with the upload switched off stops it. */
-export function createDiagnosticsUploader({ events, clear, send, interval = 30_000, settle = 2_000, now = Date.now }: Options): DiagnosticsUploader {
-  let last = Number.NEGATIVE_INFINITY, timer: ReturnType<typeof setTimeout> | null = null, busy = false, again = false, stopped = false;
+ * anything else waits for the next trigger, a rate limit for one more interval. A server with
+ * the upload switched off stops it. Another operator's leftovers are forgotten unsent. */
+export function createDiagnosticsUploader({ events, clear, send, owner, interval = 30_000, settle = 2_000, finishWithin = 4_000, now = Date.now }: Options): DiagnosticsUploader {
+  let last = Number.NEGATIVE_INFINITY, timer: ReturnType<typeof setTimeout> | null = null, busy: Promise<void> | null = null,
+    again = false, stopped = false, claimed = false;
+  async function claim() {
+    if (claimed || !owner) return;
+    const previous = await owner.load();
+    if (previous !== owner.id) {
+      if (previous !== null) await clear(EVERYTHING);
+      await owner.save(owner.id);
+    }
+    claimed = true;
+  }
+  async function sendPending() {
+    await claim();
+    let pending = await events();
+    for (let count = 0; count < BATCHES && pending.length; count += 1) {
+      const batch: VoiceDiagnosticEvent[] = [];
+      let characters = 0;
+      for (const event of pending.slice(0, BATCH)) {
+        characters += JSON.stringify(event).length + 1;
+        if (batch.length && characters > BATCH_CHARACTERS) break;
+        batch.push(event);
+      }
+      const result = await send(batch);
+      if (result.code === "voice_diagnostics_disabled") { stopped = true; return; }
+      if (result.status === 429) { last = now() + interval; return; }
+      if (result.status < 200 || result.status > 299) return;
+      await clear(batch[batch.length - 1].id);
+      pending = pending.slice(batch.length);
+    }
+  }
   async function upload() {
     timer = null;
     if (stopped) return;
     if (busy) { again = true; return; }
-    busy = true; last = now();
-    try {
-      let pending = await events();
-      for (let count = 0; count < BATCHES && pending.length && !stopped; count += 1) {
-        const batch: VoiceDiagnosticEvent[] = [];
-        let characters = 0;
-        for (const event of pending.slice(0, BATCH)) {
-          characters += JSON.stringify(event).length + 1;
-          if (batch.length && characters > BATCH_CHARACTERS) break;
-          batch.push(event);
-        }
-        const result = await send(batch);
-        if (result.code === "voice_diagnostics_disabled") { stopped = true; return; }
-        if (result.status < 200 || result.status > 299) return;
-        await clear(batch[batch.length - 1].id);
-        pending = pending.slice(batch.length);
-      }
-    } catch { /* The ring keeps the events for the next trigger. */ }
-    finally { busy = false; if (again) { again = false; request(); } }
+    last = now();
+    busy = sendPending().catch(() => { /* The ring keeps the events for the next trigger. */ });
+    await busy; busy = null;
+    if (again) { again = false; request(); }
   }
   function request() {
     if (stopped || timer) return;
     timer = setTimeout(() => { void upload(); }, Math.max(settle, last + interval - now()));
   }
-  return { request, dispose: () => { stopped = true; if (timer) clearTimeout(timer); timer = null; } };
+  async function finish() {
+    const work = (async () => { await busy; if (!stopped) await sendPending(); })().catch(() => {});
+    await Promise.race([work, new Promise(resolve => setTimeout(resolve, finishWithin))]);
+    // The next operator to sign in on this phone never uploads these events.
+    await clear(EVERYTHING).catch(() => {});
+  }
+  return { request, finish, dispose: () => { stopped = true; if (timer) clearTimeout(timer); timer = null; } };
 }
 
 /** Posts one batch for the signed-in operator; the status is 0 when nothing was sent. */

@@ -1,15 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDiagnosticsUploader, voiceDiagnosticsSender, type DiagnosticsUploadResult } from "./diagnostics-upload";
+import { createDiagnosticsUploader, voiceDiagnosticsSender, type DiagnosticsOwner, type DiagnosticsUploadResult } from "./diagnostics-upload";
 import type { VoiceDiagnosticEvent } from "./diagnostics";
 
 const event = (id: number, fields: Record<string, string> = { reason: "voice_disabled" }): VoiceDiagnosticEvent => ({ id, at: 1_793_000_000_000 + id, event: "push.refused", fields });
-function fixture(count: number, results: DiagnosticsUploadResult[] = []) {
+function fixture(count: number, results: DiagnosticsUploadResult[] = [], owner?: DiagnosticsOwner) {
   let ring = Array.from({ length: count }, (_, index) => event(index + 1));
   const events = vi.fn(async () => ring);
   const clear = vi.fn(async (upToId: number) => { ring = ring.filter(item => item.id > upToId); });
   const send = vi.fn(async (_batch: VoiceDiagnosticEvent[]) => results.shift() ?? { status: 200 });
-  const uploader = createDiagnosticsUploader({ events, clear, send });
+  const uploader = createDiagnosticsUploader({ events, clear, send, owner });
   return { uploader, events, clear, send, ring: () => ring, add: (item: VoiceDiagnosticEvent) => { ring = [...ring, item]; } };
+}
+function owner(id: string, stored: string | null) {
+  const value = { stored };
+  return { value, owner: { id, load: vi.fn(async () => value.stored), save: vi.fn(async (next: string) => { value.stored = next; }) } };
 }
 const settle = async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); };
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(Date.UTC(2026, 9, 30, 8)); });
@@ -61,6 +65,33 @@ describe("voice device-log upload", () => {
     expect(f.send).toHaveBeenCalledOnce(); expect(f.ring()).toHaveLength(5);
     const g = fixture(5); g.uploader.request(); g.uploader.dispose(); await settle(60_000);
     expect(g.send).not.toHaveBeenCalled();
+  });
+  it("backs off one more interval when the server limits the rate", async () => {
+    const f = fixture(3, [{ status: 429, code: "voice_diagnostics_rate_limited" }]);
+    f.uploader.request(); await settle(2_000);
+    f.uploader.request(); await settle(59_999);
+    expect(f.send).toHaveBeenCalledOnce(); expect(f.ring()).toHaveLength(3);
+    await settle(1);
+    expect(f.send).toHaveBeenCalledTimes(2); expect(f.ring()).toEqual([]);
+  });
+  it("forgets another operator's events unsent, and keeps the first owner's", async () => {
+    const other = owner("profile-b", "profile-a"), f = fixture(5, [], other.owner);
+    f.uploader.request(); await settle(2_000);
+    expect(f.clear).toHaveBeenCalledWith(Number.MAX_SAFE_INTEGER); expect(f.send).not.toHaveBeenCalled(); expect(other.value.stored).toBe("profile-b");
+    const first = owner("profile-a", null), g = fixture(5, [], first.owner);
+    g.uploader.request(); await settle(2_000);
+    expect(g.send).toHaveBeenCalledOnce(); expect(g.send.mock.calls[0][0]).toHaveLength(5); expect(first.value.stored).toBe("profile-a");
+  });
+  it("at logout sends what is pending at once and then empties the ring, even when the upload fails or hangs", async () => {
+    const f = fixture(150, [], owner("profile-a", "profile-a").owner);
+    await f.uploader.finish();
+    expect(f.send.mock.calls.map(([batch]) => batch.length)).toEqual([100, 50]); expect(f.clear).toHaveBeenLastCalledWith(Number.MAX_SAFE_INTEGER);
+    const g = fixture(5, [{ status: 503 }]);
+    await g.uploader.finish();
+    expect(g.send).toHaveBeenCalledOnce(); expect(g.ring()).toEqual([]);
+    const h = fixture(5); h.send.mockReturnValue(new Promise(() => {}));
+    const finished = h.uploader.finish(); await settle(4_000); await finished;
+    expect(h.ring()).toEqual([]);
   });
   it("posts the signed-in operator's batch with the device session and build, and reads the refusal code", async () => {
     const transport = vi.fn(async () => new Response(JSON.stringify({ ok: false, code: "voice_diagnostics_disabled" }), { status: 403 }));

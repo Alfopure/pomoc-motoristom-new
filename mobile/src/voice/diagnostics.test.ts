@@ -23,6 +23,14 @@ describe("device-log sanitizer", () => {
     expect(sanitizeDiagnostic("caller:0900000999")?.event).toBe("redacted");
     expect(sanitizeDiagnostic("x", { "n0900000999": true })?.fields).toEqual({ redacted: "true" });
     for (const value of ["fail:409", "123456", "a1b2c3d4", "12-34-56", "v2"]) expect(sanitizeDiagnostic("x", { value })?.fields.value).toBe(value);
+    // Every digit counts, whatever separates them.
+    for (const value of ["0900--000--999", "421..900..000..999", "0900a000b999", "12-34-56-7"]) expect(sanitizeDiagnostic("x", { value })?.fields.value).toBe("redacted");
+  });
+  it("lets an ID key carry only an 8-hex app ID or a flag", () => {
+    const token = "a".repeat(32) + "0123456789abcdef".repeat(2);
+    const fields = { call: "3F2A9C1B", action: "12345678", session: "true", leg: "none", token, push_token: "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
+      control: "v3:a1b2c3d4e5f6g7h8", user: "novak", profile: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln", client: "3f2a9c1b-0000", voice_sdk_id: "abc", value: "12345678" };
+    expect(sanitizeDiagnostic("x", fields)?.fields).toEqual({ call: "3f2a9c1b", action: "12345678", session: "true", leg: "none", value: "redacted" });
   });
   it("never lets more than six digits in a row through", () => {
     let seed = 7;

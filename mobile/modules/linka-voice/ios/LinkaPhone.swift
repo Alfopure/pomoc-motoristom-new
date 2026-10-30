@@ -23,10 +23,15 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   // app IDs: never a phone number, name, token or push payload value.
   private static let log = os.Logger(subsystem: "sk.linkapomoci.voice", category: "phone")
   private static let diagAllowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:,-")
-  /** Keeps [A-Za-z0-9_.:,-]; a phone-number-like run of 7+ digits is redacted. */
+  private static let hexDigits = CharacterSet(charactersIn: "0123456789abcdef")
+  /** Keeps [A-Za-z0-9_.:,-]; a value with 7+ digits in total (a phone number) is redacted. */
   private static func diagText(_ text: String, _ limit: Int) -> String {
     let kept = String(text.unicodeScalars.filter { diagAllowed.contains($0) })
-    return kept.range(of: "[0-9]([._:,-]?[0-9]){6,}", options: .regularExpression) == nil ? String(kept.prefix(limit)) : "redacted"
+    return kept.unicodeScalars.filter { $0.value >= 48 && $0.value <= 57 }.count >= 7 ? "redacted" : String(kept.prefix(limit))
+  }
+  /** A key that carries an ID; its value is only ever an app ID's 8 lowercase hex characters. */
+  private static func idKey(_ key: String) -> Bool {
+    ["call", "session", "action", "leg", "control", "user", "profile", "client", "device", "token", "push_token"].contains(key) || key.hasSuffix("_id")
   }
   /** One `event key=value` line; JS lines arrive here too, prefixed "js.". The same
    * event enters the ring below, which the app uploads, so a test needs no cable. */
@@ -37,34 +42,38 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       case let flag as Bool: text = flag ? "true" : "false"
       case let count as Int: text = String(count)
       case let id as UUID: text = String(id.uuidString.prefix(8)).lowercased()
-      case let names as [String]: text = names.isEmpty ? "none" : diagText(names.joined(separator: ","), 400)
+      case let names as [String]: text = names.isEmpty ? "none" : diagText(names.map { String($0.prefix(40)) }.joined(separator: ","), 400)
+      case let code as String where idKey(key):
+        let id = code.lowercased()
+        text = id.count == 8 && id.unicodeScalars.allSatisfy({ hexDigits.contains($0) }) || ["true", "false", "none"].contains(id) ? id : "redacted"
       case let code as String: text = diagText(code, 64)
-      case let error as Error: text = diagText((error as NSError).domain, 60) + ":" + String((error as NSError).code)
+      case let error as Error: text = String((diagText((error as NSError).domain, 52) + ":" + String((error as NSError).code)).suffix(64))
       default: text = "none"
       }
       return (diagText(key, 32), text)
     }
-    let name = diagText(event, 48)
+    let name = diagText(event, 48), at = Int(Date().timeIntervalSince1970 * 1000)
     let line = ([name] + pairs.map { $0.0 + "=" + $0.1 }).joined(separator: " ")
     log.notice("\(line, privacy: .public)")
-    ringLock.lock(); defer { ringLock.unlock() }
-    loadRing()
-    ring.append(["id": ringNextId, "at": Int(Date().timeIntervalSince1970 * 1000), "event": name,
-      "fields": Dictionary(pairs, uniquingKeysWith: { first, _ in first })])
-    ringNextId += 1
-    if ring.count > 300 { ring.removeFirst(ring.count - 300) }
-    persistRing()
+    let fields = Dictionary(pairs, uniquingKeysWith: { first, _ in first })
+    ringQueue.async {
+      loadRing()
+      ring.append(["id": ringNextId, "at": at, "event": name, "fields": fields])
+      ringNextId += 1
+      if ring.count > 300 { ring.removeFirst(ring.count - 300) }
+      persistRing()
+    }
   }
   private func diag(_ event: String, _ fields: [String: Any] = [:]) { Self.diag(event, fields) }
   // The last 300 events, also in a file of the app container: an iOS kill or relaunch
-  // keeps them until the app uploads them. Guarded by ringLock; diag runs on any thread.
-  private static let ringLock = NSLock()
+  // keeps them until the app uploads them. Only ringQueue touches them, so file reads,
+  // JSON and writes never run on the main thread (launch, PushKit) or the caller's.
   private static let ringQueue = DispatchQueue(label: "sk.linkapomoci.voice.diagnostics")
   private static var ring = [[String: Any]](), ringLoaded = false, ringNextId = 1, ringWriting = false
   /** Another file is read afresh on the next access. */
   static var diagnosticFile = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
     .appendingPathComponent("linka-voice-diagnostics.json") {
-    didSet { ringLock.lock(); ringLoaded = false; ring = []; ringLock.unlock() }
+    didSet { ringQueue.sync { ringLoaded = false; ring = [] } }
   }
   private static func loadRing() {
     guard !ringLoaded else { return }
@@ -73,26 +82,23 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     ring = Array(stored.filter { $0["id"] is Int && $0["at"] is Int && $0["event"] is String && $0["fields"] is [String: String] }.suffix(300))
     ringNextId = (ring.compactMap { $0["id"] as? Int }.max() ?? 0) + 1
   }
-  /** Coalesced, off the caller's thread; the ring itself is current at once. */
+  /** Coalesced; runs on ringQueue like every other ring access. */
   private static func persistRing() {
     guard !ringWriting, let file = diagnosticFile else { return }
     ringWriting = true
     ringQueue.asyncAfter(deadline: .now() + 0.5) {
-      ringLock.lock()
-      let events = ring; ringWriting = false
-      ringLock.unlock()
-      if let data = try? JSONSerialization.data(withJSONObject: events) { try? data.write(to: file, options: .atomic) }
+      ringWriting = false
+      guard JSONSerialization.isValidJSONObject(ring), let data = try? JSONSerialization.data(withJSONObject: ring) else { return }
+      try? data.write(to: file, options: .atomic)
     }
   }
   /** Oldest first: `{id, at, event, fields}` with the same sanitized values as the log lines. */
   static func diagnosticEvents() -> [[String: Any]] {
-    ringLock.lock(); defer { ringLock.unlock() }
-    loadRing(); return ring
+    ringQueue.sync { loadRing(); return ring }
   }
   /** Forgets the events the server accepted, up to and including `upToId`. */
   static func clearDiagnosticEvents(upToId: Int) {
-    ringLock.lock(); defer { ringLock.unlock() }
-    loadRing(); ring.removeAll { ($0["id"] as? Int ?? 0) <= upToId }; persistRing()
+    ringQueue.sync { loadRing(); ring.removeAll { ($0["id"] as? Int ?? 0) <= upToId }; persistRing() }
   }
   /** Side-effect-free inputs of the hold guards. */
   private func holdFlags(_ id: UUID) -> [String: Any] {
@@ -254,7 +260,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       self.emit(["type": "heldCancelled", "callId": id.uuidString, "actionId": action.uuid.uuidString])
     }
     controller.request(CXTransaction(action: action)) { [weak self] error in
-      LinkaPhone.diag("callkit.request", ["action": "hold", "call": id, "held": held, "error": error as Any])
+      LinkaPhone.diag("callkit.request", ["kind": "hold", "call": id, "held": held, "error": error as Any])
       guard error != nil else { return }
       DispatchQueue.main.async {
         guard let self, self.requestedHolds[id] === action else { return }
@@ -357,7 +363,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     emit(mirrorEvent("holdSyncPending", id, mirror))
     diag("hold.mirror_request", ["call": id, "held": held, "version": state.version])
     controller.request(CXTransaction(action: action)) { [weak self] error in
-      LinkaPhone.diag("callkit.request", ["action": "hold_mirror", "call": id, "held": held, "error": error as Any])
+      LinkaPhone.diag("callkit.request", ["kind": "hold_mirror", "call": id, "held": held, "error": error as Any])
       guard error != nil else { return }
       DispatchQueue.main.async { if self?.mirrors[id]?.action === action { self?.failMirror(id) } }
     }
@@ -571,7 +577,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       emit(["type": "outgoing", "callId": id.uuidString, "sessionId": attempt.sessionId, "callControlId": attempt.controlId, "number": attempt.number])
       let action = CXStartCallAction(call: id, handle: CXHandle(type: attempt.handleType, value: attempt.number))
       controller.request(CXTransaction(action: action)) { [weak self] error in
-        LinkaPhone.diag("callkit.request", ["action": "start", "call": id, "error": error as Any])
+        LinkaPhone.diag("callkit.request", ["kind": "start", "call": id, "error": error as Any])
         guard let self else { return }
         if error != nil { DispatchQueue.main.async { self.reject(callId: id.uuidString, source: "start_request_error") } }
       }
@@ -585,7 +591,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       diag("call.answer", ["result": "refused", "call": UUID(uuidString: callId) as Any]); throw PhoneError()
     }
     controller.request(CXTransaction(action: CXAnswerCallAction(call: id))) { [weak self] error in
-      LinkaPhone.diag("callkit.request", ["action": "answer", "call": id, "error": error as Any])
+      LinkaPhone.diag("callkit.request", ["kind": "answer", "call": id, "error": error as Any])
       if error != nil { DispatchQueue.main.async { self?.reject(callId: callId, source: "answer_request_error") } }
     }
   }
@@ -617,14 +623,14 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     }
     guard let id = reported.first else { return }
     controller.request(CXTransaction(action: CXEndCallAction(call: id))) { [weak self] error in
-      LinkaPhone.diag("callkit.request", ["action": "end", "call": id, "error": error as Any])
+      LinkaPhone.diag("callkit.request", ["kind": "end", "call": id, "error": error as Any])
       if error != nil { DispatchQueue.main.async { self?.reject(callId: id.uuidString, source: "end_request_error") } }
     }
   }
   func mute(muted: Bool) throws {
     guard let id = reported.first, currentCall(id) != nil else { diag("call.mute", ["result": "refused"]); throw PhoneError() }
     controller.request(CXTransaction(action: CXSetMutedCallAction(call: id, muted: muted))) { error in
-      LinkaPhone.diag("callkit.request", ["action": "mute", "call": id, "muted": muted, "error": error as Any])
+      LinkaPhone.diag("callkit.request", ["kind": "mute", "call": id, "muted": muted, "error": error as Any])
     }
   }
   func speaker(enabled: Bool) { if enabled { client?.setSpeaker() } else { client?.setEarpiece() } }
@@ -882,7 +888,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     action.fulfill(); emit(["type": "muted", "muted": action.isMuted])
   }
   func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
-    diag("callkit.timeout", ["action": String(describing: type(of: action)), "call": (action as? CXCallAction)?.callUUID as Any])
+    diag("callkit.timeout", ["kind": String(describing: type(of: action)), "call": (action as? CXCallAction)?.callUUID as Any])
     if let held = action as? CXSetHeldCallAction {
       if mirrors[held.callUUID]?.action === held { failMirror(held.callUUID, timedOut: true) }
       else if holds[held.callUUID]?.action === held { detachHold(held.callUUID, timedOut: true) }

@@ -60,14 +60,16 @@ export function useDispatchPhone(config: MobileConfig, client: SupabaseClient, u
   // The device-log ring reaches the server without a USB cable, for the signed-in operator only.
   const diagnostics = useMemo(() => {
     const native = phone && profileId ? nativePhone() : null;
-    if (!native?.diagnosticEvents || !native.clearDiagnosticEvents) return null;
-    const key = "pm-voice-" + config.environment + "-" + profileId;
+    if (!profileId || !native?.diagnosticEvents || !native.clearDiagnosticEvents) return null;
+    const key = "pm-voice-" + config.environment + "-" + profileId, ownerKey = "pm-voice-diagnostics-owner-" + config.environment;
     const token = async () => {
       const { data, error } = await client.auth.getSession();
       return !error && data.session?.user.id === userId ? data.session.access_token : null;
     };
     return { native, uploader: createDiagnosticsUploader({ events: native.diagnosticEvents, clear: native.clearDiagnosticEvents,
-      send: voiceDiagnosticsSender(config, token, () => SecureStore.getItemAsync(key), appVersion().build) }) };
+      send: voiceDiagnosticsSender(config, token, () => SecureStore.getItemAsync(key), appVersion().build),
+      owner: { id: profileId, load: () => SecureStore.getItemAsync(ownerKey),
+        save: id => SecureStore.setItemAsync(ownerKey, id, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY }) } }) };
   }, [phone, config, client, userId, profileId]);
   useEffect(() => {
     if (!diagnostics) return;
@@ -78,5 +80,7 @@ export function useDispatchPhone(config: MobileConfig, client: SupabaseClient, u
   }, [diagnostics]);
   useEffect(() => { if (active) diagnostics?.uploader.request(); }, [diagnostics, active]);
   const state = useSyncExternalStore(phone?.subscribe ?? noSubscribe, phone?.snapshot ?? idleSnapshot, idleSnapshot);
-  return { phone, state };
+  /** Before logout: this operator's pending device-log events go out if they can, then the ring is emptied. */
+  const finishDiagnostics = diagnostics?.uploader.finish;
+  return { phone, state, finishDiagnostics };
 }

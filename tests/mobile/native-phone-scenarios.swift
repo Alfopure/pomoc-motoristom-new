@@ -344,7 +344,7 @@ do {
   CXCallController.requestError=NSError(domain:"controlled-denial",code:1)
   try! owner.requestHold(callId:id.uuidString,held:true);drain()
   check("CallKit transaction rejection emits cancellation without media command",events.contains{$0["type"] as? String == "heldCancelled"} && heldRows(owner).isEmpty && !call.isMuted)
-  check("device log names the refused hold transaction and its error code",os.Logger.lines.contains{$0.hasPrefix("callkit.request action=hold ") && $0.contains(" error=controlled-denial:1")}
+  check("device log names the refused hold transaction and its error code",os.Logger.lines.contains{$0.hasPrefix("callkit.request ") && $0.contains(" kind=hold") && $0.contains(" error=controlled-denial:1")}
     && os.Logger.lines.contains{$0.hasPrefix("hold.cancelled ") && $0.contains(" reason=transaction_error")})
   CXCallController.requestError=nil
   try! owner.requestHold(callId:id.uuidString,held:true);Timer.fire(12)
@@ -585,6 +585,9 @@ do {
   let owner = phone()
   LinkaPhone.diag("js.probe", ["number": "+421 900 000 999", "dashed": "0900-000-999", "code": "fail:401", "id": "3f2a9c1b"])
   check("device log redacts a phone-number-like value and keeps codes", os.Logger.lines.last == "js.probe code=fail:401 dashed=redacted id=3f2a9c1b number=redacted")
+  LinkaPhone.diag("js.probe", ["doubled": "0900--000--999", "dotted": "421..900..000..999", "lettered": "0900a000b999", "call": "12345678", "value": "12345678", "session": "Novak"])
+  check("device log counts every digit of a value and lets an ID key carry only an 8-hex ID", os.Logger.lines.last
+    == "js.probe call=12345678 dotted=redacted doubled=redacted lettered=redacted session=redacted value=redacted")
   owner.disconnect()
   check("device log names the disconnect reason and the disabled voice flag", os.Logger.lines.contains { $0.hasPrefix("phone.disconnect ") && $0.contains(" reason=native") }
     && os.Logger.lines.last?.hasPrefix("emit ") == true && os.Logger.lines.contains("voice.enabled source=disconnect value=false was=true"))

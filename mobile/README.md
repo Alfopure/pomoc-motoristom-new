@@ -123,7 +123,10 @@ Android TEST a Google Play majú vlastný [postup prípravy a vydania](../docs/m
   operátor ich odošle po skončení hovoru, odmietnutom pushi a návrate do popredia
   (najviac raz za 30 s, po 100) na `/api/mobile/v1/diagnostics/voice`; server ich
   znova pretriedi a zapíše jeden riadok `mobile-voice-diag` do záznamov behu.
-  Zapnuté na TEST, na produkcii iba s `MOBILE_VOICE_DIAGNOSTICS_ENABLED=true`.
+  Zapnuté na TEST, na produkcii iba s `MOBILE_VOICE_DIAGNOSTICS_ENABLED=true`;
+  najviac 10 dávok za minútu na profil (429). Pred odhlásením sa čakajúce udalosti
+  odošlú, ak sa dá, a zoznam sa vymaže; iný prihlásený profil staré udalosti zmaže
+  bez odoslania.
 - **Nástroje:** samostatný modul v Moduloch (vozidlo, trasa, mapa, flotila).
 - Rozpísané textové formuláre a pôvodné neisté príkazy sa na iPhone ukladajú
   do samostatného chráneného úložiska. Android potrebuje nový natívny build

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST as upload } from "@/app/api/mobile/v1/diagnostics/voice/route";
 import { MutationError } from "@/server/mutation-error";
-import { VOICE_DIAGNOSTIC_EVENTS, VOICE_DIAGNOSTIC_KEYS } from "./voice-diagnostics";
+import { takeVoiceDiagnosticsToken, VOICE_DIAGNOSTIC_EVENTS, VOICE_DIAGNOSTIC_KEYS } from "./voice-diagnostics";
 
 const m = vi.hoisted(() => ({ actor: vi.fn(), environment: { value: "test" }, info: vi.spyOn(console, "info").mockImplementation(() => undefined) }));
 vi.mock("./auth", () => ({ requireMobileActor: m.actor, mobileEnvironment: () => m.environment.value }));
@@ -15,9 +15,12 @@ const body = (events: unknown[] = [event(1)], extra: Record<string, unknown> = {
 const post = (value: unknown = body()) => new Request("https://test.dispecing.linkapomoci.sk/api/mobile/v1/diagnostics/voice",
   { method: "POST", headers: { "content-type": "application/json" }, body: typeof value === "string" ? value : JSON.stringify(value) });
 const logged = () => JSON.parse(m.info.mock.calls.at(-1)![0] as string);
+// The rate limit is per profile and per instance: each test signs in its own operator.
+let profile = "p", profiles = 0;
+const signIn = (id: string) => m.actor.mockResolvedValue({ userId: "u", profileId: id, organizationId: "o", displayName: "D", role: "dispatcher" });
 beforeEach(() => {
   m.actor.mockReset(); m.info.mockClear(); m.environment.value = "test";
-  m.actor.mockResolvedValue({ userId: "u", profileId: "p", organizationId: "o", displayName: "D", role: "dispatcher" });
+  profile = "p" + ++profiles; signIn(profile);
 });
 afterEach(() => { vi.unstubAllEnvs(); });
 
@@ -29,9 +32,9 @@ describe("mobile voice diagnostics route", () => {
   it("writes one structured log line per batch, with a short device session and no database", async () => {
     const response = await upload(post(body([event(1), event(2, "js.offer.done", { outcome: "not_ready", call: "3f2a9c1b" })])));
     expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toContain("no-store");
-    expect(await response.json()).toMatchObject({ ok: true, profileId: "p", received: 2 });
+    expect(await response.json()).toMatchObject({ ok: true, profileId: profile, received: 2 });
     expect(m.info).toHaveBeenCalledOnce();
-    expect(logged()).toEqual({ scope: "mobile-voice-diag", profile: "p", deviceSession: "3f2a9c1b", build: "27", events: [
+    expect(logged()).toEqual({ scope: "mobile-voice-diag", profile, deviceSession: "3f2a9c1b", build: "27", events: [
       { id: 1, at: "2026-10-30T08:00:01.000Z", event: "push.refused", fields: { reason: "voice_disabled", reported: "1", enabled: "false" } },
       { id: 2, at: "2026-10-30T08:00:02.000Z", event: "js.offer.done", fields: { outcome: "not_ready", call: "3f2a9c1b" } }] });
   });
@@ -44,6 +47,31 @@ describe("mobile voice diagnostics route", () => {
     expect(logged().events).toHaveLength(1);
     expect(logged().events[0].fields).toEqual({ keys: "call_id,caller_name", alert: "redacted", call: "a1b2c3d4" });
     expect(JSON.stringify(logged())).not.toMatch(/0900000999|\+421|421-900/);
+  });
+  it("lets an ID key carry only an 8-hex app ID or a flag and drops long values", async () => {
+    const apnsToken = "0123456789abcdef".repeat(4);
+    await upload(post(body([event(1, "push.received", { call: "3F2A9C1B", token: apnsToken, push_token: "true", control: "v3:Q2FsbENvbnRyb2xJZA",
+      session: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln", user: "novak", client: "3f2a9c1b-0000", has_call_id: "false", state: "x".repeat(65),
+      reason: "y".repeat(64), keys: ["call_id", "caller_number", "z".repeat(40)].join(","), payload_keys: "aps," + "w".repeat(41) })])));
+    expect(logged().events[0].fields).toEqual({ call: "3f2a9c1b", push_token: "true", has_call_id: "false", reason: "y".repeat(64),
+      keys: "call_id,caller_number," + "z".repeat(40) });
+    expect(JSON.stringify(logged())).not.toMatch(/0123456789abcdef0123|v3:|eyJ|novak/);
+  });
+  it("counts every digit of a value, whatever separates them", async () => {
+    await upload(post(body([event(1, "push.refused", { reason: "0900--000--999", source: "421..900..000..999", alert: "0900a000b999", code: "fail:409", error: "domain:123456" })])));
+    expect(logged().events[0].fields).toEqual({ reason: "redacted", source: "redacted", alert: "redacted", code: "fail:409", error: "domain:123456" });
+  });
+  it("limits each operator to 10 batches a minute on this instance", async () => {
+    for (let index = 0; index < 10; index += 1) expect((await upload(post())).status).toBe(200);
+    const limited = await upload(post());
+    expect(limited.status).toBe(429); expect(await limited.json()).toMatchObject({ code: "voice_diagnostics_rate_limited" });
+    expect(m.info).toHaveBeenCalledTimes(10);
+    signIn(profile + "-other"); expect((await upload(post())).status).toBe(200);
+    const start = 1_000_000;
+    for (let index = 0; index < 10; index += 1) expect(takeVoiceDiagnosticsToken("bucket", start)).toBe(true);
+    expect(takeVoiceDiagnosticsToken("bucket", start + 5_000)).toBe(false);
+    expect(takeVoiceDiagnosticsToken("bucket", start + 6_000)).toBe(true);
+    expect(takeVoiceDiagnosticsToken("bucket", start + 6_001)).toBe(false);
   });
   it("refuses an oversized, empty or malformed batch without logging it", async () => {
     for (const value of [body(Array.from({ length: 101 }, (_, index) => event(index))), body([]), body([event(1)], { name: "Ján" }),

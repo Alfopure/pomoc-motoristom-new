@@ -47,12 +47,15 @@ export type PhoneState = {
 };
 
 const holdRefused = "Podržanie sa nepodarilo.";
-/** Device-log values: an 8-character ID, and an error's status and code, never its message. */
-const short = (id: string | null | undefined) => id ? id.slice(0, 8) : "none";
-function failure(error: unknown) {
-  if (error instanceof MobileApiError) return { status: error.status, code: error.code ?? "none" };
-  const code = (error as { code?: unknown } | null)?.code;
-  return { status: 0, code: typeof code === "string" ? code : error instanceof Error ? error.name : "unknown" };
+/** Device-log values: an 8-character ID, and an error's status and code, never its message.
+ * Both never throw: they are evaluated before the guarded log call. */
+const short = (id: unknown) => typeof id === "string" && id ? id.slice(0, 8) : "none";
+function failure(error: unknown): { status: number; code: string } {
+  try {
+    if (error instanceof MobileApiError) return { status: error.status, code: error.code ?? "none" };
+    const code = (error as { code?: unknown } | null)?.code;
+    return { status: 0, code: typeof code === "string" ? code : error instanceof Error ? error.name : "unknown" };
+  } catch { return { status: 0, code: "unknown" }; }
 }
 
 /** A retry must repeat the exact original command, including its confirmed target. */
