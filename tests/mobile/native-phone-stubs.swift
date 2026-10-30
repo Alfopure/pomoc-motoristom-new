@@ -46,14 +46,16 @@ class CXHandle { enum HandleType: Hashable { case phoneNumber, generic }; let ty
 class CXProviderConfiguration { var supportsVideo = false; var supportedHandleTypes: Set<CXHandle.HandleType> = []; var maximumCallGroups = 1; var maximumCallsPerCallGroup = 1 }
 enum CXCallEndedReason { case failed, remoteEnded, unanswered, answeredElsewhere }
 class CXCallUpdate { var remoteHandle: CXHandle?; var localizedCallerName: String?; var hasVideo = false; var supportsHolding = false; var supportsGrouping = false; var supportsUngrouping = false }
-class CXAction { let uuid = UUID(); var timeoutDate = Date().addingTimeInterval(30); var isComplete = false; var fulfills = 0; var failures = 0; func fulfill() { fulfills += 1; isComplete = true }; func fail() { failures += 1; isComplete = true } }
+class CXAction { var uuid = UUID(); var timeoutDate = Date().addingTimeInterval(30); var isComplete = false; var fulfills = 0; var failures = 0; func fulfill() { fulfills += 1; isComplete = true }; func fail() { failures += 1; isComplete = true } }
 class CXCallAction: CXAction { let callUUID: UUID; init(call: UUID) { callUUID = call } }
 class CXAnswerCallAction: CXCallAction {}
 class CXEndCallAction: CXCallAction {}
 class CXStartCallAction: CXCallAction { let handle: CXHandle; init(call: UUID, handle: CXHandle) { self.handle = handle; super.init(call: call) } }
-class CXSetHeldCallAction: CXCallAction { let isOnHold: Bool; init(call: UUID, onHold: Bool) { isOnHold = onHold; super.init(call: call) } }
+class CXSetHeldCallAction: CXCallAction { let isOnHold: Bool; init(call: UUID, onHold: Bool) { isOnHold = onHold; super.init(call: call) }
+  // iOS hands the provider a new object for a requested action: same uuid, different identity.
+  func deliveredCopy() -> CXSetHeldCallAction { let copy = CXSetHeldCallAction(call: callUUID, onHold: isOnHold); copy.uuid = uuid; copy.timeoutDate = timeoutDate; return copy } }
 class CXSetMutedCallAction: CXCallAction { let isMuted: Bool; init(call: UUID, muted: Bool) { isMuted = muted; super.init(call: call) } }
-class CXTransaction { let action: CXAction; init(action: CXAction) { self.action = action } }
+class CXTransaction { let action: CXAction; init(action: CXAction) { self.action = (action as? CXSetHeldCallAction)?.deliveredCopy() ?? action } }
 class CXCallController { static var transactions: [CXTransaction] = []; static var requestError: Error?; func request(_ transaction: CXTransaction, completion: @escaping (Error?) -> Void) { Self.transactions.append(transaction); completion(Self.requestError) } }
 class CXProvider { var updates: [UUID: CXCallUpdate] = [:]; var updateCount = 0; var incoming: [UUID] = []; var ended: [UUID: CXCallEndedReason] = [:]; func reportCall(with id: UUID, updated: CXCallUpdate) { updates[id] = updated; updateCount += 1 }; static var last: CXProvider!; let configuration: CXProviderConfiguration; init(configuration: CXProviderConfiguration) { self.configuration = configuration; Self.last = self }; func setDelegate(_ delegate: CXProviderDelegate, queue: DispatchQueue) {}; func reportNewIncomingCall(with id: UUID, update: CXCallUpdate, completion: @escaping (Error?) -> Void) { incoming.append(id); completion(nil) }; func reportCall(with id: UUID, endedAt: Date, reason: CXCallEndedReason) { ended[id] = reason }; func reportOutgoingCall(with: UUID, startedConnectingAt: Date) {}; func reportOutgoingCall(with: UUID, connectedAt: Date) {} }
 struct CallTerminationReason: Equatable {}

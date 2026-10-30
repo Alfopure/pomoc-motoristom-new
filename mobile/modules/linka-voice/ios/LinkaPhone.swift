@@ -370,12 +370,13 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   }
   func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
     let id = action.callUUID
-    if let mirror = mirrors[id], mirror.action === action {
+    // iOS delivers a requested action as a new object with the same uuid: match by uuid, never identity.
+    if let mirror = mirrors[id], mirror.action.uuid == action.uuid {
       guard client === mirror.client, sessions[id] == mirror.session, controls[id] == mirror.control,
-        currentCall(id) === mirror.call, mirrors[id]?.action === action,
+        currentCall(id) === mirror.call, mirrors[id]?.action.uuid == action.uuid,
         recoveryTimers[id] == nil, media[id]?.version == mirror.version,
         media[id]?.state == (action.isOnHold ? "held" : "active"), holds[id] == nil,
-        !action.isComplete, action.timeoutDate > Date() else { diag("callkit.held", ["call": id, "result": "mirror_refused", "on_hold": action.isOnHold]); failMirror(id); return }
+        !action.isComplete, action.timeoutDate > Date() else { diag("callkit.held", ["call": id, "result": "mirror_refused", "on_hold": action.isOnHold]); failLive(action); failMirror(id); return }
       mirrors.removeValue(forKey: id); mirrorTimers.removeValue(forKey: id)?.invalidate()
       action.fulfill()
       diag("callkit.held", ["call": id, "result": "mirror_ok", "on_hold": action.isOnHold])
@@ -385,13 +386,13 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     }
     // A stale mirror callback is not a new user command.
     guard mirrorActionIds[action.uuid] == nil else { diag("callkit.held", ["call": id, "result": "stale_mirror"]); failLive(action); return }
-    guard requestedHolds[id] == nil || requestedHolds[id] === action else {
+    guard requestedHolds[id] == nil || requestedHolds[id]?.uuid == action.uuid else {
       diag("callkit.held", ["call": id, "result": "competing", "on_hold": action.isOnHold])
       diag("hold.cancelled", ["call": id, "action": action.uuid, "reason": "competing"])
       failLive(action); emit(["type": "heldCancelled", "callId": id.uuidString, "actionId": action.uuid.uuidString]); return
     }
-    let ownRequest = requestedHolds[id] === action
-    if requestedHolds[id] === action { requestedHolds.removeValue(forKey: id); holdTimers.removeValue(forKey: id)?.invalidate() }
+    let ownRequest = requestedHolds[id]?.uuid == action.uuid
+    if ownRequest { requestedHolds.removeValue(forKey: id); holdTimers.removeValue(forKey: id)?.invalidate() }
     guard ready, holds[id] == nil, mirrors[id] == nil, let client, let session = sessions[id], let control = controls[id],
       let call = currentCall(id), established.contains(id), recoveryTimers[id] == nil,
       call.callState == .ACTIVE, let state = media[id], state.canHold,
@@ -890,9 +891,9 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
     diag("callkit.timeout", ["kind": String(describing: type(of: action)), "call": (action as? CXCallAction)?.callUUID as Any])
     if let held = action as? CXSetHeldCallAction {
-      if mirrors[held.callUUID]?.action === held { failMirror(held.callUUID, timedOut: true) }
-      else if holds[held.callUUID]?.action === held { detachHold(held.callUUID, timedOut: true) }
-      else if requestedHolds[held.callUUID] === held {
+      if mirrors[held.callUUID]?.action.uuid == held.uuid { failMirror(held.callUUID, timedOut: true) }
+      else if holds[held.callUUID]?.action?.uuid == held.uuid { detachHold(held.callUUID, timedOut: true) }
+      else if requestedHolds[held.callUUID]?.uuid == held.uuid {
         requestedHolds.removeValue(forKey: held.callUUID); holdTimers.removeValue(forKey: held.callUUID)?.invalidate()
         diag("hold.cancelled", ["call": held.callUUID, "action": held.uuid, "reason": "callkit_timeout"])
         emit(["type": "heldCancelled", "callId": held.callUUID.uuidString, "actionId": held.uuid.uuidString])
