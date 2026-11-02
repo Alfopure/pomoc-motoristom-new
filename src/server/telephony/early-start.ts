@@ -44,8 +44,12 @@ export async function respondWhenDialled<T>(
   });
   const value = await Promise.race([proven, work]);
   if (answered) {
+    // The tail's own database steps are not in this route's request metrics
+    // (that scope has finished); `lease-timing` `held_ms` measures it.
+    const sessionId = startedSessionId(value);
     const tail = () => work.then(() => undefined, (error: unknown) => {
-      deps.logger?.({ level: "warn", scope: "call-actions", code: "start_tail_failed", error: error instanceof Error ? error.message : String(error) });
+      deps.logger?.({ level: "warn", scope: "call-actions", code: "start_tail_failed", ...(sessionId ? { sessionId } : {}),
+        error: error instanceof Error ? error.message : String(error) });
     });
     try { after(withBackgroundRequestMetrics(tail)); }
     catch {
@@ -54,4 +58,11 @@ export async function respondWhenDialled<T>(
     }
   }
   return value;
+}
+
+/** The session of a start result: direct, or under `call` for a callback. */
+function startedSessionId(value: unknown): string | null {
+  const record = value && typeof value === "object" ? value as { sessionId?: unknown; call?: { sessionId?: unknown } } : null;
+  const id = record?.sessionId ?? record?.call?.sessionId;
+  return typeof id === "string" ? id : null;
 }

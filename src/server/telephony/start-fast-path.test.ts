@@ -110,7 +110,10 @@ function outcome(h: TelephonyHarness, result: StartOutboundResult) {
     legs: h.legs(result.sessionId).map(leg => ({ role: leg.role, profile: leg.profile_id, to: leg.to_number, from: leg.from_number,
       open: !leg.ended_at, own: leg.telnyx_call_control_id === result.operatorLegCallControlId,
       dial: Boolean((leg.metadata as { dial_command_id?: string }).dial_command_id) })),
-    call: (({ status, direction, operator_id, caller_number, called_number, end_reason }) => ({ status, direction, operator_id, caller_number, called_number, end_reason }))(h.call(result.sessionId)!),
+    call: (({ status, direction, operator_id, caller_number, called_number, end_reason, provider_session_id }) =>
+      ({ status, direction, operator_id, caller_number, called_number, end_reason, provider: provider_session_id === (h.session(result.sessionId) as SessionRow).telnyx_session_id }))(h.call(result.sessionId)!),
+    auditProvider: h.callEvents(result.sessionId).filter(row => (row.normalized_payload as { notes?: string[] }).notes?.includes("durable effects completed"))
+      .map(row => row.provider_session_id === (h.session(result.sessionId) as SessionRow).telnyx_session_id),
     presence: (({ status, current_session_id }) => ({ status, current: current_session_id === result.sessionId }))(h.presence(actor.profileId)),
     dials: h.telnyx.of("dial").map(dial => ({ to: dial.params.to, from: dial.params.from, timeoutSecs: dial.params.timeoutSecs, headers: dial.params.customHeaders })),
     audit: h.callEvents(result.sessionId).some(row => (row.normalized_payload as { notes?: string[] }).notes?.includes("durable effects completed")),
@@ -120,15 +123,19 @@ function outcome(h: TelephonyHarness, result: StartOutboundResult) {
 
 describe("call-speed S2 start path", () => {
   it.each([
-    ["outbound", outbound, "fast", FAST], ["outbound", outbound, "early", EARLY], ["outbound", outbound, "all", ALL],
-    ["internal", colleague, "fast", FAST], ["internal", colleague, "early", EARLY], ["internal", colleague, "all", ALL],
-  ] as const)("leaves the same %s call behind with the %s switches on as with them off", async (_kind, start, _name, flags) => {
+    ["outbound", "fast", outbound, FAST], ["outbound", "early", outbound, EARLY], ["outbound", "all", outbound, ALL],
+    ["internal", "fast", colleague, FAST], ["internal", "early", colleague, EARLY], ["internal", "all", colleague, ALL],
+  ] as const)("leaves the same %s call behind with the %s switches on as with them off", async (_kind, _name, start, flags) => {
     const off = world();
     const on = world(flags);
     const before = outcome(off.h, await start(off));
     let early: StartOutboundResult | null = null;
     const after = outcome(on.h, await (flags.start_early_response ? start(on, undefined, result => { early = result; }) : start(on)));
-    expect(after).toEqual(before);
+    // History written after the dial (fast path) already carries the provider
+    // session, which the switch-off row only gets from the next event.
+    expect(after.call.provider).toBe(flags.start_fast_path ? true : before.call.provider);
+    expect({ ...after, call: { ...after.call, provider: null } }).toEqual({ ...before, call: { ...before.call, provider: null } });
+    expect(after.auditProvider).toEqual([true]);
     if (flags.start_early_response) expect(early).toMatchObject({ operatorLegCallControlId: expect.any(String) });
     expect(before).toMatchObject({ session: { pending: 0 }, presence: { status: "on_call", current: true }, audit: true, legs: [{ own: true, open: true, dial: true }] });
   });
@@ -148,6 +155,14 @@ describe("call-speed S2 start path", () => {
     expect(beforeDial.filter(row => row.table === "motorist_calls")).toHaveLength(0);
     expect(t.h.call(result.sessionId)).toMatchObject({ status: "outbound" });
     expect(readPendingEffects(t.h.session(result.sessionId) as SessionRow).entries).toEqual([]);
+  });
+
+  it("sends no guard read for a request the synchronous checks refuse anyway", async () => {
+    const t = world(FAST);
+    await expect(startOutboundCall(t.deps, actor, { to: "not a number", requestId: requestId(7004) })).rejects.toMatchObject({ status: 400, code: "invalid_number" });
+    await expect(callColleague(t.deps, actor, { targetProfileId: actor.profileId, requestId: requestId(7005) })).rejects.toMatchObject({ status: 400, code: "self_call" });
+    // Only the two prior lookups.
+    expect(t.h.db.log.map(row => row.table)).toEqual(["motorist_call_sessions", "motorist_call_sessions"]);
   });
 
   it("refuses a busy operator exactly as before, without a dial", async () => {
@@ -394,10 +409,13 @@ describe("call-speed S2 TEST destination proof prefetch", () => {
     for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
     t.h.db.update("motorist_profiles", { kind: "human" }, () => true);
     const sent: Array<{ method: string; path: string; at: number }> = [];
+    let credentialUnavailable = () => false;
     const fetch = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
       const path = new URL(String(input)).pathname.replace(/^\/v2/, "");
       sent.push({ method: options?.method ?? "GET", path, at: t.h.db.log.length });
-      const data = path.startsWith("/telephony_credentials/")
+      const credential = path.startsWith("/telephony_credentials/");
+      if (credential && credentialUnavailable()) return new Response(JSON.stringify({ errors: [{ code: "unavailable" }] }), { status: 503 });
+      const data = credential
         ? { resource_id: "connection:cred-connection-test", expired: false, sip_username: "gencred001" }
         : { call_control_id: "own-leg", call_leg_id: "own-leg-id", call_session_id: "provider-session", is_alive: true };
       return new Response(JSON.stringify({ data }), { status: 200 });
@@ -406,7 +424,7 @@ describe("call-speed S2 TEST destination proof prefetch", () => {
     const client = createTelnyxClient({ config, fetch, liveGate: { callsEnabled: true, smsEnabled: false }, testProvenanceContext: { admin: t.h.admin, organizationId: ORG } });
     t.deps.telnyx = client;
     t.deps.config = config;
-    return { ...t, sent, client };
+    return { ...t, sent, client, failCredentialCheck: (when: () => boolean) => { credentialUnavailable = when; } };
   }
 
   it("proves the own destination before the lease, so the dial runs no serial guard", async () => {
@@ -434,15 +452,29 @@ describe("call-speed S2 TEST destination proof prefetch", () => {
     expect(check.at).toBeLessThanOrEqual(prepare + 1);
   });
 
-  it("refuses an unproven destination before anything is reserved or dialled", async () => {
-    const t = testWorld({ start_fast_path: true, start_test_proof_prefetch: true });
+  it.each([false, true])("refuses an unproven destination with today's answer, prefetch=%s", async (prefetch) => {
+    const t = testWorld({ start_fast_path: true, start_test_proof_prefetch: prefetch });
     t.h.db.update("motorist_operator_devices", { telnyx_credential_id: null }, row => row.profile_id === actor.profileId);
-    await expect(outbound(t)).rejects.toMatchObject({ status: 423, code: "test_provider_boundary" });
-    expect(t.actions).toEqual([]);
+    await expect(outbound(t)).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
     expect(t.sent.filter(row => row.method === "POST")).toHaveLength(0);
     const [session] = t.h.rows("motorist_call_sessions") as SessionRow[];
     expect(session).toMatchObject({ state: "failed" });
+    expect(t.h.call(session.id)).toMatchObject({ status: "failed", end_reason: "dial_failed" });
     expect(t.h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
+    expect(t.h.rows("motorist_job_incidents")).toHaveLength(1);
+    // With the prefetch the refusal comes before anything was reserved.
+    expect(t.actions.length === 0).toBe(prefetch);
+  });
+
+  it("leaves an inconclusive prefetch to the dial's own guard", async () => {
+    const t = testWorld({ start_fast_path: true, start_test_proof_prefetch: true });
+    let unavailable = true;
+    t.failCredentialCheck(() => { const fail = unavailable; unavailable = false; return fail; });
+    const result = await outbound(t);
+    expect(result.operatorLegCallControlId).toBe("own-leg");
+    // One inconclusive check (503) before the lease, one by the dial itself.
+    expect(t.sent.filter(row => row.path.startsWith("/telephony_credentials/"))).toHaveLength(2);
+    expect(t.sent.filter(row => row.method === "POST" && row.path === "/calls")).toHaveLength(1);
   });
 
   it("uses a proof once, for its own destination only", async () => {

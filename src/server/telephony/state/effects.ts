@@ -1494,6 +1494,17 @@ function dialParams(command: DialCommand): DialParams {
   };
 }
 
+/**
+ * `Promise.all` that lets every write finish before reporting the first
+ * failure, so nothing is still in flight when the caller's failure path
+ * checkpoints or releases the lease.
+ */
+async function settledAll<T extends readonly unknown[]>(work: { [K in keyof T]: Promise<T[K]> | T[K] }): Promise<T> {
+  const settled = await Promise.allSettled(work as readonly unknown[]);
+  for (const outcome of settled) if (outcome.status === "rejected") throw outcome.reason;
+  return settled.map(outcome => (outcome as PromiseFulfilledResult<unknown>).value) as unknown as T;
+}
+
 /** The bookkeeping behind one dial, whether it was sent alone or as part of a step. */
 async function settleDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, result: DialResult, stable: boolean): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   ctx.dialResults.set(command.commandId, result);
@@ -1511,7 +1522,10 @@ async function settleDial(deps: EffectsDeps, ctx: ExecutionContext, command: Dia
     // Call-speed S2.3: the revocation read is still after the dial, so a
     // tombstone written while it was in flight is found; the arriving leg is
     // named explicitly, so the check does not need its row.
-    [leg] = await Promise.all([upsertDialedLeg(deps, ctx.session, command, result, { knownNew: true }), revoked()]);
+    [leg] = await settledAll([upsertDialedLeg(deps, ctx.session, command, result, { knownNew: true }), revoked()]);
+    // The row this invocation carries on (projection, audit, final
+    // checkpoint) gains the identity just written; that write keeps `version`.
+    if (!ctx.session.telnyx_session_id && result.callSessionId) ctx.session = { ...ctx.session, telnyx_session_id: result.callSessionId };
   } else {
     leg = await upsertDialedLeg(deps, ctx.session, command, result);
     await revoked();
@@ -1558,7 +1572,7 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
   };
   // With no earlier row these three writes are independent of each other.
   if (options.knownNew && !command.attempt) {
-    const [leg] = await Promise.all([write(), usage(), sessionIdentity()]);
+    const [leg] = await settledAll([write(), usage(), sessionIdentity()]);
     return leg;
   }
   const leg = await write();
@@ -2362,6 +2376,7 @@ async function executeReduceResult(
         // then a resume adopts the dial from its leg row (`dial_command_id`),
         // which `settleDial` wrote before anything else could observe it.
         foldedCheckpoint = true;
+        session = ctx.session;
       } else if (!following || !overlapped.has(following)) {
         const checkpointed = await writeCheckpoint();
         const owner = sessionOwnership.getStore();

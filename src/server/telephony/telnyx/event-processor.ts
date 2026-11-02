@@ -1187,6 +1187,8 @@ async function recoverInitialSetup(deps: ProcessorDeps, known: SessionRow, event
 async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow, current?: TelephonyEvent, customerTerminalOnly = false,
   options: { deadline?: number; limit?: number } = {}): Promise<void> {
   const deadline = Math.min(options.deadline ?? Number.POSITIVE_INFINITY, Date.now() + DEFERRED_DRAIN_DEADLINE_MS);
+  // A spent window (a held run's drain, S1.3) replays nothing; skip its reads too.
+  if (Date.now() >= deadline) return;
   const limit = options.limit ?? 2;
   try {
     if (customerTerminalOnly && !session.customer_leg_id) return;

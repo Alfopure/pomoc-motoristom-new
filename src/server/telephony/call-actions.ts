@@ -27,7 +27,7 @@ import { findInitialCall, initialOperationIdentity, InitialOperationExistsError,
 import { ownedSessionWork, effectsDeps, loadRoutingSettings, runSessionEvent, type SessionRunnerDeps, type SessionRunResult } from "./session-runner";
 import { isOverLegCap, loadDailyUsage, type DailyUsage } from "./usage";
 import { resumePendingEffects, upsertCallRow, upsertDialedLeg, type CommandOutcome, type InitialDispatch } from "./state/effects";
-import { recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
+import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { readPendingEffects, stageEffects } from "./state/continuation";
 import { CallActionRejected } from "./state/transitions";
 import {
@@ -442,8 +442,9 @@ export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, 
   const identity = initialOperationIdentity(actor, "outbound", input);
   // Call-speed S2.1 (`start_fast_path`): the rate count and every guard read
   // leave together with the prior lookup. A prior still wins whatever they
-  // say, and the in-memory bucket counts only a request found to be new.
-  const wave = latencyFlagsOf(deps).start_fast_path
+  // say, and the in-memory bucket counts only a request found to be new. A
+  // request the synchronous checks below refuse anyway sends none of them.
+  const wave = latencyFlagsOf(deps).start_fast_path && deps.config.configured && deps.telnyx && manualPhoneNumber(input.to)
     ? inFlight({ rateCount: outboundRateCount(deps, actor), ...outboundGuards(deps, actor, input, true) }) : undefined;
   const prior = await findInitialCall(deps, identity);
   if (prior) return initializeOutgoingSession(deps, actor, prior, undefined, true);
@@ -495,7 +496,7 @@ async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, inpu
 export async function callColleague(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string }, early?: EarlyStart<StartOutboundResult>): Promise<StartOutboundResult> {
   const identity = initialOperationIdentity(actor, "internal", input);
   // Call-speed S2.1 (`start_fast_path`): as for `startOutboundCall`.
-  const wave = latencyFlagsOf(deps).start_fast_path
+  const wave = latencyFlagsOf(deps).start_fast_path && deps.config.configured && deps.telnyx && input.targetProfileId !== actor.profileId
     ? inFlight({ rateCount: outboundRateCount(deps, actor), ...colleagueGuards(deps, actor, input, true) }) : undefined;
   const prior = await findInitialCall(deps, identity);
   if (prior) return initializeOutgoingSession(deps, actor, prior, undefined, true);
@@ -665,12 +666,17 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
       }
     }
     if (options.sipProof) {
-      // The TEST guard refused this destination (or could not prove it):
-      // nothing is reserved or dialled, and the request surfaces that refusal.
+      // The TEST guard refused this destination: nothing is reserved or
+      // dialled. The session, the incident and the answer are those of the
+      // refused dial today (`recoverInitialDial`); only the reservation and
+      // its release are spared.
       try { await options.sipProof; }
       catch (error) {
+        deps.logger?.({ level: "warn", scope: "call-actions", code: "initial_destination_refused", sessionId: session.id,
+          error: error instanceof Error ? error.message : String(error) });
         await markSessionFailed(deps, session, "dial_failed");
-        throw error;
+        await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, context: { sessionId: session.id, command: "dial", key: id } });
+        throw new CallActionError("Pôvodný hovor už skončil.", 409, "initial_call_ended");
       }
     }
     // Call-speed S2.2 (`start_fast_path`): on the stable contract `acquire`

@@ -364,7 +364,9 @@ export type TelnyxClient = {
    * Call-speed S2 (`start_test_proof_prefetch`): proves the TEST SIP
    * destination of this client's next dial to `to` ahead of that dial, with
    * the same enrollment and credential checks. The proof is used once, by this
-   * client only (one request); null where no TEST guard runs.
+   * client only (one request); null where no TEST guard runs. It rejects only
+   * with the boundary's refusal; an inconclusive check leaves the dial to
+   * prove the destination itself.
    */
   proveSipDestination?(to: string): Promise<void> | null;
 };
@@ -508,16 +510,20 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const username = safety.restricted ? testSipUsername(to) : null;
     if (!username) return null;
     const deadline = now() + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS);
-    const proof = (async () => {
+    const slot: { proof?: Promise<void> } = {};
+    slot.proof = (async () => {
       try { await assertTestCredential(await resolveSipCredential(username), username, "POST", deadline); }
       catch (error) {
+        // Only the boundary's own refusal is final. Anything else (a provider
+        // timeout, a 5xx) proves nothing either way: the dial checks the
+        // destination itself, exactly as without the prefetch.
+        if (prefetchedSipProofs.get(username) === slot.proof) prefetchedSipProofs.delete(username);
         if (error instanceof TestProviderSafetyError) throw new TelnyxCommandError({ code: error.code, status: error.status, message: error.message, commandId: null });
-        throw error;
       }
     })();
-    proof.catch(() => undefined);
-    prefetchedSipProofs.set(username, proof);
-    return proof;
+    slot.proof.catch(() => undefined);
+    prefetchedSipProofs.set(username, slot.proof);
+    return slot.proof;
   }
 
   async function attempt(
