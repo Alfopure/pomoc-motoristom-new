@@ -802,6 +802,43 @@ describe("S6 pause boundaries of a concurrent colleague dial", () => {
   });
 });
 
+/**
+ * S5: a session is created and controlled in the API region frozen into its
+ * `start_mode`. The far-end dial of a concurrent start, the explicit bridge
+ * and the hangups belong to the same session, so they go to the same region.
+ */
+describe("S6 with S5: both legs in the session's frozen API region", () => {
+  const callRoutes = (t: World) => t.h.telnyx.routes.filter(route => route.path.startsWith("/calls"));
+  const notEu = (t: World) => callRoutes(t).filter(route => route.region !== "eu" || route.baseUrl !== "https://api.telnyx.eu/v2");
+
+  it("freezes concurrent dialing next to the EU region, and sends both dials, the bridge and the hangups of an outgoing call to .eu", async () => {
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    const t = world({ api_region: "eu" });
+    const call = await outbound(t, 9300);
+    expect(meta(t, call.sessionId).start_mode).toMatchObject({ concurrent: true, autoBridge: false, ownLegTimeoutSecs: 12, apiRegion: "eu" });
+    // (B) the customer answers first: the explicit bridge.
+    await answer(t, call.far);
+    await answer(t, call.own);
+    expect(t.h.telnyx.of("bridge")).toHaveLength(1);
+    await hangupCall(t.deps, actor, call.sessionId);
+    expect(callRoutes(t).filter(route => route.method === "dial")).toHaveLength(2);
+    expect(callRoutes(t).map(route => route.method)).toEqual(expect.arrayContaining(["dial", "bridge", "hangup"]));
+    expect(notEu(t)).toEqual([]);
+  });
+
+  it("freezes the colleague auto-bridge next to the EU region, and dials both legs of a colleague call in .eu", async () => {
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    const t = world({ api_region: "eu", internal_auto_bridge: true });
+    const call = await colleague(t, 9301);
+    expect(meta(t, call.sessionId).start_mode).toMatchObject({ concurrent: true, autoBridge: true, apiRegion: "eu" });
+    await answer(t, call.own);
+    await answer(t, call.far);
+    expect(t.h.session(call.sessionId).state).toBe("talking");
+    expect(callRoutes(t).filter(route => route.method === "dial")).toHaveLength(2);
+    expect(notEu(t)).toEqual([]);
+  });
+});
+
 describe("S6 cron and recovery", () => {
   it("leaves nothing for cron once both dials are done, and cron never dials again", async () => {
     const t = world({ internal_auto_bridge: true });
