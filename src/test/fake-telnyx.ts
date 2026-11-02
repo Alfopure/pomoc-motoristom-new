@@ -243,17 +243,24 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
         return sent;
       },
       {
-        error: (status, body, replayedCommandId) => new TelnyxCommandError({
-          code: "journal_replay", status,
-          detail: `replayed provider outcome: ${JSON.stringify(body)}`,
-          commandId: replayedCommandId,
-        }),
+        error: replayedOutcome,
       },
     );
 
     if (outcome.cached) return outcome.result as T;
     if ("thrown" in outcome.sent && outcome.sent.thrown && !options?.raw) throw outcome.sent.thrown;
     return options?.raw ? (outcome.sent as unknown as T) : (outcome.sent.result as T);
+  }
+
+  /**
+   * A recorded refusal handed back by the journal, with the provider's own
+   * code as the real client's `errorFromBody` keeps it (a replayed 90018 is
+   * still a call-gone answer).
+   */
+  function replayedOutcome(status: number, body: unknown, commandId: string | null): TelnyxCommandError {
+    const errors = (body as { errors?: Array<{ code?: unknown }> } | null)?.errors;
+    const code = Array.isArray(errors) && typeof errors[0]?.code === "string" ? errors[0].code : "journal_replay";
+    return new TelnyxCommandError({ code, status, detail: `replayed provider outcome: ${JSON.stringify(body)}`, commandId });
   }
 
   /** Drops `undefined` values the way the real client's `compact` does. */
@@ -374,7 +381,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       }
       const settled = await dispatchJournaledBatch(
         list.map((_, index) => ({ journal: journals[index]!, send: () => one(index) })),
-        { error: (status, body, commandId) => new TelnyxCommandError({ code: "journal_replay", status, detail: `replayed provider outcome: ${JSON.stringify(body)}`, commandId }) },
+        { error: replayedOutcome },
       );
       return settled.map((outcome) => {
         if (outcome.status === "rejected") return outcome as PromiseRejectedResult;
@@ -401,7 +408,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
           journal: journals[index]!,
           send: () => dialOnce<{ status: number; result: unknown; thrown?: unknown }>(params, { journalled: true, raw: true }),
         })),
-        { error: (status, body, commandId) => new TelnyxCommandError({ code: "journal_replay", status, detail: `replayed provider outcome: ${JSON.stringify(body)}`, commandId }) },
+        { error: replayedOutcome },
       );
       return settled.map((outcome) => {
         if (outcome.status === "rejected") return outcome as PromiseRejectedResult;

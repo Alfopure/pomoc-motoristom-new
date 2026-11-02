@@ -1,3 +1,5 @@
+import { resolveAppEnvironment } from "@/lib/app-environment";
+
 import { getTestProviderSafety, type TestProviderSafety } from "./test-safety";
 
 /**
@@ -13,9 +15,9 @@ export type TelnyxConfig =
   | {
       configured: true;
       apiKey: string;
-      /** Region `us`: `api.telnyx.com` unless overridden. */
+      /** Region `us`: `api.telnyx.com` (see `regionBaseUrl`). */
       apiBaseUrl: string;
-      /** Region `eu` (call-speed S5): `api.telnyx.eu` unless overridden. */
+      /** Region `eu` (call-speed S5): `api.telnyx.eu` (see `regionBaseUrl`). */
       euApiBaseUrl: string;
       publicKey: string | null;
       callControlAppId: string | null;
@@ -48,6 +50,32 @@ function readFlag(env: EnvRecord, name: string): boolean {
   return readEnv(env, name)?.toLowerCase() === "true";
 }
 
+const ignoredOverrides = new Set<string>();
+
+/**
+ * Call-speed S5: each API region has its own fixed host, so the region a
+ * session freezes and the telnyx-http line logs always name the host its
+ * calls really use. In production `us` is api.telnyx.com and `eu`
+ * api.telnyx.eu, whatever the environment says: `TELNYX_API_BASE_URL` and
+ * `TELNYX_EU_API_BASE_URL` are overrides for tests and local runs, and a
+ * production override is ignored and logged once per instance. An unreadable
+ * application environment counts as production.
+ */
+function regionBaseUrl(env: EnvRecord, name: "TELNYX_API_BASE_URL" | "TELNYX_EU_API_BASE_URL", fixed: string): string {
+  const override = readEnv(env, name)?.replace(/\/+$/, "");
+  if (!override || override === fixed) return fixed;
+  let production = true;
+  try { production = resolveAppEnvironment(env) === "production"; } catch { /* fail closed */ }
+  if (!production) return override;
+  if (!ignoredOverrides.has(name)) {
+    ignoredOverrides.add(name);
+    let host: string | null = null;
+    try { host = new URL(override).hostname; } catch { /* Only the hostname is ever logged. */ }
+    console.error(JSON.stringify({ scope: "telnyx-config", level: "error", code: "api_base_url_override_ignored", variable: name, host, using: fixed }));
+  }
+  return fixed;
+}
+
 export function getTelnyxConfig(env: EnvRecord = process.env): TelnyxConfig {
   const apiKey = readEnv(env, "TELNYX_API_KEY");
   if (!apiKey) {
@@ -57,8 +85,8 @@ export function getTelnyxConfig(env: EnvRecord = process.env): TelnyxConfig {
   return {
     configured: true,
     apiKey,
-    apiBaseUrl: (readEnv(env, "TELNYX_API_BASE_URL") ?? TELNYX_DEFAULT_API_BASE_URL).replace(/\/+$/, ""),
-    euApiBaseUrl: (readEnv(env, "TELNYX_EU_API_BASE_URL") ?? TELNYX_DEFAULT_EU_API_BASE_URL).replace(/\/+$/, ""),
+    apiBaseUrl: regionBaseUrl(env, "TELNYX_API_BASE_URL", TELNYX_DEFAULT_API_BASE_URL),
+    euApiBaseUrl: regionBaseUrl(env, "TELNYX_EU_API_BASE_URL", TELNYX_DEFAULT_EU_API_BASE_URL),
     publicKey: readEnv(env, "TELNYX_PUBLIC_KEY"),
     callControlAppId: readEnv(env, "TELNYX_CALL_CONTROL_APP_ID"),
     credentialConnectionId: readEnv(env, "TELNYX_CREDENTIAL_CONNECTION_ID"),
@@ -81,7 +109,7 @@ export function getTelnyxConfig(env: EnvRecord = process.env): TelnyxConfig {
  */
 export type TelnyxApiRegion = "us" | "eu";
 
-/** The REST base for a region: `TELNYX_API_BASE_URL` for `us`, `TELNYX_EU_API_BASE_URL` for `eu`. */
+/** The REST base for a region: api.telnyx.com for `us`, api.telnyx.eu for `eu` (overridable outside production). */
 export function apiBaseUrlFor(config: Pick<Extract<TelnyxConfig, { configured: true }>, "apiBaseUrl" | "euApiBaseUrl">, region: TelnyxApiRegion): string {
   return region === "eu" ? config.euApiBaseUrl : config.apiBaseUrl;
 }

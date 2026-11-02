@@ -118,19 +118,22 @@ describe("latency flags", () => {
       own_leg_timeout_secs_concurrent: 9, internal_auto_bridge: true, api_region: "eu" };
     expect([concurrentDialFor(flags, "outbound", "web"), concurrentDialFor(flags, "outbound", "mobile"),
       concurrentDialFor(flags, "internal", "web"), concurrentDialFor(flags, "internal", "mobile")]).toEqual([true, false, false, true]);
-    // S6 is not implemented: the session records the sequential 30 s dial. S5 is: a session we create
-    // takes the flag's API region, while an inbound call keeps the region its client calls.
+    // S6 is not implemented: the session records the sequential 30 s dial. S5 is: on TEST a session we
+    // create takes the flag's API region, while an inbound call keeps the region its client calls.
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
     for (const [direction, origin, apiRegion] of [["outbound", "web", "eu"], ["internal", "mobile", "eu"], ["inbound", null, "us"]] as const) {
       expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" })).toEqual({ concurrent: false, autoBridge: false,
         ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion, origin });
     }
     expect(freezeStartMode({ ...flags, api_region: "us" }, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
-    // Until spike S5.0 passes, production keeps `us` whatever the switch says; TEST can freeze `eu`.
-    vi.stubEnv("MOTORIST_APP_ENV", "production");
-    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
-    vi.stubEnv("MOTORIST_APP_ENV", "test");
-    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("eu");
+    // Until spike S5.0 passes, only an application environment of exactly `test` may freeze `eu`:
+    // production, a local run (development) and an unreadable environment keep `us`.
+    for (const environment of ["production", "development", "staging"]) {
+      vi.stubEnv("MOTORIST_APP_ENV", environment);
+      expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
+    }
     vi.unstubAllEnvs();
+    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
     // S7b ships its behaviour: join-with-hold is frozen when asked for, and only then; never for a colleague call.
     const joinHeld = { ...flags, hold_join_with_hold: true };
     expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
@@ -144,13 +147,22 @@ describe("latency flags", () => {
     vi.unstubAllEnvs();
     expect(envLatencyFlags({ TELEPHONY_LATENCY_FLAGS: JSON.stringify({ hold_lean_context: true, hold_mobile_dedupe: true, hold_join_with_hold: "yes" }) }))
       .toMatchObject({ hold_lean_context: true, hold_mobile_dedupe: true, hold_join_with_hold: false });
+    // A test or local override of the `us` base is honoured, and the region names its real host...
     expect(providerRegionOf(getTelnyxConfig({ ...FAKE_TELNYX_ENV, TELNYX_API_BASE_URL: "https://api.telnyx.eu/v2" }))).toBe("eu");
     expect(providerRegionOf(getTelnyxConfig({ ...FAKE_TELNYX_ENV, TELNYX_API_BASE_URL: "https://api.telnyx.com/v2" }))).toBe("us");
     expect(providerRegionOf(getTelnyxConfig({}))).toBe("us");
+    // ...while production ignores it: `us` is api.telnyx.com, so an inbound call there freezes `us` with the .com host.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const production = getTelnyxConfig({ ...FAKE_TELNYX_ENV, MOTORIST_APP_ENV: "production", TELNYX_API_BASE_URL: "https://api.telnyx.eu/v2" });
+    expect(production).toMatchObject({ apiBaseUrl: "https://api.telnyx.com/v2" });
+    expect(providerRegionOf(production)).toBe("us");
+    expect(freezeStartMode(flags, { direction: "inbound", origin: null, providerRegion: providerRegionOf(production) }).apiRegion).toBe("us");
+    errors.mockRestore();
   });
 
   it("freezes the start mode into every new session as the call really runs, whatever the flags ask", async () => {
     vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
     const h = createTelephonyHarness();
     const asked: LatencyFlags = { ...defaultLatencyFlags(), concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } },
       internal_auto_bridge: true, api_region: "eu" };

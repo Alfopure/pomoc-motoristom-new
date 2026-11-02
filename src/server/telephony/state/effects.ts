@@ -18,7 +18,7 @@ import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, failureAudits, failureAuditsComplete, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
-import { isCallGoneError, TELNYX_CALL_ENDED_CODE, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { isCallGoneError, TELNYX_CALL_ENDED_CODE, TELNYX_CALL_GONE_CODES, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
 import { pendingAudioStillOwned, recordingCommandOutcome, recordingFrozenOff, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
@@ -896,9 +896,16 @@ function requireTelnyx(deps: EffectsDeps): TelnyxClient {
   return deps.telnyx;
 }
 
-/** A hangup for a leg Telnyx no longer knows (404) or refuses to touch because it ended (422). */
+/**
+ * A hangup for a leg Telnyx no longer knows (404) or refuses to touch because
+ * it ended (422). In an EU session (call-speed S5) only Telnyx's own call-gone
+ * codes count: a bare 404/422 there may be the answer of the wrong region (an
+ * older build, a changed base URL) for a call that is still connected, so it
+ * takes the ordinary failure path instead of closing the leg.
+ */
 function isLegAlreadyGone(error: unknown): boolean {
-  return error instanceof TelnyxCommandError && (error.status === 404 || error.status === 422);
+  if (!(error instanceof TelnyxCommandError) || (error.status !== 404 && error.status !== 422)) return false;
+  return sessionOwnership.getStore()?.providerRegion !== "eu" || TELNYX_CALL_GONE_CODES.has(String(error.code));
 }
 
 /**

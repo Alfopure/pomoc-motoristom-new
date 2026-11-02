@@ -422,12 +422,18 @@ export const CLOUDFLARE_SIGNATURE_BANNED_CODE = "cloudflare_1010";
 /**
  * Cloudflare in front of `api.telnyx.eu` refuses some client signatures (for
  * example `Python-urllib`) with 403 and error 1010 "browser_signature_banned"
- * before the request reaches Telnyx. That is our configuration, never the
- * provider's verdict on the command.
+ * before the request reaches Telnyx: as JSON (we ask for it), as plain text
+ * ("error code: 1010") or as its HTML page. That is our configuration, never
+ * the provider's verdict on the command. Checked only for the EU host, so the
+ * default `.com` path keeps today's handling of every 403.
  */
 export function cloudflareSignatureBanned(status: number, body: unknown): boolean {
   if (status !== 403) return false;
-  if (typeof body === "string") return /error code:?\s*1010\b|browser_signature_banned/i.test(body);
+  if (typeof body === "string") {
+    return /error code:?\s*1010\b|browser_signature_banned/i.test(body) ||
+      /<title>[^<]*\b1010\b[^<]*<\/title>/i.test(body) ||
+      /used Cloudflare to restrict access/i.test(body) && /\b1010\b/.test(body);
+  }
   const record = asRecord(body);
   return record.error_code === 1010 || record.error_code === "1010" || record.error_name === "browser_signature_banned";
 }
@@ -660,18 +666,23 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       // calls and then their conferences; the SIP destinations and their
       // credentials; for a token, the SIP connection and then its profile.
       // Each stays fail-closed and every check still precedes journal
-      // preparation and provider mutation. Once one chain fails the others
-      // start nothing new, and a boundary refusal is reported ahead of a
-      // transient read failure, as when the chains ran one after another.
-      let failed = false;
-      const stopped = new Error("TEST guard stopped after another check failed");
-      const stop = () => { if (failed) throw stopped; };
-      const chain = (work: () => Promise<void>) => work().catch((error: unknown) => { failed = true; throw error; });
+      // preparation and provider mutation. Once a check has refused, the
+      // others start nothing new. A transient read failure stops nothing, so
+      // every refusal still runs to completion, and a boundary refusal is
+      // always reported ahead of it, as when the chains ran one after another.
+      let refused = false;
+      const stopped = new Error("TEST guard stopped after another check refused");
+      const stop = () => { if (refused) throw stopped; };
+      const chain = (work: () => Promise<void>) => work().catch((error: unknown) => {
+        if (error instanceof TestProviderSafetyError) refused = true;
+        throw error;
+      });
       const settled = await Promise.allSettled([
         chain(async () => {
           // Independent local proofs run together, but retain the boundary that
           // rejects a foreign call before even reading its conference at Telnyx.
           await Promise.all([...new Set(checked.callIds)].map(callId => verifyTestCall(callId, safety, requestDeadline)));
+          stop();
           await Promise.all([...new Set(checked.conferenceIds)].map(async conferenceId => {
             if (owner && createdTestConferences.get(owner)?.has(conferenceId)) return;
             const response = await request<unknown>("GET", `/conferences/${encodeURIComponent(conferenceId)}`, { region }, requestDeadline);
@@ -739,11 +750,20 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         journal,
         async () => {
           const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline, { started, attempts }));
-          // Thrown before anything is observed or journalled: Telnyx never saw
-          // the request, so it is neither its outcome nor worth a retry.
-          if (cloudflareSignatureBanned(result.response.status, result.parsed)) {
-            throw new TelnyxCommandError({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, status: 403, retryable: false, commandId,
-              detail: `Cloudflare refused the ${region} API request (error 1010, browser signature banned) before it reached Telnyx; check the client's User-Agent` });
+          if (region === "eu" && cloudflareSignatureBanned(result.response.status, result.parsed)) {
+            const detail = "Cloudflare refused the eu API request (error 1010, browser signature banned) before it reached Telnyx; check the client's User-Agent";
+            // A dial that never reached Telnyx created no call. It is recorded
+            // as refused (403), so termination does not wait for a leg that
+            // cannot exist, and tagged, so it reads (and replays) as this
+            // configuration error rather than Telnyx's.
+            if (method === "POST" && path === "/calls") {
+              const refusal = { errors: [{ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, title: "Cloudflare error 1010", detail }] };
+              requestOptions.observe?.({ status: 403, result: refusal });
+              return { status: 403, result: refusal as unknown, raw: { response: result.response, parsed: refusal as unknown }, retryAfterMs: undefined };
+            }
+            // Any other command: nothing observed or journalled, as after a
+            // transport failure, and never retried.
+            throw new TelnyxCommandError({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, status: 403, retryable: false, commandId, detail });
           }
           const sent = { status: result.response.status, result: result.parsed, raw: result,
             retryAfterMs: result.response.status === 429 ? parseRetryAfterMs(result.response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS : undefined };

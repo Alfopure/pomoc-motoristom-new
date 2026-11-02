@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTelnyxClient } from "./client";
 import { getTelnyxConfig } from "./env";
-import { acceptsTestInboundSms, acceptsTestProviderEvent, allowsUnlistedTestSmsRecipient, checkTestProviderRequest, getTestProviderSafety, resolveTestSipCredential, type TestProviderContext } from "./test-safety";
+import { acceptsTestInboundSms, acceptsTestProviderEvent, allowsUnlistedTestSmsRecipient, checkTestProviderRequest, getTestProviderSafety, hasTestCallProvenance, resolveTestSipCredential, type TestProviderContext } from "./test-safety";
 
 vi.mock("./test-safety", async (original) => ({ ...await original<typeof import("./test-safety")>(),
   resolveTestSipCredential: vi.fn(async () => "test-credential"),
@@ -321,6 +321,20 @@ describe("TEST provider boundary", () => {
     const api = createTelnyxClient({ config: getTelnyxConfig(ENV), liveGate: { callsEnabled: true, smsEnabled: true }, fetch });
     await expect(api.dial({ to: "sip:test_user@sip.telnyx.com", from: FROM, commandId: "sip", linkTo: "copied-prod" })).rejects.toMatchObject({ code: "test_provider_boundary" });
     expect((fetch.mock.calls as unknown as Array<[string, RequestInit]>).every(([, options]) => options.method === "GET")).toBe(true);
+  });
+  it("never lets a transient read failure mask a refusal another check reaches only later (S5)", async () => {
+    // The call proof is slow and passes; meanwhile the credential read fails with a 503; the
+    // conference read that follows the proof still runs, and its refusal is what is reported.
+    vi.mocked(hasTestCallProvenance).mockImplementationOnce(async () => { await new Promise(resolve => setTimeout(resolve, 20)); return true; });
+    const fetch = vi.fn(async (input: RequestInfo | URL) => String(input).includes("/telephony_credentials/")
+      ? new Response(JSON.stringify({ errors: [{ code: "unavailable" }] }), { status: 503, headers: { "content-type": "application/json" } })
+      : new Response(JSON.stringify({ data: { connection_id: "production" } }), { headers: { "content-type": "application/json" } }));
+    const api = createTelnyxClient({ config: getTelnyxConfig(ENV), liveGate: { callsEnabled: true, smsEnabled: true }, fetch });
+    await expect(api.request("POST", "/conferences/foreign-conference/actions/add_participants",
+      { body: { call_control_id: "slow-proof", to: "sip:test_user@sip.telnyx.com", from: FROM } })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    const calls = fetch.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([input, options]) => `${options.method} ${new URL(input).pathname}`).sort())
+      .toEqual(["GET /v2/conferences/foreign-conference", "GET /v2/telephony_credentials/test-credential"]);
   });
   it("reads the credential and the SIP connection together before a token, still refusing on either (S5)", async () => {
     const pending: Array<{ url: string; release: () => void }> = [];

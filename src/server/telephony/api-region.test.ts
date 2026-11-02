@@ -2,20 +2,24 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { completeAnnouncedAction } from "@/test/complete-call-announcements";
+import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
+import { completeAnnouncedAction, completeCallAnnouncements } from "@/test/complete-call-announcements";
 import { createFakeSupabase } from "@/test/fake-supabase";
 import { registerContractTwoRpcs } from "@/test/fake-stability";
 import { FAKE_TELNYX_ENV } from "@/test/fake-telnyx";
 import { CONNECTION_ID, createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
-import { addCallParty, blindTransfer, callColleague, createRateLimiter, hangupCall, holdCall, startConsult, startOutboundCall, unholdCall, type CallActor } from "./call-actions";
+import { addCallParty, blindTransfer, callColleague, createRateLimiter, hangupCall, holdCall, startConsult, startOutboundCall, stopCallRecording, superviseCall, unholdCall, type CallActor } from "./call-actions";
 import { reconcileBrowserCall } from "./call-reconciliation";
 import { reconcileWithTelnyx } from "./cron-jobs";
-import { defaultLatencyFlags, type LatencyFlags } from "./latency-flags";
+import { clearLatencyFlagsCache, defaultLatencyFlags, readLatencyFlags, type LatencyFlags } from "./latency-flags";
 import { sessionOwnership, type Ownership } from "./ownership";
-import { fetchTelnyxRecording, recordingApiBaseUrl, RecordingProcessingError, type RecordingJobContext } from "./recording-jobs";
+import { fetchTelnyxRecording, RecordingProcessingError, type RecordingJobContext } from "./recording-jobs";
+import { deleteRecordingJob } from "./recording-processing";
 import { refreshRecordingSource } from "./recording-storage";
-import { ownedSessionWork } from "./session-runner";
+import { effectsDeps, ownedSessionWork } from "./session-runner";
+import { cancelRevokedOffers } from "./state/cancelled-offers";
+import { reconcileTermination } from "./termination";
 import { readMeta, type SessionRow } from "./state/types";
 import { CLOUDFLARE_SIGNATURE_BANNED_CODE, createTelnyxClient, TelnyxCommandError, type TelnyxRequestLog } from "./telnyx/client";
 import { encodeClientState } from "./telnyx/client-state";
@@ -181,24 +185,79 @@ describe("Cloudflare error 1010 on the EU host", () => {
       region: "eu", errorCode: CLOUDFLARE_SIGNATURE_BANNED_CODE, status: 403 })));
   });
 
-  it("is never journalled as the dial's provider outcome, unlike a Telnyx refusal", async () => {
+  it("recognises Cloudflare's HTML 1010 page", async () => {
+    const page = "<!DOCTYPE html><html><head><title>Access denied | api.telnyx.eu used Cloudflare to restrict access</title></head>" +
+      "<body><h1><span>Error</span><span>1010</span></h1><p>The owner of this website (api.telnyx.eu) has banned your access based on your browser's signature.</p></body></html>";
+    const { client } = realClient(() => json(403, page, { "content-type": "text/html" }));
+    await expect(sessionOwnership.run(owner("eu"), () => client.hangup({ callControlId: "a", commandId: "hangup" }))).rejects.toMatchObject({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE });
+  });
+
+  it("leaves the default .com path exactly as before: a 403 there is an ordinary refusal", async () => {
     const { db, admin } = createFakeSupabase();
     registerContractTwoRpcs(db);
-    const now = Date.now();
     db.seed("motorist_call_sessions", [{ id: "session", organization_id: ORG, writer_contract: 2, state: "received",
-      lease_token: "token", lease_generation: 1, lease_until: new Date(now + 15_000).toISOString() }]);
-    const scope: Ownership = { ...owner("eu"), admin, contract: 2 };
-    const outcomes = async (respond: () => Response, commandId: string) => {
-      const fetch = vi.fn(async () => respond());
-      const client = createTelnyxClient({ config: getTelnyxConfig(FAKE_TELNYX_ENV), liveGate: { callsEnabled: true, smsEnabled: true }, fetch });
-      await expect(sessionOwnership.run(scope, () => client.dial({ commandId, to: NUMBERS.customer, from: NUMBERS.allianz }))).rejects.toBeInstanceOf(TelnyxCommandError);
-      const batch = await sessionOwnership.run(scope, () => client.dialMany([{ commandId: `${commandId}-batch`, to: NUMBERS.customer, from: NUMBERS.allianz }]));
-      expect(batch[0].status).toBe("rejected");
-      return db.rows("motorist_provider_commands").filter(row => String(row.command_id).startsWith(commandId)).map(row => row.outcome);
+      lease_token: "token", lease_generation: 1, lease_until: new Date(Date.now() + 15_000).toISOString() }]);
+    const { client, fetch } = realClient(() => json(403, banned));
+    await expect(sessionOwnership.run({ ...owner("us"), admin, contract: 2 }, () => client.hangup({ callControlId: "a", commandId: "hangup" })))
+      .rejects.toMatchObject({ code: "http_403", status: 403 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(db.rows("motorist_provider_commands").map(row => row.outcome)).toEqual(["rejected"]);
+  });
+
+  /** A contract-2 EU session, its ownership, and its later termination pass. */
+  function terminating() {
+    const { db, admin } = createFakeSupabase();
+    registerContractTwoRpcs(db);
+    db.seed("motorist_call_sessions", [{ id: "session", organization_id: ORG, writer_contract: 2, state: "talking",
+      metadata: { start_mode: { apiRegion: "eu" } },
+      lease_token: "token", lease_generation: 1, lease_until: new Date(Date.now() + 15_000).toISOString() }]);
+    const scope = { ...owner("eu"), admin, contract: 2 } as Ownership;
+    /** The operator ends the call: does termination still wait for a dial? */
+    const terminate = () => {
+      db.update("motorist_call_sessions", { termination_requested_at: new Date().toISOString() }, row => row.id === "session");
+      return sessionOwnership.run(scope, () => reconcileTermination({ admin, organizationId: ORG, telnyx: null }, "session"));
     };
-    // Telnyx never saw it: the entry stays open, as after a transport failure.
-    expect(await outcomes(() => json(403, banned), "edge")).toEqual(["unknown", "unknown"]);
-    expect(await outcomes(() => json(403, { errors: [{ code: "10010", title: "Forbidden" }] }), "telnyx")).toEqual(["rejected", "rejected"]);
+    // `20260929200000` lines 316-334: termination waits for every unknown dial and every accepted, uncleaned one.
+    db.registerRpc("motorist_provider_termination_legs_v2", (args) => db.storage("motorist_provider_commands")
+      .filter(row => row.session_id === args.p_session_id && row.path === "/calls" && row.outcome === "accepted" && !row.termination_cleanup_at)
+      .map(row => ({ commandId: row.command_id, callControlId: (row.result as { data: { call_control_id: string } }).data.call_control_id })));
+    db.registerRpc("motorist_provider_termination_checkpoint_v2", (args) => {
+      const rows = db.storage("motorist_provider_commands").filter(row => row.session_id === args.p_session_id && row.path === "/calls");
+      for (const row of rows) if ((args.p_completed_commands as string[]).includes(String(row.command_id)) && row.outcome === "accepted") row.termination_cleanup_at = new Date().toISOString();
+      return { pending: rows.some(row => row.outcome === "unknown" || row.outcome === "accepted" && !row.termination_cleanup_at) };
+    });
+    return { db, scope, terminate };
+  }
+
+  it("journals a refused dial as refused (403), so it is not a provider outcome Telnyx gave and termination does not wait for it", async () => {
+    const { db, scope, terminate } = terminating();
+    const outcomes = async (respond: () => Response, commandId: string) => {
+      const { client } = realClient(respond);
+      const single = await sessionOwnership.run(scope, () => client.dial({ commandId, to: NUMBERS.customer, from: NUMBERS.allianz })).catch(error => error);
+      const batch = await sessionOwnership.run(scope, () => client.dialMany([{ commandId: `${commandId}-batch`, to: NUMBERS.customer, from: NUMBERS.allianz }]));
+      return { single, batch: batch[0].status === "rejected" ? batch[0].reason : null,
+        rows: db.rows("motorist_provider_commands").filter(row => String(row.command_id).startsWith(commandId)).map(row => [row.outcome, row.http_status]) };
+    };
+    const edge = await outcomes(() => json(403, banned), "edge");
+    for (const error of [edge.single, edge.batch]) expect(error).toMatchObject({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, status: 403, retryable: false });
+    expect(edge.rows).toEqual([["rejected", 403], ["rejected", 403]]);
+    // A replay of the same command gets the same configuration error back, without a second send.
+    const { client, fetch } = realClient(() => { throw new Error("must not send again"); });
+    await expect(sessionOwnership.run(scope, () => client.dial({ commandId: "edge", to: NUMBERS.customer, from: NUMBERS.allianz })))
+      .rejects.toMatchObject({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE });
+    expect(fetch).not.toHaveBeenCalled();
+    // ...so a non-initial dial refused at the edge leaves nothing for termination to wait for.
+    expect(await terminate()).toBe(false);
+  });
+
+  it("leaves any other command refused at the edge open, as after a transport failure; a lost dial still holds termination", async () => {
+    const { db, scope, terminate } = terminating();
+    const { client } = realClient(() => json(403, banned));
+    await expect(sessionOwnership.run(scope, () => client.hangup({ callControlId: "a", commandId: "hangup" }))).rejects.toMatchObject({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE });
+    expect(db.rows("motorist_provider_commands").map(row => row.outcome)).toEqual(["unknown"]);
+    const lost = realClient(() => { throw new Error("socket hang up"); });
+    await expect(sessionOwnership.run(scope, () => lost.client.dial({ commandId: "lost", to: NUMBERS.customer, from: NUMBERS.allianz }))).rejects.toMatchObject({ code: "network" });
+    expect(await terminate()).toBe(true);
   });
 
   it("goes out with Node's own User-Agent, never an empty or blocked one", async () => {
@@ -263,8 +322,10 @@ describe("session pinning (ownership)", () => {
   });
 });
 
+/** A contract-2 world on a TEST deployment, the only kind that may freeze `eu` until spike S5.0 passes. */
 function harness(flags: Partial<LatencyFlags> = {}) {
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+  vi.stubEnv("MOTORIST_APP_ENV", "test");
   const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
   h.deps.latencyFlags = { ...defaultLatencyFlags(), ...flags };
   const deps = () => ({ ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) });
@@ -370,6 +431,26 @@ describe("an EU session end to end (fake provider)", () => {
     expect(routesOf(h, after.sessionId).map(route => route.region)).toEqual(["eu"]);
   });
 
+  it.each([
+    ["eu", "a bare 404 (another region's answer for a live call) is a failure, not a gone leg", { code: "http_404", status: 404 }, false],
+    ["eu", "Telnyx's own call-gone code still closes the leg", { code: "90018", status: 422 }, true],
+    ["us", "a bare 404 keeps today's meaning: the leg is gone", { code: "http_404", status: 404 }, true],
+  ] as const)("hangup in a %s session: %s", async (region, _case, failure, gone) => {
+    const { h, deps } = harness({ api_region: region });
+    const call = await outboundTalking(h, deps());
+    expect(regionOf(h, call.sessionId)).toBe(region);
+    h.telnyx.failAlways("hangup", new TelnyxCommandError({ ...failure, detail: "Resource not found" }));
+    const result = await hangupCall(deps(), o1, call.sessionId).catch((error: unknown) => error);
+    const hangups = h.callEvents(call.sessionId).flatMap(row => {
+      const commands = (row.normalized_payload as { commands?: Array<{ kind: string; ok: boolean; skipped: boolean }> } | null)?.commands ?? [];
+      return commands.filter(command => command.kind === "hangup");
+    });
+    expect(hangups.length).toBeGreaterThan(0);
+    // Gone: the hangup is skipped as already done. Not gone: it failed and stays an obligation.
+    expect(hangups.map(command => command.ok && command.skipped)).toEqual(hangups.map(() => gone));
+    if (!gone) expect(result).toBeInstanceOf(Error);
+  });
+
   it("keeps an inbound session on `us` whatever the flag says", async () => {
     const { h, deps } = harness({ api_region: "eu" });
     const call = await h.inbound({ to: NUMBERS.allianz });
@@ -385,64 +466,214 @@ describe("an EU session end to end (fake provider)", () => {
 });
 
 describe("recording provider host", () => {
-  function context(metadata: Record<string, unknown> | null, sessionId: string | null = "00000000-0000-4000-8000-00000000b001") {
+  const SESSION = "00000000-0000-4000-8000-00000000b001";
+  function context(metadata: Record<string, unknown> | null, sessionId: string | null = SESSION) {
     const { db, admin } = createFakeSupabase();
-    if (metadata) db.seed("motorist_call_sessions", [{ id: "00000000-0000-4000-8000-00000000b001", organization_id: ORG, metadata }]);
-    const recording = { id: "recording-row", organization_id: ORG, session_id: sessionId, provider_recording_id: "recording", provider_session_id: null };
-    const ctx = { admin, organizationId: ORG, recording, signal: AbortSignal.timeout(5_000), job: { lease_token: "lease", checkpoint: {} } } as unknown as RecordingJobContext;
+    if (metadata) db.seed("motorist_call_sessions", [{ id: SESSION, organization_id: ORG, metadata }]);
+    const recording = { id: "00000000-0000-4000-8000-00000000b002", organization_id: ORG, session_id: sessionId, provider_recording_id: "recording",
+      provider_session_id: null, source_revision: 1, storage_path: null };
+    const ctx = { admin, organizationId: ORG, recording, recordings: [recording], signal: AbortSignal.timeout(5_000),
+      job: { id: "job", kind: "delete", call_id: "00000000-0000-4000-8000-00000000b003", lease_token: "lease", checkpoint: { scope: "recording" } } } as unknown as RecordingJobContext;
     return { db, ctx };
   }
-
-  it("follows the recording's session region; no session or no frozen region is the default host", async () => {
-    vi.stubEnv("TELNYX_API_KEY", "synthetic");
-    expect(await recordingApiBaseUrl(context({ start_mode: { apiRegion: "eu" } }).ctx)).toBe("https://api.telnyx.eu/v2");
-    expect(await recordingApiBaseUrl(context({ start_mode: { apiRegion: "us" } }).ctx)).toBe("https://api.telnyx.com/v2");
-    expect(await recordingApiBaseUrl(context({}).ctx)).toBe("https://api.telnyx.com/v2");
-    const unbound = context(null, null);
-    expect(await recordingApiBaseUrl(unbound.ctx)).toBe("https://api.telnyx.com/v2");
-    expect(unbound.db.log).toEqual([]);
-  });
-
-  it("fails a step for a retry rather than guess when the session cannot be read", async () => {
-    const { db, ctx } = context({ start_mode: { apiRegion: "eu" } });
-    db.failNext("motorist_call_sessions", "select", "connection reset");
-    const error = await recordingApiBaseUrl(ctx).catch(failure => failure);
-    expect(error).toBeInstanceOf(RecordingProcessingError);
-    expect(error).toMatchObject({ code: "recording_region_unavailable", retryable: true });
-  });
-
+  const urls = (fetch: ReturnType<typeof vi.fn>) => (fetch.mock.calls as unknown as Array<[string, RequestInit?]>).map(([url, init]) => `${init?.method ?? "GET"} ${url}`);
+  function stubFetch(respond: (url: string, init?: RequestInit) => Response = () => json(200, { data: {} })) {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => respond(String(input), init));
+    vi.stubGlobal("fetch", fetch);
+    return fetch;
+  }
   function production() {
     vi.stubEnv("TELNYX_API_KEY", "synthetic");
     vi.stubEnv("MOTORIST_APP_ENV", "production"); vi.stubEnv("VERCEL_GIT_COMMIT_REF", "main");
     vi.stubEnv("APP_BASE_URL", "https://dispecing.linkapomoci.sk");
     for (const key of ["SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"]) vi.stubEnv(key, "https://ifpaeegaesdmljfkdvcn.supabase.co");
   }
+  /** The dedicated TEST deployment, with storage, as the recording provider safety suite sets it up. */
+  function testDeployment() {
+    const env = {
+      MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev",
+      VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk", APP_BASE_URL: "https://test.dispecing.linkapomoci.sk",
+      SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co", NEXT_PUBLIC_SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co",
+      SUPABASE_ANON_KEY: "synthetic-anon", SUPABASE_SERVICE_ROLE_KEY: "synthetic-service",
+      MOTORIST_TEST_LIVE_INTEGRATIONS: "true", MOTORIST_TEST_ALLOWED_NUMBERS: "+421900111222", MOTORIST_TEST_FROM_NUMBERS: "+421900333444",
+      TELNYX_API_KEY: "synthetic", TELNYX_CALL_CONTROL_APP_ID: "test-app", TELNYX_CREDENTIAL_CONNECTION_ID: "test-sip",
+    };
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+  }
 
-  it("reports a Cloudflare 1010 on a recording request as its own configuration error, logged", async () => {
-    production();
+  it("follows the recording's session region on TEST; no session, `us` or no frozen region is api.telnyx.com", async () => {
+    vi.stubEnv("TELNYX_API_KEY", "synthetic");
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    const fetch = stubFetch();
+    for (const metadata of [{ start_mode: { apiRegion: "eu" } }, { start_mode: { apiRegion: "us" } }, {}]) await fetchTelnyxRecording(context(metadata).ctx, "recording", {});
+    const unbound = context(null, null);
+    await fetchTelnyxRecording(unbound.ctx, "recording", { method: "DELETE" });
+    expect(urls(fetch)).toEqual(["GET https://api.telnyx.eu/v2/recordings/recording", "GET https://api.telnyx.com/v2/recordings/recording",
+      "GET https://api.telnyx.com/v2/recordings/recording", "DELETE https://api.telnyx.com/v2/recordings/recording"]);
+    expect(unbound.db.log).toEqual([]);
+  });
+
+  it.each([["production", production], ["a local run", () => vi.stubEnv("TELNYX_API_KEY", "synthetic")]])("adds no read and no failure mode in %s, where no session can be frozen to eu", async (_case, environment) => {
+    environment();
+    const fetch = stubFetch();
+    const { db, ctx } = context({ start_mode: { apiRegion: "eu" } });
+    db.failNext("motorist_call_sessions", "select", "must not be read");
+    await fetchTelnyxRecording(ctx, "recording", { method: "DELETE" });
+    expect(urls(fetch)).toEqual(["DELETE https://api.telnyx.com/v2/recordings/recording"]);
+    expect(db.log).toEqual([]);
+  });
+
+  it("fails a step for a retry rather than guess when the session cannot be read", async () => {
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    const fetch = stubFetch();
+    const { db, ctx } = context({ start_mode: { apiRegion: "eu" } });
+    db.failNext("motorist_call_sessions", "select", "connection reset");
+    const error = await fetchTelnyxRecording(ctx, "recording", {}).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(RecordingProcessingError);
+    expect(error).toMatchObject({ code: "recording_region_unavailable", retryable: true });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("proves and deletes an EU session's recording at api.telnyx.eu", async () => {
+    testDeployment();
+    const fetch = stubFetch((url, init) => url.includes("/recordings/") && (init?.method ?? "GET") === "GET"
+      ? json(200, { data: { id: "recording", connection_id: "test-app" } }) : json(200, {}));
+    const { ctx } = context({ start_mode: { apiRegion: "eu" } });
+    await expect(deleteRecordingJob(ctx)).resolves.toMatchObject({ state: "complete" });
+    expect(urls(fetch).filter(line => line.includes("telnyx"))).toEqual(["GET https://api.telnyx.eu/v2/recordings/recording", "DELETE https://api.telnyx.eu/v2/recordings/recording"]);
+  });
+
+  it("reports a Cloudflare 1010 on an EU recording request as its own configuration error, logged", async () => {
+    testDeployment();
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    vi.stubGlobal("fetch", vi.fn(async () => json(403, { error_code: 1010, error_name: "browser_signature_banned" })));
-    const failure = await refreshRecordingSource(context({ start_mode: { apiRegion: "eu" } }).ctx).catch(error => error);
+    stubFetch(() => json(403, { error_code: 1010, error_name: "browser_signature_banned" }));
+    const failure = await refreshRecordingSource(context({ start_mode: { apiRegion: "eu" } }).ctx).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(RecordingProcessingError);
     expect(failure).toMatchObject({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, retryable: false });
-    vi.stubGlobal("fetch", vi.fn(async () => json(403, "error code: 1010", { "content-type": "text/plain" })));
+    stubFetch(() => json(403, "error code: 1010", { "content-type": "text/plain" }));
     await expect(fetchTelnyxRecording(context({ start_mode: { apiRegion: "eu" } }).ctx, "recording", { method: "DELETE" }))
       .rejects.toMatchObject({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE });
     expect(errors.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
       { scope: "recording", level: "error", code: CLOUDFLARE_SIGNATURE_BANNED_CODE, method: "GET", host: "api.telnyx.eu" },
       { scope: "recording", level: "error", code: CLOUDFLARE_SIGNATURE_BANNED_CODE, method: "DELETE", host: "api.telnyx.eu" },
     ]);
-    // A refusal from Telnyx itself keeps today's meaning.
-    vi.stubGlobal("fetch", vi.fn(async () => json(403, { errors: [{ code: "10010", title: "Forbidden" }] })));
-    await expect(refreshRecordingSource(context({ start_mode: { apiRegion: "eu" } }).ctx)).rejects.toMatchObject({ code: "recording_refresh_failed" });
-    expect(errors).toHaveBeenCalledTimes(2);
   });
 
-  it("fetches an EU session's recording metadata from .eu on the production path", async () => {
+  it("keeps every 403 on the production .com path as before", async () => {
     production();
-    const fetch = vi.fn(async () => json(200, { data: { id: "recording", status: "completed", download_urls: { wav: "https://recordings.telnyx.com/audio" } } }));
-    vi.stubGlobal("fetch", fetch);
-    await expect(refreshRecordingSource(context({ start_mode: { apiRegion: "eu" } }).ctx)).resolves.toBe("https://recordings.telnyx.com/audio");
-    expect((fetch.mock.calls as unknown as Array<[string]>).map(([url]) => url)).toEqual(["https://api.telnyx.eu/v2/recordings/recording"]);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    for (const body of [{ error_code: 1010, error_name: "browser_signature_banned" }, { errors: [{ code: "10010", title: "Forbidden" }] }]) {
+      stubFetch(() => json(403, body));
+      await expect(refreshRecordingSource(context({ start_mode: { apiRegion: "eu" } }).ctx)).rejects.toMatchObject({ code: "recording_refresh_failed" });
+    }
+    expect(errors).not.toHaveBeenCalled();
+  });
+});
+
+describe("an EU session's supervision, recording, termination clean-up and cancelled offers (fake provider)", () => {
+  const manager: CallActor = { profileId: PROFILES.o4, role: "manager", displayName: "Manažér" };
+  const regions = (h: TelephonyHarness, sessionId: string) => [...new Set(routesOf(h, sessionId).map(route => `${route.region} ${route.baseUrl}`))];
+
+  it("dials a supervisor into an EU call through .eu", async () => {
+    const { h, deps } = harness({ api_region: "eu" });
+    const call = await outboundTalking(h, deps());
+    const seenAt = h.now().toISOString();
+    h.db.seed("motorist_operator_devices", [{ organization_id: ORG, profile_id: PROFILES.o4, environment: "development", telnyx_credential_id: "cred-900",
+      sip_username: "gencred900", credential_expires_at: null, last_token_issued_at: seenAt, token_expires_at: null, device_seen_at: seenAt,
+      device_session_id: "dev-900", registration_state: "registered", user_agent: "vitest", metadata: {} }]);
+    await completeAnnouncedAction(h, superviseCall(deps(), manager, call.sessionId, "monitor"));
+    expect(h.telnyx.of("dial").at(-1)!.params).toMatchObject({ superviseCallControlId: expect.any(String), supervisorRole: "monitor" });
+    expect(regions(h, call.sessionId)).toEqual(["eu https://api.telnyx.eu/v2"]);
+  });
+
+  it("starts and stops an EU call's recording through .eu", async () => {
+    const { h, deps } = harness({ api_region: "eu" });
+    for (const key of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED", "TELNYX_RECORDING_CONFERENCE_VERIFIED",
+      "TELNYX_RECORDING_TRANSFER_VERIFIED", "TELNYX_RECORDING_CHANNELS_VERIFIED"]) vi.stubEnv(key, "true");
+    h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(),
+      inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
+    h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), outboundStartAnnouncements: true } } }, () => true);
+    const call = await startOutboundCall(deps(), o1, { to: NUMBERS.customer, requestId: requestId() });
+    h.telnyx.physical.answered(call.operatorLegCallControlId);
+    await h.legEvent(call.operatorLegCallControlId, "call.answered");
+    const customer = String(h.legs(call.sessionId).find(leg => leg.role === "customer")!.telnyx_call_control_id);
+    h.telnyx.physical.answered(customer);
+    await h.legEvent(customer, "call.answered", { direction: "outgoing" });
+    await completeCallAnnouncements(h, call.sessionId);
+    expect(routesOf(h, call.sessionId).map(route => route.method)).toContain("recordingStart");
+    // The stop is sent; the action itself still reports the connection's audio effects as pending here.
+    await stopCallRecording(deps(), o1, call.sessionId).catch((error: unknown) => expect(error).toMatchObject({ message: expect.stringMatching(/pending/) }));
+    expect(routesOf(h, call.sessionId).map(route => route.method)).toContain("recordingStop");
+    expect(regions(h, call.sessionId)).toEqual(["eu https://api.telnyx.eu/v2"]);
+  });
+
+  /** An EU contract-2 session with one owned, accepted dial, as the termination pass finds it. */
+  async function euSessionWithDial(h: TelephonyHarness, sessionId: string) {
+    h.db.seed("motorist_call_sessions", [{ id: sessionId, organization_id: ORG, direction: "outbound", state: "talking", writer_contract: 2, lease_generation: 0,
+      metadata: { start_mode: { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "eu", origin: "web" } } }]);
+    const dialed = await ownedSessionWork(h.deps, sessionId, () => h.telnyx.client.dial({ commandId: `${sessionId}-dial`, to: NUMBERS.customer, from: NUMBERS.allianz }));
+    return dialed.callControlId;
+  }
+
+  it("hangs up an EU session's accepted legs through .eu when its termination is reconciled", async () => {
+    const { h } = harness();
+    const sessionId = "00000000-0000-4000-8000-00000000d001";
+    const leg = await euSessionWithDial(h, sessionId);
+    h.db.registerRpc("motorist_provider_termination_legs_v2", () => [{ commandId: `${sessionId}-dial`, callControlId: leg }]);
+    await ownedSessionWork(h.deps, sessionId, () => reconcileTermination({ ...h.deps, telnyx: h.telnyx.client }, sessionId));
+    expect(routesOf(h, sessionId).map(route => `${route.method} ${route.region}`)).toEqual(["dial eu", "hangup eu"]);
+  });
+
+  it("hangs up an EU session's revoked offer through .eu", async () => {
+    const { h } = harness();
+    const sessionId = "00000000-0000-4000-8000-00000000d002";
+    const leg = await euSessionWithDial(h, sessionId);
+    h.db.update("motorist_call_sessions", { presence_cancellations: { token: { profileId: PROFILES.o2, requestedAt: h.now().toISOString(), reason: "revoked" } } }, row => row.id === sessionId);
+    h.db.seed("motorist_call_legs", [{ organization_id: ORG, session_id: sessionId, telnyx_call_control_id: leg, role: "operator", profile_id: PROFILES.o2,
+      state: "ringing", client_state: { sid: sessionId, role: "operator", operatorId: PROFILES.o2, offerToken: "token" }, ended_at: null }]);
+    const result = await ownedSessionWork(h.deps, sessionId, () => cancelRevokedOffers(effectsDeps(h.deps), h.session(sessionId) as SessionRow));
+    expect(result).toMatchObject({ cancelled: 1, pending: 0 });
+    expect(routesOf(h, sessionId).map(route => `${route.method} ${route.region}`)).toEqual(["dial eu", "hangup eu"]);
+  });
+});
+
+describe("the EU switch end to end from the database flags (production guard)", () => {
+  async function startWith(environment: string) {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    vi.stubEnv("MOTORIST_APP_ENV", environment);
+    clearLatencyFlagsCache();
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    h.db.update("motorist_telephony_settings", { latency_flags: { api_region: "eu" } }, () => true);
+    const latencyFlags = await readLatencyFlags(h.admin, ORG, { logger: () => undefined, env: {} });
+    expect(latencyFlags.api_region).toBe("eu");
+    const deps = { ...h.deps, latencyFlags, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) };
+    const call = await startOutboundCall(deps, o1, { to: NUMBERS.customer, requestId: requestId() });
+    clearLatencyFlagsCache();
+    return { h, call };
+  }
+
+  it.each([["test", "eu"], ["production", "us"], ["development", "us"]] as const)("an outbound call started on a %s deployment freezes %s", async (environment, region) => {
+    const { h, call } = await startWith(environment);
+    expect(regionOf(h, call.sessionId)).toBe(region);
+    expect(routesOf(h, call.sessionId).map(route => route.region)).toEqual([region]);
+  });
+});
+
+describe("one fixed host per region (env)", () => {
+  it("lets tests and local runs override a region's base, and pins both in production, logging the ignored override once", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const local = getTelnyxConfig({ TELNYX_API_KEY: "k", TELNYX_API_BASE_URL: "https://telnyx.test/v2/", TELNYX_EU_API_BASE_URL: "https://eu.telnyx.test/v2" });
+    expect(local).toMatchObject({ apiBaseUrl: "https://telnyx.test/v2", euApiBaseUrl: "https://eu.telnyx.test/v2" });
+    expect(errors).not.toHaveBeenCalled();
+    const env = { TELNYX_API_KEY: "k", MOTORIST_APP_ENV: "production", TELNYX_API_BASE_URL: "https://proxy.example/v2", TELNYX_EU_API_BASE_URL: "https://proxy-eu.example/v2" };
+    for (let round = 0; round < 2; round += 1) {
+      expect(getTelnyxConfig(env)).toMatchObject({ apiBaseUrl: "https://api.telnyx.com/v2", euApiBaseUrl: "https://api.telnyx.eu/v2" });
+    }
+    // The canonical value itself is not an override; an unreadable environment counts as production.
+    expect(getTelnyxConfig({ ...env, TELNYX_API_BASE_URL: "https://api.telnyx.com/v2/", MOTORIST_APP_ENV: "bogus" })).toMatchObject({ apiBaseUrl: "https://api.telnyx.com/v2", euApiBaseUrl: "https://api.telnyx.eu/v2" });
+    const logged = errors.mock.calls.map(([line]) => JSON.parse(String(line)));
+    expect(logged.filter(entry => entry.code === "api_base_url_override_ignored").map(entry => [entry.variable, entry.host])).toEqual(expect.arrayContaining([
+      ["TELNYX_API_BASE_URL", "proxy.example"], ["TELNYX_EU_API_BASE_URL", "proxy-eu.example"]]));
+    expect(new Set(logged.map(entry => entry.variable)).size).toBe(logged.length);
   });
 });
