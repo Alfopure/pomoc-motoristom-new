@@ -405,24 +405,27 @@ export type StartOutboundResult = { sessionId: string; operatorLegCallControlId:
 export type EarlyStart<T> = (result: T) => void;
 
 /** The guard reads a new start needs, already in flight (call-speed S2.1). */
-type StartWave<T> = { rateCount?: Promise<number | null>; guards: Promise<T>; sipProof?: Promise<unknown> };
+type StartWave<T> = { rateCount?: Promise<number | null>; guards: Promise<T>; device: Promise<{ sipUri: string }> };
 
 /** Started promises nobody may await (an identical retry); never an unhandled rejection. */
 function inFlight<T extends StartWave<unknown>>(wave: T): T {
-  for (const pending of [wave.rateCount, wave.guards, wave.sipProof]) pending?.catch(() => undefined);
+  for (const pending of [wave.rateCount, wave.guards, wave.device]) pending?.catch(() => undefined);
   return wave;
 }
 
 /**
  * Call-speed S2 (`start_test_proof_prefetch`): the TEST-only destination proof
- * of the operator's own SIP leg, started as soon as the device is known and
- * awaited before anything is reserved. The dial in this same request then
- * finds it proven; production runs no guard and gets null.
+ * of the operator's own SIP leg. Started only once no earlier attempt of this
+ * request exists, as soon as the device is known, and awaited before anything
+ * is reserved; the dial in this same request may skip its own check only on a
+ * completed `proven`. Production runs no guard and gets null.
  */
 function ownDestinationProof(deps: CallActionDeps, device: Promise<{ sipUri: string }>): Promise<unknown> | undefined {
   const telnyx = deps.telnyx;
   if (!latencyFlagsOf(deps).start_test_proof_prefetch || !telnyx?.proveSipDestination) return undefined;
-  return device.then(row => telnyx.proveSipDestination!(row.sipUri));
+  const proof = device.then(row => telnyx.proveSipDestination!(row.sipUri));
+  proof.catch(() => undefined);
+  return proof;
 }
 
 function outboundGuards(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput, speculative: boolean) {
@@ -435,7 +438,7 @@ function outboundGuards(deps: CallActionDeps, actor: CallActor, input: StartOutb
     resolveCallbackTarget(deps.admin, deps.organizationId, input.to),
     device,
     resolveFromLine(deps, actor.profileId, input.lineId, speculative),
-  ]), sipProof: ownDestinationProof(deps, device) });
+  ]), device });
 }
 
 export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput, early?: EarlyStart<StartOutboundResult>): Promise<StartOutboundResult> {
@@ -462,11 +465,14 @@ async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, inpu
   // Validate the submitted number before a callback policy may replace it with
   // a trusted stored target. The replacement itself keeps provider-tolerant parsing.
   if (!manualPhoneNumber(input.to)) throw new CallActionError(`Neplatné telefónne číslo: ${String(input.to ?? "").trim()}`, 400, "invalid_number");
+  // The prior lookup missed: from here on this is a new start.
+  let sipProof = wave && ownDestinationProof(deps, wave.device);
   if (wave?.rateCount) {
     assertOutboundRateBucket(deps, actor);
     assertOutboundRateCount(await wave.rateCount);
   } else await assertOutboundRate(deps, actor);
   const started = wave ?? outboundGuards(deps, actor, input, false);
+  sipProof ??= ownDestinationProof(deps, started.device);
   const [settings, usage, target, device, { line, from }] = await started.guards;
   assertLoadedLegBudget(deps, usage, settings);
   const confirmed = confirmedCallbackTarget(target, input.callbackTargetVerificationId);
@@ -488,7 +494,7 @@ async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, inpu
 
   const result = await initializeOutgoingSession(deps, actor, session, { to, from, sipUri: device.sipUri,
     fromDisplayName: actor.displayName?.replace(/[^A-Za-z0-9 \-\_~!.+]/g, "").slice(0, 128) || undefined,
-    callbackRequestId: input.callbackRequestId }, false, { sipProof: started.sipProof, early });
+    callbackRequestId: input.callbackRequestId }, false, { sipProof, early });
   deps.logger?.({ scope: "call-actions", action: "start_outbound", sessionId: session.id, by: actor.profileId, preflightMs: now.getTime() - startedAt, ms: nowOf(deps).getTime() - startedAt });
   return result;
 }
@@ -584,18 +590,21 @@ function colleagueGuards(deps: CallActionDeps, actor: CallActor, input: { target
     resolveFromLine(deps, actor.profileId, null, speculative),
     actor.displayName ? Promise.resolve(actor.displayName) : deps.admin.from("motorist_profiles").select("display_name")
       .eq("organization_id", deps.organizationId).eq("id", actor.profileId).maybeSingle().then((result) => result.data?.display_name ?? null),
-  ]), sipProof: ownDestinationProof(deps, device) });
+  ]), device });
 }
 
 async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string },
   wave?: ReturnType<typeof colleagueGuards> & Pick<StartWave<unknown>, "rateCount">, early?: EarlyStart<StartOutboundResult>): Promise<StartOutboundResult> {
   requireConfigured(deps);
   if (input.targetProfileId === actor.profileId) throw new CallActionError("Nie je možné volať sám sebe.", 400, "self_call");
+  // The prior lookup missed: from here on this is a new start.
+  let sipProof = wave && ownDestinationProof(deps, wave.device);
   if (wave?.rateCount) {
     assertOutboundRateBucket(deps, actor);
     assertOutboundRateCount(await wave.rateCount);
   } else await assertOutboundRate(deps, actor);
   const started = wave ?? colleagueGuards(deps, actor, input, false);
+  sipProof ??= ownDestinationProof(deps, started.device);
   const [budget, target, device, fromLine, caller] = await started.guards;
   for (const outcome of [budget, target, device, fromLine]) if (outcome.status === "rejected") throw outcome.reason;
   if (budget.status !== "fulfilled" || target.status !== "fulfilled" || device.status !== "fulfilled" || fromLine.status !== "fulfilled") throw new CallActionError("Interný hovor sa nepodarilo pripraviť.", 500);
@@ -617,7 +626,7 @@ async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: {
         caller_name: callerName, target_name: target.value.label, caller_display: plan.fromDisplayName ?? null },
       line_label: line?.label ?? null },
   });
-  return initializeOutgoingSession(deps, actor, session, plan, false, { sipProof: started.sipProof, early });
+  return initializeOutgoingSession(deps, actor, session, plan, false, { sipProof, early });
 }
 
 async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor, original: SessionRow,

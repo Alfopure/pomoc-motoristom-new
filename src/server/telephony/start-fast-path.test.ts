@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { FAKE_TELNYX_ENV } from "@/test/fake-telnyx";
+import { fenceSession } from "@/test/fake-stability";
+import { callCenterCallFromActive, type ActiveCallPayload } from "@/lib/telephony/active-calls-model";
+import { loadActiveCalls } from "./active-calls";
+import { sessionOwnership } from "./ownership";
 import { callColleague, continueAcceptedHangup, createRateLimiter, hangupCall, startOutboundCall, type CallActor, type StartOutboundResult } from "./call-actions";
 import { callBackRequest, type CallbackCallResult } from "./callbacks";
 import { runPendingEffectRecovery } from "./cron-jobs";
@@ -80,6 +84,40 @@ function holdNext(h: TelephonyHarness, table: string) {
     return builder;
   };
   return { reached: atGate, release };
+}
+
+/**
+ * `motorist_telephony_fence` on table writes, as the session and child write
+ * guards apply it (`20260929200000`): an owned write to these tables must
+ * come from the current lease holder. The double fences only its RPCs.
+ */
+function fenceOwnedWrites(h: TelephonyHarness) {
+  const fenced = new Set(["motorist_call_sessions", "motorist_call_legs", "motorist_calls", "motorist_ring_attempts", "motorist_operator_presence"]);
+  const refused: string[] = [];
+  const from = h.client.from;
+  h.client.from = (table) => {
+    const builder = from.call(h.client, table);
+    if (!fenced.has(table)) return builder;
+    let writes = false;
+    for (const operation of ["insert", "upsert", "update", "delete"] as const) {
+      const verb = builder[operation].bind(builder) as (...args: unknown[]) => typeof builder;
+      (builder as unknown as Record<string, unknown>)[operation] = (...args: unknown[]) => { writes = true; return verb(...args); };
+    }
+    const then = builder.then.bind(builder);
+    builder.then = (fulfilled, rejected) => {
+      const owner = sessionOwnership.getStore();
+      if (writes && owner) {
+        try { fenceSession(h.db, owner.sessionId); }
+        catch (error) {
+          refused.push(table);
+          return Promise.resolve({ data: null, error, count: null, status: 409, statusText: "Conflict" }).then(fulfilled as never, rejected);
+        }
+      }
+      return then(fulfilled, rejected);
+    };
+    return builder;
+  };
+  return refused;
 }
 
 /** Releases `hold` the first time a lease acquisition is refused as busy. */
@@ -338,12 +376,79 @@ describe("call-speed S2 early response", () => {
     expect(t.h.telnyx.of("dial")).toHaveLength(1);
   });
 
-  it("logs, never retains, a lost start audit written beside the final checkpoint", async () => {
+  it("shows the console the call before its call-log row, keyed by session, and the call-log id once the tail wrote it", async () => {
+    const t = world(ALL);
+    const hold = holdNext(t.h, "motorist_calls");
+    const early = earlyResponse();
+    const start = outbound(t, 7761, early.hook);
+    const started = await early.promise;
+    await hold.reached;
+    const snapshot = async () => {
+      const call = (await loadActiveCalls({ ...t.h.deps, configured: true }, { profileId: actor.profileId, canManageAssignments: false }))
+        .calls.find(item => item.sessionId === started.sessionId);
+      expect(call).toBeDefined();
+      return call as unknown as ActiveCallPayload;
+    };
+    // The 201 has left and the history row is not written yet: the console's
+    // first snapshot has the call without a call-log id. The model keys it by
+    // its session (`callCenterCallFromActive`), and case linking waits for the
+    // id (`CaseDetail`: "Hovor sa dá priradiť po zápise do call logu").
+    const first = await snapshot();
+    expect(first).toMatchObject({ callId: null, state: "received" });
+    expect(callCenterCallFromActive(first, { now: t.h.now().getTime() })).toMatchObject({ id: started.sessionId, sessionId: started.sessionId });
+    hold.release();
+    await start;
+    // The final checkpoint, which rings the console's doorbell, comes after the
+    // history row: the snapshot it triggers carries the call-log id.
+    const callRow = t.h.call(started.sessionId)!;
+    const next = await snapshot();
+    expect(next.callId).toBe(callRow.id);
+    expect(callCenterCallFromActive(next, { now: t.h.now().getTime() })).toMatchObject({ id: callRow.id, sessionId: started.sessionId });
+  });
+
+  it("fences the tail's late writes once another holder took the expired lease", async () => {
+    const t = world(ALL);
+    const refused = fenceOwnedWrites(t.h);
+    const hold = holdNext(t.h, "motorist_calls");
+    const early = earlyResponse();
+    const start = outbound(t, 7751, early.hook);
+    const started = await early.promise;
+    await hold.reached;
+    // The 201 has left; the tail stalls past its lease and another invocation takes over.
+    t.h.advance(20_000);
+    const takeover = await t.h.db.rpcHandlers.get("motorist_session_lease_acquire_v2")!({ p_session_id: started.sessionId, p_token: "next-holder", p_ttl_ms: 15_000 }, t.h.db);
+    expect(takeover).toMatchObject({ contract: 2 });
+    hold.release();
+    await expect(start).rejects.toMatchObject({ name: "SessionLeaseLostError" });
+    // None of the stale tail's writes landed: no history row, no retirement,
+    // and the new holder's lease is untouched.
+    expect(refused).toEqual(expect.arrayContaining(["motorist_calls", "motorist_call_sessions"]));
+    expect(t.h.call(started.sessionId)).toBeNull();
+    const session = t.h.session(started.sessionId) as SessionRow;
+    expect(readPendingEffects(session).entries).toHaveLength(1);
+    expect(session.lease_token).toBe("next-holder");
+    // Once that lease lapses, the ordinary recovery finishes the start without a second dial.
+    t.h.advance(60_000);
+    await runPendingEffectRecovery(t.deps);
+    expect(t.h.call(started.sessionId)).toMatchObject({ status: "outbound" });
+    expect(readPendingEffects(t.h.session(started.sessionId) as SessionRow).entries).toEqual([]);
+    expect(t.h.telnyx.of("dial")).toHaveLength(1);
+  });
+
+  it("keeps the entry for a failed start audit after the response, and cron writes it", async () => {
     const t = world(ALL);
     const result = await outbound(t, 7801, () => t.h.db.failNext("motorist_call_events", "upsert", "audit unavailable"));
-    expect(readPendingEffects(t.h.session(result.sessionId) as SessionRow).entries).toEqual([]);
+    const audits = () => t.h.callEvents(result.sessionId).filter(row => (row.normalized_payload as { notes?: string[] }).notes?.includes("durable effects completed"));
+    expect(audits()).toHaveLength(0);
+    const pending = readPendingEffects(t.h.session(result.sessionId) as SessionRow).entries;
+    expect(pending).toHaveLength(1);
+    expect(pending[0].auditComplete).not.toBe(true);
     expect(t.h.call(result.sessionId)).toMatchObject({ status: "outbound" });
-    expect(t.h.logs).toContainEqual(expect.objectContaining({ code: "initial_audit_unrecorded", sessionId: result.sessionId }));
+    t.h.advance(60_000);
+    await runPendingEffectRecovery(t.deps);
+    expect(audits()).toHaveLength(1);
+    expect(readPendingEffects(t.h.session(result.sessionId) as SessionRow).entries).toEqual([]);
+    expect(t.h.telnyx.of("dial")).toHaveLength(1);
   });
 
   it("ends a start the operator hung up before the dial, without the validity read, as cancelled", async () => {
@@ -409,22 +514,41 @@ describe("call-speed S2 TEST destination proof prefetch", () => {
     for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
     t.h.db.update("motorist_profiles", { kind: "human" }, () => true);
     const sent: Array<{ method: string; path: string; at: number }> = [];
-    let credentialUnavailable = () => false;
+    // Scripted answers for the next credential checks; afterwards a valid one.
+    const script: CredentialAnswer[] = [];
     const fetch = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
       const path = new URL(String(input)).pathname.replace(/^\/v2/, "");
       sent.push({ method: options?.method ?? "GET", path, at: t.h.db.log.length });
-      const credential = path.startsWith("/telephony_credentials/");
-      if (credential && credentialUnavailable()) return new Response(JSON.stringify({ errors: [{ code: "unavailable" }] }), { status: 503 });
-      const data = credential
-        ? { resource_id: "connection:cred-connection-test", expired: false, sip_username: "gencred001" }
-        : { call_control_id: "own-leg", call_leg_id: "own-leg-id", call_session_id: "provider-session", is_alive: true };
-      return new Response(JSON.stringify({ data }), { status: 200 });
+      if (path.startsWith("/telephony_credentials/")) {
+        const answer = script.shift() ?? "valid";
+        if (typeof answer === "object") {
+          await new Promise((resolve) => setTimeout(resolve, answer.delayMs));
+          return new Response(JSON.stringify({ errors: [{ code: "unavailable" }] }), { status: answer.status });
+        }
+        return new Response(JSON.stringify({ data: { resource_id: answer === "foreign" ? "connection:FOREIGN" : "connection:cred-connection-test",
+          expired: false, sip_username: "gencred001" } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { call_control_id: "own-leg", call_leg_id: "own-leg-id", call_session_id: "provider-session", is_alive: true } }), { status: 200 });
     });
     const config = getTelnyxConfig({ ...env, TELNYX_CALL_CONTROL_APP_ID: "app-test", TELNYX_CREDENTIAL_CONNECTION_ID: "cred-connection-test" });
     const client = createTelnyxClient({ config, fetch, liveGate: { callsEnabled: true, smsEnabled: false }, testProvenanceContext: { admin: t.h.admin, organizationId: ORG } });
     t.deps.telnyx = client;
     t.deps.config = config;
-    return { ...t, sent, client, failCredentialCheck: (when: () => boolean) => { credentialUnavailable = when; } };
+    const credentialChecks = () => sent.filter(row => row.path.startsWith("/telephony_credentials/")).length;
+    const dials = () => sent.filter(row => row.method === "POST" && row.path === "/calls").length;
+    return { ...t, sent, client, credentialChecks, dials, scriptCredentials: (...answers: CredentialAnswer[]) => { script.push(...answers); } };
+  }
+  type CredentialAnswer = "valid" | "foreign" | { delayMs: number; status: number };
+  const OWN_SIP = "sip:gencred001@sip.telnyx.com";
+
+  /** The first start stops after staging: `prepare_v2` fails, the entry stays pending (503 `initial_call_pending`). */
+  async function stalledStart(t: ReturnType<typeof testWorld>, n: number) {
+    t.h.db.failNext("motorist_provider_command_prepare_v2", "rpc", "database timeout");
+    await expect(outbound(t, n)).rejects.toMatchObject({ status: 503, code: "initial_call_pending" });
+    const [session] = t.h.rows("motorist_call_sessions") as SessionRow[];
+    expect(readPendingEffects(session).entries).toHaveLength(1);
+    expect(t.dials()).toBe(0);
+    return session;
   }
 
   it("proves the own destination before the lease, so the dial runs no serial guard", async () => {
@@ -468,26 +592,83 @@ describe("call-speed S2 TEST destination proof prefetch", () => {
 
   it("leaves an inconclusive prefetch to the dial's own guard", async () => {
     const t = testWorld({ start_fast_path: true, start_test_proof_prefetch: true });
-    let unavailable = true;
-    t.failCredentialCheck(() => { const fail = unavailable; unavailable = false; return fail; });
+    t.scriptCredentials({ delayMs: 0, status: 503 });
     const result = await outbound(t);
     expect(result.operatorLegCallControlId).toBe("own-leg");
     // One inconclusive check (503) before the lease, one by the dial itself.
-    expect(t.sent.filter(row => row.path.startsWith("/telephony_credentials/"))).toHaveLength(2);
-    expect(t.sent.filter(row => row.method === "POST" && row.path === "/calls")).toHaveLength(1);
+    expect(t.credentialChecks()).toBe(2);
+    expect(t.dials()).toBe(1);
   });
+
+  const dial = (t: ReturnType<typeof testWorld>, to: string, commandId: string) =>
+    t.client.dial({ commandId, to, from: NUMBERS.allianz, clientState: "e30=", timeoutSecs: 30 });
 
   it("uses a proof once, for its own destination only", async () => {
     const t = testWorld({});
-    await t.client.proveSipDestination!("sip:gencred001@sip.telnyx.com");
+    await expect(t.client.proveSipDestination!(OWN_SIP)).resolves.toBe("proven");
     expect(t.client.proveSipDestination!(NUMBERS.customer)).toBeNull();
-    const checks = () => t.sent.filter(row => row.path.startsWith("/telephony_credentials/")).length;
-    expect(checks()).toBe(1);
-    const dial = (to: string, commandId: string) => t.client.dial({ commandId, to, from: NUMBERS.allianz, clientState: "e30=", timeoutSecs: 30 });
-    await dial("sip:gencred001@sip.telnyx.com", "first");
-    expect(checks()).toBe(1);
-    await dial("sip:gencred001@sip.telnyx.com", "second");
-    expect(checks()).toBe(2);
-    await expect(dial("sip:gencred002@sip.telnyx.com", "other")).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect(t.credentialChecks()).toBe(1);
+    await dial(t, OWN_SIP, "first");
+    expect(t.credentialChecks()).toBe(1);
+    await dial(t, OWN_SIP, "second");
+    expect(t.credentialChecks()).toBe(2);
+    await expect(dial(t, "sip:gencred002@sip.telnyx.com", "other")).rejects.toMatchObject({ code: "test_provider_boundary" });
+  });
+
+  it("never lets a dial through on a check it picked up still running that ends inconclusive", async () => {
+    const t = testWorld({});
+    // The early check waits 80 ms and fails with a 5xx; meanwhile the
+    // credential was moved to a foreign connection.
+    t.scriptCredentials({ delayMs: 80, status: 503 }, "foreign");
+    const early = t.client.proveSipDestination!(OWN_SIP);
+    const dialled = dial(t, OWN_SIP, "picked-up");
+    await expect(dialled).rejects.toMatchObject({ code: "test_provider_boundary" });
+    await expect(early).resolves.toBe("inconclusive");
+    // The dial ran its own check after the inconclusive one, and nothing was dialled.
+    expect(t.credentialChecks()).toBe(2);
+    expect(t.dials()).toBe(0);
+  });
+
+  it("starts no early check for an identical retry; its resumed dial proves the destination itself", async () => {
+    const t = testWorld({ start_fast_path: true, start_test_proof_prefetch: true });
+    await stalledStart(t, 7801);
+    const before = t.credentialChecks();
+    // Without an early check the resumed dial's own check meets this 5xx and
+    // stops: no dial without a proof.
+    t.scriptCredentials({ delayMs: 80, status: 503 });
+    await expect(outbound(t, 7801)).rejects.toMatchObject({ status: 503, code: "initial_call_pending" });
+    expect(t.credentialChecks() - before).toBe(1);
+    expect(t.dials()).toBe(0);
+    // Once the credential is foreign the next retry is refused outright.
+    t.scriptCredentials("foreign");
+    await expect(outbound(t, 7801)).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    expect(t.dials()).toBe(0);
+  });
+
+  it("refuses a resumed dial after a lost insert race whose early check is still running and ends inconclusive", async () => {
+    const t = testWorld({ start_fast_path: true, start_test_proof_prefetch: true });
+    const winner = await stalledStart(t, 7802);
+    // The identical retry's lookup misses (the winner is not visible yet), so
+    // it starts its own early check; its INSERT then loses to the winner.
+    t.h.db.delete("motorist_call_sessions", row => row.id === winner.id);
+    const from = t.h.client.from;
+    t.h.client.from = (table) => {
+      const builder = from.call(t.h.client, table);
+      if (table !== "motorist_call_sessions") return builder;
+      const insert = builder.insert.bind(builder) as (...args: unknown[]) => typeof builder;
+      (builder as unknown as { insert: (...args: unknown[]) => typeof builder }).insert = (...args: unknown[]) => {
+        t.h.client.from = from;
+        t.h.db.seed("motorist_call_sessions", [winner]);
+        t.h.db.failNext("motorist_call_sessions", "insert", { code: "23505", message: "duplicate key value violates unique constraint", details: null, hint: null });
+        return insert(...args);
+      };
+      return builder;
+    };
+    t.scriptCredentials({ delayMs: 80, status: 503 }, "foreign");
+    await expect(outbound(t, 7802)).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    // The early check (inconclusive) and the dial's own check (foreign): never a dial.
+    expect(t.credentialChecks()).toBe(3);
+    expect(t.dials()).toBe(0);
+    expect(t.h.rows("motorist_call_sessions")).toHaveLength(1);
   });
 });

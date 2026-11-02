@@ -12,8 +12,12 @@ import base from "./vitest.config";
 export default mergeConfig(base, defineConfig({
   test: {
     env: {
+      // S2: `start_early_response` acts only through the hook a start route
+      // passes; the route tests pin today's call shape, and its own tests
+      // (`early-start`, `start-fast-path`, the route cases) turn it on.
       TELEPHONY_LATENCY_FLAGS: JSON.stringify({
         internal_lean_path: true, bridged_observation_fast: true, claim_holding_drain: true, fresh_after_write: true,
+        start_fast_path: true, start_test_proof_prefetch: true,
       }),
     },
     include: ["src/server/telephony", "src/app/api/telephony", "src/server/mobile", "src/components/dispatch", "src/lib/telephony"]

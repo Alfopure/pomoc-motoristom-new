@@ -61,7 +61,7 @@ const BOUND_S1 = {
 } as const;
 
 /**
- * The starts with the S2 switches, measured on 2 Nov 2026 on dev d214e0b + S2.
+ * The starts with the S2 switches, measured on 2 Nov 2026 on dev a3b2b3f + S2.
  * `fast` is `start_fast_path` alone; `early` adds `start_early_response`, where
  * `toEarly` is the wave the route may answer at, `resolved` still counts the
  * whole leased work behind it and `leaseHeld` the waves from acquisition to
@@ -73,9 +73,9 @@ const BOUND_S2 = {
   start: {
     // `resolved` allows the once-a-minute incident read, which the process may
     // or may not still owe (`recoverTelephonyIncidentThrottled`).
-    outbound: { toOwnDial: 8, fast: { requests: 33, resolved: 23 }, early: { requests: 29, toEarly: 11, resolved: 16, leaseHeld: 11 } },
-    1: { toOwnDial: 8, fast: { requests: 36, resolved: 23 }, early: { requests: 33, toEarly: 11, resolved: 16, leaseHeld: 11 } },
-    2: { toOwnDial: 8, fast: { requests: 37, resolved: 23 }, early: { requests: 34, toEarly: 11, resolved: 16, leaseHeld: 11 } },
+    outbound: { toOwnDial: 8, fast: { requests: 33, resolved: 23 }, early: { requests: 29, toEarly: 11, resolved: 17, leaseHeld: 12 } },
+    1: { toOwnDial: 8, fast: { requests: 36, resolved: 23 }, early: { requests: 33, toEarly: 11, resolved: 17, leaseHeld: 12 } },
+    2: { toOwnDial: 8, fast: { requests: 37, resolved: 23 }, early: { requests: 34, toEarly: 11, resolved: 17, leaseHeld: 12 } },
   },
 } as const;
 

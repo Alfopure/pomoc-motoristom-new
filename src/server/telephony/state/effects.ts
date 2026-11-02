@@ -158,8 +158,9 @@ export type InitialDispatch = {
    * `start_early_response`: the tail behind the response is compacted. The
    * leg bookkeeping and the offer-revocation read run together, the
    * command-done checkpoint folds into the final one (the leg row is the
-   * adoption evidence until then), the audit runs beside that final write and
-   * the incident read moves after the lease (the caller runs it).
+   * adoption evidence until then) and the incident read moves after the lease
+   * (the caller runs it). The audit stays ahead of the final checkpoint, so a
+   * failed insert keeps the entry for the next resume or cron.
    */
   compact: boolean;
   /** Fires once the own leg's dial is settled: journal result, leg row, revoked-offer check. */
@@ -2633,34 +2634,21 @@ async function executeReduceResult(
         ctx.session = session;
       }
     }
-    let besideFinalize: Promise<void> | null = null;
     if (!failure && !projectionError && !input.continuation.auditComplete && input.continuation.commands.every((command) => input.continuation!.completedCommands.includes(commandKey(command)))) {
-      const continuation = input.continuation;
-      const audit = () => project(() => measureControlStage("audit", () => recordCallEvent(deps, { session, event: continuation.event, handledStatus: "processed", stateBefore: continuation.stateBefore, stateAfter: session.state,
-        notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) })));
-      if (initial?.compact) {
-        // Call-speed S2.3: the start's audit row is written beside the final
-        // checkpoint. It is idempotent by event id and no recovery reads it;
-        // a failed insert is logged instead of keeping the entry alive.
-        besideFinalize = audit().catch(() => {
-          deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "initial_audit_unrecorded" });
-        });
-        continuation.auditComplete = true;
-      } else {
-        try {
-          await audit();
-          continuation.auditComplete = true;
-        } catch (error) {
-          if (!deferProjections || error instanceof SessionLeaseLostError) throw error;
-          projectionError = describeError(error);
-        }
+      try {
+        const continuation = input.continuation;
+        await project(() => measureControlStage("audit", () => recordCallEvent(deps, { session, event: continuation.event, handledStatus: "processed", stateBefore: continuation.stateBefore, stateAfter: session.state,
+          notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) })));
+        input.continuation.auditComplete = true;
+      } catch (error) {
+        if (!deferProjections || error instanceof SessionLeaseLostError) throw error;
+        projectionError = describeError(error);
       }
     }
     input.continuation.attempts += 1;
     input.continuation.lastError = projectionError ?? failure?.error ?? (continuationComplete(input.continuation) ? null : "mandatory effects pending");
     const continuation = input.continuation;
-    try { session = await measureControlStage("finalize", () => checkpointEffects(deps, session.id, continuationComplete(continuation) ? null : continuation, continuation.id, session)); }
-    finally { await besideFinalize; }
+    session = await measureControlStage("finalize", () => checkpointEffects(deps, session.id, continuationComplete(continuation) ? null : continuation, continuation.id, session));
     if (!continuationComplete(input.continuation) && !failure && !projectionError) failure = { command: "continuation", error: "mandatory effects pending", callGone: false };
   }
 
