@@ -239,7 +239,7 @@ export function concurrentDialFor(flags: LatencyFlags, direction: "outbound" | "
  * what it really does, whatever the flags ask, and no later build can mistake
  * an earlier session for one that ran the optimisation.
  */
-const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: false, holdJoinWithHold: true } as const;
+const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: true, holdJoinWithHold: true } as const;
 
 /**
  * S7b is implemented, but whether Telnyx plays the hold music to a participant
@@ -256,11 +256,40 @@ function joinWithHoldAllowed(): boolean {
   catch { return false; }
 }
 
-/** The Telnyx API region this deployment's client really calls. */
+/**
+ * S5 is implemented, but that every command of a call created through
+ * `api.telnyx.eu` works there (and that the gain passes the plan's gate) is
+ * TEST spike S5.0 (docs/operations/telnyx-runbook.md). Until the runbook
+ * records a pass only a deployment whose application environment is exactly
+ * `test` may freeze `eu`: production, a local run (`development`, even one
+ * pointed at production data) and an unreadable environment keep `us`
+ * whatever `api_region` says. Production needs a reviewed change here.
+ */
+const EU_API_PROVEN = false;
+export function euApiRegionAllowed(): boolean {
+  if (EU_API_PROVEN) return true;
+  try { return resolveAppEnvironment() === "test"; }
+  catch { return false; }
+}
+
+/**
+ * The Telnyx API region this deployment's `us` base really calls. Production
+ * pins it to api.telnyx.com (`regionBaseUrl` in `telnyx/env.ts`), so there
+ * this is always `us`; a test or local override pointing at `.eu` reads `eu`.
+ */
 export function providerRegionOf(config: TelnyxConfig): "us" | "eu" {
   if (!config.configured) return "us";
   try { return /(^|\.)telnyx\.eu$/.test(new URL(config.apiBaseUrl).hostname) ? "eu" : "us"; }
   catch { return "us"; }
+}
+
+/**
+ * The Telnyx API region a session was frozen to (call-speed S5). A session
+ * without `start_mode.apiRegion` (created before S0/S5) is `us` for good.
+ */
+export function sessionApiRegion(metadata: unknown): "us" | "eu" {
+  const startMode = record(record(metadata)?.start_mode);
+  return startMode?.apiRegion === "eu" ? "eu" : "us";
 }
 
 /** What a new session keeps for its whole life, whatever the flags say later. */
@@ -272,7 +301,14 @@ export function freezeStartMode(flags: LatencyFlags, input: { direction: "inboun
   const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold && joinWithHoldAllowed();
   return { concurrent, autoBridge: HONOURED_START_SWITCHES.autoBridge && input.direction === "internal" && flags.internal_auto_bridge,
     ownLegTimeoutSecs: concurrent ? flags.own_leg_timeout_secs_concurrent : SEQUENTIAL_OWN_LEG_TIMEOUT_SECS,
-    apiRegion: HONOURED_START_SWITCHES.apiRegion ? flags.api_region : input.providerRegion, origin: input.origin,
+    // S5: a session we create is created and controlled in `eu` when the flag
+    // asks for it and this deployment may (`euApiRegionAllowed`). Otherwise,
+    // and always for an inbound call (Telnyx created it, in a region we have
+    // no evidence for on this account; a separate inbound switch would need
+    // the S5.0 inbound spike), it records the region of the host it really
+    // calls, so the frozen and logged region always match the host.
+    apiRegion: HONOURED_START_SWITCHES.apiRegion && input.direction !== "inbound" && flags.api_region === "eu" && euApiRegionAllowed()
+      ? "eu" : input.providerRegion, origin: input.origin,
     ...(holdJoinWithHold ? { holdJoinWithHold: true as const } : {}) };
 }
 

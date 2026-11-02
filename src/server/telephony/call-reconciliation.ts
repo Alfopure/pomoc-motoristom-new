@@ -1,5 +1,6 @@
 import type { CallActor } from "./call-actions";
 import { isUuid } from "@/lib/telephony/uuid";
+import { sessionApiRegion } from "./latency-flags";
 import { CallActionError, SessionLeaseBusyError } from "./service-errors";
 import { runSessionEvent, type SessionRunnerDeps } from "./session-runner";
 import { TERMINAL_STATES, type SessionRow, type TelephonyEvent } from "./state/types";
@@ -41,7 +42,7 @@ export async function reconcileBrowserCall(
     throw new CallActionError("Chýba identifikátor telefónneho spojenia.", 400, "invalid_call_control_id");
   }
   const [sessionResult, legResult] = await Promise.all([
-    deps.admin.from("motorist_call_sessions").select("id, state")
+    deps.admin.from("motorist_call_sessions").select("id, state, metadata")
       .eq("organization_id", deps.organizationId).eq("id", sessionId).maybeSingle(),
     deps.admin.from("motorist_call_legs").select("id, ended_at")
       .eq("organization_id", deps.organizationId).eq("session_id", sessionId)
@@ -55,7 +56,8 @@ export async function reconcileBrowserCall(
   if (legResult.data.ended_at) return { ...result, reason: "already_ended" };
   if (!deps.telnyx) throw new CallActionError("Telefónia nie je nakonfigurovaná.", 503, "not_configured");
 
-  const provider = await deps.telnyx.retrieveCall(callControlId);
+  // Unowned: ask the region the session's legs were created in (S5).
+  const provider = await deps.telnyx.retrieveCall(callControlId, { region: sessionApiRegion(sessionResult.data.metadata) });
   if (provider.alive) return { ...result, reason: "alive" };
   if (!provider.known || provider.raw?.is_alive !== false) return { ...result, reason: "provider_unknown" };
 

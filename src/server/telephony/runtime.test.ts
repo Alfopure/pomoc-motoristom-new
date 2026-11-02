@@ -110,7 +110,7 @@ describe("telephony runtime", () => {
     await deps.telnyx!.bridge({ callControlId: "PRIVATE_CALL_CONTROL_TOKEN", targetCallControlId: "PRIVATE_TARGET_TOKEN", commandId });
     // The other line is the instance's one effective-latency-flags record.
     expect(logger.mock.calls.filter(([entry]) => entry.scope !== "latency-flags")).toEqual([[{ scope: "telnyx-http", level: "info", method: "POST", path: "/calls/:id/actions/bridge",
-      commandId, status: 200, ms: expect.any(Number), retried: false, errorCode: null, cached: false,
+      region: "us", commandId, status: 200, ms: expect.any(Number), retried: false, errorCode: null, cached: false,
       attempts: [{ startedAtMs: expect.any(Number), dispatchAfterMs: expect.any(Number), headersMs: expect.any(Number), ms: expect.any(Number), status: 200 }] }]]);
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/PRIVATE_|KEYtest/);
   });

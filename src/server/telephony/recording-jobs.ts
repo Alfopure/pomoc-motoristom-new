@@ -1,6 +1,9 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
+import { euApiRegionAllowed, sessionApiRegion } from "./latency-flags";
+import { CLOUDFLARE_SIGNATURE_BANNED_CODE, cloudflareSignatureBanned } from "./telnyx/client";
+import { apiBaseUrlFor, getTelnyxConfig, TELNYX_DEFAULT_API_BASE_URL, TELNYX_DEFAULT_EU_API_BASE_URL, type TelnyxApiRegion } from "./telnyx/env";
 
 export type RecordingAdmin = SupabaseClient<Database>;
 export type RecordingJob = Database["public"]["Tables"]["motorist_call_processing_jobs"]["Row"];
@@ -21,6 +24,46 @@ export class RecordingProcessingError extends Error {
 }
 export function record(value: unknown): Record<string, Json | undefined> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, Json | undefined> : {};
+}
+/**
+ * Call-speed S5: the API region of this recording's GET and DELETE. A
+ * recording lives in the region of the session that created it
+ * (`metadata.start_mode.apiRegion`); no session, or one from before S5, is
+ * `us`. Only a deployment that can freeze a session to `eu`
+ * (`euApiRegionAllowed`: TEST until spike S5.0 passes) reads the session, so
+ * production and local runs do exactly what they did before. That read is
+ * bounded at 1.5 s, and an unreadable session fails the step for a retry
+ * rather than guessing: cleanup would take the wrong region's 404 for
+ * "already removed".
+ */
+async function recordingApiRegion(ctx: Pick<RecordingJobContext, "admin" | "organizationId" | "recording" | "signal">): Promise<TelnyxApiRegion> {
+  const sessionId = ctx.recording?.session_id;
+  if (!sessionId || !euApiRegionAllowed()) return "us";
+  const session = await ctx.admin.from("motorist_call_sessions").select("metadata").eq("organization_id", ctx.organizationId)
+    .eq("id", sessionId).abortSignal(AbortSignal.any([ctx.signal, AbortSignal.timeout(1_500)])).maybeSingle();
+  if (session.error) throw new RecordingProcessingError("recording_region_unavailable", true);
+  return sessionApiRegion(session.data?.metadata);
+}
+/**
+ * `GET`/`DELETE /recordings/:id` in the recording's region. On the EU host a
+ * Cloudflare 1010 refusal never reached Telnyx: it is our User-Agent, so it is
+ * logged as a configuration error and fails the step without a retry of its
+ * own, rather than reading as a denied, missing or unconfirmed recording. The
+ * default `.com` path handles every response exactly as before.
+ */
+export async function fetchTelnyxRecording(ctx: Pick<RecordingJobContext, "admin" | "organizationId" | "recording" | "signal">, recordingId: string, init: RequestInit): Promise<Response> {
+  const config = getTelnyxConfig();
+  const region = await recordingApiRegion(ctx);
+  const base = apiBaseUrlFor(config.configured ? config : { apiBaseUrl: TELNYX_DEFAULT_API_BASE_URL, euApiBaseUrl: TELNYX_DEFAULT_EU_API_BASE_URL }, region);
+  const response = await fetch(`${base}/recordings/${encodeURIComponent(recordingId)}`, init);
+  if (region !== "eu" || response.status !== 403) return response;
+  const text = await response.clone().text().catch(() => "");
+  let body: unknown = text;
+  try { body = JSON.parse(text); } catch { /* A text or HTML body is checked as text. */ }
+  if (!cloudflareSignatureBanned(403, body)) return response;
+  await response.body?.cancel();
+  console.error(JSON.stringify({ scope: "recording", level: "error", code: CLOUDFLARE_SIGNATURE_BANNED_CODE, method: init.method ?? "GET", host: new URL(base).hostname }));
+  throw new RecordingProcessingError(CLOUDFLARE_SIGNATURE_BANNED_CODE);
 }
 export async function enqueueSavedRecording(admin: RecordingAdmin, input: {
   organizationId: string; callId: string; sessionId: string; providerRecordingId: string;

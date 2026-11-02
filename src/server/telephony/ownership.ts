@@ -37,6 +37,12 @@ export type Ownership = {
   terminationPending?: boolean;
   /** Includes acquisition by an outer webhook owner, before the reducer starts. */
   leaseWaitMs?: number;
+  /**
+   * Call-speed S5: the Telnyx API region this session was frozen to
+   * (`metadata.start_mode.apiRegion`). Every call and conference command
+   * issued under this ownership goes to that region, whatever a caller passes.
+   */
+  providerRegion?: "us" | "eu";
 };
 export const sessionOwnership = new AsyncLocalStorage<Ownership>();
 const ownershipRenewals = new WeakMap<Ownership, Promise<void>>();

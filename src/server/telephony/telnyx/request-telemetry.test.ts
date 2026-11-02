@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createTelnyxRequestLogger } from "./request-telemetry";
 
 const commandId = "bb824028-87c9-442f-bfac-ac527f733493";
-const request = { method: "POST", path: "/calls/private-call-token/actions/bridge", commandId, status: 200, ms: 128, retried: false, error: null };
+const request = { method: "POST", path: "/calls/private-call-token/actions/bridge", region: "us" as const, commandId, status: 200, ms: 128, retried: false, error: null };
 
 describe("provider HTTP telemetry", () => {
   it.each([
@@ -19,7 +19,7 @@ describe("provider HTTP telemetry", () => {
   ])("redacts identifiers and query values from %s", (path, expected) => {
     const logger = vi.fn();
     createTelnyxRequestLogger(logger)({ ...request, path });
-    expect(logger).toHaveBeenCalledExactlyOnceWith({ scope: "telnyx-http", level: "info", method: "POST", path: expected,
+    expect(logger).toHaveBeenCalledExactlyOnceWith({ scope: "telnyx-http", level: "info", method: "POST", path: expected, region: "us",
       commandId, status: 200, ms: 128, retried: false, errorCode: null, cached: false, attempts: [] });
   });
 
@@ -33,9 +33,24 @@ describe("provider HTTP telemetry", () => {
   ])("emits only a safe error code for %s", (error, code) => {
     const logger = vi.fn();
     createTelnyxRequestLogger(logger)({ ...request, error, commandId: "API_KEY", status: 502, retried: true });
-    expect(logger).toHaveBeenCalledExactlyOnceWith({ scope: "telnyx-http", level: "warn", method: "POST", path: "/calls/:id/actions/bridge",
+    expect(logger).toHaveBeenCalledExactlyOnceWith({ scope: "telnyx-http", level: "warn", method: "POST", path: "/calls/:id/actions/bridge", region: "us",
       commandId: null, status: 502, ms: 128, retried: true, errorCode: code, cached: false, attempts: [] });
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/API_KEY|private-token|421905123456/);
+  });
+
+  it("names the API region of every request so TEST can compare .com and .eu per command (S5)", () => {
+    const logger = vi.fn();
+    createTelnyxRequestLogger(logger)({ ...request, region: "eu" });
+    createTelnyxRequestLogger(logger)({ ...request, region: "private-token" as never });
+    expect(logger.mock.calls.map(([entry]) => entry.region)).toEqual(["eu", "us"]);
+    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private-token/);
+  });
+
+  it("reports a Cloudflare 1010 refusal as a configuration error, not a provider warning (S5)", () => {
+    const logger = vi.fn();
+    createTelnyxRequestLogger(logger)({ ...request, region: "eu", status: 403,
+      error: "TelnyxCommandError: Telnyx cloudflare_1010 (403): Cloudflare refused the eu API request (error 1010, browser signature banned)" });
+    expect(logger).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ level: "error", region: "eu", status: 403, errorCode: "cloudflare_1010" }));
   });
 
   it("isolates thrown and rejected log-sink failures", async () => {

@@ -68,6 +68,31 @@ Time-boxed verifications that cannot be done offline. Record the outcome (date, 
 
 **Result.** _Not yet run._
 
+### S5.0 — Telnyx EU API (call-speed S5)
+
+**Why.** With `api_region: "eu"` in `latency_flags`, every outbound, colleague and callback session created afterwards on TEST is frozen to `start_mode.apiRegion = "eu"`: its calls, conferences, the TEST guard's conference reads, reconcile reads and recording GET/DELETE go to `api.telnyx.eu`. Telnyx processes a call in the region whose API created it, and conferences cannot span regions, so the region never changes during a call. Inbound sessions stay `us` (no evidence yet which region processes our inbound calls). Credentials, tokens, connections, profiles, numbers and SMS stay on `api.telnyx.com`. The `telnyx-http` log line carries `region`.
+
+**One host per region.** `us` is `https://api.telnyx.com/v2` and `eu` is `https://api.telnyx.eu/v2`. `TELNYX_API_BASE_URL` and `TELNYX_EU_API_BASE_URL` override them only outside production (tests, local runs); production ignores them and logs `api_base_url_override_ignored` once. A session's frozen region, and the logged `region`, therefore always name the host its calls really use.
+
+**Hard rule while any `eu` session is active** (not ended, or with a recording still stored at Telnyx): never redeploy or roll back to a build without S5, and never change either base URL. An older build or a changed host would send the call's commands to a region that does not know the call, and an answer from there (for example 404/422) says nothing about the customer, who may still be connected. For `eu` sessions a hangup counts as "already gone" only on Telnyx's own call-gone codes (90018/90003), so such a 404 fails loudly instead of closing the leg, but nothing else can bring the call back under control.
+
+**How.** On stable TEST only, with its own provider resources:
+- read back `anchorsite_override` of the call control application and the credential connection (expected Amsterdam/Frankfurt); on production read only, with `sip_uri_calling_preference` and the outbound profile;
+- set `api_region: "eu"` and start **new** calls: a loop call with hold, unhold, consult and hangup; a colleague call; a recorded call if TEST recording is on (`recording.saved`, then the import's GET and the cleanup DELETE);
+- negative check: a `.com` session must not be able to join a `.eu` conference (confirms the pinning is needed);
+- compare `headersMs` per command between `region: "us"` and `region: "eu"` lines, and the target's dial → SDK invite time;
+- check `download_urls` of an EU recording: if its host is not `recordings.telnyx.com`, add it to `TELNYX_RECORDING_DOWNLOAD_HOSTS` (otherwise the import fails `source_host_not_allowed`); never construct EU media URLs;
+- a `telnyx-http` line with `errorCode: "cloudflare_1010"` (or a `recording` line with `code: "cloudflare_1010"`) means Cloudflare refused our User-Agent before Telnyx: set the switch back to `us`. The refused command is not retried. A refused dial (`POST /calls`) is journalled as refused (403, tagged `cloudflare_1010`): no call exists, so termination does not wait for it. Any other refused command's journal entry stays open (outcome unknown, as after a transport failure), so a live EU call affected by it is settled by provider webhooks and the reconcile job, not by a re-send. Only the EU host is checked; a 403 from `.com` keeps its ordinary meaning;
+- a connection-less conference webhook (TEST guard) is read in the region of the session found by conference id, client state or leg; with none of them (a conference whose id is not saved yet) it reads `.com`, fails for an EU conference and is answered 500, so Telnyx redelivers it.
+
+**Pass criteria.** Every command of an EU session succeeds against `.eu`, and the saving is at least 100 ms per command or 300 ms on invite delivery (plan S5 gate). Otherwise keep the switch `us` and record the evidence here.
+
+**Limits until it passes.** Only a deployment whose application environment is exactly `test` freezes `eu` (`EU_API_PROVEN` in `latency-flags.ts`); production and local runs keep `us` whatever `api_region` says until a reviewed change records the pass. Only such a deployment reads a recording's session to find its region; production recordings keep `.com` without an extra read.
+
+**Rollback.** `api_region: "us"` affects only new sessions; sessions already frozen to `eu` finish on `.eu`. Do not roll back to a build without S5 while an EU call is live, or while recordings of EU sessions are still stored at Telnyx: an older build would control the call, and read or delete the recording, through `.com`, where a 404 reads as "already removed" and would leave the EU recording in place.
+
+**Result.** _Not yet run._
+
 ### S2 — Slovak TTS availability (secondary)
 
 Pre-recorded Slovak prompts in `public/telephony/` are primary and are served from `TELNYX_MEDIA_BASE_URL`. TTS (`Azure.sk-SK-ViktoriaNeural`) is used only when that variable is unset. If TTS quality or availability is unacceptable, the answer is to fix the media base URL, not to change the code path.

@@ -13,6 +13,7 @@ import { sweepExpiredWrapUp } from "./presence-service";
 import { sweepEndedSessionPresence } from "./presence-recovery";
 import { reconciledHangupEvent } from "./call-reconciliation";
 import { DATABASE_REQUEST_MS } from "./ownership";
+import { sessionApiRegion } from "./latency-flags";
 import { getTelephonyHealth } from "./health";
 import { createHealthReadRetry } from "./health-read";
 import { PROGRESS_FAIL_MS, sessionProgressIssue, type ProviderObservation, type ProviderVerification } from "./health-progress";
@@ -605,7 +606,7 @@ export async function reconcileWithTelnyx(deps: TelephonyCronDeps, candidates?: 
     verification: { ...verification, error: selected.error } };
   // A preceding recovery may have ended a selected session. Do not resurrect
   // its provider operations or report a missing leg as a new problem.
-  const current = selected.sessions.length ? await read(signal => deps.admin.from("motorist_call_sessions").select("id, state")
+  const current = selected.sessions.length ? await read(signal => deps.admin.from("motorist_call_sessions").select("id, state, metadata")
     .eq("organization_id", deps.organizationId).in("id", selected.sessions.map((row) => row.id)).in("state", [...ACTIVE_SESSION_STATES]).abortSignal(signal))
     : { data: [], error: null };
   if (current.error) return { job: RECONCILE_JOB, status: "failed", detail: {}, error: current.error.message,
@@ -663,7 +664,9 @@ export async function reconcileWithTelnyx(deps: TelephonyCronDeps, candidates?: 
       let ended: ProviderObservation | undefined;
       try {
         checkedLegs += 1;
-        const status = await telnyx.retrieveCall(callControlId);
+        // Unowned: ask the region the session was created in (S5). A leg the
+        // provider does not know stays "unknown" below, never "ended".
+        const status = await telnyx.retrieveCall(callControlId, { region: sessionApiRegion(session.metadata) });
         if (status.known && status.alive) {
           verification.entries.push(observation("alive", { legId: leg.id, role: leg.role }));
           continue;
