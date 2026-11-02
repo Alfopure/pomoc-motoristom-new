@@ -1,6 +1,8 @@
+import type { MobileVoiceTuning } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
-import type { VoiceApi, VoiceCallTarget, VoiceHoldCommand, VoiceHoldResult, VoiceMedia, VoiceMediaState, VoiceOutgoing, VoiceRecording, VoiceStatus, VoiceToken } from "./api";
+import type { VoiceApi, VoiceCallTarget, VoiceHoldCommand, VoiceHoldResult, VoiceMedia, VoiceMediaState, VoiceOffer, VoiceOutgoing, VoiceRecording, VoiceStatus, VoiceToken } from "./api";
 import type { DiagnosticFields, VoiceDiagnosticEvent } from "./diagnostics";
+import { parseVoiceTuning, usableCachedToken, VOICE_TUNING_OFF, type CachedVoiceToken } from "./tuning";
 
 export type VoiceEvent = { type: string; callId?: string; callControlId?: string; providerLegId?: string; sessionId?: string; number?: string; state?: string; active?: boolean; muted?: boolean; outgoing?: boolean;
   actionId?: string; held?: boolean; expectedVersion?: number; phase?: "unclaimed" | "dispatched" | "uncertain"; actionLive?: boolean; systemHeld?: boolean; privacyHold?: boolean; media?: Pick<VoiceMedia, "state" | "version" | "canHold">;
@@ -9,9 +11,11 @@ export type VoiceEvent = { type: string; callId?: string; callControlId?: string
 export type NativeHold = { callId: string; sessionId: string; callControlId: string; actionId: string; held: boolean; expectedVersion: number; phase: "unclaimed" | "dispatched" | "uncertain"; actionLive: boolean };
 export type NativeMediaSync = Pick<NativeHold, "callId" | "sessionId" | "callControlId" | "actionId" | "held" | "expectedVersion">;
 export type MicrophonePermission = "granted" | "denied" | "undetermined" | "unknown";
+/** Native login switches (S8); omitted when all are off, so the login is today's. `cached` marks a Keychain JWT. */
+export type NativeConnectOptions = { cached: boolean; region: "auto" | "eu"; trickleIce: boolean };
 export type PhoneSnapshot = { ready: boolean; audioActive: boolean; microphonePermission?: MicrophonePermission; pushRegistered?: boolean; preparedPushCallId?: string | null; pushRejection?: VoiceEvent | null; wasEnabled?: boolean; calls?: VoiceEvent[]; pending: VoiceEvent[]; pendingHolds?: NativeHold[]; pendingSyncs?: NativeMediaSync[] };
 export type NativePhone = {
-  snapshot(): Promise<PhoneSnapshot>; clearPushRejection(id: string): Promise<void>; requestMicrophone(): Promise<boolean>; connect(token: string): Promise<void>;
+  snapshot(): Promise<PhoneSnapshot>; clearPushRejection(id: string): Promise<void>; requestMicrophone(): Promise<boolean>; connect(token: string, options?: NativeConnectOptions): Promise<void>;
   /** `reason` only names the caller in the device log. */
   disconnect(reason?: string): Promise<void>;
   authorize(callId: string, sessionId: string, controlId: string): Promise<void>; reject(callId: string): Promise<void>;
@@ -28,6 +32,22 @@ export type NativePhone = {
   clearDiagnosticEvents?(upToId: number): Promise<void>;
 };
 export type PhoneLeaseStore = { load(): Promise<string | null>; save(id: string): Promise<void>; clear(): Promise<void> };
+/** One Keychain item of this device only. */
+export type PhoneSecretStore = { load(): Promise<string | null>; save(value: string): Promise<void>; clear(): Promise<void> };
+export type PhoneOptions = {
+  /** The bounded provider JWT (S8.1) and the last switches the server sent, for a push wake. */
+  tokens?: PhoneSecretStore; tuning?: PhoneSecretStore;
+  /** What a cached JWT is bound to besides its lease. */
+  profileId?: string; appBuild?: string | null;
+  /** Subscribes to the organisation's private telephony signal (S8.5). Its payload is never read:
+   * `onSignal` only triggers a status read through the server API. Returns the unsubscribe. */
+  realtime?: (topic: string, onSignal: () => void, onState: (state: string) => void) => () => void;
+  now?: () => number;
+};
+/** Realtime-triggered status reads run at most this often (S8.5). */
+const REALTIME_CHECK_MS = 300;
+/** Token refusals the server names (besides 401/403); anything else is not a refusal of the lease. */
+const TOKEN_REFUSALS = ["native_lease_stale", "native_lease_taken", "native_voice_disabled"];
 export type PhoneDialTarget = VoiceCallTarget;
 export type PhoneState = {
   supported: boolean; registration: "unregistered" | "connecting" | "registered" | "error"; takeoverRequired: boolean;
@@ -67,7 +87,8 @@ export function sameDialTarget(left: PhoneDialTarget, right: PhoneDialTarget): b
 
 /** CallKit owns audio/signaling. JS owns the authenticated mobile lease and
  * exact outbound intent; it never issues a direct SDK dial. Provider tokens
- * stay in memory. Only the revocable device lease survives a cold launch. */
+ * stay in memory. Only the revocable device lease survives a cold launch, and,
+ * with the server's `mobileTokenCache`, a bounded JWT in this device's Keychain. */
 export class DispatchPhone {
   state: PhoneState;
   private token: VoiceToken | null = null;
@@ -110,9 +131,34 @@ export class DispatchPhone {
   private ending = new Map<string, Promise<void>>();
   private listeners = new Set<() => void>();
   private reportedPushRejection: string | null = null;
+  /** The server's phone switches (S8): the last token's, or those stored for a push wake. */
+  private tuning: MobileVoiceTuning = VOICE_TUNING_OFF;
+  /** The switches as stored; an unchanged set is never written again. */
+  private storedTuning = JSON.stringify(VOICE_TUNING_OFF);
+  private tuningFromServer = false;
+  /** Whether a JWT may have been cached here; a wipe is logged only then. */
+  private cacheEverOn = false;
+  private cacheOps: Promise<void> = Promise.resolve();
+  /** The JWT in native came from the Keychain and no refresh has replaced it yet. */
+  private cachedInUse = false;
+  /** A native login with a cached JWT: `running` until it reached native, `settled` once it registered or failed. */
+  private cachedLogin: { generation: number; running: boolean; settled: boolean; done: Promise<boolean> } | null = null;
+  /** When this phone received its current JWT, by its own clock. */
+  private tokenIssuedAt = 0;
+  /** Offers read while the start POST was in flight (S8.4). */
+  private prefetchedOffers = new Map<string, { leaseId: string; generation: number; result: Promise<{ offer: VoiceOffer | null } | { error: unknown }> }>();
+  private topic: string | null = null;
+  private realtimeOff: (() => void) | null = null;
+  private realtimeTimer: ReturnType<typeof setTimeout> | null = null;
+  private realtimeLast = 0;
+  private realtimeSignals = 0;
+  private realtimeChecks = 0;
+  /** Token requests answered "the device row changed meanwhile", asked again (S8). */
+  private contentionRetries = 0;
+  private contentionTimer: ReturnType<typeof setTimeout> | null = null;
   constructor(private api: VoiceApi, private native: NativePhone | null, private uuid: () => string, private leases?: PhoneLeaseStore,
     /** The app's error report; it receives a refused VoIP push's reason and key names. */
-    private reportDiagnostic?: (error: Error) => void) {
+    private reportDiagnostic?: (error: Error) => void, private options: PhoneOptions = {}) {
     this.state = { supported: Boolean(native), registration: "unregistered", takeoverRequired: false, call: null, termination: null,
       dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false, error: null,
       microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false, transferPending: null };
@@ -120,7 +166,120 @@ export class DispatchPhone {
   subscribe = (callback: () => void) => { this.listeners.add(callback); return () => { this.listeners.delete(callback); }; };
   snapshot = () => this.state;
   private current(generation: number) { return !this.stopped && generation === this.generation; }
+  private now() { return (this.options.now ?? Date.now)(); }
   private diag(event: string, fields?: DiagnosticFields) { try { this.native?.debug?.(event, fields); } catch { /* A device log never affects calling. */ } }
+  /** Native login with the switches (S8); with all of them off, exactly today's call. */
+  private nativeConnect(token: string, cached = false) {
+    const { mobileRtcRegion: region, mobileTrickleIce: trickleIce } = this.tuning;
+    return cached || region !== "auto" || trickleIce ? this.native!.connect(token, { cached, region, trickleIce }) : this.native!.connect(token);
+  }
+  private async loadTuning() {
+    try {
+      const raw = await this.options.tuning?.load();
+      if (typeof raw !== "string" || this.tuningFromServer) return;
+      this.tuning = parseVoiceTuning(JSON.parse(raw)); this.storedTuning = raw;
+      if (this.tuning.mobileTokenCache) this.cacheEverOn = true;
+    } catch { /* The build's defaults: today's behaviour. */ }
+  }
+  /** Every token carries the switches; a push wake uses the last stored ones. */
+  private applyTuning(token: VoiceToken) {
+    const next = token.voiceTuning ?? VOICE_TUNING_OFF, text = JSON.stringify(next), cacheOff = this.tuning.mobileTokenCache && !next.mobileTokenCache;
+    this.tuningFromServer = true; this.tuning = next; this.topic = token.realtimeTopic ?? null;
+    if (next.mobileTokenCache) this.cacheEverOn = true;
+    if (text !== this.storedTuning) {
+      this.storedTuning = text;
+      this.diag("tuning.applied", { cache: next.mobileTokenCache, region: next.mobileRtcRegion, trickle: next.mobileTrickleIce, realtime: next.mobileRealtimeStatus,
+        offers: next.mobileParallelOffers, early: next.mobileEarlyAccept });
+      void this.options.tuning?.save(text).catch(() => {});
+    }
+    if (cacheOff) void this.wipeCachedToken("flag_off");
+  }
+  /** Keychain writes and wipes run in order, so a logout's wipe follows any earlier save. */
+  private queueCache(work: () => Promise<void>) {
+    const next = this.cacheOps.then(work).catch(() => { /* The next save or wipe retries. */ });
+    this.cacheOps = next; return next;
+  }
+  private saveCachedToken(token: VoiceToken, generation: number) {
+    const store = this.options.tokens, profileId = this.options.profileId;
+    if (!store || !profileId || !this.tuning.mobileTokenCache) return;
+    const entry: CachedVoiceToken = { v: 1, token: token.token, expiresAt: token.expiresAt, issuedAt: this.tokenIssuedAt, deviceSessionId: token.deviceSessionId,
+      profileId, appBuild: this.options.appBuild ?? null };
+    void this.queueCache(async () => {
+      // A logout, refusal or newer token since then wins.
+      if (!this.current(generation) || this.token !== token || !this.tuning.mobileTokenCache) return;
+      await store.save(JSON.stringify(entry));
+      this.diag("token.cache", { outcome: "saved" });
+    });
+  }
+  /** Read in order with the writes, so a wipe queued before it always applies first. */
+  private readCachedToken(store: PhoneSecretStore) {
+    let raw: string | null = null;
+    return this.queueCache(async () => { raw = await store.load(); }).then(() => raw);
+  }
+  /** Never fails; logged only when a JWT may have been cached. */
+  private wipeCachedToken(reason: string) {
+    const store = this.options.tokens;
+    if (!store) return Promise.resolve();
+    return this.queueCache(async () => {
+      await store.clear();
+      if (this.cacheEverOn) this.diag("token.cache", { outcome: "wiped", reason });
+    });
+  }
+  /** S8.1: a push wake logs in at once with the bounded Keychain JWT, while `connect` refreshes it
+   * and checks the lease alongside; a refusal disconnects, wipes the cache and ends the parked
+   * INVITE. False when nothing usable is cached: the caller connects as before. */
+  private connectCached(): Promise<boolean> {
+    const generation = this.generation, store = this.options.tokens, profileId = this.options.profileId;
+    // Another push of the same wake joins the cached login while it or its refresh is under way;
+    // a later push logs in (and refreshes) again.
+    const login0 = this.cachedLogin;
+    if (login0?.generation === generation && (login0.running || !login0.settled && this.connecting)) return login0.done;
+    if (!this.native || this.stopped || !this.tuning.mobileTokenCache || !store || !profileId || this.connecting || this.state.cancelingAttempt) return Promise.resolve(false);
+    const login = { generation, running: true, settled: false, done: Promise.resolve(false) };
+    login.done = (async () => {
+      const leaseId = this.leaseId ?? await this.leases?.load() ?? null;
+      const raw = await this.readCachedToken(store);
+      if (!this.current(generation)) return true;
+      const result = usableCachedToken(raw, { profileId, deviceSessionId: leaseId, appBuild: this.options.appBuild ?? null, now: this.now() });
+      if (!("token" in result)) {
+        if (result.reason !== "none") { this.diag("token.cache", { outcome: "miss", reason: result.reason }); void this.wipeCachedToken(result.reason); }
+        return false;
+      }
+      if (this.connecting) return false;
+      const cached = result.token;
+      this.connectionRequested = true; this.reconnectAttempts = 0; this.leaseId = cached.deviceSessionId;
+      this.diag("token.cache", { outcome: "hit", left_min: Math.floor((Date.parse(cached.expiresAt) - this.now()) / 60_000), age_min: Math.floor((this.now() - cached.issuedAt) / 60_000) });
+      this.update({ registration: "connecting", takeoverRequired: false, error: null });
+      try { await this.nativeConnect(cached.token, true); }
+      catch (error) {
+        this.diag("token.cache", { outcome: "native_error", ...failure(error) });
+        return !this.current(generation);
+      }
+      if (!this.current(generation)) return true;
+      this.token = { token: cached.token, expiresAt: cached.expiresAt, deviceSessionId: cached.deviceSessionId };
+      this.tokenIssuedAt = cached.issuedAt; this.cachedInUse = true;
+      void this.connect();
+      return true;
+    })().finally(() => { login.running = false; });
+    this.cachedLogin = login;
+    return login.done;
+  }
+  /** The native login with a cached JWT ended; a failed one falls back once to a fresh JWT. */
+  private settleCachedLogin(registration: PhoneState["registration"], generation: number) {
+    const login = this.cachedLogin;
+    if (!login || login.settled || login.generation !== generation || (registration !== "registered" && registration !== "error")) return;
+    login.settled = true;
+    if (registration === "registered") return;
+    this.diag("token.cache", { outcome: "login_failed" });
+    void this.wipeCachedToken("login_failed");
+    // Native forgot the push it prepared with that JWT and a fresh JWT prepares it again: the
+    // phone is connecting, not failed, so the re-prepared push is not refused as not ready.
+    this.update({ registration: "connecting" });
+    void (async () => {
+      await this.connecting;
+      if (this.current(generation) && this.state.registration !== "registered") await this.connect();
+    })();
+  }
   private update(value: Partial<PhoneState>) {
     if (this.stopped) return;
     this.state = { ...this.state, ...value }; for (const notify of this.listeners) notify();
@@ -129,7 +288,7 @@ export class DispatchPhone {
     if (!this.native || this.stopped) return;
     this.off = this.native.subscribe(event => { void this.event(event); });
     const generation = this.generation;
-    const snapshot = await this.native.snapshot();
+    const [snapshot] = await Promise.all([this.native.snapshot(), this.loadTuning()]);
     if (!this.current(generation)) return;
     this.diag("phone.init", { ready: snapshot.ready, was_enabled: snapshot.wasEnabled === true, pending: snapshot.pending.length, calls: snapshot.calls?.length ?? 0,
       push_rejection: Boolean(snapshot.pushRejection), prepared: Boolean(snapshot.preparedPushCallId), foreground: this.foreground });
@@ -141,7 +300,9 @@ export class DispatchPhone {
         callControlId: call.callControlId, state: call.state ?? "CONNECTING", outgoing: call.outgoing === true, connected: false }, muted: call.muted === true, audioActive: snapshot.audioActive });
     }
     for (const sync of snapshot.pendingSyncs ?? []) this.mediaSyncEvent({ type: "holdSyncPending", ...sync });
-    if (snapshot.pending.length || snapshot.wasEnabled) await this.connect();
+    // A cold push wake with a usable cached JWT logs in before the refresh; its pushes follow.
+    if (snapshot.pending.length && this.tuning.mobileTokenCache && await this.connectCached()) { for (const event of snapshot.pending) void this.event(event); }
+    else if (snapshot.pending.length || snapshot.wasEnabled) await this.connect();
   }
   /** Reports a refused VoIP push once: its reason and key names, which hold no number or token. */
   private pushRejected(event: VoiceEvent | null | undefined) {
@@ -177,6 +338,8 @@ export class DispatchPhone {
   connect(takeover = false): Promise<void> {
     if (this.state.cancelingAttempt) return Promise.resolve();
     if (takeover && (this.state.call || this.state.termination || this.state.dialing || this.pendingDial || this.outgoingIntent || this.authorizing.size)) return Promise.resolve();
+    // A takeover starts a new lease: a JWT cached for the previous one is never reused.
+    if (takeover) void this.wipeCachedToken("takeover");
     this.connectionRequested = true; this.reconnectAttempts = 0;
     return this.connectAttempt(takeover);
   }
@@ -201,16 +364,20 @@ export class DispatchPhone {
         step = "token";
         this.diag("token.start", { takeover, automatic });
         const token = await this.api.token(this.leaseId ?? undefined, takeover);
-        this.diag("token.end", { outcome: "ok" });
+        this.diag("token.end", { outcome: "ok" }); this.contentionRetries = 0;
         if (!this.current(generation)) { await this.api.disconnect(token.deviceSessionId).catch(() => {}); return; }
         this.leaseId = token.deviceSessionId;
         step = "save";
         await this.leases?.save(token.deviceSessionId);
         if (!this.current(generation)) return;
-        this.token = token;
+        this.applyTuning(token);
+        this.token = token; this.tokenIssuedAt = this.now(); this.cachedInUse = false;
+        this.saveCachedToken(token, generation);
         if (automatic && !this.idleForRecovery()) return;
         step = "native";
-        await this.native!.connect(token.token);
+        // After a cached login, native keeps the push it prepared with that JWT and prepares
+        // again only one whose cached login failed.
+        await this.nativeConnect(token.token);
         if (!this.current(generation)) return;
         step = "snapshot";
         const pending = await this.native!.snapshot();
@@ -232,12 +399,36 @@ export class DispatchPhone {
       } catch (error) {
         this.diag("phone.connect_error", { step, current: this.current(generation), ...failure(error) });
         if (this.current(generation)) {
+          const api = error instanceof MobileApiError ? error : null;
+          // The device row changed under this request: asking again is safe, a few times.
+          if (step === "token" && api?.code === "native_lease_contention" && this.contentionRetries < 3) {
+            this.contentionRetries += 1;
+            this.diag("token.contention", { attempt: this.contentionRetries });
+            this.contentionTimer = setTimeout(() => {
+              this.contentionTimer = null;
+              if (this.current(generation) && this.connectionRequested) void this.connectAttempt(takeover, automatic);
+            }, 300 * this.contentionRetries);
+            return;
+          }
+          // Refusals the server names: the account, the lease or calling itself is gone. They also
+          // refuse any JWT this phone cached for its lease.
+          const refused = step === "token" && api !== null && (api.status === 401 || api.status === 403 || TOKEN_REFUSALS.includes(api.code ?? ""));
+          if (refused) void this.wipeCachedToken("refused");
           // A refusal needs a deliberate action. In particular, recovery never
           // takes the phone from another device or repeats an untrusted reply.
-          if (error instanceof MobileApiError && error.status !== 0 && error.status !== 408 && error.status !== 429
-            && !(error.status >= 500 && error.status <= 599 && error.status !== 502)) this.connectionRequested = false;
-          this.update({ registration: "error", takeoverRequired: error instanceof MobileApiError && error.status === 409 });
-          this.fail(error);
+          if (api && api.status !== 0 && api.status !== 408 && api.status !== 429
+            && !(api.status >= 500 && api.status <= 599 && api.status !== 502)) this.connectionRequested = false;
+          // A token refresh never drops an established call: native stays as it is and the
+          // call's own status reads decide about it.
+          const call = this.state.call;
+          if (step === "token" && call && (call.connected || call.state === "ACTIVE")) {
+            this.diag("phone.fail", { status: api?.status ?? 0, code: api?.code ?? "none", revoke: false });
+            this.update({ error: api?.message ?? "Telefonovanie sa nepodarilo pripraviť." });
+            return;
+          }
+          // A call in progress on another device is no takeover the server would allow.
+          this.update({ registration: "error", takeoverRequired: api?.status === 409 && !["native_lease_contention", "native_lease_on_call"].includes(api.code ?? "") });
+          this.fail(error, false, refused && this.cachedInUse);
         }
       } finally {
         if (automatic && this.current(generation) && !this.idleForRecovery() && this.state.registration === "connecting") {
@@ -286,13 +477,50 @@ export class DispatchPhone {
     }, delay);
   }
   private schedule() {
-    this.scheduleRecovery();
+    this.scheduleRecovery(); this.syncRealtime();
     if (this.heartbeat) clearInterval(this.heartbeat); this.heartbeat = null;
     if (this.monitor) clearInterval(this.monitor); this.monitor = null;
     if (this.stopped || (!this.token && !(this.leaseId && this.state.termination))) return;
     // No JS/background keepalive: suspended iOS is reached through APNs.
     if (this.token && this.foreground && this.state.registration === "registered") this.heartbeat = setInterval(() => { void this.touch(); }, 30_000);
     if ((this.foreground || this.state.audioActive) && (this.state.call || this.state.termination)) this.monitor = setInterval(() => { void this.checkCall(); }, 2_000);
+  }
+  /** S8.5: while a call shows in the foreground, each signal on the organisation's telephony topic
+   * triggers one status read through the server, at most every 300 ms. The message itself is
+   * never read; the 2 s poll stays as the fallback. */
+  private syncRealtime() {
+    const want = Boolean(this.options.realtime && this.tuning.mobileRealtimeStatus && this.topic && this.foreground && !this.stopped
+      && (this.token || this.leaseId) && (this.state.call || this.state.termination));
+    if (want === Boolean(this.realtimeOff)) return;
+    if (!want) { this.stopRealtime(); return; }
+    this.realtimeSignals = 0; this.realtimeChecks = 0;
+    this.diag("realtime.state", { state: "subscribing" });
+    try { this.realtimeOff = this.options.realtime!(this.topic!, () => this.realtimeSignal(), state => this.diag("realtime.state", { state })); }
+    // Without a channel the poll alone keeps the call current.
+    catch { this.realtimeOff = () => {}; }
+  }
+  private stopRealtime() {
+    const off = this.realtimeOff;
+    if (!off) return;
+    this.realtimeOff = null;
+    if (this.realtimeTimer) clearTimeout(this.realtimeTimer); this.realtimeTimer = null;
+    this.diag("realtime.state", { state: "unsubscribed", signals: this.realtimeSignals, checks: this.realtimeChecks });
+    try { off(); } catch { /* Unsubscribing never affects calling. */ }
+  }
+  private realtimeSignal() {
+    if (!this.realtimeOff) return;
+    this.realtimeSignals += 1; this.scheduleRealtimeCheck();
+  }
+  private scheduleRealtimeCheck() {
+    if (this.realtimeTimer || !this.realtimeOff) return;
+    this.realtimeTimer = setTimeout(() => {
+      this.realtimeTimer = null;
+      if (!this.realtimeOff) return;
+      this.realtimeLast = this.now();
+      // A read already in flight may predate the signal: read again after it.
+      if (this.monitorBusy) { this.scheduleRealtimeCheck(); return; }
+      this.realtimeChecks += 1; void this.checkCall();
+    }, Math.max(0, this.realtimeLast + REALTIME_CHECK_MS - this.now()));
   }
   private async touch() {
     if (!this.token || this.heartbeatBusy || this.stopped) return;
@@ -588,7 +816,7 @@ export class DispatchPhone {
       if (denied && !this.pendingDial?.uncertain) {
         this.pendingDial = null;
         for (const id of this.pendingInvites.keys()) await this.native.reject(id);
-        this.pendingInvites.clear();
+        this.pendingInvites.clear(); this.prefetchedOffers.clear();
       }
       this.update({ retryTarget: this.pendingDial?.target ?? null });
       this.fail(error, !createdSession && error instanceof MobileApiError && error.status === 502);
@@ -622,6 +850,7 @@ export class DispatchPhone {
         const registration = event.state === "registered" ? "registered" : event.state === "error" ? "error" : "unregistered";
         if (registration === "registered") this.reconnectAttempts = 0;
         this.update({ registration }); this.schedule();
+        this.settleCachedLogin(registration, generation);
         if (registration === "registered") await this.touch();
       } else if (event.type === "pushTokenChanged") {
         this.refreshPushRegistration = true;
@@ -656,13 +885,19 @@ export class DispatchPhone {
         if (this.state.call || this.state.termination) { this.diag("offer.done", { call: short(id), type: event.type, outcome: "busy" }); await this.native.reject(id); return; }
         // A real SDK INVITE has a leg UUID, but no control ID until ANSWER.
         // Hold it until the HTTP result establishes the exact outgoing intent.
-        if (this.pendingDial) { this.pendingInvites.set(id, event); this.diag("offer.done", { call: short(id), type: event.type, outcome: "stored_for_dial" }); return; }
+        if (this.pendingDial) {
+          this.pendingInvites.set(id, event);
+          if (event.type === "incoming" && this.tuning.mobileParallelOffers) this.prefetchOffer(id, event, generation);
+          this.diag("offer.done", { call: short(id), type: event.type, outcome: "stored_for_dial" }); return;
+        }
         this.authorizing.add(id);
         let replayInvite = false, outcome = "stale";
         try {
           // A push wake may follow hours of suspension. Refresh the provider
           // token and prepare native signaling before forwarding CallKit answer.
-          if (!this.token || event.type === "push") await this.connect();
+          // With a usable cached JWT (S8.1) native logs in first and the refresh runs alongside.
+          if (event.type === "push" && this.tuning.mobileTokenCache && await this.connectCached()) { /* Prepared with the cached JWT. */ }
+          else if (!this.token || event.type === "push") await this.connect();
           if (!this.current(generation) || this.finished.has(id)) return;
           if (!this.token || this.state.registration === "error") { outcome = "not_ready"; await this.native.reject(id); return; }
           if (event.type === "push") {
@@ -674,7 +909,9 @@ export class DispatchPhone {
             const invited = Boolean(snapshot.calls?.some(call => call.callId?.toLowerCase() === id.toLowerCase()));
             this.diag("offer.prepare", { call: short(id), prepared, invited, ready: snapshot.ready });
             if (!prepared && !invited) {
-              await this.native.connect(this.token.token);
+              // A cached JWT that native dropped is not tried again: the refresh in flight prepares it.
+              if (this.cachedInUse) await this.connect();
+              else await this.nativeConnect(this.token.token);
               if (!this.current(generation) || this.finished.has(id)) return;
             }
             // Telnyx push metadata names no provider leg (SDK 4.2.2 reads it from the
@@ -682,7 +919,7 @@ export class DispatchPhone {
             if (!event.providerLegId) { outcome = "awaiting_invite"; replayInvite = true; return; }
           }
           const identity = event.callControlId ? { callControlId: event.callControlId } : { providerLegId: event.providerLegId };
-          const offer = await this.authorizeOffer(this.token.deviceSessionId, identity, id, generation);
+          const offer = await this.prefetchedOffer(id, generation) ?? await this.authorizeOffer(this.token.deviceSessionId, identity, id, generation);
           if (!offer || !this.current(generation) || this.finished.has(id)) return;
           const intent = this.outgoingIntent;
           this.diag("offer.authorized", { call: short(id), role: offer.role, direction: offer.direction, intent: Boolean(intent) });
@@ -731,7 +968,7 @@ export class DispatchPhone {
       } else if (event.type === "ended") {
         if (event.callId) {
           if (this.finished.has(event.callId)) return;
-          this.pendingInvites.delete(event.callId); this.rememberFinished(event.callId);
+          this.pendingInvites.delete(event.callId); this.prefetchedOffers.delete(event.callId); this.rememberFinished(event.callId);
         }
         if (event.sessionId === this.outgoingIntent?.sessionId) this.outgoingIntent = null;
         if (event.callId && this.state.call?.id === event.callId) {
@@ -772,6 +1009,26 @@ export class DispatchPhone {
     this.finished.add(id);
     if (this.finished.size > 50) this.finished.delete(this.finished.values().next().value!);
   }
+  /** S8.4: an INVITE parked during the start POST is read at once; the server's lease and
+   * ownership checks are the same, and the exact intent is still compared after the start reply. */
+  private prefetchOffer(id: string, event: VoiceEvent, generation: number) {
+    const token = this.token;
+    if (!token || this.prefetchedOffers.has(id) || !(event.callControlId || event.providerLegId)) return;
+    const identity = event.callControlId ? { callControlId: event.callControlId } : { providerLegId: event.providerLegId };
+    this.diag("offer.prefetch", { call: short(id), outcome: "started" });
+    this.prefetchedOffers.set(id, { leaseId: token.deviceSessionId, generation,
+      result: this.authorizeOffer(token.deviceSessionId, identity, id, generation).then(offer => ({ offer }), (error: unknown) => ({ error })) });
+  }
+  /** The prefetched offer of this lease and generation; null reads it again as before. */
+  private async prefetchedOffer(id: string, generation: number): Promise<VoiceOffer | null> {
+    const prefetch = this.prefetchedOffers.get(id);
+    if (!prefetch) return null;
+    this.prefetchedOffers.delete(id);
+    const result = await prefetch.result;
+    const offer = "offer" in result && prefetch.generation === generation && prefetch.leaseId === this.token?.deviceSessionId ? result.offer : null;
+    this.diag("offer.prefetch", { call: short(id), outcome: offer ? "reused" : "discarded" });
+    return offer;
+  }
   private async authorizeOffer(leaseId: string, identity: { callControlId?: string; providerLegId?: string }, id: string, generation: number) {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       if (!this.current(generation) || this.finished.has(id)) return null;
@@ -786,16 +1043,21 @@ export class DispatchPhone {
     }
     return null;
   }
-  private fail(error: unknown, preserveOutgoingRequest = false) {
+  /** `refusedCachedLogin`: native is logged in with a cached JWT whose refresh the server refused
+   * (S8.1); it is disconnected like a stale lease, even for a 409 takeover answer. */
+  private fail(error: unknown, preserveOutgoingRequest = false, refusedCachedLogin = false) {
     if (this.stopped) return;
     const message = error instanceof MobileApiError ? error.code === "native_voice_disabled"
-      ? "Telefonovanie v aplikácii ešte nie je aktivované." : error.message : "Telefonovanie sa nepodarilo pripraviť.";
+      ? "Telefonovanie v aplikácii ešte nie je aktivované." : error.code === "native_lease_on_call" ? "Linka má aktívny hovor na inom zariadení."
+        : error.message : "Telefonovanie sa nepodarilo pripraviť.";
     this.update({ error: message });
     const { status, code } = failure(error);
-    const revoke = error instanceof MobileApiError && ([401, 403, 502].includes(error.status) || ["native_lease_stale", "native_voice_disabled"].includes(error.code ?? ""));
+    const revoke = refusedCachedLogin || error instanceof MobileApiError && ([401, 403, 502].includes(error.status) || ["native_lease_stale", "native_voice_disabled"].includes(error.code ?? ""));
     this.diag("phone.fail", { status, code, revoke });
     if (revoke) {
-      this.connectionRequested = false;
+      this.connectionRequested = false; this.cachedInUse = false; this.prefetchedOffers.clear();
+      if (this.cachedLogin) this.cachedLogin.settled = true;
+      void this.wipeCachedToken("refused");
       if (this.pendingDial && this.state.dialing) this.pendingDial.uncertain = true;
       const ownedSession = this.state.call && (this.state.call.outgoing || this.state.call.connected) ? this.state.call.sessionId : this.outgoingIntent?.sessionId;
       this.generation += 1;
@@ -914,20 +1176,27 @@ export class DispatchPhone {
   async disconnect(reason = "explicit") {
     this.diag("phone.disconnect", { reason, token: Boolean(this.token), call: Boolean(this.state.call), requested: this.connectionRequested });
     this.connectionRequested = false;
+    // Queued first: the Keychain holds no JWT once a logout or account change returns.
+    const wiped = this.wipeCachedToken(reason); this.cachedInUse = false; this.prefetchedOffers.clear(); this.stopRealtime();
+    if (this.contentionTimer) clearTimeout(this.contentionTimer); this.contentionTimer = null;
     this.generation += 1; this.token = null; this.pendingDial = null; this.pendingHold = null; this.nativeMediaSync = null; this.outgoingIntent = null; this.pendingInvites.clear(); this.schedule();
     await this.native?.disconnect(reason);
+    await wiped;
     const leaseId = this.leaseId ?? await this.leases?.load();
     if (leaseId) try { await this.api.disconnect(leaseId); } catch (error) {
       this.diag("phone.disconnect_error", { reason, ...failure(error) });
-      // A superseded lease is already disconnected. Provider/network failures
-      // retain the saved lease so the user can retry revocation before logout.
-      if (!(error instanceof MobileApiError && error.status === 409)) throw error;
+      // A superseded lease is already disconnected, and so is one the server revoked while only
+      // an older credential's cleanup is still pending (the server retries that). Provider or
+      // network failures retain the saved lease so the user can retry revocation before logout.
+      if (!(error instanceof MobileApiError && (error.status === 409 || error.code === "credential_cleanup_pending"))) throw error;
     }
     await this.leases?.clear(); this.leaseId = null;
     this.update({ registration: "unregistered", call: null, holdPhase: "idle", nativeSyncPending: false, termination: null, dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false,
       pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null });
   }
   dispose() {
+    this.stopRealtime();
+    if (this.contentionTimer) clearTimeout(this.contentionTimer); this.contentionTimer = null;
     this.stopped = true; this.generation += 1; this.off?.(); this.off = null;
     if (this.heartbeat) clearInterval(this.heartbeat); if (this.monitor) clearInterval(this.monitor);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.listeners.clear();

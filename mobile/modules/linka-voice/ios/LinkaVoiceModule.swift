@@ -23,7 +23,10 @@ public final class LinkaVoiceModule: Module {
     AsyncFunction("requestMicrophone") { (promise: Promise) in
       AVAudioSession.sharedInstance().requestRecordPermission { allowed in promise.resolve(allowed) }
     }.runOnQueue(.main)
-    AsyncFunction("connect") { (token: String) in try LinkaPhone.shared.connect(token: token) }.runOnQueue(.main)
+    // Login switches (S8: cached JWT, region, trickle ICE); omitted, the login is today's.
+    AsyncFunction("connect") { (token: String, options: [String: Any]?) in
+      try LinkaPhone.shared.connect(token: token, options: LinkaPhone.ConnectOptions(options))
+    }.runOnQueue(.main)
     // The reason only names the caller in the device log; older bundles omit it.
     AsyncFunction("disconnect") { (reason: String?) in LinkaPhone.shared.disconnect(reason: reason ?? "js") }.runOnQueue(.main)
     // A JS device-log line; LinkaPhone.diag sanitizes it again and touches no phone state.

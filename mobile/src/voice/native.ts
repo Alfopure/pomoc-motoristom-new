@@ -13,7 +13,8 @@ export function nativePhone(): NativePhone | null {
   if (!module?.isAvailable()) return null;
   return {
     snapshot: () => module.snapshot(), clearPushRejection: id => module.clearPushRejection(id), requestMicrophone: () => module.requestMicrophone(),
-    connect: token => module.connect(token), disconnect: reason => module.disconnect(reason),
+    // Without options the native call is exactly today's.
+    connect: (token, options) => options ? module.connect(token, options) : module.connect(token), disconnect: reason => module.disconnect(reason),
     authorize: (callId, sessionId, controlId) => module.authorize(callId, sessionId, controlId), reject: callId => module.reject(callId),
     expectOutgoing: (controlId, sessionId, number, genericHandle = false) => module.expectOutgoing(controlId, sessionId, number, genericHandle),
     answer: callId => module.answer(callId), confirmConnected: callId => module.confirmConnected(callId), end: () => module.end(), mute: muted => module.mute(muted),

@@ -99,13 +99,16 @@ export class PresenceServiceError extends Error {
 }
 
 export class OperatorDeviceError extends Error {
+  /** A machine-readable reason the iPhone app acts on; the browser responses do not carry it. */
+  readonly code?: string;
   constructor(
     message: string,
     readonly status = 500,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { code?: string },
   ) {
     super(message, options);
     this.name = "OperatorDeviceError";
+    this.code = options?.code;
   }
 }
 

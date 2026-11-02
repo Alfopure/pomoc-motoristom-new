@@ -1,7 +1,10 @@
+import type { MobileVoiceTuning } from "../../../src/lib/mobile-api";
 import type { MobileConfig } from "../lib/config";
 import { MobileApiError, type MobileTransport } from "../lib/api";
+import { parseVoiceTuning, realtimeTopic } from "./tuning";
 
-export type VoiceToken = { token: string; expiresAt: string; deviceSessionId: string };
+/** `voiceTuning` and `realtimeTopic` come with every token (S8); a server without them leaves every switch off. */
+export type VoiceToken = { token: string; expiresAt: string; deviceSessionId: string; voiceTuning?: MobileVoiceTuning; realtimeTopic?: string | null };
 export type VoiceOffer = { sessionId: string; callControlId: string; direction: "inbound" | "outbound" | "internal"; number: string | null; role: "caller" | "callee"; displayName: string | null };
 export type VoiceOutgoing = { sessionId: string; operatorLegCallControlId: string; to: string };
 export type VoiceInternalOutgoing = VoiceOutgoing & { targetProfileId: string };
@@ -97,7 +100,7 @@ export function createVoiceApi(config: MobileConfig, profileId: string, getToken
     token: async (deviceSessionId?: string, takeover = false): Promise<VoiceToken> => {
       const body = await request("token", { deviceSessionId, takeover });
       if (!nonempty(body.token) || !uuid(body.deviceSessionId) || !nonempty(body.expiresAt) || Date.parse(body.expiresAt) <= Date.now() + 60_000 || !Number.isFinite(Date.parse(body.expiresAt))) throw invalid();
-      return body as unknown as VoiceToken;
+      return { ...body as unknown as VoiceToken, voiceTuning: parseVoiceTuning(body.voiceTuning), realtimeTopic: realtimeTopic(body.realtimeTopic) };
     },
     heartbeat: async (deviceSessionId: string, registrationState: string, nativeVoipRegistered = false) => {
       const body = await request("heartbeat", { deviceSessionId, registrationState, nativeVoipRegistered });

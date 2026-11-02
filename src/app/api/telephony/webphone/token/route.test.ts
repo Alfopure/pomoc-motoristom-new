@@ -6,6 +6,7 @@ import { OperatorDeviceError } from "@/server/telephony/operator-devices";
 const issueWebphoneToken = vi.fn();
 /** Deps without flags stand for those built outside `createTelephonyDeps`: env alone. */
 let latencyFlags: LatencyFlags | undefined;
+const refuseIfAccessLost = vi.fn();
 
 vi.mock("@/server/api-auth", () => ({
   requireDefaultMotoristActor: async () => ({ userId: "user-1", profileId: "profile-1", organizationId: "org-1", displayName: "Jana", role: "dispatcher" as const }),
@@ -14,7 +15,7 @@ vi.mock("@/server/api-auth", () => ({
 
 vi.mock("@/server/telephony/operator-devices", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/server/telephony/operator-devices")>();
-  return { ...actual, issueWebphoneToken: (...args: unknown[]) => issueWebphoneToken(...args) };
+  return { ...actual, issueWebphoneToken: (...args: unknown[]) => issueWebphoneToken(...args), refuseIfAccessLost: (...args: unknown[]) => refuseIfAccessLost(...args) };
 });
 
 vi.mock("@/server/telephony/runtime", async (importOriginal) => {
@@ -31,6 +32,16 @@ describe("POST /api/telephony/webphone/token", () => {
   beforeEach(() => {
     process.env.TELNYX_API_KEY = "KEYtest";
     issueWebphoneToken.mockReset();
+    refuseIfAccessLost.mockReset(); refuseIfAccessLost.mockResolvedValue(undefined);
+  });
+
+  it("withholds a token minted while the operator lost access, after revoking it", async () => {
+    issueWebphoneToken.mockResolvedValue({ token: "jwt", expiresAt: "2026-09-04T08:00:00.000Z", deviceSessionId: "dev-2", sipUsername: "gencred001", credentialId: "cred-1" });
+    refuseIfAccessLost.mockRejectedValue(new OperatorDeviceError("Prístup k telefónu bol zrušený.", 403, { code: "native_access_revoked" }));
+    const response = await POST(request());
+    expect(response.status).toBe(403); expect(JSON.stringify(await response.json())).not.toContain("jwt");
+    expect(refuseIfAccessLost).toHaveBeenCalledWith(expect.objectContaining({ deviceKind: "web" }), { organizationId: "org-1", profileId: "profile-1" },
+      expect.objectContaining({ credentialId: "cred-1" }));
   });
 
   afterEach(() => {

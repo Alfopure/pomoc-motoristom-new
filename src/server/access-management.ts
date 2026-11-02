@@ -12,6 +12,8 @@ import { canAssignRole, canManageTargetRole, isAppRole } from "./access-policy";
 import { type MotoristActor, resolveDefaultOrganizationId } from "./api-auth";
 import { assertRateLimit, rateLimitKey, requestIp } from "./rate-limit";
 import { MutationError } from "./motorist-mutations";
+import { readLatencyFlags } from "./telephony/latency-flags";
+import { mobileTokenCacheOpen, pendingCredentialDeletions } from "@/lib/telephony/device-liveness";
 
 /** Account removal and availability changes also alter shared live phone routing. */
 function assertOperatorAccessDeployment(): void {
@@ -157,11 +159,16 @@ export async function updateAccessUser(actor: MotoristActor, profileId: string, 
     ...(input.role !== undefined ? { role: nextRole } : {}),
   };
 
+  // Deactivating an already disabled user only repeats the phone revocation (S8.1).
+  const repeatedDeactivation = input.active === false && !profile.active && profile.access_status === "disabled";
   if (input.active !== undefined) {
     patch.active = input.active;
     patch.access_status = input.active ? nextEnabledStatus(profile) : "disabled";
-    patch.access_disabled_at = input.active ? null : new Date().toISOString();
-    patch.access_disabled_by = input.active ? null : actor.profileId;
+    // A repeated deactivation keeps who disabled the user and when.
+    if (!repeatedDeactivation) {
+      patch.access_disabled_at = input.active ? null : new Date().toISOString();
+      patch.access_disabled_by = input.active ? null : actor.profileId;
+    }
 
     if (!input.active && profile.user_id) {
       const { error } = await supabase.auth.admin.updateUserById(profile.user_id, { ban_duration: "876000h" });
@@ -190,7 +197,44 @@ export async function updateAccessUser(actor: MotoristActor, profileId: string, 
     throw new MutationError("Používateľa sa nepodarilo uložiť.", 500);
   }
 
+  // After the profile is inactive, so the phone cannot enroll a new credential in between. A
+  // repeated deactivation is the manager asking for exactly that, so it always revokes and says
+  // whether anything was taken away.
+  if (input.active === false) {
+    const phoneRevoked = await revokeDeactivatedPhone(supabase, actor.organizationId, profile.id, repeatedDeactivation);
+    if (repeatedDeactivation) return { ...data, phoneRevoked };
+  }
+
   return data;
+}
+
+/**
+ * Call-speed S8.1: the iPhone's lease is revoked and its Telnyx credential deleted, so a JWT the
+ * phone cached can no longer register. With `mobile_rotate_on_deactivation`, or fail-closed while
+ * a JWT issued for caching may still be in use (or that cannot be read). Reactivation enrolls a
+ * new credential. A repeated deactivation (`always`) is an explicit request and always revokes.
+ * Resolves whether anything was taken away.
+ */
+async function revokeDeactivatedPhone(supabase: ReturnType<typeof createSupabaseAdminClient>, organizationId: string, profileId: string, always = false) {
+  if (!always && !(await readLatencyFlags(supabase, organizationId)).mobile_rotate_on_deactivation) {
+    const phones = await supabase.from("motorist_operator_mobile_devices").select("metadata").eq("organization_id", organizationId).eq("profile_id", profileId);
+    if (!phones.error && !(phones.data ?? []).some(row => mobileTokenCacheOpen(row.metadata, new Date()))) return false;
+  }
+  return revokeOperatorPhone(organizationId, profileId, "Používateľ je deaktivovaný, ale prístup jeho iPhonu k ústredni sa nepodarilo zrušiť. Deaktiváciu zopakujte.");
+}
+
+/** Revokes the iPhone lease and deletes its credential (and any still pending) at Telnyx; a refusal
+ * is a 502 the manager can retry. Resolves whether anything was taken away. */
+async function revokeOperatorPhone(organizationId: string, profileId: string, failure: string): Promise<boolean> {
+  try {
+    const { createTelephonyDeps } = await import("@/server/telephony/runtime");
+    const { disconnectDevice } = await import("@/server/telephony/operator-devices");
+    const deps = await createTelephonyDeps({ organizationId, deviceKind: "mobile" });
+    return (await disconnectDevice({ ...deps, deviceKind: "mobile" }, { organizationId, profileId }))?.revoked === true;
+  } catch (error) {
+    console.error("iPhone credential revocation failed:", error);
+    throw new MutationError(failure, 502);
+  }
 }
 
 export type DeleteAccessUserResult = {
@@ -282,6 +326,15 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
   const keepHistory = await hasRecordedHistory(supabase, profile);
   const mode: DeleteAccessUserResult["mode"] = keepHistory ? "anonymised" : "deleted";
 
+  // The iPhone credential goes before anything irreversible, whatever the switches: the profile's
+  // cascade would orphan it at Telnyx, valid for any JWT the phone holds (S8.1). A refusal stops
+  // the removal so it can be retried.
+  const phones = await supabase.from("motorist_operator_mobile_devices").select("environment, telnyx_credential_id, metadata").eq("profile_id", profile.id);
+  if (phones.error) throw new MutationError("Telefónne prístupy používateľa sa nepodarilo načítať.", 500);
+  const { telephonyEnvironment } = await import("@/server/telephony/runtime");
+  if ((phones.data ?? []).some(row => row.environment === telephonyEnvironment() && (row.telnyx_credential_id || pendingCredentialDeletions(row.metadata).length))) {
+    await revokeOperatorPhone(actor.organizationId, profile.id, "Prístup iPhonu k ústredni sa nepodarilo zrušiť, používateľ zostáva. Výmaz zopakujte.");
+  }
   const accessSnapshot = await loadOperatorAccessSnapshot(supabase, profile);
   const audit = await supabase.from("motorist_audit_log").insert({
     organization_id: profile.organization_id,
@@ -326,7 +379,7 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
     }
   }
 
-  await revokeOperatorAccess(supabase, profile, accessSnapshot.credentialIds);
+  await revokeOperatorAccess(supabase, profile, accessSnapshot.credentialIds, accessSnapshot.phones);
 
   let authWarning: string | null = null;
   if (profile.user_id) {
@@ -495,19 +548,30 @@ function isMissingRelation(error: DatabaseLookupError, relation: string): boolea
  * irreversible change.
  */
 async function loadOperatorAccessSnapshot(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow) {
-  const devices = await supabase.from("motorist_operator_devices").select("id, telnyx_credential_id").eq("profile_id", profile.id);
-  if (devices.error) {
+  const [web, phone] = await Promise.all([
+    supabase.from("motorist_operator_devices").select("id, environment, telnyx_credential_id, metadata").eq("profile_id", profile.id),
+    supabase.from("motorist_operator_mobile_devices").select("id, environment, telnyx_credential_id, metadata").eq("profile_id", profile.id),
+  ]);
+  if (web.error || phone.error) {
     throw new MutationError("Telefónne prístupy používateľa sa nepodarilo načítať.", 500);
   }
+  // Only this deployment's own credentials are deleted at its Telnyx account: rows copied from
+  // another environment (production rows in a TEST database) never cause a deletion there.
+  // Their IDs still pending go too. The rows themselves are removed below in every environment.
+  const { telephonyEnvironment } = await import("@/server/telephony/runtime");
+  const environment = telephonyEnvironment();
+  const phones = phone.data ?? [];
+  const own = [...web.data ?? [], ...phones].filter(row => row.environment === environment);
+  const devices = [...own, ...own.flatMap(row => pendingCredentialDeletions(row.metadata).map(id => ({ telnyx_credential_id: id })))];
 
   const memberships = await supabase.from("motorist_ring_group_members").select("id").eq("profile_id", profile.id);
   if (memberships.error) {
     throw new MutationError("Skupiny zvonenia používateľa sa nepodarilo načítať.", 500);
   }
 
-  const credentialIds = (devices.data ?? []).map((row) => row.telnyx_credential_id).filter((id): id is string => Boolean(id));
+  const credentialIds = devices.map((row) => row.telnyx_credential_id).filter((id): id is string => Boolean(id));
 
-  return { credentialIds, ringGroupMembershipCount: (memberships.data ?? []).length };
+  return { credentialIds, ringGroupMembershipCount: (memberships.data ?? []).length, phones: phones.length > 0 };
 }
 
 /**
@@ -519,25 +583,40 @@ async function revokeOperatorAccess(
   supabase: ReturnType<typeof createSupabaseAdminClient>,
   profile: ProfileRow,
   credentialIds: string[],
+  mobile = false,
 ) {
 
   if (credentialIds.length > 0) {
+    // Best effort, but never without a record: a credential Telnyx did not delete is logged with its
+    // ID and audited for a manager, since its device row (the other record) goes regardless.
+    const settled = new Set<string>();
+    const recordUndeleted = async (credentialId: string, error: unknown) => {
+      settled.add(credentialId);
+      // Telnyx no longer knowing it means it is gone.
+      if ((error as { status?: unknown } | null)?.status === 404) return;
+      console.error(JSON.stringify({ level: "error", scope: "telephony", code: "credential_deletion_stuck", credentialId, removal: true,
+        message: error instanceof Error ? error.message : String(error) }));
+      const audit = await supabase.from("motorist_audit_log").insert({ organization_id: profile.organization_id, actor_profile_id: null,
+        action: "telephony.credential_deletion_stuck", entity_type: "operator_device", entity_id: profile.id, source: "telephony",
+        after_payload: { credentialId, removal: true } as unknown as Json });
+      if (audit.error) console.error(JSON.stringify({ level: "error", scope: "telephony", code: "credential_deletion_unaudited", credentialId, message: audit.error.message }));
+    };
     try {
       const { getTelnyxConfig } = await import("@/server/telephony/telnyx/env");
       const config = getTelnyxConfig();
-      if (config.configured) {
-        const { createTelnyxClient } = await import("@/server/telephony/telnyx/client");
-        const client = createTelnyxClient({ config, liveGate: { callsEnabled: true, smsEnabled: false } });
-        for (const credentialId of credentialIds) {
-          // Best effort per credential: one Telnyx already forgot must not stop
-          // the others, and the device rows go regardless.
-          await client.deleteTelephonyCredential(credentialId).catch((error: unknown) => {
-            console.error("Telnyx credential deletion during account removal failed:", error);
-          });
-        }
+      if (!config.configured) throw new Error("Telnyx is not configured");
+      const { createTelnyxClient } = await import("@/server/telephony/telnyx/client");
+      const client = createTelnyxClient({ config, liveGate: { callsEnabled: true, smsEnabled: false } });
+      for (const credentialId of credentialIds) {
+        // Best effort per credential: one Telnyx already forgot must not stop
+        // the others, and the device rows go regardless.
+        try {
+          await client.deleteTelephonyCredential(credentialId);
+          settled.add(credentialId);
+        } catch (error) { await recordUndeleted(credentialId, error); }
       }
     } catch (error) {
-      console.error("Telnyx cleanup during account removal failed:", error);
+      for (const credentialId of credentialIds) if (!settled.has(credentialId)) await recordUndeleted(credentialId, error);
     }
   }
 
@@ -545,6 +624,7 @@ async function revokeOperatorAccess(
     supabase.from("motorist_operator_devices").delete().eq("profile_id", profile.id),
     supabase.from("motorist_operator_presence").delete().eq("profile_id", profile.id),
     supabase.from("motorist_ring_group_members").delete().eq("profile_id", profile.id),
+    ...mobile ? [supabase.from("motorist_operator_mobile_devices").delete().eq("profile_id", profile.id)] : [],
   ]);
 
   for (const cleanup of cleanupResults) {

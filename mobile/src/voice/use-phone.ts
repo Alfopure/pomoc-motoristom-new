@@ -1,7 +1,7 @@
 import { useContext, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { randomUUID } from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import { MobileApiError } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 import { appVersion } from "../lib/app-version";
@@ -16,6 +16,8 @@ const idle: PhoneState = { supported: false, registration: "unregistered", takeo
   microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false, transferPending: null };
 const noSubscribe = () => () => {};
 const idleSnapshot = () => idle;
+/** The last call signal channel's removal; the next join waits for it (S8.5). */
+let realtimeRemoval: Promise<unknown> = Promise.resolve();
 
 export function useDispatchPhone(config: MobileConfig, client: SupabaseClient, userId: string, profileId: string | null, active: boolean) {
   const reporter = useContext(ErrorReporterContext);
@@ -29,11 +31,31 @@ export function useDispatchPhone(config: MobileConfig, client: SupabaseClient, u
       return data.session.access_token;
     });
     const key = "pm-voice-" + config.environment + "-" + profileId;
-    return new DispatchPhone(api, native, randomUUID, {
-      load: () => SecureStore.getItemAsync(key),
-      save: id => SecureStore.setItemAsync(key, id, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY }),
-      clear: () => SecureStore.deleteItemAsync(key),
-    }, error => reporter?.report("error", error, "voice-push"));
+    // Keychain items of this device only, readable after the first unlock so a locked phone's push wake can use them.
+    const keychain = (name: string) => ({
+      load: () => SecureStore.getItemAsync(name),
+      save: (value: string) => SecureStore.setItemAsync(name, value, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY }),
+      clear: () => SecureStore.deleteItemAsync(name),
+    });
+    return new DispatchPhone(api, native, randomUUID, keychain(key), error => reporter?.report("error", error, "voice-push"), {
+      tokens: keychain("pm-voice-jwt-" + config.environment + "-" + profileId), tuning: keychain("pm-voice-tuning-" + config.environment + "-" + profileId),
+      profileId, appBuild: appVersion().build,
+      // Only a refetch signal: the status itself is read through the server API, never from the message.
+      realtime: (topic, onSignal, onState) => {
+        let closed = false, channel: RealtimeChannel | null = null;
+        // The client hands out a leaving channel of the same topic until its removal ends;
+        // a private join also needs the user's JWT on the socket first.
+        void realtimeRemoval.then(() => client.realtime.setAuth()).catch(() => {}).then(() => {
+          if (closed) return;
+          const joined = client.channel(topic, { config: { private: true } });
+          channel = joined;
+          joined.on("broadcast", { event: "*" }, () => onSignal());
+          // A (re)join may have missed signals: read once when it succeeds.
+          joined.subscribe(status => { onState(status.toLowerCase()); if (status === "SUBSCRIBED") onSignal(); });
+        });
+        return () => { closed = true; if (channel) realtimeRemoval = client.removeChannel(channel).catch(() => "error"); };
+      },
+    });
   }, [config, client, userId, profileId, reporter]);
   // Device log: whether a cleanup below is an unmount or a replaced phone, and
   // which input replaced it. Every cleanup turns native voice off.
