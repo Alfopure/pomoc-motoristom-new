@@ -728,13 +728,16 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     const maintenance = async () => {
       if (result.outcome === "processed" || result.outcome === "ignored") await replayCorrelatedEvents(deps, event, ownedSession);
       else if (failedOwnerReplayEligible && eventClass === "control" && deps.replayCorrelated !== false) {
-        await replayReadySessionEvents(deps, ownedSession, event, true);
+        // A held run (S1.3) carries its drain's window: a failed apply there
+        // must not stretch the customer-terminal drain or the recovery past it.
+        await replayReadySessionEvents(deps, ownedSession, event, true, { deadline: deps.replayDeadline });
         // The existing retained maintenance gets one prompt recovery, after
         // queued customer hangups. Never wait five minutes for a pre-dispatch
         // DB timeout, and never invent a new media/dial command to bypass the
         // journal's accepted/unknown decision.
-        if (setupRecovery && Date.now() - ingressWall < INLINE_DRAIN_BUDGET_MS) {
-          await recoverInitialSetup(deps, setupRecovery, event.id, ingressWall + INLINE_DRAIN_BUDGET_MS);
+        const setupDeadline = Math.min(ingressWall + INLINE_DRAIN_BUDGET_MS, deps.replayDeadline ?? Number.POSITIVE_INFINITY);
+        if (setupRecovery && Date.now() < setupDeadline) {
+          await recoverInitialSetup(deps, setupRecovery, event.id, setupDeadline);
         }
       }
       if (eventClass === "control" && result.outcome === "processed") {

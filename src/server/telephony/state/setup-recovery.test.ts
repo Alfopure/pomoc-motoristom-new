@@ -127,6 +127,18 @@ describe("bounded recovery of initial call setup", () => {
     expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries).toHaveLength(1);
   });
 
+  it.each([false, true])("keeps a held run's failed apply inside its drain window, window spent=%s", async spent => {
+    const { h, call, answer, timeout } = await setup();
+    timeout();
+    // A held run (S1.3) runs its maintenance inline and carries its drain's
+    // deadline. Once that is spent, neither the customer-terminal drain nor
+    // the setup recovery may start; the durable entry waits for the next fact.
+    const result = await processTelnyxEvent({ ...h.deps, deferMaintenance: undefined, ...(spent ? { replayDeadline: Date.now() - 1 } : {}) }, answer);
+    expect(result).toMatchObject({ outcome: "failed" });
+    expect(h.telnyx.of("playbackStart")).toHaveLength(spent ? 0 : 1);
+    expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries).toHaveLength(spent ? 1 : 0);
+  });
+
   it("leaves recovery durable when retained maintenance starts after its time budget", async () => {
     const { h, call, answer, work, timeout } = await setup();
     timeout();
