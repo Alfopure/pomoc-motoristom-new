@@ -110,6 +110,27 @@ export function isSessionCallGoneError(error: unknown): error is TelnyxCommandEr
   return error instanceof TelnyxCommandError && TELNYX_CALL_GONE_CODES.has(String(error.code));
 }
 
+/**
+ * Call-speed S5, EU sessions only: a hangup or recording stop that Telnyx
+ * refused without a call-gone code is confirmed with `GET /calls/:id` in the
+ * session's region before its obligation is given up. `is_alive: false`
+ * means the leg has ended; alive, unknown (404/422) or a failed read keeps the
+ * obligation. So a wrong region's answer never closes a live leg, and the
+ * bookkeeping for a dead one does not stay open for good. A `us` session,
+ * work outside a session, a transport failure or a rate limit is never
+ * confirmed this way.
+ */
+export async function confirmEuLegEnded(telnyx: Pick<TelnyxClient, "retrieveCall"> | null, callControlId: string, error: unknown): Promise<boolean> {
+  if (sessionOwnership.getStore()?.providerRegion !== "eu" || !telnyx || !callControlId || !(error instanceof TelnyxCommandError) ||
+    error.status < 400 || error.status >= 500 || error.status === 408 || error.status === 429) return false;
+  try {
+    const status = await telnyx.retrieveCall(callControlId);
+    return status.known && status.raw?.is_alive === false;
+  } catch {
+    return false;
+  }
+}
+
 export class TelnyxLiveCallsDisabledError extends TelnyxCommandError {
   constructor() {
     super({ code: "live_calls_disabled", status: 423, message: LIVE_CALLS_DISABLED_MESSAGE });

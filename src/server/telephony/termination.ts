@@ -4,7 +4,7 @@ import { ownershipRpc, sessionOwnership } from "./ownership";
 import type { SessionOwnershipDeps } from "./session-runner";
 import { SessionLeaseLostError } from "./service-errors";
 import { commandId } from "./telnyx/command-id";
-import { isSessionCallGoneError, type TelnyxClient } from "./telnyx/client";
+import { confirmEuLegEnded, isSessionCallGoneError, type TelnyxClient } from "./telnyx/client";
 
 type TerminationLeg = { commandId: string; callControlId: string };
 
@@ -89,9 +89,10 @@ export async function reconcileTermination(deps: SessionOwnershipDeps & { telnyx
     await deps.telnyx.hangup({ callControlId: leg.callControlId,
       commandId: commandId({ sessionId, legId: leg.callControlId, step: leg.commandId, intent: "termination-compensation" }) });
   };
-  const settle = (leg: { commandId: string }, error: unknown) => {
+  const settle = async (leg: TerminationLeg, error: unknown) => {
     if (error === null) { completed.push(leg.commandId); return; }
-    if (isSessionCallGoneError(error)) completed.push(leg.commandId);
+    // In an EU session a refusal without a call-gone code is confirmed by the leg's status first (S5).
+    if (isSessionCallGoneError(error) || await confirmEuLegEnded(deps.telnyx, leg.callControlId, error)) completed.push(leg.commandId);
     else deps.logger?.({ level: "warn", scope: "termination", sessionId, code: "termination_leg_outcome_pending" });
   };
   // Under contract 2 the legs go out together: the customer's leg does not wait
@@ -102,16 +103,16 @@ export async function reconcileTermination(deps: SessionOwnershipDeps & { telnyx
   if (sessionOwnership.getStore()?.contract === 2) {
     const settled = await Promise.allSettled(outstanding.map(hangup));
     for (const [index, result] of settled.entries()) {
-      if (result.status === "fulfilled") { settle(outstanding[index], null); continue; }
+      if (result.status === "fulfilled") { await settle(outstanding[index], null); continue; }
       if (result.reason instanceof SessionLeaseLostError) throw result.reason;
-      settle(outstanding[index], result.reason);
+      await settle(outstanding[index], result.reason);
     }
   } else {
     for (const leg of outstanding) {
-      try { await hangup(leg); settle(leg, null); }
+      try { await hangup(leg); await settle(leg, null); }
       catch (error) {
         if (error instanceof SessionLeaseLostError) throw error;
-        settle(leg, error);
+        await settle(leg, error);
       }
     }
   }
