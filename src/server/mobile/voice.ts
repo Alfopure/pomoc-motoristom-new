@@ -4,7 +4,7 @@ import { canOperateTelephony, resolveAppEnvironment } from "@/lib/app-environmen
 import { isUuid } from "@/lib/telephony/uuid";
 import type { MotoristActor } from "@/server/api-auth";
 import { findInitialCall, findInitialCallByRequest, initialOperationIdentity, readInitialCallPlan } from "@/server/telephony/initial-call-operation";
-import { callColleague } from "@/server/telephony/call-actions";
+import { callColleague, type EarlyStart } from "@/server/telephony/call-actions";
 import { nativeOutboundInput } from "./voice-input";
 import { callBackRequest } from "@/server/telephony/callbacks";
 import { resolveCallbackTarget } from "@/server/callback-targets";
@@ -43,8 +43,14 @@ export async function requireNativeLease(deps: TelephonyRuntimeDeps, actor: Moto
   return device;
 }
 
-/** The command remains immutable in callColleague's existing initial-operation journal. */
-export async function startNativeInternalCall(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown) {
+export type NativeInternalStarted = { sessionId: string; operatorLegCallControlId: string; targetProfileId: string; to: string };
+export type NativeCallbackStarted = { sessionId: string; operatorLegCallControlId: string; to: string; callbackRequestId: string; linked: boolean };
+
+/**
+ * The command remains immutable in callColleague's existing initial-operation journal.
+ * `early` (call-speed S2.3) receives the same response once the own leg is dialled.
+ */
+export async function startNativeInternalCall(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown, early?: EarlyStart<NativeInternalStarted>): Promise<NativeInternalStarted> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new MutationError("Neplatný pokus o volanie.", 400);
   const body = value as Record<string, unknown>;
   await requireNativeLease(deps, actor, body.deviceSessionId);
@@ -54,15 +60,16 @@ export async function startNativeInternalCall(deps: TelephonyRuntimeDeps, actor:
     throw new MutationError("Chýba identita pokusu alebo kolegu.", 400);
   }
   const target = await requireMobileColleague(deps.admin, actor, body.targetProfileId);
-  const result = await callColleague(deps, actor, { requestId: body.requestId, targetProfileId: body.targetProfileId });
-  return { sessionId: result.sessionId, operatorLegCallControlId: result.operatorLegCallControlId,
-    targetProfileId: target.id, to: mobileColleagueName(target.display_name) };
+  const started = (result: { sessionId: string; operatorLegCallControlId: string }): NativeInternalStarted => ({ sessionId: result.sessionId,
+    operatorLegCallControlId: result.operatorLegCallControlId, targetProfileId: target.id, to: mobileColleagueName(target.display_name) });
+  const input = { requestId: body.requestId, targetProfileId: body.targetProfileId };
+  return started(early ? await callColleague(deps, actor, input, (result) => early(started(result))) : await callColleague(deps, actor, input));
 }
 
 const optionalVerification = (value: unknown) => value === undefined || typeof value === "string" && isUuid(value);
 
 /** Rings a queued caller back through the web's callback path; the request stays open until resolved. */
-export async function startNativeCallback(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown) {
+export async function startNativeCallback(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown, early?: EarlyStart<NativeCallbackStarted>): Promise<NativeCallbackStarted> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new MutationError("Neplatný pokus o spätné volanie.", 400);
   const body = value as Record<string, unknown>;
   await requireNativeLease(deps, actor, body.deviceSessionId);
@@ -93,9 +100,11 @@ export async function startNativeCallback(deps: TelephonyRuntimeDeps, actor: Mot
       }
     }
   }
-  const result = await callBackRequest(deps, toCallActor(actor), callbackRequestId, verificationId, body.requestId);
-  return { sessionId: result.call.sessionId, operatorLegCallControlId: result.call.operatorLegCallControlId, to: result.call.to,
-    callbackRequestId: result.request.id, linked: result.linked };
+  const started = (result: Awaited<ReturnType<typeof callBackRequest>>): NativeCallbackStarted => ({ sessionId: result.call.sessionId,
+    operatorLegCallControlId: result.call.operatorLegCallControlId, to: result.call.to, callbackRequestId: result.request.id, linked: result.linked });
+  return started(early
+    ? await callBackRequest(deps, toCallActor(actor), callbackRequestId, verificationId, body.requestId, (result) => early(started(result)))
+    : await callBackRequest(deps, toCallActor(actor), callbackRequestId, verificationId, body.requestId));
 }
 
 /** A call placed from a case is filed with it; the case must belong to the caller's organization. */

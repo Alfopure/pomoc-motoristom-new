@@ -60,6 +60,25 @@ const BOUND_S1 = {
   duplicateBridged: { requests: 13, leases: 0 },
 } as const;
 
+/**
+ * The starts with the S2 switches, measured on 2 Nov 2026 on dev a3b2b3f + S2.
+ * `fast` is `start_fast_path` alone; `early` adds `start_early_response`, where
+ * `toEarly` is the wave the route may answer at, `resolved` still counts the
+ * whole leased work behind it and `leaseHeld` the waves from acquisition to
+ * release. The TEST proof prefetch needs the real provider guard and is
+ * covered in `start-fast-path.test.ts`. Same request headroom as S1.
+ */
+const BOUND_S2_FLAGS = { start_fast_path: true, start_early_response: true } as const;
+const BOUND_S2 = {
+  start: {
+    // `resolved` allows the once-a-minute incident read, which the process may
+    // or may not still owe (`recoverTelephonyIncidentThrottled`).
+    outbound: { toOwnDial: 8, fast: { requests: 33, resolved: 23 }, early: { requests: 29, toEarly: 11, resolved: 17, leaseHeld: 12 } },
+    1: { toOwnDial: 8, fast: { requests: 36, resolved: 23 }, early: { requests: 33, toEarly: 11, resolved: 17, leaseHeld: 12 } },
+    2: { toOwnDial: 8, fast: { requests: 37, resolved: 23 }, early: { requests: 34, toEarly: 11, resolved: 17, leaseHeld: 12 } },
+  },
+} as const;
+
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
@@ -465,6 +484,44 @@ describe("contract 2 dependent waves", () => {
       expect(BOUND_S1.internalCalleeAnswer.toCalleeAnswered).toBeLessThan(BOUND.internalCalleeAnswer.toCalleeAnswered);
       expect(BOUND_S1.firstBridged.requests).toBeLessThan(BOUND.firstBridged.requests);
       expect(BOUND_S1.duplicateBridged.requests).toBeLessThan(BOUND.duplicateBridged.requests);
+    });
+  });
+
+  describe("with the S2 switches (start_fast_path, start_early_response)", () => {
+    type Start = "outbound" | 1 | 2;
+    async function measuredStart(kind: Start, flags: Partial<typeof BOUND_S2_FLAGS>) {
+      const h = kind === 2 ? nativeWorld() : harness();
+      if (kind === 2) h.db.seed("motorist_operator_mobile_devices", [{ organization_id: ORG, profile_id: PROFILES.o2, environment: "development",
+        sip_username: "native-colleague", device_session_id: requestId(9103), device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), ...flags };
+      let early: number | null = null;
+      // What the start routes pass while `start_early_response` is on.
+      const hook: [] | [() => void] = flags.start_early_response ? [() => { early ??= Date.now(); }] : [];
+      const run = await metered(h, () => kind === "outbound"
+        ? startOutboundCall(rateLimited(h), actor, { to: NUMBERS.customer, requestId: requestId(9101) }, ...hook)
+        : callColleague(rateLimited(h), actor, { targetProfileId: PROFILES.o2, requestId: requestId(9102) }, ...hook));
+      const lease = (table: string) => run.meter.requests.find(row => row.table === table)!.at / WAVE_MS;
+      return { run, toOwnDial: sendWave(run, "dial"), toEarly: early === null ? null : run.meter.waves(early),
+        leaseHeld: lease("motorist_session_lease_release_v2") - lease("motorist_session_lease_acquire_v2") };
+    }
+
+    it.each(["outbound", 1, 2] as const)("starts %s with the guard wave, the lean dial and an early response", async (kind) => {
+      const bound = BOUND_S2.start[kind];
+      const fast = await measuredStart(kind, { start_fast_path: true });
+      bounded(fast.run.requests, bound.fast.requests);
+      bounded(fast.toOwnDial, bound.toOwnDial);
+      bounded(fast.run.waves, bound.fast.resolved);
+      const all = await measuredStart(kind, BOUND_S2_FLAGS);
+      bounded(all.run.requests, bound.early.requests);
+      bounded(all.toOwnDial, bound.toOwnDial);
+      bounded(all.toEarly!, bound.early.toEarly);
+      bounded(all.run.waves, bound.early.resolved);
+      bounded(all.leaseHeld, bound.early.leaseHeld);
+      // Strictly below the switch-off contract.
+      const off = kind === "outbound" ? BOUND.outboundStart : BOUND.colleagueStart[kind];
+      expect(bound.toOwnDial).toBeLessThan(off.toOwnDial);
+      expect(bound.early.toEarly).toBeLessThan(bound.fast.resolved);
+      expect(bound.fast.resolved).toBeLessThan(off.resolved);
     });
   });
 

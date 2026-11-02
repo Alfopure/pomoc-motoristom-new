@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
 import { callColleague, startOutboundCall, createRateLimiter, type CallActor } from "./call-actions";
 import { initialOperationIdentity } from "./initial-call-operation";
+import { latencyFlagsOf } from "./latency-flags";
 import { createTelnyxClient } from "./telnyx/client";
 import { getTelnyxConfig } from "./telnyx/env";
 import { readPendingEffects } from "./state/continuation";
@@ -352,6 +353,10 @@ describe("hangup before the first dial", () => {
       return staged;
     });
     await expect(start(t, "outbound")).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
+    // `start_fast_path` (call-speed S2.2) has no validity read before the
+    // start's own dial: `prepare_v2`'s refusal alone proves no dispatch, so the
+    // unreadable journal is never consulted and the call ends as cancelled.
+    if (latencyFlagsOf(t.deps).start_fast_path) return expectCancelled(t, true);
     const [session] = t.h.rows("motorist_call_sessions") as SessionRow[];
     expect(t.h.telnyx.of("dial")).toHaveLength(0);
     expect(t.h.call(session.id)?.end_reason ?? null).not.toBe("cancelled_before_dial");

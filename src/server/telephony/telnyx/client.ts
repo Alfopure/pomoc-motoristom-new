@@ -6,7 +6,7 @@ import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../pr
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
 import { getTelnyxConfig, type TelnyxConfig } from "./env";
-import { checkTestProviderRequest, getTestProviderSafety, hasTestCallProvenance, resolveTestSipCredential, TestProviderSafetyError, type TestProviderContext } from "./test-safety";
+import { checkTestProviderRequest, getTestProviderSafety, hasTestCallProvenance, resolveTestSipCredential, TestProviderSafetyError, testSipUsername, type TestProviderContext } from "./test-safety";
 
 /**
  * Thin Telnyx REST client over `fetch`.
@@ -360,7 +360,19 @@ export type TelnyxClient = {
   sendMessage(params: SendMessageParams): Promise<SendMessageResult>;
   /** Escape hatch used by later stages for endpoints not wrapped above. */
   request<T = unknown>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, options?: RequestOptions): Promise<T>;
+  /**
+   * Call-speed S2 (`start_test_proof_prefetch`): proves the TEST SIP
+   * destination of this client's next dial to `to` ahead of that dial, with
+   * the same enrollment and credential checks. The proof is used once, by this
+   * client only (one request); null where no TEST guard runs. It rejects only
+   * with the boundary's refusal; an `inconclusive` check leaves the dial to
+   * prove the destination itself.
+   */
+  proveSipDestination?(to: string): Promise<SipDestinationProof> | null;
 };
+
+/** `proven`: the dial may skip its own TEST destination check; `inconclusive`: it may not. */
+export type SipDestinationProof = "proven" | "inconclusive";
 
 export type RequestOptions = {
   /** Internal identity for endpoints whose wire schema omits command_id. */
@@ -478,6 +490,46 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     }
   }
 
+  // Call-speed S2 (`start_test_proof_prefetch`): destination proofs made
+  // earlier in this same request, each consumed by the next dial to it. The
+  // client lives for one request, so this never outlasts it.
+  const prefetchedSipProofs = new Map<string, Promise<SipDestinationProof>>();
+
+  function resolveSipCredential(username: string): Promise<string> {
+    return options.testProvenanceContext ? resolveTestSipCredential(username, options.testProvenanceContext) : resolveTestSipCredential(username);
+  }
+
+  async function assertTestCredential(credentialId: string, username: string | undefined, method: string, deadline: number): Promise<void> {
+    const response = await request<unknown>("GET", `/telephony_credentials/${encodeURIComponent(credentialId)}`, {}, deadline);
+    const credential = asRecord(asRecord(response).data);
+    // Telnyx GET credentials returns resource_id="connection:<id>", not
+    // the connection_id field used in the create request.
+    if (credential.resource_id !== `connection:${configured.credentialConnectionId}` || (credential.expired === true && method !== "DELETE") ||
+      (username && credential.sip_username !== username)) throw new TestProviderSafetyError();
+  }
+
+  function proveSipDestination(to: string): Promise<SipDestinationProof> | null {
+    const safety = configured.testSafety ?? getTestProviderSafety();
+    const username = safety.restricted ? testSipUsername(to) : null;
+    if (!username) return null;
+    const deadline = now() + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS);
+    const proof = (async (): Promise<SipDestinationProof> => {
+      try {
+        await assertTestCredential(await resolveSipCredential(username), username, "POST", deadline);
+        return "proven";
+      } catch (error) {
+        // Only the boundary's own refusal is final. Anything else (a provider
+        // timeout, a 5xx) proves nothing either way: the dial checks the
+        // destination itself, exactly as without the prefetch.
+        if (error instanceof TestProviderSafetyError) throw new TelnyxCommandError({ code: error.code, status: error.status, message: error.message, commandId: null });
+        return "inconclusive";
+      }
+    })();
+    proof.catch(() => undefined);
+    prefetchedSipProofs.set(username, proof);
+    return proof;
+  }
+
   async function attempt(
     method: string,
     url: string,
@@ -574,19 +626,19 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       const credentials = new Map<string, string | undefined>();
       if (checked.credentialId) credentials.set(checked.credentialId, undefined);
       for (const username of new Set(checked.sipUsernames)) {
+        // Proven earlier in this request (S2 prefetch): used once, then gone.
+        // Only a completed positive proof replaces this check; a refusal
+        // throws as the check would, and anything inconclusive (including a
+        // check still running when it ends that way) falls through to it.
+        const prefetched = method === "POST" && path === "/calls" ? prefetchedSipProofs.get(username) : undefined;
+        if (prefetched) {
+          prefetchedSipProofs.delete(username);
+          if (await prefetched === "proven") continue;
+        }
         if (now() >= requestDeadline) throw new TestProviderSafetyError();
-        credentials.set(await (options.testProvenanceContext
-          ? resolveTestSipCredential(username, options.testProvenanceContext)
-          : resolveTestSipCredential(username)), username);
+        credentials.set(await resolveSipCredential(username), username);
       }
-      for (const [credentialId, username] of credentials) {
-        const response = await request<unknown>("GET", `/telephony_credentials/${encodeURIComponent(credentialId)}`, {}, requestDeadline);
-        const credential = asRecord(asRecord(response).data);
-        // Telnyx GET credentials returns resource_id="connection:<id>", not
-        // the connection_id field used in the create request.
-        if (credential.resource_id !== `connection:${configured.credentialConnectionId}` || (credential.expired === true && method !== "DELETE") ||
-          (username && credential.sip_username !== username)) throw new TestProviderSafetyError();
-      }
+      for (const [credentialId, username] of credentials) await assertTestCredential(credentialId, username, method, requestDeadline);
       if (checked.credentialId && method === "POST") {
         // A browser possessing the JWT can dial without our REST client. Its
         // dedicated SIP connection must therefore have provider-side PSTN off.
@@ -748,6 +800,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     config: configured,
     liveGate,
     request,
+    proveSipDestination,
 
     /**
      * A whole ring step, under one journal.

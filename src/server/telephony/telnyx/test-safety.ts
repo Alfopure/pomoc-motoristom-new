@@ -40,6 +40,11 @@ export function allowsUnlistedTestSmsRecipient(safety: TestProviderSafety | unde
     safety.smsAllowAnyRecipient === true && E164.test(destination);
 }
 
+/** The enrolled-identity part of a `sip:<user>@sip.telnyx.com` destination, as the dial check reads it. */
+export function testSipUsername(destination: string): string | null {
+  return SIP.exec(destination)?.[1] ?? null;
+}
+
 export class TestProviderSafetyError extends Error {
   readonly code = "test_provider_boundary";
   readonly status = 423;
