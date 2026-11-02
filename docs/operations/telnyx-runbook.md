@@ -105,6 +105,32 @@ For `eu` sessions every "already gone" decision (hangup, recording stop, termina
 - `headersMs` on `.eu` in these runs, next to the earlier TEST baseline on `.com` (not a paired measurement: different runs and times): `POST /calls` 206–385 ms (baseline 390–500); bridge 78–174 ms (263–384); hangup 38–86 ms (213–271); `GET /calls` 23–130 ms (230–330).
 - Still open: the gate decision; hold, consult and transfer (conferences); a recorded call (`recording.saved`, GET/DELETE, `download_urls` host); an inbound call controlled through `.eu`; a token mint through `.eu`; the `anchorsite_override` readbacks; dial → SDK invite.
 
+### S6.0 — Concurrent far-end dial and internal auto-bridge (call-speed S6)
+
+**Why.** A session frozen with `concurrent_dial.<outbound|internal>.<web|mobile>` dials the far end (customer or colleague) in the start request, right after the operator's own leg, with `link_to` the own leg; outbound and auto-bridged colleague dials carry `bridge_on_answer`, `prevent_double_bridge` and `park_after_unbridge: "self"`. What Telnyx does when the far end answers while the own leg still rings is not documented. The code is built to be safe in all three outcomes and decides only on provider evidence (a far leg's `call.bridged`, or the bridge journal), never on event order:
+
+| Outcome | What the server does |
+|---|---|
+| (A) Telnyx bridges once the own leg answers | Nothing; `talking` follows the bridged evidence. If the own answer is processed first, its explicit bridge gets a 422 "already bridged", which counts as success. |
+| (B) Nothing is bridged, both legs stay up | The own leg's answer sends `bridge(own → far, park_after_unbridge self)`; any refusal other than "already bridged" hangs up both, end reason `bridge_failed`. |
+| (C) Telnyx hangs up the far leg | The session ends, the own leg is hung up, presence is released once and the history entry is `ended` with `bridge_failed`, never `answered`. |
+
+The customer hears silence until the own leg answers (owner default), at most the frozen own-leg timeout (12 s).
+
+**How.** Synthetic accounts A and B and TEST-owned numbers only, never a real customer. Enable one switch at a time in the TEST `latency_flags` (frozen per call, so start a new call after each change), and run each spike 3 times with the voice harness (`.context/voice-harness/`):
+
+1. Far end answers first. Colleague: `call A <B email> --answer-on B --ring-seconds 0 --caller-answer-delay 4000`. Outbound: `dial A <TEST line> --expect-listener B --answer-after 0 --caller-answer-delay 4000`. The report's `s6` note says which of A/B/C happened and how long after the far end the own leg answered.
+2. Own leg never answers: `--drop-caller-after-post` (both directions). Pass: the far leg ends within about 14 s, both presences are free.
+3. Colleague on web and mobile with `internal_auto_bridge`, both answering within 200 ms: exactly one bridges, the other is hung up.
+4. An explicit bridge sent to an already auto-bridged pair (spike 1 with outcome A and the own answer processed before `call.bridged`): record the code and wording of the 422 and whether audio is disturbed. `isAlreadyBridgedRefusal` (`state/effects.ts`) accepts a 422 whose text says "already … bridg…"; adjust it to the recorded wording if it differs.
+5. What the operator hears while the far end rings, sequential versus concurrent: `--media-probe` on the caller side, plus one manual listen.
+
+**Pass criteria.** Every run passes the harness checks, including `exactlyOneBridge`, `presenceReleasedOnce`, `historyAnsweredOnlyIfTalking` and `legsAndSessionEnded`, with no open `telephony.telnyx.commands` incident.
+
+**If it fails.** Turn the switch off (frozen calls finish in their mode). Outcome C on a customer dial means concurrent outbound must not use `bridge_on_answer`: that is a reviewed code change, not a configuration change.
+
+**Result.** _Not yet run._
+
 ### S2 — Slovak TTS availability (secondary)
 
 Pre-recorded Slovak prompts in `public/telephony/` are primary and are served from `TELNYX_MEDIA_BASE_URL`. TTS (`Azure.sk-SK-ViktoriaNeural`) is used only when that variable is unset. If TTS quality or availability is unacceptable, the answer is to fix the media base URL, not to change the code path.
