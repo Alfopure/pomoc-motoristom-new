@@ -305,12 +305,22 @@ describe("TEST provider boundary", () => {
     await expect(api.createTelephonyCredential({ name: "synthetic", connectionId: "production" })).rejects.toMatchObject({ code: "test_provider_boundary" });
     expect(fetch).not.toHaveBeenCalled();
     await expect(api.mintCredentialToken("copied-production-credential")).rejects.toMatchObject({ code: "test_provider_boundary" });
-    // The SIP connection is read alongside the copied credential (S5); the token write never goes out.
+    // The SIP connection is read alongside the copied credential (S5); the token write never goes out,
+    // and the refusal is reported only once every read the guard started has settled.
     expect(String(fetch.mock.calls[0][0])).toContain("/telephony_credentials/copied-production-credential");
-    expect(fetch.mock.calls.every(([, options]) => options?.method === "GET")).toBe(true);
+    expect(fetch.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(fetch.mock.calls.every(([input, options]) => options?.method === "GET" && !String(input).endsWith("/token"))).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(fetch.mock.calls.every(([input]) => !String(input).endsWith("/token"))).toBe(true);
     const allowed = client();
     await allowed.api.mintCredentialToken("test-credential");
     expect(allowed.fetch.mock.calls.map(([, options]) => options?.method)).toEqual(["GET", "GET", "GET", "POST"]);
+  });
+  it("reports a boundary refusal ahead of a transient read failure in a parallel check (S5)", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ errors: [{ code: "unavailable" }] }), { status: 503, headers: { "content-type": "application/json" } }));
+    const api = createTelnyxClient({ config: getTelnyxConfig(ENV), liveGate: { callsEnabled: true, smsEnabled: true }, fetch });
+    await expect(api.dial({ to: "sip:test_user@sip.telnyx.com", from: FROM, commandId: "sip", linkTo: "copied-prod" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect((fetch.mock.calls as unknown as Array<[string, RequestInit]>).every(([, options]) => options.method === "GET")).toBe(true);
   });
   it("reads the credential and the SIP connection together before a token, still refusing on either (S5)", async () => {
     const pending: Array<{ url: string; release: () => void }> = [];

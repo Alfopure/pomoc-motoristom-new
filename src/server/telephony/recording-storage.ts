@@ -4,7 +4,7 @@ import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import { getSupabaseServiceEnv } from "@/lib/supabase/env";
 import type { Json } from "@/lib/supabase/database.types";
-import { record, recordingApiBaseUrl, RecordingProcessingError, type RecordingJobContext, type RecordingJobOutcome } from "./recording-jobs";
+import { fetchTelnyxRecording, record, RecordingProcessingError, type RecordingJobContext, type RecordingJobOutcome } from "./recording-jobs";
 import { inspectRecordingWav } from "./recording-audio-integrity";
 import { assertRecordingProviderAccess } from "./recording-provider-safety";
 import { newRecordingHash, updateRecordingHash, finishRecordingHash, type RecordingSha256State } from "./recording-storage-sha256";
@@ -63,7 +63,7 @@ export async function refreshRecordingSource(ctx:RecordingJobContext){
  const verified=await assertRecordingProviderAccess(ctx,'import');
  const id=ctx.recording?.provider_recording_id,key=process.env.TELNYX_API_KEY?.trim();if(!id||!key)throw new RecordingProcessingError('recording_provider_not_configured');
  let data=verified;
- if(!data){const res=await fetch(`${await recordingApiBaseUrl(ctx)}/recordings/${encodeURIComponent(id)}`,{headers:{Authorization:`Bearer ${key}`},signal:ctx.signal,cache:'no-store',redirect:'error'});
+ if(!data){const res=await fetchTelnyxRecording(ctx,id,{headers:{Authorization:`Bearer ${key}`},signal:ctx.signal,cache:'no-store',redirect:'error'});
  if(!res.ok)throw new RecordingProcessingError('recording_refresh_failed',res.status>=500||res.status===429);
  data=record(record(await res.json()).data);}
  if(data.id!==id||data.status!=='completed')throw new RecordingProcessingError('recording_not_ready',true);

@@ -17,7 +17,7 @@ import { envLatencyFlags, sessionApiRegion } from "./latency-flags";
 const ON = { api_region: "eu" };
 beforeEach(() => { vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify(ON)); });
 
-const seen = vi.hoisted(() => ({ harnesses: [] as TelephonyHarness[], eu: 0, us: 0, euSessions: new Set<string>(), inbound: 0 }));
+const seen = vi.hoisted(() => ({ harnesses: [] as TelephonyHarness[], eu: 0, us: 0, euSessions: new Set<string>(), inbound: 0, unownedReads: 0 }));
 vi.mock("@/test/telephony-harness", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/test/telephony-harness")>();
   return { ...actual, createTelephonyHarness: (...args: Parameters<typeof actual.createTelephonyHarness>) => {
@@ -36,9 +36,21 @@ afterEach(() => {
       // Telnyx created an inbound call; only sessions we create follow the flag.
       if (row.direction === "inbound") { expect(startMode.apiRegion).toBe("us"); seen.inbound += 1; }
     }
+    const legs = h.rows("motorist_call_legs");
+    // An unowned provider read (reconcile, the TEST guard) names its session
+    // only through the leg or conference it asks about. Unowned commands occur
+    // only in suites whose rows predate writer contracts, which production
+    // never has; they are not checked.
+    const unownedRead = (path: string) => {
+      const [, kind, id] = /^\/(calls|conferences)\/([^/]+)/.exec(path) ?? [];
+      const key = id ? decodeURIComponent(id) : null;
+      if (kind === "calls") return sessions.get(String(legs.find(leg => leg.telnyx_call_control_id === key)?.session_id));
+      return kind === "conferences" ? [...sessions.values()].find(row => row.conference_id === key) : undefined;
+    };
     for (const route of h.telnyx.routes) {
-      const row = route.sessionId ? sessions.get(route.sessionId) : undefined;
+      const row = route.sessionId ? sessions.get(route.sessionId) : route.method === "GET" ? unownedRead(route.path) : undefined;
       if (!row) continue;
+      if (!route.sessionId) seen.unownedReads += 1;
       expect(`${route.method} ${route.path} ${route.region}`).toBe(`${route.method} ${route.path} ${sessionApiRegion(row.metadata)}`);
       if (route.region === "eu") { seen.eu += 1; seen.euSessions.add(String(row.id)); expect(route.baseUrl).toBe("https://api.telnyx.eu/v2"); }
       else seen.us += 1;
@@ -56,6 +68,7 @@ afterAll(() => {
   // The suites below really ran sessions in .eu, command by command...
   // (45 sessions and 154 commands when written; the margin absorbs edits to those suites.)
   expect(seen.euSessions.size).toBeGreaterThan(30);
+  expect(seen.unownedReads).toBeGreaterThan(0);
   expect(seen.eu).toBeGreaterThan(100);
   // ...and inbound calls among them stayed `us`.
   expect(seen.inbound).toBeGreaterThan(20);

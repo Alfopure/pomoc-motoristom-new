@@ -125,6 +125,12 @@ describe("latency flags", () => {
         ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion, origin });
     }
     expect(freezeStartMode({ ...flags, api_region: "us" }, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
+    // Until spike S5.0 passes, production keeps `us` whatever the switch says; TEST can freeze `eu`.
+    vi.stubEnv("MOTORIST_APP_ENV", "production");
+    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("eu");
+    vi.unstubAllEnvs();
     // S7b ships its behaviour: join-with-hold is frozen when asked for, and only then; never for a colleague call.
     const joinHeld = { ...flags, hold_join_with_hold: true };
     expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });

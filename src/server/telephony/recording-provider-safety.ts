@@ -1,5 +1,5 @@
 import "server-only";
-import { record, recordingApiBaseUrl, RecordingProcessingError, type RecordingJobContext } from "./recording-jobs";
+import { fetchTelnyxRecording, record, RecordingProcessingError, type RecordingJobContext } from "./recording-jobs";
 import { getTelnyxConfig } from "./telnyx/env";
 import { getTestProviderSafety } from "./telnyx/test-safety";
 
@@ -20,7 +20,7 @@ export async function assertRecordingProviderAccess(ctx: RecordingJobContext, op
   const signal = AbortSignal.any([ctx.signal, AbortSignal.timeout(1500)]);
   // Metadata has no audio bytes. Telnyx returns the owning connection here,
   // so proof survives the shorter webhook-ledger retention window.
-  const response = await fetch(`${await recordingApiBaseUrl(ctx)}/recordings/${encodeURIComponent(recording.provider_recording_id)}`, {
+  const response = await fetchTelnyxRecording(ctx, recording.provider_recording_id, {
     headers: { Authorization: `Bearer ${config.apiKey}` }, signal, cache: "no-store", redirect: "error",
   });
   if (response.status === 404 && operation === "delete") { await response.body?.cancel(); return null; }

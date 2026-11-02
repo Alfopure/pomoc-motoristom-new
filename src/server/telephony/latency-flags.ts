@@ -256,6 +256,20 @@ function joinWithHoldAllowed(): boolean {
   catch { return false; }
 }
 
+/**
+ * S5 is implemented, but that every command of a call created through
+ * `api.telnyx.eu` works there (and that the gain passes the plan's gate) is
+ * TEST spike S5.0 (docs/operations/telnyx-runbook.md). As with S7b, until the
+ * runbook records a pass only a non-production deployment may freeze `eu`;
+ * production keeps `us` whatever its `api_region` says.
+ */
+const EU_API_PROVEN = false;
+function euApiAllowed(): boolean {
+  if (EU_API_PROVEN) return true;
+  try { return resolveAppEnvironment() !== "production"; }
+  catch { return false; }
+}
+
 /** The Telnyx API region this deployment's client really calls. */
 export function providerRegionOf(config: TelnyxConfig): "us" | "eu" {
   if (!config.configured) return "us";
@@ -285,7 +299,8 @@ export function freezeStartMode(flags: LatencyFlags, input: { direction: "inboun
     // An inbound call was created by Telnyx, in a region we have no evidence
     // for on this account, so it keeps the region the deployment really calls
     // (`us`); a separate inbound switch would need the S5.0 inbound spike.
-    apiRegion: HONOURED_START_SWITCHES.apiRegion && input.direction !== "inbound" ? flags.api_region : input.providerRegion, origin: input.origin,
+    apiRegion: HONOURED_START_SWITCHES.apiRegion && input.direction !== "inbound" && (flags.api_region === "us" || euApiAllowed())
+      ? flags.api_region : input.providerRegion, origin: input.origin,
     ...(holdJoinWithHold ? { holdJoinWithHold: true as const } : {}) };
 }
 

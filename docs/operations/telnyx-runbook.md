@@ -78,11 +78,13 @@ Time-boxed verifications that cannot be done offline. Record the outcome (date, 
 - negative check: a `.com` session must not be able to join a `.eu` conference (confirms the pinning is needed);
 - compare `headersMs` per command between `region: "us"` and `region: "eu"` lines, and the target's dial → SDK invite time;
 - check `download_urls` of an EU recording: if its host is not `recordings.telnyx.com`, add it to `TELNYX_RECORDING_DOWNLOAD_HOSTS` (otherwise the import fails `source_host_not_allowed`); never construct EU media URLs;
-- a `telnyx-http` line with `errorCode: "cloudflare_1010"` means Cloudflare refused our User-Agent before Telnyx: set the switch back to `us`.
+- a `telnyx-http` line with `errorCode: "cloudflare_1010"` (or a `recording` line with `code: "cloudflare_1010"`) means Cloudflare refused our User-Agent before Telnyx: set the switch back to `us`. The refused command is not retried and its journal entry stays open (outcome unknown, as after a transport failure), so a live EU call affected by it is settled by provider webhooks and the reconcile job, not by a re-send.
 
 **Pass criteria.** Every command of an EU session succeeds against `.eu`, and the saving is at least 100 ms per command or 300 ms on invite delivery (plan S5 gate). Otherwise keep the switch `us` and record the evidence here.
 
-**Rollback.** `api_region: "us"` affects only new sessions; sessions already frozen to `eu` finish on `.eu`. Do not roll back to a build without S5 while an EU call is live: an older build would control it through `.com`.
+**Limits until it passes.** Only a non-production deployment freezes `eu` (`EU_API_PROVEN` in `latency-flags.ts`); production keeps `us` whatever its `api_region` says until a reviewed change records the pass.
+
+**Rollback.** `api_region: "us"` affects only new sessions; sessions already frozen to `eu` finish on `.eu`. Do not roll back to a build without S5 while an EU call is live, or while recordings of EU sessions are still stored at Telnyx: an older build would control the call, and read or delete the recording, through `.com`, where a 404 reads as "already removed" and would leave the EU recording in place.
 
 **Result.** _Not yet run._
 

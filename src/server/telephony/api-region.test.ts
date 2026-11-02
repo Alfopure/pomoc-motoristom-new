@@ -13,7 +13,7 @@ import { reconcileBrowserCall } from "./call-reconciliation";
 import { reconcileWithTelnyx } from "./cron-jobs";
 import { defaultLatencyFlags, type LatencyFlags } from "./latency-flags";
 import { sessionOwnership, type Ownership } from "./ownership";
-import { recordingApiBaseUrl, RecordingProcessingError, type RecordingJobContext } from "./recording-jobs";
+import { fetchTelnyxRecording, recordingApiBaseUrl, RecordingProcessingError, type RecordingJobContext } from "./recording-jobs";
 import { refreshRecordingSource } from "./recording-storage";
 import { ownedSessionWork } from "./session-runner";
 import { readMeta, type SessionRow } from "./state/types";
@@ -411,11 +411,35 @@ describe("recording provider host", () => {
     expect(error).toMatchObject({ code: "recording_region_unavailable", retryable: true });
   });
 
-  it("fetches an EU session's recording metadata from .eu on the production path", async () => {
+  function production() {
     vi.stubEnv("TELNYX_API_KEY", "synthetic");
     vi.stubEnv("MOTORIST_APP_ENV", "production"); vi.stubEnv("VERCEL_GIT_COMMIT_REF", "main");
     vi.stubEnv("APP_BASE_URL", "https://dispecing.linkapomoci.sk");
     for (const key of ["SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"]) vi.stubEnv(key, "https://ifpaeegaesdmljfkdvcn.supabase.co");
+  }
+
+  it("reports a Cloudflare 1010 on a recording request as its own configuration error, logged", async () => {
+    production();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn(async () => json(403, { error_code: 1010, error_name: "browser_signature_banned" })));
+    const failure = await refreshRecordingSource(context({ start_mode: { apiRegion: "eu" } }).ctx).catch(error => error);
+    expect(failure).toBeInstanceOf(RecordingProcessingError);
+    expect(failure).toMatchObject({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, retryable: false });
+    vi.stubGlobal("fetch", vi.fn(async () => json(403, "error code: 1010", { "content-type": "text/plain" })));
+    await expect(fetchTelnyxRecording(context({ start_mode: { apiRegion: "eu" } }).ctx, "recording", { method: "DELETE" }))
+      .rejects.toMatchObject({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE });
+    expect(errors.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+      { scope: "recording", level: "error", code: CLOUDFLARE_SIGNATURE_BANNED_CODE, method: "GET", host: "api.telnyx.eu" },
+      { scope: "recording", level: "error", code: CLOUDFLARE_SIGNATURE_BANNED_CODE, method: "DELETE", host: "api.telnyx.eu" },
+    ]);
+    // A refusal from Telnyx itself keeps today's meaning.
+    vi.stubGlobal("fetch", vi.fn(async () => json(403, { errors: [{ code: "10010", title: "Forbidden" }] })));
+    await expect(refreshRecordingSource(context({ start_mode: { apiRegion: "eu" } }).ctx)).rejects.toMatchObject({ code: "recording_refresh_failed" });
+    expect(errors).toHaveBeenCalledTimes(2);
+  });
+
+  it("fetches an EU session's recording metadata from .eu on the production path", async () => {
+    production();
     const fetch = vi.fn(async () => json(200, { data: { id: "recording", status: "completed", download_urls: { wav: "https://recordings.telnyx.com/audio" } } }));
     vi.stubGlobal("fetch", fetch);
     await expect(refreshRecordingSource(context({ start_mode: { apiRegion: "eu" } }).ctx)).resolves.toBe("https://recordings.telnyx.com/audio");

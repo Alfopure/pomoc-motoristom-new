@@ -149,8 +149,9 @@ export function allowedConnectionIds(deps: Pick<ProcessorDeps, "config">): Set<s
  * state). No such session, or one from before S5, is `us`.
  */
 async function conferenceEventRegion(deps: ProcessorDeps, conferenceId: string, sid: string | null): Promise<"us" | "eu"> {
+  const signal = AbortSignal.timeout(1_500);
   const read = (column: "conference_id" | "id", value: string) => deps.admin.from("motorist_call_sessions").select("metadata")
-    .eq("organization_id", deps.organizationId).eq(column, value).maybeSingle();
+    .eq("organization_id", deps.organizationId).eq(column, value).abortSignal(signal).maybeSingle();
   let session = await read("conference_id", conferenceId);
   if (!session.error && !session.data && sid) session = await read("id", sid);
   if (session.error) throw new Error("conference session lookup failed");

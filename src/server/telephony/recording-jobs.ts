@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
 import { sessionApiRegion } from "./latency-flags";
+import { CLOUDFLARE_SIGNATURE_BANNED_CODE, cloudflareSignatureBanned } from "./telnyx/client";
 import { apiBaseUrlFor, getTelnyxConfig, TELNYX_DEFAULT_API_BASE_URL, TELNYX_DEFAULT_EU_API_BASE_URL } from "./telnyx/env";
 
 export type RecordingAdmin = SupabaseClient<Database>;
@@ -40,6 +41,24 @@ export async function recordingApiBaseUrl(ctx: Pick<RecordingJobContext, "admin"
     .eq("id", sessionId).abortSignal(ctx.signal).maybeSingle();
   if (session.error) throw new RecordingProcessingError("recording_region_unavailable", true);
   return apiBaseUrlFor(bases, sessionApiRegion(session.data?.metadata));
+}
+/**
+ * `GET`/`DELETE /recordings/:id` in the recording's region. A Cloudflare 1010
+ * refusal (S5) never reached Telnyx: it is our User-Agent, so it is logged as
+ * a configuration error and fails the step without a retry of its own, rather
+ * than reading as a denied, missing or unconfirmed recording.
+ */
+export async function fetchTelnyxRecording(ctx: Pick<RecordingJobContext, "admin" | "organizationId" | "recording" | "signal">, recordingId: string, init: RequestInit): Promise<Response> {
+  const base = await recordingApiBaseUrl(ctx);
+  const response = await fetch(`${base}/recordings/${encodeURIComponent(recordingId)}`, init);
+  if (response.status !== 403) return response;
+  const text = await response.clone().text().catch(() => "");
+  let body: unknown = text;
+  try { body = JSON.parse(text); } catch { /* A text body is checked as text. */ }
+  if (!cloudflareSignatureBanned(403, body)) return response;
+  await response.body?.cancel();
+  console.error(JSON.stringify({ scope: "recording", level: "error", code: CLOUDFLARE_SIGNATURE_BANNED_CODE, method: init.method ?? "GET", host: new URL(base).hostname }));
+  throw new RecordingProcessingError(CLOUDFLARE_SIGNATURE_BANNED_CODE);
 }
 export async function enqueueSavedRecording(admin: RecordingAdmin, input: {
   organizationId: string; callId: string; sessionId: string; providerRecordingId: string;
