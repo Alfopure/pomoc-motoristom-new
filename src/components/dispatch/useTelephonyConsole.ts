@@ -36,6 +36,7 @@ import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 import { type IncomingOfferPolicy, type WebphoneSnapshot } from "@/lib/telephony/telnyx-webphone";
 import { callControlRetryPolicy, retryUnstartedCallControl } from "@/lib/telephony/call-control-retry";
 import { hangupSnapshotConfirmsEnd, type HangupSnapshotScope } from "@/lib/telephony/hangup-confirmation";
+import { applyHoldConfirmation, holdConfirmation, type HoldConfirmation } from "@/lib/telephony/hold-confirmation";
 import { BrowserReconciliationGate } from "@/lib/telephony/browser-reconciliation";
 import { CoordinatedWebphone } from "@/lib/telephony/coordinated-webphone";
 import { correlateWebphoneDiagnostic, logWebphoneDiagnostic } from "@/lib/telephony/diagnostics";
@@ -160,6 +161,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const busyCommandRef = useRef<CallCommand | null>(null);
   const snapshotRequestRef = useRef(0);
   const pendingHangupRef = useRef<PendingHangup | null>(null);
+  /** A hold/unhold the server confirmed (`hold_fast_web`); overlays snapshots that predate it. */
+  const holdConfirmationRef = useRef<HoldConfirmation | null>(null);
   // Hangup's progress/error belongs to one session and must not erase a later
   // presence, media or new-call error when its delayed response arrives.
   const [hangupNotice, setHangupNotice] = useState<{ command: CallCommand; message: string } | null>(null);
@@ -447,8 +450,10 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
             ? [{ callControlId: leg.callControlId, sessionId: call.sessionId }] : []));
         incomingPolicyRef.current = { presenceRevision: own?.presenceRevision, automaticAllowed: own?.automaticOffersAllowed ?? (own?.status === "available" || own?.status === "ringing"), explicitLegs };
         webphoneRef.current?.setIncomingOfferPolicy(incomingPolicyRef.current);
-        snapshotRef.current = result.body;
-        setSnapshot(result.body);
+        const confirmed = applyHoldConfirmation(result.body, holdConfirmationRef.current, Date.now());
+        if (!confirmed.keep) holdConfirmationRef.current = null;
+        snapshotRef.current = confirmed.snapshot;
+        setSnapshot(confirmed.snapshot);
         const pendingHangup = pendingHangupRef.current;
         if (pendingHangup && hangupSnapshotConfirmsEnd(pendingHangup, result.body, snapshotRequest)) finishPendingHangup(pendingHangup);
         const currentLegIds = new Set([...result.body.calls, ...result.body.waiting].flatMap((call) => call.legs.map((leg) => leg.callControlId)));
@@ -688,7 +693,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       try {
         const execute = async (webphone = webphoneRef.current) => {
           if (busyCommandRef.current !== command) return;
-          const send = () => telephonyJson<{ error?: string; code?: string; retryAfterMs?: number; operatorLegCallControlId?: string; terminationPending?: boolean }>(
+          const send = () => telephonyJson<{ error?: string; code?: string; retryAfterMs?: number; operatorLegCallControlId?: string; terminationPending?: boolean;
+            confirmedState?: string; ignored?: string | null }>(
             `/api/telephony/calls/${encodeURIComponent(sessionId)}/${action}`,
             {
               method: "POST",
@@ -740,6 +746,17 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
               setDegraded((current) => new Set(current).add(sessionId));
             }
             throw new Error(result.body?.error ?? PHONE_ACTION_ERRORS[action]);
+          }
+          // `hold_fast_web` (call-speed S7a.1): show the confirmed state now.
+          // The refresh below may be answered by a pass that predates it.
+          const confirmation = holdConfirmation(action, sessionId, result.body, Date.now());
+          if (confirmation) {
+            holdConfirmationRef.current = confirmation;
+            const confirmed = applyHoldConfirmation(snapshotRef.current, confirmation, confirmation.at);
+            if (confirmed.keep) {
+              snapshotRef.current = confirmed.snapshot;
+              setSnapshot(confirmed.snapshot);
+            }
           }
           if (pendingHangup) {
             if (result.status === 202 || result.body?.terminationPending === true) {

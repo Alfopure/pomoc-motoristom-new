@@ -391,6 +391,8 @@ export type Command = CommandBase &
       supervisorRole?: SupervisorMode;
       /** `whisper_call_control_ids`: the only legs that hear a `whisper` supervisor. */
       whisper?: LegRef[];
+      /** Call-speed S7b: `hold: true` with `hold_audio_url` — the participant joins already held. */
+      holdOnJoin?: { media: MediaRef };
     }
   | { kind: "conference_leave"; commandId: string; leg: LegRef }
   | { kind: "conference_hold"; commandId: string; legs: LegRef[]; media: MediaRef }
@@ -668,8 +670,12 @@ export function appendJourneyEvidence(previous: unknown, entry: JourneyEvidenceE
 
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
-/** `origin` is the device that started the call; null for an inbound call. */
-export type SessionStartMode = { concurrent: boolean; autoBridge: boolean; ownLegTimeoutSecs: number; apiRegion: "us" | "eu"; origin: "web" | "mobile" | null };
+/**
+ * `origin` is the device that started the call; null for an inbound call.
+ * `holdJoinWithHold` (call-speed S7b) is present only when frozen on: the
+ * first hold joins the customer to the new conference already held.
+ */
+export type SessionStartMode = { concurrent: boolean; autoBridge: boolean; ownLegTimeoutSecs: number; apiRegion: "us" | "eu"; origin: "web" | "mobile" | null; holdJoinWithHold?: true };
 
 export type SessionMeta = {
   holdControl?: { commandId: string; held: boolean; customerControlId: string } | null;

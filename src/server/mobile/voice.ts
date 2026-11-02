@@ -12,7 +12,7 @@ import { mobileColleagueName, requireMobileColleague } from "./voice-colleagues"
 import { MutationError } from "@/server/mutation-error";
 import { getOperatorDevice } from "@/server/telephony/operator-devices";
 import { createTelephonyDeps, toCallActor, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
-import { readMeta, telnyxSipUri, type LegRow, type SessionRow } from "@/server/telephony/state/types";
+import { readMeta, telnyxSipUri, type DeviceRow, type LegRow, type SessionRow } from "@/server/telephony/state/types";
 import { isProductionLiveDeployment, nativeVoiceEnabled } from "@/lib/app-environment";
 
 export class NativeLeaseError extends MutationError { readonly code = "native_lease_stale"; }
@@ -30,9 +30,11 @@ export async function nativeVoiceDeps(actor: MotoristActor, options: { cleanup?:
   return createTelephonyDeps({ organizationId: actor.organizationId, deviceKind: "mobile" });
 }
 
-export async function requireNativeLease(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown, options: { cleanup?: boolean; heartbeat?: boolean } = {}) {
+export async function requireNativeLease(deps: TelephonyRuntimeDeps, actor: MotoristActor, value: unknown,
+  options: { cleanup?: boolean; heartbeat?: boolean; /** This actor's mobile device row, already read in this request's wave. */ known?: { device: DeviceRow | null } } = {}) {
   if (typeof value !== "string" || !isUuid(value)) throw new MutationError("Chýba relácia telefónu.", 400);
-  const device = await getOperatorDevice({ ...deps, deviceKind: "mobile" }, { organizationId: actor.organizationId, profileId: actor.profileId });
+  const device = options.known ? options.known.device
+    : await getOperatorDevice({ ...deps, deviceKind: "mobile" }, { organizationId: actor.organizationId, profileId: actor.profileId });
   const metadata = device?.metadata && typeof device.metadata === "object" && !Array.isArray(device.metadata) ? device.metadata : {};
   const retryingRevocation = options.cleanup && device?.device_session_id?.startsWith("revoked:") && metadata.native_revocation_session_id === value;
   if (!device || (device.device_session_id !== value && !retryingRevocation) || (!options.cleanup && !options.heartbeat && ["unregistered", "error"].includes(device.registration_state))) {
@@ -276,20 +278,39 @@ async function deliveredLeg(deps: TelephonyRuntimeDeps, actor: MotoristActor, si
   return delivered ? legs[0] : null;
 }
 
-/** Native hangup controls only the operator's own connected/started session. */
-export async function requireNativeSession(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessionId: string, options: { readOffer?: boolean } = {}) {
-  if (!isUuid(sessionId)) throw new MutationError("Hovor sa nenašiel.", 404);
-  const { data, error } = await deps.admin.from("motorist_call_sessions").select("*")
+/** One request's reads, issued together (call-speed S7a.2). Each keeps its own error. */
+export type NativeKnownRows = {
+  /** `nativeSessionQuery`: organisation, environment and id. */
+  session: { data: SessionRow | null; error: unknown };
+  device: DeviceRow | null;
+  /** Every leg of the session in the actor's organisation. */
+  legs: { data: LegRow[] | null; error: unknown };
+};
+
+/** The exact session read `requireNativeSession` makes. */
+export function nativeSessionQuery(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessionId: string) {
+  return deps.admin.from("motorist_call_sessions").select("*")
     .eq("organization_id", actor.organizationId).contains("metadata", { environment: deps.environment }).eq("id", sessionId).maybeSingle();
+}
+
+/** Native hangup controls only the operator's own connected/started session. */
+export async function requireNativeSession(deps: TelephonyRuntimeDeps, actor: MotoristActor, sessionId: string, options: { readOffer?: boolean; known?: NativeKnownRows } = {}) {
+  if (!isUuid(sessionId)) throw new MutationError("Hovor sa nenašiel.", 404);
+  const known = options.known;
+  const { data, error } = known ? known.session : await nativeSessionQuery(deps, actor, sessionId);
   if (error) throw new MutationError("Hovor sa nepodarilo overiť.", 503);
   if (!data) throw new MutationError("Hovor nepatrí vášmu telefónu.", 403);
   // Profile ownership alone also matches this operator's browser. Always
   // resolve the mobile endpoint, including for the caller of an outbound call.
-  const device = await getOperatorDevice({ ...deps, deviceKind: "mobile" }, { organizationId: actor.organizationId, profileId: actor.profileId });
+  const device = known ? known.device : await getOperatorDevice({ ...deps, deviceKind: "mobile" }, { organizationId: actor.organizationId, profileId: actor.profileId });
   if (!device?.sip_username) throw new MutationError("Hovor nepatrí vášmu telefónu.", 403);
-  const { data: legs, error: legError } = await deps.admin.from("motorist_call_legs").select("*")
-    .eq("organization_id", actor.organizationId).eq("session_id", data.id).eq("profile_id", actor.profileId)
-    .eq("role", "operator").eq("to_number", telnyxSipUri(device.sip_username));
+  const sip = telnyxSipUri(device.sip_username);
+  const { data: legs, error: legError } = known
+    ? { data: known.legs.data?.filter(leg => leg.organization_id === actor.organizationId && leg.session_id === data.id &&
+      leg.profile_id === actor.profileId && leg.role === "operator" && leg.to_number === sip) ?? null, error: known.legs.error }
+    : await deps.admin.from("motorist_call_legs").select("*")
+      .eq("organization_id", actor.organizationId).eq("session_id", data.id).eq("profile_id", actor.profileId)
+      .eq("role", "operator").eq("to_number", sip);
   if (legError) throw new MutationError("Účastníka hovoru sa nepodarilo overiť.", 503);
   if (!legs?.length) throw new MutationError("Hovor nepatrí vášmu telefónu.", 403);
 

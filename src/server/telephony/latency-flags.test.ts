@@ -113,6 +113,13 @@ describe("latency flags", () => {
       expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" })).toEqual({ concurrent: false, autoBridge: false,
         ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin });
     }
+    // S7b ships its behaviour: join-with-hold is frozen when asked for, and only then; never for a colleague call.
+    const joinHeld = { ...flags, hold_join_with_hold: true };
+    expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
+    expect(freezeStartMode(joinHeld, { direction: "outbound", origin: "mobile", providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
+    expect(freezeStartMode(joinHeld, { direction: "internal", origin: "web", providerRegion: "us" })).not.toHaveProperty("holdJoinWithHold");
+    expect(envLatencyFlags({ TELEPHONY_LATENCY_FLAGS: JSON.stringify({ hold_lean_context: true, hold_mobile_dedupe: true, hold_join_with_hold: "yes" }) }))
+      .toMatchObject({ hold_lean_context: true, hold_mobile_dedupe: true, hold_join_with_hold: false });
     expect(providerRegionOf(getTelnyxConfig({ ...FAKE_TELNYX_ENV, TELNYX_API_BASE_URL: "https://api.telnyx.eu/v2" }))).toBe("eu");
     expect(providerRegionOf(getTelnyxConfig({ ...FAKE_TELNYX_ENV, TELNYX_API_BASE_URL: "https://api.telnyx.com/v2" }))).toBe("us");
     expect(providerRegionOf(getTelnyxConfig({}))).toBe("us");

@@ -54,6 +54,18 @@ Time-boxed verifications that cannot be done offline. Record the outcome (date, 
 
 **Latest recorded attempt (2026-10-06).** The “Nahrávanie overenie pripravenosti” workspace recorded bidirectional audio followed by a hold error after 22.4 s with recording disabled, alongside database connection timeouts. This is evidence about that TEST attempt, not a new live test or proof of a general/production failure. Hold/unhold, transfer, termination and recording still need a successful run on the final TEST candidate.
 
+### S7.0 — Join with hold on the first hold (call-speed S7b)
+
+**Why.** With `hold_join_with_hold` frozen into a session, its first hold sends `conference_create` on the operator leg and then `conference_join` for the customer with `hold: true` and `hold_audio_url` (the MOH file), instead of a separate `conference_hold`: two provider commands instead of three. Telnyx documents `hold_audio_url` together with `start_conference_on_create: false`; our conference starts on create, so the music on join is not established by the documentation.
+
+**How.** Only after this spike passes, set `hold_join_with_hold` in the TEST `latency_flags` and start a **new** call (the switch is frozen at creation). Hold from the web console, then unhold, then hold again. Repeat once with `start_conference_on_create` as the code sends it today; record the result here.
+
+**Pass criteria.** On the first hold the customer hears the MOH and not the operator, the operator stays connected (`ended_at is null` on both legs), `conference_unhold` restores two-way audio, and the later hold uses the ordinary `conference_hold`.
+
+**If it fails.** Leave the switch off (default). The fallback in the plan — `conference_join` and `conference_hold` prepared as one sequential journal batch with `predecessor_failed` for an unsent member — is not implemented.
+
+**Result.** _Not yet run._
+
 ### S2 — Slovak TTS availability (secondary)
 
 Pre-recorded Slovak prompts in `public/telephony/` are primary and are served from `TELNYX_MEDIA_BASE_URL`. TTS (`Azure.sk-SK-ViktoriaNeural`) is used only when that variable is unset. If TTS quality or availability is unacceptable, the answer is to fix the media base URL, not to change the code path.

@@ -134,3 +134,49 @@ describe("recorded TEST control provenance cost", () => {
     expect(proofCount()).toBe(5);
   });
 });
+
+describe("TEST self-created conference proof (call-speed S7a.3, test_conference_self_proof)", () => {
+  function world(selfProof: boolean) {
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    h.db.insert("motorist_telnyx_webhook_events", { event_id: "origin", organization_id: ORG,
+      call_control_id: "owned-call", event_type: "call.initiated", connection_id: "app-test" });
+    const sent: Array<{ method: string; path: string }> = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      const path = new URL(String(input)).pathname.replace(/^\/v2/, "");
+      sent.push({ method: options?.method ?? "GET", path });
+      const data = path === "/conferences" ? { id: "conf-own", name: "sess-x" } : options?.method === "GET" ? { connection_id: "app-test" } : { result: "ok" };
+      return new Response(JSON.stringify({ data }), { status: 200 });
+    });
+    const client = createTelnyxClient({ config: getTelnyxConfig(env), liveGate: { callsEnabled: true, smsEnabled: false },
+      fetch, testProvenanceContext: { admin: h.admin, organizationId: ORG }, testConferenceSelfProof: selfProof });
+    const owner = (): Ownership => ({ admin: h.admin, organizationId: ORG, sessionId: "owned-session", contract: 2,
+      token: "test-owner", generation: 1, deadline: Date.now() + 24_000, acquiredAt: Date.now() });
+    const create = () => client.request("POST", "/conferences", { body: { call_control_id: "owned-call", name: "sess-x" }, skipJournal: true });
+    const holdIn = (conference: string) => client.request("POST", `/conferences/${conference}/actions/hold`, { body: { call_control_ids: ["owned-call"] }, skipJournal: true });
+    const lookups = () => sent.filter(row => row.method === "GET" && row.path.startsWith("/conferences/")).map(row => row.path);
+    return { owner, create, holdIn, lookups };
+  }
+
+  it("skips the lookup of a conference this client just created under the same ownership, never of another", async () => {
+    const w = world(true);
+    await sessionOwnership.run(w.owner(), async () => {
+      await w.create();
+      await w.holdIn("conf-own");
+      expect(w.lookups()).toEqual([]);
+      await w.holdIn("conf-foreign");
+      expect(w.lookups()).toEqual(["/conferences/conf-foreign"]);
+    });
+    // A later ownership proves it again.
+    await sessionOwnership.run(w.owner(), () => w.holdIn("conf-own"));
+    expect(w.lookups()).toEqual(["/conferences/conf-foreign", "/conferences/conf-own"]);
+  });
+
+  it("looks every conference up while the switch is off", async () => {
+    const w = world(false);
+    await sessionOwnership.run(w.owner(), async () => {
+      await w.create();
+      await w.holdIn("conf-own");
+    });
+    expect(w.lookups()).toEqual(["/conferences/conf-own"]);
+  });
+});

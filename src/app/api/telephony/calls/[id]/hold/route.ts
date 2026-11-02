@@ -6,6 +6,8 @@ export const runtime = "nodejs";
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   return handleCallActionRoute(request, context, {
     fallback: "Podržanie hovoru zlyhalo.",
-    run: ({ deps, actor, sessionId }) => holdCall(deps, actor, sessionId),
+    // `hold_fast_web` (call-speed S7a.5): the named event's last command may answer early.
+    confirmControl: "hold",
+    run: ({ deps, actor, sessionId, eventId }) => eventId ? holdCall(deps, actor, sessionId, { id: eventId }) : holdCall(deps, actor, sessionId),
   });
 }

@@ -5,6 +5,8 @@ import { completeAnnouncedAction } from "@/test/complete-call-announcements";
 import { delayDatabase, WAVE_MS, type DatabaseDelay } from "@/test/delay-database";
 import { changeNativeHold } from "@/server/mobile/voice-hold";
 import { blindTransfer, callColleague, createRateLimiter, hangupCall, holdCall, startOutboundCall, unholdCall } from "../call-actions";
+import { defaultLatencyFlags, type LatencyFlags } from "../latency-flags";
+import { recoverSessionContactChecks } from "../session-runner";
 import type { TelephonyRuntimeDeps } from "../runtime";
 import { defaultLatencyFlags } from "../latency-flags";
 import { readPendingEffects } from "./continuation";
@@ -29,6 +31,14 @@ const BOUND = {
   webHoldLater: { requests: 28, waves: 20 },
   nativeHoldFirst: { requests: 69, waves: 65 },
   nativeHoldLater: { requests: 57, waves: 49 },
+  // Call-speed S7 switches on (2 Nov 2026): the lean hold context plus
+  // join-with-hold on the web, and the phone's single read wave plus the lean
+  // context on the phone. The early web answer is bounded in the hold route's
+  // fast-web test, where the response exists.
+  webHoldFirstS7: { requests: 30, waves: 26 },
+  webHoldLaterS7: { requests: 26, waves: 19 },
+  nativeHoldFirstS7: { requests: 56, waves: 42 },
+  nativeHoldLaterS7: { requests: 42, waves: 29 },
 } as const;
 
 /**
@@ -471,6 +481,62 @@ describe("contract 2 dependent waves", () => {
     bounded(first.waves, BOUND.webHoldFirst.waves);
     bounded(later.requests, BOUND.webHoldLater.requests);
     bounded(later.waves, BOUND.webHoldLater.waves);
+  });
+
+  /** The S7 switches, set before the call so a frozen one (join-with-hold) applies. */
+  const s7 = (h: TelephonyHarness, flags: Partial<LatencyFlags>) => { h.deps.latencyFlags = { ...defaultLatencyFlags(), ...flags }; return h; };
+  /** As the control routes do after every action: retire the contact check a promotion leaves behind. */
+  const settle = (h: TelephonyHarness, sessionId: string) => recoverSessionContactChecks(h.deps, sessionId);
+
+  it("holds from the web console with the S7 switches: lean context and join-with-hold", async () => {
+    const h = s7(harness(), { hold_lean_context: true, hold_join_with_hold: true });
+    const call = await talking(h);
+    const first = await metered(h, () => holdCall(h.deps, actor, call.sessionId));
+    expect(h.session(call.sessionId).state).toBe("held");
+    expect(first.sent.map(send => send.method)).toEqual(["createConference", "conference:join"]);
+    await settle(h, call.sessionId);
+    await unholdCall(h.deps, actor, call.sessionId);
+    await settle(h, call.sessionId);
+    const later = await metered(h, () => holdCall(h.deps, actor, call.sessionId));
+    expect(h.session(call.sessionId).state).toBe("held");
+    expect(later.sent.map(send => send.method)).toEqual(["conference:hold"]);
+    bounded(first.requests, BOUND.webHoldFirstS7.requests);
+    bounded(first.waves, BOUND.webHoldFirstS7.waves);
+    bounded(later.requests, BOUND.webHoldLaterS7.requests);
+    bounded(later.waves, BOUND.webHoldLaterS7.waves);
+    // Lower than with the switches off, not merely within budget.
+    expect(first.waves).toBeLessThan(BOUND.webHoldFirst.waves - 4);
+    expect(later.waves).toBeLessThan(BOUND.webHoldLater.waves);
+  });
+
+  it("holds from the phone with the S7 switches: one read wave and the lean context", async () => {
+    const h = s7(nativeWorld(), { hold_lean_context: true, hold_mobile_dedupe: true });
+    const call = await talking(h);
+    const control = String(h.legFor(call.sessionId, actor.profileId)!.telnyx_call_control_id);
+    h.telnyx.physical.answered(control);
+    const lease = requestId(9204);
+    const web = h.rows("motorist_operator_devices").find(row => row.profile_id === actor.profileId)!;
+    h.db.seed("motorist_operator_mobile_devices", [{ ...web, sip_username: "native-hold", device_session_id: lease, registration_state: "registered", metadata: {} }]);
+    h.db.update("motorist_call_legs", { to_number: "sip:native-hold@sip.telnyx.com" }, row => row.telnyx_call_control_id === control);
+    const mobile = { ...h.deps, deviceKind: "mobile" } as TelephonyRuntimeDeps;
+    const phone = { userId: actor.profileId, profileId: actor.profileId, organizationId: ORG, displayName: "Test", role: "dispatcher" as const };
+    const body = (n: number, held: boolean) => ({ deviceSessionId: lease, requestId: requestId(n), callControlId: control, held,
+      expectedVersion: Number(h.session(call.sessionId).version) });
+    const first = await metered(h, () => changeNativeHold(mobile, phone, call.sessionId, body(9205, true)));
+    expect(first.value).toMatchObject({ operation: { outcome: "accepted", held: true }, media: { state: "held", canHold: true } });
+    // The reply carries the version the phone sends next.
+    expect((first.value as { media: { version: number } }).media.version).toBe(Number(h.session(call.sessionId).version));
+    await settle(h, call.sessionId);
+    await changeNativeHold(mobile, phone, call.sessionId, body(9206, false));
+    await settle(h, call.sessionId);
+    const later = await metered(h, () => changeNativeHold(mobile, phone, call.sessionId, body(9207, true)));
+    expect(later.value).toMatchObject({ operation: { outcome: "accepted", held: true } });
+    bounded(first.requests, BOUND.nativeHoldFirstS7.requests);
+    bounded(first.waves, BOUND.nativeHoldFirstS7.waves);
+    bounded(later.requests, BOUND.nativeHoldLaterS7.requests);
+    bounded(later.waves, BOUND.nativeHoldLaterS7.waves);
+    expect(first.waves).toBeLessThan(BOUND.nativeHoldFirst.waves - 20);
+    expect(later.waves).toBeLessThan(BOUND.nativeHoldLater.waves - 15);
   });
 
   it("holds from the phone, first with the conference promotion and later without", async () => {

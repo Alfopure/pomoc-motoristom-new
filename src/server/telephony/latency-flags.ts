@@ -34,6 +34,8 @@ const BOOLEAN_KEYS = [
   "internal_lean_path", "bridged_observation_fast", "claim_holding_drain", "fresh_after_write",
   "start_fast_path", "start_test_proof_prefetch", "start_early_response", "own_leg_request_header",
   "internal_auto_bridge", "hold_fast_web", "hold_join_with_hold", "test_conference_self_proof",
+  // S7a.4 (lean routing context for hold/unhold) and S7a.2 (one read wave for the phone's hold).
+  "hold_lean_context", "hold_mobile_dedupe",
 ] as const;
 const CLIENT_BOOLEAN_KEYS = ["webEarlyAccept", "webPrefetchIce", "targetLocalFirst", "mobileTokenCache", "mobileTrickleIce",
   "mobileRealtimeStatus", "mobileEarlyAccept", "mobileParallelOffers"] as const;
@@ -228,11 +230,12 @@ export function concurrentDialFor(flags: LatencyFlags, direction: "outbound" | "
  * The start-mode switches this build implements. A frozen value is a promise
  * for the rest of the call, so a switch is frozen only once the stage that
  * ships its behaviour flips it here (S6: concurrent dial with its own-leg
- * timeout, internal auto-bridge; S5: API region). Until then a session records
+ * timeout, internal auto-bridge; S5: API region; S7b, shipped: join-with-hold
+ * on the first hold). Until then a session records
  * what it really does, whatever the flags ask, and no later build can mistake
  * an earlier session for one that ran the optimisation.
  */
-const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: false } as const;
+const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: false, holdJoinWithHold: true } as const;
 
 /** The Telnyx API region this deployment's client really calls. */
 export function providerRegionOf(config: TelnyxConfig): "us" | "eu" {
@@ -245,9 +248,13 @@ export function providerRegionOf(config: TelnyxConfig): "us" | "eu" {
 export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null; providerRegion: "us" | "eu" }): SessionStartMode {
   const concurrent = HONOURED_START_SWITCHES.concurrent && input.direction !== "inbound" && input.origin !== null &&
     concurrentDialFor(flags, input.direction, input.origin);
+  // S7b: the first hold joins the customer already held. Present only when on,
+  // so a session started with the switch off records exactly what it did before.
+  const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold;
   return { concurrent, autoBridge: HONOURED_START_SWITCHES.autoBridge && input.direction === "internal" && flags.internal_auto_bridge,
     ownLegTimeoutSecs: concurrent ? flags.own_leg_timeout_secs_concurrent : SEQUENTIAL_OWN_LEG_TIMEOUT_SECS,
-    apiRegion: HONOURED_START_SWITCHES.apiRegion ? flags.api_region : input.providerRegion, origin: input.origin };
+    apiRegion: HONOURED_START_SWITCHES.apiRegion ? flags.api_region : input.providerRegion, origin: input.origin,
+    ...(holdJoinWithHold ? { holdJoinWithHold: true as const } : {}) };
 }
 
 export function webCallTuning(flags: LatencyFlags): WebCallTuning {
