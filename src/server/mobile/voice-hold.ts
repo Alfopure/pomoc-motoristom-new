@@ -348,7 +348,7 @@ export async function changeNativeHold(deps: TelephonyRuntimeDeps, actor: Motori
         }
         if (!receipt.rejected && authority && receipt.customerControlId === authority.customer.telnyx_call_control_id && session.version === input.expectedVersion && media.canHold) {
             await (input.held ? holdCall : unholdCall)(deps, actor, sessionId, { id: eventId, nativeHold: { ...identity, customerControlId: receipt.customerControlId } },
-                known ? { session, legs: knownLegs(known) ?? [] } : undefined);
+                known ? { session: known.session.data ?? session, legs: knownLegs(known) ?? [] } : undefined);
         }
         if (!dedupe)
             return response(deps, actor, sessionId, input, receipt);

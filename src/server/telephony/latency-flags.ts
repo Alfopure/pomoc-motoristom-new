@@ -2,6 +2,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { resolveAppEnvironment } from "@/lib/app-environment";
 import type { Database } from "@/lib/supabase/database.types";
 import type { MobileVoiceTuning } from "@/lib/mobile-api";
 import type { WebCallTuning } from "@/lib/telephony/active-calls-model";
@@ -230,12 +231,27 @@ export function concurrentDialFor(flags: LatencyFlags, direction: "outbound" | "
  * The start-mode switches this build implements. A frozen value is a promise
  * for the rest of the call, so a switch is frozen only once the stage that
  * ships its behaviour flips it here (S6: concurrent dial with its own-leg
- * timeout, internal auto-bridge; S5: API region; S7b, shipped: join-with-hold
- * on the first hold). Until then a session records
+ * timeout, internal auto-bridge; S5: API region; S7b: join-with-hold on the
+ * first hold, see `joinWithHoldAllowed`). Until then a session records
  * what it really does, whatever the flags ask, and no later build can mistake
  * an earlier session for one that ran the optimisation.
  */
 const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: false, holdJoinWithHold: true } as const;
+
+/**
+ * S7b is implemented, but whether Telnyx plays the hold music to a participant
+ * joining held into a conference that started on create is TEST spike S7.0
+ * (docs/operations/telnyx-runbook.md). Until the runbook records a pass, only
+ * a non-production deployment may freeze it: the spike runs on TEST with the
+ * switch alone, while production cannot reach it without a reviewed change
+ * here. An unreadable environment counts as production.
+ */
+const JOIN_WITH_HOLD_PROVEN = false;
+function joinWithHoldAllowed(): boolean {
+  if (JOIN_WITH_HOLD_PROVEN) return true;
+  try { return resolveAppEnvironment() !== "production"; }
+  catch { return false; }
+}
 
 /** The Telnyx API region this deployment's client really calls. */
 export function providerRegionOf(config: TelnyxConfig): "us" | "eu" {
@@ -250,7 +266,7 @@ export function freezeStartMode(flags: LatencyFlags, input: { direction: "inboun
     concurrentDialFor(flags, input.direction, input.origin);
   // S7b: the first hold joins the customer already held. Present only when on,
   // so a session started with the switch off records exactly what it did before.
-  const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold;
+  const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold && joinWithHoldAllowed();
   return { concurrent, autoBridge: HONOURED_START_SWITCHES.autoBridge && input.direction === "internal" && flags.internal_auto_bridge,
     ownLegTimeoutSecs: concurrent ? flags.own_leg_timeout_secs_concurrent : SEQUENTIAL_OWN_LEG_TIMEOUT_SECS,
     apiRegion: HONOURED_START_SWITCHES.apiRegion ? flags.api_region : input.providerRegion, origin: input.origin,

@@ -64,6 +64,8 @@ Time-boxed verifications that cannot be done offline. Record the outcome (date, 
 
 **If it fails.** Leave the switch off (default). The fallback in the plan — `conference_join` and `conference_hold` prepared as one sequential journal batch with `predecessor_failed` for an unsent member — is not implemented.
 
+**Limits until it passes.** Only a non-production deployment freezes the switch (`JOIN_WITH_HOLD_PROVEN` in `latency-flags.ts`); production needs a reviewed change recording the pass. The value is frozen per call: switching it off protects only new calls, so a failing spike call is ended rather than waited out. Do not roll TEST back to a build without S7 while such a call has an unsent held join: an older build would send that join without the hold.
+
 **Result.** _Not yet run._
 
 ### S2 — Slovak TTS availability (secondary)

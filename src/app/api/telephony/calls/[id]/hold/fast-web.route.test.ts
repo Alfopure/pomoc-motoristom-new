@@ -16,9 +16,12 @@ import { TelnyxCommandError } from "@/server/telephony/telnyx/client";
  */
 
 let h: TelephonyHarness;
-const deferred = vi.hoisted(() => ({ after: [] as Array<() => Promise<unknown>> }));
+const deferred = vi.hoisted(() => ({ after: [] as Array<() => Promise<unknown>>, unavailable: false }));
 vi.mock("next/server", async importOriginal => ({
-  ...await importOriginal<typeof import("next/server")>(), after: (task: () => Promise<unknown>) => { deferred.after.push(task); },
+  ...await importOriginal<typeof import("next/server")>(), after: (task: () => Promise<unknown>) => {
+    if (deferred.unavailable) throw new Error("after() unavailable");
+    deferred.after.push(task);
+  },
 }));
 vi.mock("@/server/api-auth", () => ({
   requireDefaultMotoristActor: async () => ({ userId: "user-1", profileId: PROFILES.o1, organizationId: ORG, displayName: "Jana", role: "dispatcher" as const }),
@@ -39,6 +42,7 @@ beforeEach(() => {
   vi.stubEnv("TELNYX_API_KEY", "KEYtest");
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
   deferred.after.length = 0;
+  deferred.unavailable = false;
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 
@@ -125,6 +129,16 @@ describe("hold_fast_web", () => {
     expect(h.telnyx.of("conference:join").at(-1)!.params).toMatchObject({ hold: true });
     // 30 waves to the answer with every switch off (contract-two-command-cost).
     expect(first.respondedAt).toBeLessThanOrEqual(17);
+  });
+
+  it("on: without after() nothing would keep the tail alive, so it answers after the whole run", async () => {
+    const sessionId = await talking(true);
+    deferred.unavailable = true;
+    const first = await timed(sessionId, hold, "hold");
+    expect(first.result.status).toBe(200);
+    expect(first.body).toMatchObject({ state: "held", confirmedState: "held" });
+    expect(first.holdEntryAtResponse).toBe(false);
+    expect(h.callEvents(sessionId).some(row => row.event_type === "app.hold" && row.handled_status === "processed")).toBe(true);
   });
 
   it("on: a refused hold is answered as before, with no early answer", async () => {

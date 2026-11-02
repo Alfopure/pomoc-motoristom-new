@@ -130,19 +130,24 @@ export async function handleCallActionRoute<P extends CallActionRouteParams = Ca
           answerEarly = settled => resolve({ early: settled });
           work.then(done => resolve({ done }), reject);
         });
+        let scheduled = false;
         if ("early" in first) {
           try {
             // The tail's own maintenance follows it, as it follows a full run.
             after(withBackgroundRequestMetrics(async () => {
               let completed: unknown;
-              try { completed = await work; } catch { return; }
+              // The operator already sees the hold; the staged entry stays owed for cron or the next event.
+              try { completed = await work; } catch { reportDeferred("hold_tail_failed"); return; }
               await maintenance(completed)?.();
             }));
-          } catch { reportDeferred(); }
-          const { state, commands } = first.early;
-          return Response.json({ ok: true, sessionId: params.id, state, commands, ignored: null, confirmedState: state });
+            scheduled = true;
+          } catch { /* Nothing would keep the tail alive: answer after it, as before. */ }
+          if (scheduled) {
+            const { state, commands } = first.early;
+            return Response.json({ ok: true, sessionId: params.id, state, commands, ignored: null, confirmedState: state });
+          }
         }
-        result = first.done;
+        result = "done" in first ? first.done : await work;
       } else {
         result = await options.run(input);
       }

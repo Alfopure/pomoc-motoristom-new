@@ -8,7 +8,6 @@ import { blindTransfer, callColleague, createRateLimiter, hangupCall, holdCall, 
 import { defaultLatencyFlags, type LatencyFlags } from "../latency-flags";
 import { recoverSessionContactChecks } from "../session-runner";
 import type { TelephonyRuntimeDeps } from "../runtime";
-import { defaultLatencyFlags } from "../latency-flags";
 import { readPendingEffects } from "./continuation";
 import { commandKey, readMeta } from "./types";
 import type { SessionRow } from "./types";
