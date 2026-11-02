@@ -490,7 +490,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       }
       });
     },
-    async retrieveCall(callControlId: string, options?: { region?: TelnyxApiRegion }) {
+    async retrieveCall(callControlId: string, options?: { region?: TelnyxApiRegion; timeoutMs?: number }) {
       route("GET", `/calls/${encodeURIComponent(callControlId)}`, options?.region);
       record("retrieveCall", { callControlId });
       const verdict = callStatuses.get(callControlId);

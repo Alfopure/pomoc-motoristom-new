@@ -21,7 +21,8 @@ import { effectsDeps, ownedSessionWork } from "./session-runner";
 import { cancelRevokedOffers } from "./state/cancelled-offers";
 import { reconcileTermination } from "./termination";
 import { readMeta, type SessionRow } from "./state/types";
-import { CLOUDFLARE_SIGNATURE_BANNED_CODE, createTelnyxClient, isSessionCallGoneError, TelnyxCommandError, type TelnyxRequestLog } from "./telnyx/client";
+import { SessionLeaseLostError } from "./service-errors";
+import { CLOUDFLARE_SIGNATURE_BANNED_CODE, confirmEuLegEnded, createTelnyxClient, EU_LEG_CONFIRM_TIMEOUT_MS, isSessionCallGoneError, TelnyxCommandError, type TelnyxRequestLog } from "./telnyx/client";
 import { encodeClientState } from "./telnyx/client-state";
 import { getTelnyxConfig } from "./telnyx/env";
 import { createTelnyxRequestLogger } from "./telnyx/request-telemetry";
@@ -741,6 +742,77 @@ describe("an EU session's supervision, recording, termination clean-up and cance
     expect(statusReads(h, call.customer).every(route => route.region === "eu")).toBe(true);
   });
 
+  it.each([
+    ["Cloudflare's 1010", new TelnyxCommandError({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, status: 403, retryable: false })],
+    ["the TEST boundary's 423", new TelnyxCommandError({ code: "test_provider_boundary", status: 423 })],
+    ["a validation refusal (400)", new TelnyxCommandError({ code: "10015", status: 400 })],
+  ])("keeps the obligation after %s without asking, even for a leg that has ended", async (_case, refusal) => {
+    const { h } = harness();
+    const sessionId = "00000000-0000-4000-8000-00000000d008";
+    const leg = await euSessionWithDial(h, sessionId);
+    h.db.registerRpc("motorist_provider_termination_legs_v2", () => [{ commandId: `${sessionId}-dial`, callControlId: leg }]);
+    h.telnyx.failNext("hangup", refusal);
+    h.telnyx.setCallStatus(leg, { alive: false });
+    await ownedSessionWork(h.deps, sessionId, () => reconcileTermination({ ...h.deps, telnyx: h.telnyx.client }, sessionId));
+    const checkpoint = h.db.log.find(entry => entry.kind === "rpc" && entry.table === "motorist_provider_termination_checkpoint_v2");
+    expect((checkpoint?.payload as { p_completed_commands: string[] }).p_completed_commands).toEqual([]);
+    expect(statusReads(h, leg)).toEqual([]);
+  });
+
+  it("retires only the confirmed-dead leg of a batched EU teardown and keeps the live one", async () => {
+    // The losing operators' hangups after an answer go out as one batched run
+    // (`callActionMany`). An inbound session stays `us`; this one is frozen to
+    // `eu` by hand, which is all the region of its commands depends on.
+    const { h } = harness();
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    h.db.update("motorist_call_sessions", { metadata: { ...readMeta(h.session(call.sessionId) as SessionRow),
+      start_mode: { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "eu", origin: null } } }, row => row.id === call.sessionId);
+    const winner = String(h.legFor(call.sessionId, PROFILES.o1)!.telnyx_call_control_id);
+    const losers = h.legs(call.sessionId).filter(leg => leg.role === "operator" && !leg.ended_at && leg.telnyx_call_control_id !== winner)
+      .map(leg => String(leg.telnyx_call_control_id));
+    expect(losers.length).toBeGreaterThanOrEqual(2);
+    const [dead, alive] = losers;
+    const batch = vi.spyOn(h.telnyx.client, "callActionMany");
+    h.telnyx.failAlways("hangup", refused());
+    h.telnyx.setCallStatus(dead, { alive: false });
+    for (const leg of losers.slice(1)) h.telnyx.setCallStatus(leg, { alive: true });
+    const answered = await h.legEvent(winner, "call.answered");
+    expect(batch.mock.calls.some(([actions]) => actions.filter(action => action.action === "hangup").length > 1)).toBe(true);
+    const legOf = new Map(h.telnyx.of("hangup").map(entry => [String(entry.params.commandId), String(entry.params.callControlId)]));
+    const retired = new Map(answered.commands.filter(command => command.kind === "hangup")
+      .map(command => [legOf.get(String(command.commandId)), command.ok && command.skipped] as const));
+    expect(retired.get(dead)).toBe(true);
+    expect(retired.get(alive)).toBe(false);
+    // The live leg's hangup stays a pending obligation of the answer.
+    expect(answered).toMatchObject({ outcome: "failed", error: "mandatory effects pending" });
+    for (const leg of [dead, alive]) {
+      expect(statusReads(h, leg).length).toBeGreaterThan(0);
+      expect(statusReads(h, leg).every(route => route.region === "eu")).toBe(true);
+    }
+  });
+
+  it("confirms refused termination legs together, not one after another", async () => {
+    const { h } = harness();
+    const sessionId = "00000000-0000-4000-8000-00000000d009";
+    h.db.seed("motorist_call_sessions", [{ id: sessionId, organization_id: ORG, direction: "outbound", state: "talking", writer_contract: 2, lease_generation: 0,
+      metadata: { start_mode: { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "eu", origin: "web" } } }]);
+    h.db.registerRpc("motorist_provider_termination_legs_v2", () => [{ commandId: "first", callControlId: "leg-1" }, { commandId: "second", callControlId: "leg-2" }]);
+    const reads: Array<{ leg: string; answer: (alive: boolean) => void }> = [];
+    const telnyx = {
+      hangup: async () => { throw refused(); },
+      retrieveCall: (leg: string) => new Promise<{ callControlId: string; known: boolean; alive: boolean; callSessionId: null; raw: Record<string, unknown> }>(resolve =>
+        reads.push({ leg, answer: alive => resolve({ callControlId: leg, known: true, alive, callSessionId: null, raw: { is_alive: alive } }) })),
+    } as unknown as NonNullable<typeof h.deps.telnyx>;
+    const pending = ownedSessionWork(h.deps, sessionId, () => reconcileTermination({ ...h.deps, telnyx }, sessionId));
+    // Both status reads are in flight before either answers.
+    await vi.waitFor(() => expect(reads.map(read => read.leg)).toEqual(["leg-1", "leg-2"]));
+    reads[1].answer(false);
+    reads[0].answer(true);
+    await pending;
+    const checkpoint = h.db.log.find(entry => entry.kind === "rpc" && entry.table === "motorist_provider_termination_checkpoint_v2");
+    expect((checkpoint?.payload as { p_completed_commands: string[] }).p_completed_commands).toEqual(["second"]);
+  });
+
   it("asks nothing in a `us` session: its refusals keep today's meaning", async () => {
     const { h } = harness();
     const sessionId = "00000000-0000-4000-8000-00000000d007";
@@ -802,6 +874,36 @@ describe("the EU switch end to end from the database flags (production guard)", 
     const { h, call } = await startWith(environment);
     expect(regionOf(h, call.sessionId)).toBe(region);
     expect(routesOf(h, call.sessionId).map(route => route.region)).toEqual([region]);
+  });
+});
+
+describe("confirming an EU leg's end (status read)", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("gives the status read 1.5 s, not the command timeout, and keeps the obligation when it runs out", async () => {
+    vi.useFakeTimers();
+    const fetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    }));
+    const client = createTelnyxClient({ config: getTelnyxConfig(FAKE_TELNYX_ENV), liveGate: { callsEnabled: true, smsEnabled: true }, fetch });
+    let settled: boolean | undefined;
+    const confirmation = sessionOwnership.run(owner("eu"), () => confirmEuLegEnded(client, "leg", new TelnyxCommandError({ code: "http_404", status: 404 })))
+      .then(value => { settled = value; });
+    await vi.advanceTimersByTimeAsync(EU_LEG_CONFIRM_TIMEOUT_MS - 1);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(2);
+    await confirmation;
+    expect(settled).toBe(false);
+    expect(EU_LEG_CONFIRM_TIMEOUT_MS).toBe(1_500);
+    expect(fetch.mock.calls.map(([input, init]) => `${init?.method} ${String(input)}`)).toEqual(["GET https://api.telnyx.eu/v2/calls/leg"]);
+  });
+
+  it("throws a lost lease instead of reading it as an unreadable status", async () => {
+    const lost = { retrieveCall: async () => { throw new SessionLeaseLostError(); } };
+    await expect(sessionOwnership.run(owner("eu"), () => confirmEuLegEnded(lost, "leg", new TelnyxCommandError({ code: "http_404", status: 404 }))))
+      .rejects.toBeInstanceOf(SessionLeaseLostError);
+    const broken = { retrieveCall: async () => { throw new TelnyxCommandError({ code: "network", status: 502 }); } };
+    await expect(sessionOwnership.run(owner("eu"), () => confirmEuLegEnded(broken, "leg", new TelnyxCommandError({ code: "http_404", status: 404 })))).resolves.toBe(false);
   });
 });
 
