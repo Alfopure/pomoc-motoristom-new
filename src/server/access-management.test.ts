@@ -29,7 +29,8 @@ vi.mock("@/lib/supabase/admin", () => ({
 }));
 
 vi.mock("@/server/telephony/runtime", () => ({ createTelephonyDeps: (options: unknown) => createTelephonyDeps(options), telephonyEnvironment: () => "development" }));
-vi.mock("@/server/telephony/operator-devices", () => ({ disconnectDevice: (deps: unknown, input: unknown) => disconnectDevice(deps, input) }));
+vi.mock("@/server/telephony/operator-devices", () => ({ disconnectDevice: (deps: unknown, input: unknown) => disconnectDevice(deps, input),
+  CREDENTIAL_CLEANUP_PENDING: "credential_cleanup_pending" }));
 
 vi.mock("@/server/telephony/telnyx/env", () => ({
   getTelnyxConfig: () => ({ configured: true }),
@@ -413,6 +414,17 @@ describe("the iPhone credential on deactivation and removal (call-speed S8.1)", 
     expect(fake.db.find("motorist_profiles", row => row.id === TARGET)).toMatchObject({ active: true });
     expect(fake.db.rows("motorist_audit_log")).toHaveLength(0); expect(deleteUser).not.toHaveBeenCalled();
     expect(fake.db.rows("motorist_operator_mobile_devices")).toHaveLength(1);
+  });
+  it("removes the account when only an older iPhone credential's cleanup is still pending, recording that credential", async () => {
+    fake.db.seed("motorist_operator_mobile_devices", [{ ...mobileDevice, telnyx_credential_id: null, metadata: { pending_credential_deletions: ["old-mobile-cred"] } }]);
+    disconnectDevice.mockRejectedValue(Object.assign(new Error("cleanup pending"), { status: 502, code: "credential_cleanup_pending" }));
+    deleteTelephonyCredential.mockRejectedValue(new Error("provider down")); vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await deleteAccessUser(actor, TARGET);
+    expect(result.mode).toBe("deleted"); expect(deleteUser).toHaveBeenCalledWith("auth-target");
+    // The pending ID went through the best-effort deletion and its refusal is on record.
+    expect(deleteTelephonyCredential).toHaveBeenCalledWith("old-mobile-cred");
+    expect(fake.db.rows("motorist_audit_log").filter(row => row.action === "telephony.credential_deletion_stuck"))
+      .toEqual([expect.objectContaining({ after_payload: { credentialId: "old-mobile-cred", removal: true } })]);
   });
   it("records every browser credential Telnyx did not delete at removal, with its ID, and keeps removal best-effort", async () => {
     fake.db.seed("motorist_operator_devices", [{ id: "web-1", organization_id: ORG, profile_id: TARGET, environment: "development", telnyx_credential_id: "web-cred",

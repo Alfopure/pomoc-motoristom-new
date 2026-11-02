@@ -564,9 +564,14 @@ export async function disconnectDevice(
   input: { organizationId: string; profileId: string; keepCredential?: boolean; deviceSessionId?: string },
 ): Promise<DisconnectResult | null> {
   if (!deps.deviceKind && !input.keepCredential) {
-    const web = await disconnectDevice({ ...deps, deviceKind: "web" }, input);
-    const mobile = await disconnectDevice({ ...deps, deviceKind: "mobile" }, input);
-    return web ?? mobile;
+    // Each phone is revoked whatever happens to the other: a browser's stuck cleanup never leaves
+    // the iPhone connected (and the reverse). A failure is reported afterwards, the one that
+    // revoked nothing before a pending cleanup, with its own code.
+    const [web, mobile] = await Promise.allSettled([disconnectDevice({ ...deps, deviceKind: "web" }, input), disconnectDevice({ ...deps, deviceKind: "mobile" }, input)]);
+    const failures = [web, mobile].flatMap(result => result.status === "rejected" ? [result.reason as unknown] : []);
+    const pendingOnly = (error: unknown) => (error as { code?: unknown } | null)?.code === CREDENTIAL_CLEANUP_PENDING;
+    if (failures.length) throw failures.find(error => !pendingOnly(error)) ?? failures[0];
+    return (web.status === "fulfilled" ? web.value : null) ?? (mobile.status === "fulfilled" ? mobile.value : null);
   }
   const device = await getOperatorDevice(deps, input);
   if (!device) return null;
