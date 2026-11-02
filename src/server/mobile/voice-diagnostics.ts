@@ -14,7 +14,7 @@ const NATIVE_EVENTS = ["call.answer", "call.answer_sdk", "call.authorize", "call
 const JS_EVENTS = ["call.start_response", "call.tap", "hold.cancelled", "hold.claim", "hold.failure", "hold.ignored", "hold.request", "hold.request_error", "hold.result", "hold.skip",
   "offer.authorize_retry", "offer.authorized", "offer.done", "offer.error", "offer.prefetch", "offer.prepare", "phone.connect_end", "phone.connect_error", "phone.connect_native",
   "phone.connect_start", "phone.disconnect", "phone.disconnect_error", "phone.event", "phone.event_error", "phone.fail", "phone.foreground", "phone.init",
-  "phone.inputs", "push.rejected", "realtime.state", "session.end", "token.cache", "token.end", "token.start", "tuning.applied"];
+  "phone.inputs", "push.rejected", "realtime.state", "session.end", "token.cache", "token.contention", "token.end", "token.start", "tuning.applied"];
 export const VOICE_DIAGNOSTIC_EVENTS: ReadonlySet<string> = new Set([...NATIVE_EVENTS, ...JS_EVENTS.map(name => "js." + name)]);
 export const VOICE_DIAGNOSTIC_KEYS: ReadonlySet<string> = new Set(["action", "action_live", "active", "age_min", "alert", "answer_pending", "answered", "answering",
   "attempt", "attempts", "authorized", "automatic", "busy", "cache", "cached", "call", "call_id_valid", "calls", "can_hold", "changed", "checks", "claimed", "cleanup",

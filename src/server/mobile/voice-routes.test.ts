@@ -58,6 +58,18 @@ describe("mobile voice HTTP contract", () => {
       expect(JSON.stringify(on)).not.toMatch(/private-sip|private-provider/);
     } finally { vi.unstubAllEnvs(); }
   });
+  it("limits token requests per operator, takeovers more tightly, before minting anything", async () => {
+    mocks.token.mockResolvedValue({ token: "jwt", deviceSessionId: id, expiresAt: "2026-10-12T12:00:00Z", sipUsername: "sip", credentialId: "cred" });
+    mocks.actor.mockResolvedValue({ ...actor, profileId: "rate-limited-operator" });
+    for (let index = 0; index < 6; index += 1) expect((await token(request({ deviceSessionId: id, takeover: true }))).status).toBe(200);
+    const takeover = await token(request({ deviceSessionId: id, takeover: true }));
+    expect(takeover.status).toBe(429); expect(mocks.token).toHaveBeenCalledTimes(6);
+    for (let index = 0; index < 23; index += 1) expect((await token(request({ deviceSessionId: id }))).status).toBe(200);
+    expect((await token(request({ deviceSessionId: id }))).status).toBe(429);
+    expect(mocks.token).toHaveBeenCalledTimes(29);
+    mocks.actor.mockResolvedValue({ ...actor, profileId: "another-operator" });
+    expect((await token(request({ deviceSessionId: id }))).status).toBe(200);
+  });
   it("requires an outbound operation UUID before dialing", async () => {
     expect((await calls(request({ deviceSessionId: id, to: "+421900000001" }))).status).toBe(400); expect(mocks.dial).not.toHaveBeenCalled();
   });

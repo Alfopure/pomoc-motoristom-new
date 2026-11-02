@@ -1258,7 +1258,7 @@ describe("call-speed S8 phone switches", () => {
     expect(s.f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg");
     release(freshToken({ mobileTokenCache: true })); await settle();
   });
-  it.each([[409, "native_lease_stale"], [409, undefined], [401, undefined], [403, undefined]])("disconnects, wipes the cache and ends the parked push when the refresh is refused (%s %s)", async (status, code) => {
+  it.each([[409, "native_lease_stale"], [409, "native_lease_taken"], [401, undefined], [403, undefined]])("disconnects, wipes the cache and ends the parked push when the refresh is refused (%s %s)", async (status, code) => {
     const s = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(s);
     vi.mocked(s.f.api.token).mockRejectedValue(new MobileApiError("refused", status, code));
     await s.f.phone.initialise(); await settle();
@@ -1315,9 +1315,34 @@ describe("call-speed S8 phone switches", () => {
     s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
     expect(s.f.native.reject).not.toHaveBeenCalled(); expect(s.f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg");
   });
+  it("treats an unnamed 409 and contention as no refusal, and asks again on contention", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(s);
+    vi.mocked(s.f.api.token).mockRejectedValueOnce(new MobileApiError("Stav zariadenia sa medzitým zmenil.", 409, "native_lease_contention"));
+    await s.f.phone.initialise(); await settle();
+    expect(s.f.native.disconnect).not.toHaveBeenCalled(); expect(s.tokens.clear).not.toHaveBeenCalled();
+    await new Promise(resolve => setTimeout(resolve, 350)); await settle();
+    expect(vi.mocked(s.f.api.token).mock.calls.length).toBeGreaterThanOrEqual(2); expect(s.f.native.connect).toHaveBeenLastCalledWith("fresh-jwt");
+    expect(s.debug).toHaveBeenCalledWith("token.contention", { attempt: 1 }); expect(s.f.native.disconnect).not.toHaveBeenCalled();
+    expect(JSON.parse(s.tokens.value!).token).toBe("fresh-jwt");
+    const unnamed = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(unnamed);
+    vi.mocked(unnamed.f.api.token).mockRejectedValue(new MobileApiError("Konflikt.", 409));
+    await unnamed.f.phone.initialise(); await settle();
+    expect(unnamed.f.native.disconnect).not.toHaveBeenCalled(); expect(unnamed.tokens.value).not.toBeNull();
+  });
+  it("never drops an answered call because its token refresh is refused", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(s);
+    let refuse!: () => void;
+    vi.mocked(s.f.api.token).mockReturnValue(new Promise((_done, fail) => { refuse = () => fail(new MobileApiError("Telefón bol odpojený.", 409, "native_lease_stale")); }));
+    await s.f.phone.initialise(); await settle();
+    s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    s.f.emit({ type: "callState", callId: id, state: "ACTIVE" }); await settle();
+    refuse(); await settle();
+    expect(s.f.native.disconnect).not.toHaveBeenCalled(); expect(s.f.phone.state.call?.id).toBe(id);
+    expect(s.tokens.value).toBeNull(); expect(s.f.phone.state.error).toBe("Telefón bol odpojený.");
+  });
   it("wipes a cached JWT when a token request without it is refused, without revoking the phone", async () => {
     const s = speedFixture({ mobileTokenCache: true }, cachedEntry());
-    vi.mocked(s.f.api.token).mockRejectedValue(new MobileApiError("Telefón používa iné zariadenie.", 409));
+    vi.mocked(s.f.api.token).mockRejectedValue(new MobileApiError("Telefón používa iné zariadenie.", 409, "native_lease_taken"));
     await s.f.phone.initialise(); await s.f.phone.connect(); await settle();
     expect(s.tokens.value).toBeNull(); expect(s.f.native.disconnect).not.toHaveBeenCalled();
     expect(s.f.phone.state.takeoverRequired).toBe(true);

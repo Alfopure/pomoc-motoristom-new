@@ -368,9 +368,6 @@ describe("the iPhone credential on deactivation and removal (call-speed S8.1)", 
     fake.db.update("motorist_operator_mobile_devices", { metadata: open }, () => true);
     await updateAccessUser(actor, TARGET, { active: false });
     expect(disconnectDevice).toHaveBeenCalledOnce();
-    seed(); fake.db.seed("motorist_operator_mobile_devices", [{ ...mobileDevice, metadata: open }]);
-    await deleteAccessUser(actor, TARGET);
-    expect(deleteTelephonyCredential.mock.calls.map(([credential]) => credential)).toEqual(["mobile-cred"]);
   });
   it("says so when Telnyx keeps the iPhone credential, so the manager repeats the deactivation", async () => {
     rotation(); disconnectDevice.mockRejectedValue(new Error("provider down"));
@@ -378,14 +375,31 @@ describe("the iPhone credential on deactivation and removal (call-speed S8.1)", 
     expect(await fails(updateAccessUser(actor, TARGET, { active: false }))).toMatchObject({ status: 502 });
     expect(fake.db.find("motorist_profiles", row => row.id === TARGET)).toMatchObject({ active: false });
   });
-  it("also deletes the iPhone credential and device when the account is removed, only with the switch", async () => {
-    fake.db.seed("motorist_operator_mobile_devices", [mobileDevice]);
+  it("revokes the iPhone credential before removing the account, whatever the switches", async () => {
+    fake.db.seed("motorist_operator_mobile_devices", [mobileDevice, { ...mobileDevice, id: "mobile-2", environment: "production", telnyx_credential_id: "other-env-cred",
+      metadata: { pending_credential_deletions: ["pending-cred"] } }]);
+    disconnectDevice.mockImplementation(async () => {
+      // Nothing irreversible yet: the profile and its login are still there.
+      expect(fake.db.find("motorist_profiles", row => row.id === TARGET)).toBeTruthy(); expect(deleteUser).not.toHaveBeenCalled();
+      fake.db.update("motorist_operator_mobile_devices", { telnyx_credential_id: null }, row => row.id === "mobile-1");
+      return null;
+    });
     await deleteAccessUser(actor, TARGET);
-    expect(deleteTelephonyCredential).not.toHaveBeenCalled();
-    seed(); clearLatencyFlagsCache(); rotation();
-    fake.db.seed("motorist_operator_mobile_devices", [mobileDevice]);
-    await deleteAccessUser(actor, TARGET);
-    expect(deleteTelephonyCredential.mock.calls.map(([credential]) => credential)).toEqual(["mobile-cred"]);
+    expect(disconnectDevice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ deviceKind: "mobile" }), { organizationId: ORG, profileId: TARGET });
+    // Another environment's row and still-pending IDs go best-effort, like the browser's.
+    expect(deleteTelephonyCredential.mock.calls.map(([credential]) => credential)).toEqual(["other-env-cred", "pending-cred"]);
     expect(fake.db.rows("motorist_operator_mobile_devices")).toHaveLength(0);
+  });
+  it("keeps the account when Telnyx keeps the iPhone credential, so the removal can be repeated", async () => {
+    fake.db.seed("motorist_operator_mobile_devices", [mobileDevice]);
+    disconnectDevice.mockRejectedValue(new Error("provider down")); vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(await fails(deleteAccessUser(actor, TARGET))).toMatchObject({ status: 502 });
+    expect(fake.db.find("motorist_profiles", row => row.id === TARGET)).toMatchObject({ active: true });
+    expect(fake.db.rows("motorist_audit_log")).toHaveLength(0); expect(deleteUser).not.toHaveBeenCalled();
+    expect(fake.db.rows("motorist_operator_mobile_devices")).toHaveLength(1);
+  });
+  it("needs no Telnyx round trip to remove an account without an iPhone", async () => {
+    await deleteAccessUser(actor, TARGET);
+    expect(createTelephonyDeps).not.toHaveBeenCalled(); expect(disconnectDevice).not.toHaveBeenCalled();
   });
 });

@@ -11,7 +11,8 @@ import { deviceLastOnlineAt, LAST_ONLINE_METADATA_KEY, retainDeviceLastOnline } 
 import { OperatorDeviceError } from "./service-errors";
 import { telnyxSipUri, toJson, type DeviceRow, type TelephonyEnvironment } from "./state/types";
 import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
-import { MOBILE_TOKEN_CACHE_UNTIL, MOBILE_TOKEN_CACHE_WINDOW_MS, mobileTokenCacheOpen, nativeMobilePushReachable, nativePushLease } from "@/lib/telephony/device-liveness";
+import { MOBILE_TOKEN_CACHE_MARGIN_MS, MOBILE_TOKEN_CACHE_UNTIL, mobileTokenCacheOpen, nativeMobilePushReachable, nativePushLease, PENDING_CREDENTIAL_DELETIONS,
+  pendingCredentialDeletions } from "@/lib/telephony/device-liveness";
 
 export { OperatorDeviceError } from "./service-errors";
 
@@ -90,13 +91,49 @@ function credentialUsable(device: DeviceRow, now: Date): boolean {
   return Number.isNaN(expires) || expires - now.getTime() > CREDENTIAL_RENEW_WINDOW_MS;
 }
 
+const PENDING_DELETIONS = PENDING_CREDENTIAL_DELETIONS;
+const pendingDeletions = (device: Pick<DeviceRow, "metadata"> | null) => pendingCredentialDeletions(device?.metadata);
+
+/**
+ * Deletes every superseded credential still pending at Telnyx and forgets those that are gone
+ * (deleted or 404). Fail-closed: throws while one is still alive, so no new token is minted and
+ * no revocation is reported done while an old JWT may still register.
+ */
+async function drainPendingDeletions(deps: DeviceDeps, device: DeviceRow): Promise<DeviceRow> {
+  const pending = pendingDeletions(device);
+  if (!pending.length) return device;
+  const gone: string[] = [];
+  let failure: unknown = null;
+  for (const id of pending) {
+    try {
+      await deleteCredentialAtProvider(deps, id, "Staré prihlasovacie údaje sa nepodarilo zrušiť u operátora");
+      gone.push(id);
+    } catch (error) { failure ??= error; }
+  }
+  let current = device;
+  if (gone.length) {
+    const updated = await updateCurrentDevice(deps, device, (row) => {
+      const metadata = retainDeviceLastOnline(row, nowOf(deps));
+      const rest = pendingDeletions(row).filter(id => !gone.includes(id));
+      if (rest.length) metadata[PENDING_DELETIONS] = rest; else delete metadata[PENDING_DELETIONS];
+      return { metadata: toJson(metadata) };
+    });
+    // Contention keeps the deleted IDs listed; the next drain sees their 404 and forgets them.
+    if (updated) current = updated;
+  }
+  if (failure) throw failure;
+  return current;
+}
+
 export async function ensureOperatorCredential(deps: DeviceDeps, input: { organizationId: string; profileId: string; force?: boolean }): Promise<DeviceRow> {
   const now = nowOf(deps);
-  const existing = await getOperatorDevice(deps, input);
+  let existing = await getOperatorDevice(deps, input);
   // `force` is the manager pressing "regenerate": mint a new credential even
   // when the stored one is still usable (Phase 3 OperatorsTelephonyPanel).
   if (existing && !input.force && credentialUsable(existing, now)) return existing;
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
+  // An earlier switch whose deletion failed is finished first; while it fails nothing new is minted.
+  if (existing) existing = await drainPendingDeletions(deps, existing);
 
   const credential = await deps.telnyx.createTelephonyCredential({
     name: credentialName(deps.environment, input.profileId) + (deps.deviceKind === "mobile" ? "-mobile" : ""),
@@ -109,6 +146,12 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
   }
 
   const previousCredentialId = existing?.telnyx_credential_id ?? null;
+  // The superseded credential is listed in the same write that switches the row, so a failed or
+  // interrupted deletion is never forgotten (and a later switch never overwrites it).
+  const pendingAfter = (row: Pick<DeviceRow, "metadata"> | null) => {
+    const list = pendingDeletions(row);
+    return previousCredentialId && previousCredentialId !== credential.id && !list.includes(previousCredentialId) ? [...list, previousCredentialId] : list;
+  };
   const values = {
     organization_id: input.organizationId,
     profile_id: input.profileId,
@@ -120,7 +163,8 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
     // The previous tab authenticated with the old credential. Its heartbeat
     // cannot register the replacement while the provider deletion is pending.
     ...(existing ? { device_session_id: `revoked:${randomUUID()}`, device_seen_at: null } : {}),
-    metadata: toJson({ ...(existing ? retainDeviceLastOnline(existing, now) : {}), credential_created_at: now.toISOString(), previous_credential_id: previousCredentialId }),
+    metadata: toJson({ ...(existing ? retainDeviceLastOnline(existing, now) : {}), credential_created_at: now.toISOString(), previous_credential_id: previousCredentialId,
+      ...(pendingAfter(existing).length ? { [PENDING_DELETIONS]: pendingAfter(existing) } : {}) }),
   };
   // Enrollment can race across requests. An upsert would overwrite the first
   // credential and leave an untracked SIP identity active at the provider.
@@ -130,10 +174,14 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
   let saved;
   if (existing) {
     try {
-      saved = { error: null, data: await updateCurrentDevice(deps, existing, current => ({
-        ...values,
-        metadata: toJson({ ...retainDeviceLastOnline(current, nowOf(deps)), credential_created_at: now.toISOString(), previous_credential_id: previousCredentialId }),
-      })) };
+      saved = { error: null, data: await updateCurrentDevice(deps, existing, current => {
+        const metadata = retainDeviceLastOnline(current, nowOf(deps));
+        // The replaced lease is remembered, so its phone cannot renew its way back (S8.1).
+        const revoked = Array.isArray(metadata.revoked_sessions) ? (metadata.revoked_sessions as unknown[]).slice(-9) : [];
+        if (current.device_session_id && !current.device_session_id.startsWith("revoked:")) revoked.push({ id: current.device_session_id, revoked_at: now.toISOString() });
+        return { ...values, metadata: toJson({ ...metadata, credential_created_at: now.toISOString(), previous_credential_id: previousCredentialId,
+          ...(revoked.length ? { revoked_sessions: revoked } : {}), ...(pendingAfter(current).length ? { [PENDING_DELETIONS]: pendingAfter(current) } : {}) }) };
+      }) };
     } catch (error) {
       await deleteCredentialAtProvider(deps, credential.id, "Nepoužité prihlasovacie údaje sa nepodarilo zrušiť u operátora");
       throw error;
@@ -152,12 +200,11 @@ export async function ensureOperatorCredential(deps: DeviceDeps, input: { organi
   }
   // The superseded credential has to die at Telnyx: it can still register and
   // the JWT minted from it stays valid for up to 24 h, so keeping it would make
-  // "new credentials" a rename rather than a revocation.
-  if (previousCredentialId && previousCredentialId !== credential.id) {
-    await deleteCredentialAtProvider(deps, previousCredentialId, "Staré prihlasovacie údaje sa nepodarilo zrušiť u operátora");
-  }
+  // "new credentials" a rename rather than a revocation. Until it is confirmed
+  // gone it stays pending, and every later mint or revocation retries it first.
+  const device = await drainPendingDeletions(deps, saved.data);
   if (existing) recordDeviceTransition(deps, existing, "superseded");
-  return saved.data;
+  return device;
 }
 
 /**
@@ -204,7 +251,7 @@ async function updateCurrentDevice(
     if (!latest || latest.id !== observed.id || latest.device_session_id !== observed.device_session_id || latest.telnyx_credential_id !== observed.telnyx_credential_id) return null;
     current = latest;
   }
-  throw new OperatorDeviceError("Stav zariadenia sa medzitým zmenil. Skúste to znova.", 409);
+  throw new OperatorDeviceError("Stav zariadenia sa medzitým zmenil. Skúste to znova.", 409, { code: LEASE_CONTENTION });
 }
 
 /** Reads `exp` from a JWT without verifying it (the token is Telnyx's, we only schedule its refresh). */
@@ -232,6 +279,16 @@ export type WebphoneToken = {
 const DEFAULT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 
 export const TOKEN_TAKEOVER_MESSAGE = "Telefón je prihlásený v inom okne alebo zariadení. Ak chceš prijímať hovory tu, prevezmi telefón.";
+/** Another device holds the lease: only an explicit takeover helps. */
+const LEASE_TAKEN = "native_lease_taken";
+/** The device row changed under this request: asking again is safe. */
+const LEASE_CONTENTION = "native_lease_contention";
+
+function revokedSession(device: Pick<DeviceRow, "metadata"> | null, deviceSessionId: string): boolean {
+  const metadata = device?.metadata && typeof device.metadata === "object" && !Array.isArray(device.metadata) ? device.metadata : {};
+  const list = metadata.revoked_sessions;
+  return Array.isArray(list) && list.some(entry => entry && typeof entry === "object" && !Array.isArray(entry) && (entry as { id?: unknown }).id === deviceSessionId);
+}
 
 export async function issueWebphoneToken(
   deps: DeviceDeps,
@@ -247,14 +304,19 @@ export async function issueWebphoneToken(
     const presence = await deps.admin.from("motorist_operator_presence").select("status")
       .eq("organization_id", input.organizationId).eq("profile_id", input.profileId).maybeSingle();
     if (presence.error) throw new OperatorDeviceError("Stav operátora sa nepodarilo overiť.", 503);
-    if (presence.data?.status === "on_call") throw new OperatorDeviceError("Prebiehajúci hovor nemožno presunúť pripojením iného prehliadača. Najprv ho dokončite.", 409);
+    if (presence.data?.status === "on_call") throw new OperatorDeviceError("Prebiehajúci hovor nemožno presunúť pripojením iného prehliadača. Najprv ho dokončite.", 409, { code: LEASE_TAKEN });
   }
   // Opening the dispatch on a second device must not silently steal incoming
   // calls from a live phone, even between calls. Own-token renewal is allowed.
   const current = !input.takeover || deps.deviceKind === "mobile" ? await getOperatorDevice(deps, input) : null;
+  // An iPhone whose lease another phone replaced never gets it back by renewing (and never
+  // rotates the new phone's credential): only an explicit takeover does.
+  if (deps.deviceKind === "mobile" && !input.takeover && input.deviceSessionId && revokedSession(current, input.deviceSessionId)) {
+    throw new OperatorDeviceError("Telefón bol odpojený alebo prihlásený na inom zariadení.", 409, { code: "native_lease_stale" });
+  }
   if (!input.takeover) {
     const sameTab = Boolean(input.deviceSessionId && current?.device_session_id === input.deviceSessionId);
-    if (current && !sameTab && reachable(current)) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+    if (current && !sameTab && reachable(current)) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409, { code: LEASE_TAKEN });
   }
   // The phone that held the replaced lease may keep a JWT of this credential in its Keychain
   // (S8.1) and log in with it before its refresh is refused. Deleting the credential at Telnyx
@@ -263,9 +325,10 @@ export async function issueWebphoneToken(
   // never rotates.
   const rotating = deps.deviceKind === "mobile" && (input.rotateCredential === true || mobileTokenCacheOpen(current?.metadata, nowOf(deps)));
   const force = rotating && Boolean(current?.telnyx_credential_id && current.device_session_id && current.device_session_id !== input.deviceSessionId);
-  const device = await ensureOperatorCredential(deps, { ...input, force });
+  // No JWT is minted while a superseded credential is still alive at Telnyx.
+  const device = await drainPendingDeletions(deps, await ensureOperatorCredential(deps, { ...input, force }));
   const sameTab = Boolean(input.deviceSessionId && device.device_session_id === input.deviceSessionId);
-  if (!input.takeover && !sameTab && reachable(device)) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+  if (!input.takeover && !sameTab && reachable(device)) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409, { code: LEASE_TAKEN });
   const credentialId = device.telnyx_credential_id;
   const sipUsername = device.sip_username;
   if (!credentialId || !sipUsername) throw new OperatorDeviceError("Zariadenie nemá prihlasovacie údaje.", 500);
@@ -287,8 +350,9 @@ export async function issueWebphoneToken(
     const revoked = Array.isArray(metadata.revoked_sessions) ? (metadata.revoked_sessions as unknown[]).slice(-9) : [];
     if (!renewing && current.device_session_id) revoked.push({ id: current.device_session_id, revoked_at: now.toISOString() });
     if (input.tokenCache && deps.deviceKind === "mobile") {
-      // Only ever extended: an earlier JWT may still be cached somewhere.
-      const previous = Date.parse(String(metadata[MOBILE_TOKEN_CACHE_UNTIL] ?? "")), until = now.getTime() + MOBILE_TOKEN_CACHE_WINDOW_MS;
+      // As long as this JWT can log in at all, plus a margin; only ever extended, since an
+      // earlier JWT may still be cached somewhere.
+      const previous = Date.parse(String(metadata[MOBILE_TOKEN_CACHE_UNTIL] ?? "")), until = expiresAt.getTime() + MOBILE_TOKEN_CACHE_MARGIN_MS;
       metadata[MOBILE_TOKEN_CACHE_UNTIL] = new Date(Number.isFinite(previous) ? Math.max(previous, until) : until).toISOString();
     }
     return {
@@ -301,8 +365,9 @@ export async function issueWebphoneToken(
       metadata: toJson({ ...metadata, revoked_sessions: revoked }),
     };
   });
-  // A slow token response cannot overwrite a newer takeover or revocation.
-  if (!updated) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+  // A slow token response cannot overwrite a newer takeover or revocation. The
+  // phone asks again; the next answer says whether another device holds the lease.
+  if (!updated) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409, { code: LEASE_CONTENTION });
 
   if (!renewing) {
     if (device.device_session_id) recordDeviceTransition(deps, device, "superseded");
@@ -392,7 +457,8 @@ export async function disconnectDevice(
   if (!device) return null;
   // A delayed mobile logout may never revoke a newer device's lease.
   if (input.deviceSessionId && device.device_session_id !== input.deviceSessionId) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
-  const revoked = await revokeDeviceSession(deps, device);
+  // Superseded credentials still alive at Telnyx go first; while one stays alive the revocation fails.
+  const revoked = await drainPendingDeletions(deps, await revokeDeviceSession(deps, device));
   if (input.keepCredential || !revoked.telnyx_credential_id) return { device: revoked, deletedCredentialId: null };
 
   const credentialId = revoked.telnyx_credential_id;

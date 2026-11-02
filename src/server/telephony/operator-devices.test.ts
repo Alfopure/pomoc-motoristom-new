@@ -453,11 +453,12 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
     await issueWebphoneToken(phone(gone), input());
     expect(deleted(gone)).toEqual([]); expect(gone.telnyx.of("createTelephonyCredential")).toHaveLength(1);
   });
-  it("records how long a JWT issued for caching may be used, and rotates during that window even with the switch off", async () => {
+  it("records how long a JWT issued for caching can log in, and rotates during that window even with the switch off", async () => {
     const h = createTelephonyHarness(); seedPhone(h);
-    await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE, rotateCredential: false, tokenCache: true }));
+    const token = await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE, rotateCredential: false, tokenCache: true }));
     const until = (await getOperatorDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }))?.metadata as Record<string, unknown>;
-    expect(Date.parse(String(until.token_cache_until)) - h.now().getTime()).toBe(13 * 3_600_000);
+    // The JWT's own expiry plus an hour, never less.
+    expect(Date.parse(String(until.token_cache_until)) - Date.parse(token.expiresAt)).toBe(3_600_000);
     // The switch was turned off since: a takeover still deletes the credential the old phone may have cached.
     await issueWebphoneToken(phone(h), input({ takeover: true, rotateCredential: false }));
     expect(deleted(h)).toEqual(["old-credential"]);
@@ -466,10 +467,63 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
     await issueWebphoneToken(phone(later), input({ takeover: true, rotateCredential: false }));
     expect(deleted(later)).toEqual([]);
   });
-  it("refuses the takeover when Telnyx keeps the old credential, so the old JWT is never silently left valid", async () => {
+  it("keeps a credential Telnyx did not delete pending, mints nothing meanwhile and deletes it on the next request", async () => {
     const h = createTelephonyHarness(); seedPhone(h);
-    h.telnyx.failNext("deleteTelephonyCredential", "provider down");
+    const pending = async () => ((await getOperatorDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }))?.metadata as Record<string, unknown>)
+      .pending_credential_deletions;
+    h.telnyx.failAlways("deleteTelephonyCredential", "provider down");
     await expect(issueWebphoneToken(phone(h), input({ takeover: true }))).rejects.toMatchObject({ status: 502 });
-    expect(h.telnyx.of("mintCredentialToken")).toEqual([]);
+    expect(await pending()).toEqual(["old-credential"]); expect(h.telnyx.of("mintCredentialToken")).toEqual([]);
+    // A second takeover while Telnyx keeps refusing neither mints nor loses the old ID.
+    await expect(issueWebphoneToken(phone(h), input({ takeover: true }))).rejects.toMatchObject({ status: 502 });
+    expect(await pending()).toEqual(["old-credential"]);
+    expect(h.telnyx.of("createTelephonyCredential")).toHaveLength(1); expect(h.telnyx.of("mintCredentialToken")).toEqual([]);
+    // Telnyx recovers: the old credential is deleted first, then a JWT is minted. The
+    // credential of the failed switch was never handed out and is replaced as well.
+    h.telnyx.clearFailures(); const attempts = deleted(h).length;
+    const token = await issueWebphoneToken(phone(h), input({ takeover: true }));
+    expect(deleted(h).slice(attempts)).toEqual(["old-credential", "cred-1"]); expect(await pending()).toBeUndefined();
+    const order = h.telnyx.calls.map(call => call.method);
+    expect(order.lastIndexOf("deleteTelephonyCredential")).toBeLessThan(order.indexOf("mintCredentialToken"));
+    expect(token.credentialId).not.toBe("old-credential");
+  });
+  it("forgets a pending credential Telnyx no longer knows, and finishes it before revoking the phone", async () => {
+    const h = createTelephonyHarness();
+    seedPhone(h, { metadata: { pending_credential_deletions: ["gone-credential", "stale-credential"] } });
+    h.telnyx.failNext("deleteTelephonyCredential", new TelnyxCommandError({ code: "not_found", status: 404, detail: "gone" }));
+    const result = await disconnectDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 });
+    expect(deleted(h)).toEqual(["gone-credential", "stale-credential", "old-credential"]);
+    expect(result?.device.metadata).not.toHaveProperty("pending_credential_deletions");
+    expect(result).toMatchObject({ deletedCredentialId: "old-credential", device: { telnyx_credential_id: null } });
+    const failing = createTelephonyHarness(); seedPhone(failing, { metadata: { pending_credential_deletions: ["stale-credential"] } });
+    failing.telnyx.failNext("deleteTelephonyCredential", "provider down");
+    await expect(disconnectDevice(phone(failing), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 502 });
+    expect(deleted(failing)).toEqual(["stale-credential"]);
+  });
+  it("answers a replaced iPhone's renewal as stale and never lets it rotate the new phone's credential", async () => {
+    const h = createTelephonyHarness(); seedPhone(h);
+    const taken = await issueWebphoneToken(phone(h), input({ takeover: true }));
+    const credential = (await getOperatorDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }))?.telnyx_credential_id;
+    // The new phone is not yet registered, so the old one is not refused as "taken".
+    await expect(issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE }))).rejects.toMatchObject({ status: 409, code: "native_lease_stale" });
+    expect(await getOperatorDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }))
+      .toMatchObject({ device_session_id: taken.deviceSessionId, telnyx_credential_id: credential });
+    expect(deleted(h)).toEqual(["old-credential"]);
+    // Only a deliberate takeover moves it back.
+    expect((await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE, takeover: true }))).deviceSessionId).not.toBe(taken.deviceSessionId);
+  });
+  it("names a lease held by a live phone and a lease that changed under the request apart", async () => {
+    const h = createTelephonyHarness(); seedPhone(h);
+    await expect(issueWebphoneToken(phone(h), input())).rejects.toMatchObject({ status: 409, code: "native_lease_taken" });
+    const raced = createTelephonyHarness(); seedPhone(raced);
+    const update = raced.db.update.bind(raced.db);
+    let switched = false;
+    raced.db.update = (table, patch, predicate) => {
+      if (table === "motorist_operator_mobile_devices" && !switched && patch.last_token_issued_at) {
+        switched = true; update(table, { device_session_id: "00000000-0000-4000-8000-0000000000a3" }, () => true);
+      }
+      return update(table, patch, predicate);
+    };
+    await expect(issueWebphoneToken(phone(raced), input({ deviceSessionId: OLD_LEASE }))).rejects.toMatchObject({ status: 409, code: "native_lease_contention" });
   });
 });

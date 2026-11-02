@@ -1,12 +1,14 @@
 import { requireMobileActor } from "@/server/mobile/auth";
 import { mobileError, mobileJson, mobileScope } from "@/server/mobile/http";
 import { nativeVoiceDeps } from "@/server/mobile/voice";
+import { assertRateLimit, rateLimitKey } from "@/server/rate-limit";
 import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
 import { latencyFlagsOf, mobileVoiceTuning } from "@/server/telephony/latency-flags";
 import { issueWebphoneToken } from "@/server/telephony/operator-devices";
 import { readJsonBody } from "@/server/telephony/runtime";
 
 export const runtime = "nodejs";
+const TOKEN_RATE_MESSAGE = "Telefón sa pripája príliš často. Skúste to o chvíľu.";
 /** On the push-wake path: measured so the phone's connect time has a server half. */
 export async function POST(request: Request) {
   return withRequestMetrics("call.token", () => issue(request), { operation: "mobile.voice-token" });
@@ -14,8 +16,12 @@ export async function POST(request: Request) {
 async function issue(request: Request) {
   try {
     const actor = await measureRequestStep("auth", () => requireMobileActor(request));
-    const deps = await nativeVoiceDeps(actor);
     const body = await readJsonBody<Record<string, unknown>>(request);
+    // Every request mints a JWT and may rotate the credential; TEST shares its Telnyx account with
+    // production. A takeover (always a rotation with S8.1) is bounded more tightly.
+    assertRateLimit(rateLimitKey("mobile-voice-token", actor.profileId), { limit: 30, windowMs: 5 * 60_000, message: TOKEN_RATE_MESSAGE });
+    if (body.takeover === true) assertRateLimit(rateLimitKey("mobile-voice-takeover", actor.profileId), { limit: 6, windowMs: 10 * 60_000, message: TOKEN_RATE_MESSAGE });
+    const deps = await nativeVoiceDeps(actor);
     const flags = latencyFlagsOf(deps);
     // Every connect carries the phone's switches (S8): a push wake uses the last ones it saw.
     const voiceTuning = mobileVoiceTuning(flags);

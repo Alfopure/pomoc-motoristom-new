@@ -13,7 +13,7 @@ import { type MotoristActor, resolveDefaultOrganizationId } from "./api-auth";
 import { assertRateLimit, rateLimitKey, requestIp } from "./rate-limit";
 import { MutationError } from "./motorist-mutations";
 import { readLatencyFlags } from "./telephony/latency-flags";
-import { mobileTokenCacheOpen } from "@/lib/telephony/device-liveness";
+import { mobileTokenCacheOpen, pendingCredentialDeletions } from "@/lib/telephony/device-liveness";
 
 /** Account removal and availability changes also alter shared live phone routing. */
 function assertOperatorAccessDeployment(): void {
@@ -209,14 +209,19 @@ async function revokeDeactivatedPhone(supabase: ReturnType<typeof createSupabase
     const phones = await supabase.from("motorist_operator_mobile_devices").select("metadata").eq("organization_id", organizationId).eq("profile_id", profileId);
     if (!phones.error && !(phones.data ?? []).some(row => mobileTokenCacheOpen(row.metadata, new Date()))) return;
   }
+  await revokeOperatorPhone(organizationId, profileId, "Používateľ je deaktivovaný, ale prístup jeho iPhonu k ústredni sa nepodarilo zrušiť. Deaktiváciu zopakujte.");
+}
+
+/** Revokes the iPhone lease and deletes its credential (and any still pending) at Telnyx; a refusal is a 502 the manager can retry. */
+async function revokeOperatorPhone(organizationId: string, profileId: string, failure: string) {
   try {
     const { createTelephonyDeps } = await import("@/server/telephony/runtime");
     const { disconnectDevice } = await import("@/server/telephony/operator-devices");
     const deps = await createTelephonyDeps({ organizationId, deviceKind: "mobile" });
     await disconnectDevice({ ...deps, deviceKind: "mobile" }, { organizationId, profileId });
   } catch (error) {
-    console.error("iPhone credential revocation during deactivation failed:", error);
-    throw new MutationError("Používateľ je deaktivovaný, ale prístup jeho iPhonu k ústredni sa nepodarilo zrušiť. Deaktiváciu zopakujte.", 502);
+    console.error("iPhone credential revocation failed:", error);
+    throw new MutationError(failure, 502);
   }
 }
 
@@ -309,9 +314,15 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
   const keepHistory = await hasRecordedHistory(supabase, profile);
   const mode: DeleteAccessUserResult["mode"] = keepHistory ? "anonymised" : "deleted";
 
-  // S8.1: with `mobile_rotate_on_deactivation`, or while a cached JWT may be in use, removal also takes the iPhone credential.
-  const mobile = (await readLatencyFlags(supabase, actor.organizationId)).mobile_rotate_on_deactivation;
-  const accessSnapshot = await loadOperatorAccessSnapshot(supabase, profile, mobile);
+  // The iPhone credential goes before anything irreversible, whatever the switches: the profile's
+  // cascade would orphan it at Telnyx, valid for any JWT the phone holds (S8.1). A refusal stops
+  // the removal so it can be retried.
+  const phones = await supabase.from("motorist_operator_mobile_devices").select("telnyx_credential_id, metadata").eq("profile_id", profile.id);
+  if (phones.error) throw new MutationError("Telefónne prístupy používateľa sa nepodarilo načítať.", 500);
+  if ((phones.data ?? []).some(row => row.telnyx_credential_id || pendingCredentialDeletions(row.metadata).length)) {
+    await revokeOperatorPhone(actor.organizationId, profile.id, "Prístup iPhonu k ústredni sa nepodarilo zrušiť, používateľ zostáva. Výmaz zopakujte.");
+  }
+  const accessSnapshot = await loadOperatorAccessSnapshot(supabase, profile);
   const audit = await supabase.from("motorist_audit_log").insert({
     organization_id: profile.organization_id,
     actor_profile_id: actor.profileId,
@@ -523,7 +534,7 @@ function isMissingRelation(error: DatabaseLookupError, relation: string): boolea
  * rows. It also validates that the cleanup scope is readable before we make an
  * irreversible change.
  */
-async function loadOperatorAccessSnapshot(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow, mobile = false) {
+async function loadOperatorAccessSnapshot(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow) {
   const [web, phone] = await Promise.all([
     supabase.from("motorist_operator_devices").select("id, telnyx_credential_id").eq("profile_id", profile.id),
     supabase.from("motorist_operator_mobile_devices").select("id, telnyx_credential_id, metadata").eq("profile_id", profile.id),
@@ -531,9 +542,9 @@ async function loadOperatorAccessSnapshot(supabase: ReturnType<typeof createSupa
   if (web.error || phone.error) {
     throw new MutationError("Telefónne prístupy používateľa sa nepodarilo načítať.", 500);
   }
-  // The iPhone credential goes with the switch on, or fail-closed while a cached JWT may be in use.
-  const phones = (phone.data ?? []).filter(row => mobile || mobileTokenCacheOpen(row.metadata, new Date()));
-  const devices = [...web.data ?? [], ...phones];
+  // iPhone rows of other environments, and IDs still pending, go best-effort like the browser's.
+  const phones = phone.data ?? [];
+  const devices = [...web.data ?? [], ...phones, ...phones.flatMap(row => pendingCredentialDeletions(row.metadata).map(id => ({ telnyx_credential_id: id })))];
 
   const memberships = await supabase.from("motorist_ring_group_members").select("id").eq("profile_id", profile.id);
   if (memberships.error) {

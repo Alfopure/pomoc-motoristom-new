@@ -46,6 +46,8 @@ export type PhoneOptions = {
 };
 /** Realtime-triggered status reads run at most this often (S8.5). */
 const REALTIME_CHECK_MS = 300;
+/** Token refusals the server names (besides 401/403); anything else is not a refusal of the lease. */
+const TOKEN_REFUSALS = ["native_lease_stale", "native_lease_taken", "native_voice_disabled"];
 export type PhoneDialTarget = VoiceCallTarget;
 export type PhoneState = {
   supported: boolean; registration: "unregistered" | "connecting" | "registered" | "error"; takeoverRequired: boolean;
@@ -151,6 +153,9 @@ export class DispatchPhone {
   private realtimeLast = 0;
   private realtimeSignals = 0;
   private realtimeChecks = 0;
+  /** Token requests answered "the device row changed meanwhile", asked again (S8). */
+  private contentionRetries = 0;
+  private contentionTimer: ReturnType<typeof setTimeout> | null = null;
   constructor(private api: VoiceApi, private native: NativePhone | null, private uuid: () => string, private leases?: PhoneLeaseStore,
     /** The app's error report; it receives a refused VoIP push's reason and key names. */
     private reportDiagnostic?: (error: Error) => void, private options: PhoneOptions = {}) {
@@ -359,7 +364,7 @@ export class DispatchPhone {
         step = "token";
         this.diag("token.start", { takeover, automatic });
         const token = await this.api.token(this.leaseId ?? undefined, takeover);
-        this.diag("token.end", { outcome: "ok" });
+        this.diag("token.end", { outcome: "ok" }); this.contentionRetries = 0;
         if (!this.current(generation)) { await this.api.disconnect(token.deviceSessionId).catch(() => {}); return; }
         this.leaseId = token.deviceSessionId;
         step = "save";
@@ -394,14 +399,34 @@ export class DispatchPhone {
       } catch (error) {
         this.diag("phone.connect_error", { step, current: this.current(generation), ...failure(error) });
         if (this.current(generation)) {
+          const api = error instanceof MobileApiError ? error : null;
+          // The device row changed under this request: asking again is safe, a few times.
+          if (step === "token" && api?.code === "native_lease_contention" && this.contentionRetries < 3) {
+            this.contentionRetries += 1;
+            this.diag("token.contention", { attempt: this.contentionRetries });
+            this.contentionTimer = setTimeout(() => {
+              this.contentionTimer = null;
+              if (this.current(generation) && this.connectionRequested) void this.connectAttempt(takeover, automatic);
+            }, 300 * this.contentionRetries);
+            return;
+          }
+          // Refusals the server names: the account, the lease or calling itself is gone. They also
+          // refuse any JWT this phone cached for its lease.
+          const refused = step === "token" && api !== null && (api.status === 401 || api.status === 403 || TOKEN_REFUSALS.includes(api.code ?? ""));
+          if (refused) void this.wipeCachedToken("refused");
           // A refusal needs a deliberate action. In particular, recovery never
           // takes the phone from another device or repeats an untrusted reply.
-          if (error instanceof MobileApiError && error.status !== 0 && error.status !== 408 && error.status !== 429
-            && !(error.status >= 500 && error.status <= 599 && error.status !== 502)) this.connectionRequested = false;
-          this.update({ registration: "error", takeoverRequired: error instanceof MobileApiError && error.status === 409 });
-          // A refused token request also refuses any JWT this phone cached for its lease.
-          const refused = step === "token" && error instanceof MobileApiError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
-          if (refused) void this.wipeCachedToken("refused");
+          if (api && api.status !== 0 && api.status !== 408 && api.status !== 429
+            && !(api.status >= 500 && api.status <= 599 && api.status !== 502)) this.connectionRequested = false;
+          // A token refresh never drops an established call: native stays as it is and the
+          // call's own status reads decide about it.
+          const call = this.state.call;
+          if (step === "token" && call && (call.connected || call.state === "ACTIVE")) {
+            this.diag("phone.fail", { status: api?.status ?? 0, code: api?.code ?? "none", revoke: false });
+            this.update({ error: api?.message ?? "Telefonovanie sa nepodarilo pripraviť." });
+            return;
+          }
+          this.update({ registration: "error", takeoverRequired: api?.status === 409 && api.code !== "native_lease_contention" });
           this.fail(error, false, refused && this.cachedInUse);
         }
       } finally {
@@ -1151,6 +1176,7 @@ export class DispatchPhone {
     this.connectionRequested = false;
     // Queued first: the Keychain holds no JWT once a logout or account change returns.
     const wiped = this.wipeCachedToken(reason); this.cachedInUse = false; this.prefetchedOffers.clear(); this.stopRealtime();
+    if (this.contentionTimer) clearTimeout(this.contentionTimer); this.contentionTimer = null;
     this.generation += 1; this.token = null; this.pendingDial = null; this.pendingHold = null; this.nativeMediaSync = null; this.outgoingIntent = null; this.pendingInvites.clear(); this.schedule();
     await this.native?.disconnect(reason);
     await wiped;
@@ -1167,6 +1193,7 @@ export class DispatchPhone {
   }
   dispose() {
     this.stopRealtime();
+    if (this.contentionTimer) clearTimeout(this.contentionTimer); this.contentionTimer = null;
     this.stopped = true; this.generation += 1; this.off?.(); this.off = null;
     if (this.heartbeat) clearInterval(this.heartbeat); if (this.monitor) clearInterval(this.monitor);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.listeners.clear();

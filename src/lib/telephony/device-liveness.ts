@@ -72,8 +72,14 @@ export function nativeMobilePushReachable(device: NativeMobileDevice | null | un
  * While it lies ahead, a replaced lease and a deactivation revoke the credential whatever the
  * switches say by then, so turning them off never strands a usable cached JWT. */
 export const MOBILE_TOKEN_CACHE_UNTIL = "token_cache_until";
-/** The phone uses a cached JWT at most 12 h after issue by its own clock; one more hour covers skew. */
-export const MOBILE_TOKEN_CACHE_WINDOW_MS = 13 * 60 * 60 * 1000;
+/** Device metadata: superseded Telnyx credentials not yet confirmed deleted; append-only until gone. */
+export const PENDING_CREDENTIAL_DELETIONS = "pending_credential_deletions";
+export function pendingCredentialDeletions(metadata: unknown): string[] {
+  const list = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>)[PENDING_CREDENTIAL_DELETIONS] : null;
+  return Array.isArray(list) ? list.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+}
+/** Past the cached JWT's own expiry: covers clock skew between the server and Telnyx. */
+export const MOBILE_TOKEN_CACHE_MARGIN_MS = 60 * 60 * 1000;
 export function mobileTokenCacheOpen(metadata: unknown, now: Date): boolean {
   const value = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>)[MOBILE_TOKEN_CACHE_UNTIL] : null;
   const until = typeof value === "string" ? Date.parse(value) : NaN;
