@@ -57,6 +57,13 @@ export type WebphoneCredentials = {
   expiresAt: string;
   deviceSessionId: string;
   sipUsername: string;
+  /**
+   * Latency switches for a new SDK client (call-speed S5), present only when
+   * on. A client already connected ignores them: a change applies at the next
+   * client creation, never to the socket carrying a call.
+   */
+  webRtcRegion?: "auto" | "eu";
+  webPrefetchIce?: boolean;
 };
 
 export type WebphoneState = {

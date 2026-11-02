@@ -14,6 +14,12 @@ describe("phone diagnostics boundary", () => {
     expect(webphoneDiagnostic({ message: "private", event: "sdk_payload" })).toBeNull();
   });
 
+  it("reports the EU-edge fallback (call-speed S5) as a failure without its trigger detail", () => {
+    expect(webphoneDiagnostic({ event: "rtc_region_fallback", reason: "rtc_region_fallback", trigger: "socket_error" })).toEqual({
+      type: "phone_lifecycle", module: "telephony", outcome: "failed", reason: "rtc_region_fallback",
+    });
+  });
+
   it("measures explicit controls but never the existing snapshot/heartbeat polling", () => {
     expect(telephonyRequestDiagnostic(`/api/telephony/calls/${session}/pickup`, "POST")).toEqual({ operation: "call.pickup", callSessionId: session });
     expect(telephonyRequestDiagnostic(`/api/telephony/calls/${session}/hangup`, "POST")?.operation).toBe("call.hangup");

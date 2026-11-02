@@ -1,4 +1,5 @@
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
+import { latencyFlagsOf, webCallTuning } from "@/server/telephony/latency-flags";
 import { issueWebphoneToken } from "@/server/telephony/operator-devices";
 import { createTelephonyDeps, readJsonBody, TELEPHONY_ROUTE_ROLES, telephonyConfiguredOrResponse, telephonyErrorResponse } from "@/server/telephony/runtime";
 
@@ -37,7 +38,10 @@ export async function POST(request: Request) {
       },
     );
 
-    return Response.json(token, { headers: { "Cache-Control": "private, no-store" } });
+    // Connect-time switches (call-speed S5): the browser creates every new SDK
+    // client right after a mint, so its first socket already follows them.
+    const { webRtcRegion, webPrefetchIce } = webCallTuning(latencyFlagsOf(deps));
+    return Response.json({ ...token, webRtcRegion, webPrefetchIce }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return telephonyErrorResponse(error, "Prihlasovací token pre telefón sa nepodarilo vydať.");
   }

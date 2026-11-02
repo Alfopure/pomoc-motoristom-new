@@ -176,6 +176,18 @@ const ACTIVE_STATES = new Set(["active", "held", "early", "answering"]);
 const DEAD_STATES = new Set(["hangup", "destroy", "purge"]);
 const SDK_LOGIN_TIMEOUT_MS = 15_000;
 
+/**
+ * `webRtcRegion` (call-speed S5): set once an EU-edge client of this page
+ * failed before its first login. Every later client of the page, whichever
+ * phone instance creates it, connects to the SDK's default edge.
+ */
+let euEdgeFailed = false;
+
+/** Test seam: a new page. */
+export function resetEuEdgeFallback(): void {
+  euEdgeFailed = false;
+}
+
 type SdkLoginRequest = {
   client: WebphoneSdkClient;
   generation: number;
@@ -227,6 +239,10 @@ export class TelnyxWebphone {
   private refreshTimer: number | null = null;
   private recoveryTimer: number | null = null;
   private loginTimer: number | null = null;
+  /** Bounds an EU-edge client's first login; see `abandonEuEdge`. */
+  private euEdgeTimer: number | null = null;
+  /** The EU-edge client until its first `telnyx.ready` (call-speed S5). */
+  private euEdgeUnproven: WebphoneSdkClient | null = null;
   private heartbeatTimer: number | null = null;
   private heartbeatWorker: Worker | null = null;
   private expectedLegTimer: number | null = null;
@@ -636,7 +652,7 @@ export class TelnyxWebphone {
     return timer(handler, delayMs);
   }
 
-  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer" | "expectedLegTimer" | "recoveryTimer" | "loginTimer" | "offerStatusTimer"): void {
+  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer" | "expectedLegTimer" | "recoveryTimer" | "loginTimer" | "euEdgeTimer" | "offerStatusTimer"): void {
     const handle = this[key];
     if (handle === null) return;
     this[key] = null;
@@ -746,11 +762,13 @@ export class TelnyxWebphone {
         this.dispatch({ type: "token_rejected", status: result.status, message: result.body?.error ?? null, code: result.body?.code });
         return;
       }
-      const { token, expiresAt, deviceSessionId, sipUsername } = result.body;
+      const { token, expiresAt, deviceSessionId, sipUsername, webRtcRegion, webPrefetchIce } = result.body;
       this.resumeSessionId = deviceSessionId;
       this.handoffPending = false;
       this.options.onSession?.(deviceSessionId);
-      this.dispatch({ type: "token_issued", credentials: { token, expiresAt, deviceSessionId, sipUsername } });
+      // Connect-time switches (call-speed S5) only when on; anything else is today's client.
+      this.dispatch({ type: "token_issued", credentials: { token, expiresAt, deviceSessionId, sipUsername,
+        ...(webRtcRegion === "eu" ? { webRtcRegion } : {}), ...(webPrefetchIce === true ? { webPrefetchIce } : {}) } });
     } catch {
       if (!this.started || generation !== this.mintGeneration) return;
       this.dispatch({ type: "token_rejected", status: 0, message: "Telefón sa nepodarilo prihlásiť (sieť)." });
@@ -942,6 +960,10 @@ export class TelnyxWebphone {
       const current = () => this.started && this.client === client && generation === this.clientGeneration;
       client.on("telnyx.ready", (() => {
         if (!current()) return;
+        if (this.euEdgeUnproven === client) {
+          this.euEdgeUnproven = null;
+          this.clearTimer("euEdgeTimer");
+        }
         this.sdkReady = true;
         this.authenticationNeeded = false;
         if (this.socketLoginToken) {
@@ -953,10 +975,14 @@ export class TelnyxWebphone {
         void this.applyPendingCredentials();
       }) as (payload: never) => void);
       client.on("telnyx.error", ((payload: WebphoneSdkError) => {
-        if (current()) this.onSdkError(payload);
+        if (!current()) return;
+        // The SDK's own recoverable errors are only logged today.
+        if (payload?.error?.fatal !== false && this.abandonEuEdge(client, "sdk_error")) return;
+        this.onSdkError(payload);
       }) as (payload: never) => void);
       client.on("telnyx.socket.close", ((payload: WebphoneSdkSocketEvent) => {
         if (!current() || !this.currentSocketEvent(client, payload)) return;
+        if (this.abandonEuEdge(client, "socket_closed")) return;
         this.onTransportLost();
       }) as (payload: never) => void);
       client.on("telnyx.socket.open", (() => {
@@ -970,7 +996,7 @@ export class TelnyxWebphone {
         this.socketLoginToken = client.options.login_token ?? null;
       }) as (payload: never) => void);
       client.on("telnyx.socket.error", ((payload: WebphoneSdkSocketEvent) => {
-        if (current() && this.currentSocketEvent(client, payload)) this.onTransportLost();
+        if (current() && this.currentSocketEvent(client, payload) && !this.abandonEuEdge(client, "socket_error")) this.onTransportLost();
       }) as (payload: never) => void);
       client.on("telnyx.warning", ((payload: WebphoneSdkWarning) => {
         if (current()) this.onSdkWarning(payload);
@@ -980,9 +1006,16 @@ export class TelnyxWebphone {
       }) as (payload: never) => void);
       const element = this.getRemoteAudio();
       if (element) client.remoteElement = element;
+      if (this.euEdgeUnproven === client) {
+        this.euEdgeTimer = this.schedule(() => {
+          this.euEdgeTimer = null;
+          if (current()) this.abandonEuEdge(client, "login_timeout");
+        }, SDK_LOGIN_TIMEOUT_MS);
+      }
       await client.connect();
     } catch (error) {
       if (!this.started || generation !== this.clientGeneration) return;
+      if (this.client && this.abandonEuEdge(this.client, "connect_rejected")) return;
       this.dispatch({
         type: "client_error",
         message: error instanceof Error ? error.message : "Telefón sa nepodarilo pripojiť.",
@@ -994,9 +1027,31 @@ export class TelnyxWebphone {
 
   private async createTelnyxClient(credentials: WebphoneCredentials): Promise<WebphoneSdkClient> {
     const { TelnyxRTC } = await this.loadSdk();
+    const euEdge = credentials.webRtcRegion === "eu" && !euEdgeFailed;
     // Send the SDP answer immediately and deliver ICE candidates as they
     // arrive, avoiding the SDK's non-trickle gathering wait before answering.
-    return new TelnyxRTC({ login_token: credentials.token, trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5 });
+    // The call-speed S5 switches add their options only when on.
+    const client = new TelnyxRTC({ login_token: credentials.token, trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5,
+      ...(euEdge ? { region: "eu" } : {}), ...(credentials.webPrefetchIce === true ? { prefetchIceCandidates: true } : {}) });
+    if (euEdge) this.euEdgeUnproven = client;
+    return client;
+  }
+
+  /**
+   * An EU-edge client that fails before its first login (call-speed S5) is
+   * replaced through the ordinary connect retry, and this page stays on the
+   * SDK's default edge from then on. Nothing rides on it yet: invites arrive
+   * only after login, so the switch can never cost a call. At most once per
+   * page, since no EU-edge client is created after it.
+   */
+  private abandonEuEdge(client: WebphoneSdkClient, trigger: "connect_rejected" | "socket_closed" | "socket_error" | "sdk_error" | "login_timeout"): boolean {
+    if (this.euEdgeUnproven !== client) return false;
+    this.euEdgeUnproven = null;
+    this.clearTimer("euEdgeTimer");
+    euEdgeFailed = true;
+    this.log({ event: "rtc_region_fallback", reason: "rtc_region_fallback", trigger });
+    this.dispatch({ type: "client_error" });
+    return true;
   }
 
   private beginRecovery(message: string, signaling: boolean): void {
@@ -1159,8 +1214,10 @@ export class TelnyxWebphone {
     this.loginRequest = null;
     this.loginFailureEvent = null;
     this.lastWarningRefreshAt = -Infinity;
+    this.euEdgeUnproven = null;
     this.clearTimer("recoveryTimer");
     this.clearTimer("loginTimer");
+    this.clearTimer("euEdgeTimer");
     this.confirmedEndedCallIds.clear();
     this.retiredCalls = new WeakSet();
     this.retiredCallIds.clear();
