@@ -225,13 +225,16 @@ async function revokeDeactivatedPhone(supabase: ReturnType<typeof createSupabase
 
 /** Revokes the iPhone lease and deletes its credential (and any still pending) at Telnyx; a refusal
  * is a 502 the manager can retry. Resolves whether anything was taken away. */
-async function revokeOperatorPhone(organizationId: string, profileId: string, failure: string): Promise<boolean> {
+async function revokeOperatorPhone(organizationId: string, profileId: string, failure: string, options: { cleanupPendingIsDone?: boolean } = {}): Promise<boolean> {
+  const devices = await import("@/server/telephony/operator-devices");
   try {
     const { createTelephonyDeps } = await import("@/server/telephony/runtime");
-    const { disconnectDevice } = await import("@/server/telephony/operator-devices");
     const deps = await createTelephonyDeps({ organizationId, deviceKind: "mobile" });
-    return (await disconnectDevice({ ...deps, deviceKind: "mobile" }, { organizationId, profileId }))?.revoked === true;
+    return (await devices.disconnectDevice({ ...deps, deviceKind: "mobile" }, { organizationId, profileId }))?.revoked === true;
   } catch (error) {
+    // The lease and the live credential are gone; only an older superseded credential is still
+    // pending. A caller that keeps a record of it elsewhere may go on.
+    if (options.cleanupPendingIsDone && (error as { code?: unknown } | null)?.code === devices.CREDENTIAL_CLEANUP_PENDING) return true;
     console.error("iPhone credential revocation failed:", error);
     throw new MutationError(failure, 502);
   }
@@ -328,12 +331,14 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
 
   // The iPhone credential goes before anything irreversible, whatever the switches: the profile's
   // cascade would orphan it at Telnyx, valid for any JWT the phone holds (S8.1). A refusal stops
-  // the removal so it can be retried.
+  // the removal so it can be retried. An older credential whose deletion is merely still pending
+  // does not: its ID goes through the snapshot below, deleted best-effort and audited if refused.
   const phones = await supabase.from("motorist_operator_mobile_devices").select("environment, telnyx_credential_id, metadata").eq("profile_id", profile.id);
   if (phones.error) throw new MutationError("Telefónne prístupy používateľa sa nepodarilo načítať.", 500);
   const { telephonyEnvironment } = await import("@/server/telephony/runtime");
   if ((phones.data ?? []).some(row => row.environment === telephonyEnvironment() && (row.telnyx_credential_id || pendingCredentialDeletions(row.metadata).length))) {
-    await revokeOperatorPhone(actor.organizationId, profile.id, "Prístup iPhonu k ústredni sa nepodarilo zrušiť, používateľ zostáva. Výmaz zopakujte.");
+    await revokeOperatorPhone(actor.organizationId, profile.id, "Prístup iPhonu k ústredni sa nepodarilo zrušiť, používateľ zostáva. Výmaz zopakujte.",
+      { cleanupPendingIsDone: true });
   }
   const accessSnapshot = await loadOperatorAccessSnapshot(supabase, profile);
   const audit = await supabase.from("motorist_audit_log").insert({

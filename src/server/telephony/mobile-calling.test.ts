@@ -96,6 +96,24 @@ describe("separate explicit mobile calling", () => {
     expect(h.rows("motorist_operator_mobile_devices")[0].telnyx_credential_id).toBeNull();
   });
 
+  it("revokes the iPhone even when an old browser credential's cleanup is stuck, and reports that cleanup", async () => {
+    const h = createTelephonyHarness(); readyMobile(h);
+    h.db.update("motorist_operator_devices", { metadata: { pending_credential_deletions: ["stuck-web-credential"] } }, row => row.profile_id === PROFILES.o1);
+    const deleteCredential = h.telnyx.client.deleteTelephonyCredential.bind(h.telnyx.client);
+    h.telnyx.client.deleteTelephonyCredential = async (credentialId: string) => {
+      if (credentialId === "stuck-web-credential") throw new Error("provider down");
+      return deleteCredential(credentialId);
+    };
+    // No device kind: both phones of the operator.
+    await expect(disconnectDevice({ ...deviceDeps(h), deviceKind: undefined }, { organizationId: ORG, profileId: PROFILES.o1 }))
+      .rejects.toMatchObject({ status: 502, code: "credential_cleanup_pending" });
+    const phone = h.rows("motorist_operator_mobile_devices").find(row => row.profile_id === PROFILES.o1)!;
+    expect(phone.telnyx_credential_id).toBeNull(); expect(String(phone.device_session_id)).toMatch(/^revoked:/);
+    expect(h.telnyx.of("deleteTelephonyCredential").map(call => (call.params as { credentialId: string }).credentialId)).toContain(`mobile-${PROFILES.o1}`);
+    // The browser itself is revoked too; only its older credential is still pending.
+    expect(h.rows("motorist_operator_devices").find(row => row.profile_id === PROFILES.o1)).toMatchObject({ telnyx_credential_id: null });
+  });
+
   it("leaves the replaced iPhone's lease and JWT useless after a rotating takeover, and calls the new SIP identity (S8.1)", async () => {
     const h = createTelephonyHarness(); readyMobile(h);
     const old = h.rows("motorist_operator_mobile_devices")[0];
