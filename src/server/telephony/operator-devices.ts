@@ -110,6 +110,19 @@ function pendingBlocks(entry: PendingCredentialDeletion, now: Date): boolean {
   return entry.failures < PENDING_BLOCK_FAILURES || pendingAge(entry, now) < PENDING_BLOCK_MS;
 }
 
+/** One `telephony.credential_deletion_stuck` audit row (and log line, with the credential ID) for
+ * a manager: a deletion no longer blocking new tokens, or one no longer retried. Resolves whether
+ * the row was written. */
+async function auditStuckDeletion(deps: DeviceDeps, device: DeviceRow, entry: PendingCredentialDeletion, abandoned: boolean): Promise<boolean> {
+  const deviceKind = deps.deviceKind ?? "web";
+  console.error(JSON.stringify({ level: "error", scope: "telephony", code: "credential_deletion_stuck", credentialId: entry.id, deviceKind, failures: entry.failures, abandoned }));
+  const audit = await deps.admin.from("motorist_audit_log").insert({ organization_id: device.organization_id, actor_profile_id: null,
+    action: "telephony.credential_deletion_stuck", entity_type: "operator_device", entity_id: device.profile_id, source: "telephony",
+    after_payload: toJson({ credentialId: entry.id, deviceKind, failures: entry.failures, since: entry.since, abandoned }) });
+  if (audit.error) console.error(JSON.stringify({ level: "error", scope: "telephony", code: "credential_deletion_unaudited", credentialId: entry.id, message: audit.error.message }));
+  return !audit.error;
+}
+
 /**
  * Deletes every superseded credential still pending at Telnyx and forgets those that are gone
  * (deleted or 404); a failure is counted on its entry, never silently dropped. `strict` (every
@@ -122,7 +135,11 @@ async function drainPendingDeletions(deps: DeviceDeps, device: DeviceRow, mode: 
   if (!listed.length) return device;
   const now = nowOf(deps);
   const pending = listed.filter(entry => pendingAge(entry, now) < PENDING_RETRY_MS).slice(-PENDING_MAX);
-  const abandoned = new Set(listed.filter(entry => !pending.includes(entry)).map(entry => entry.id));
+  // An abandoned entry leaves the list only once its audit row is written: the row is the record.
+  const abandoned = new Set<string>();
+  for (const entry of listed.filter(candidate => !pending.includes(candidate))) {
+    if (await auditStuckDeletion(deps, device, entry, true)) abandoned.add(entry.id);
+  }
   const results = new Map<string, "gone" | "failed">();
   let failure: unknown = null;
   for (const entry of pending) {
@@ -148,14 +165,8 @@ async function drainPendingDeletions(deps: DeviceDeps, device: DeviceRow, mode: 
   });
   // Contention keeps the deleted IDs listed; the next drain sees their 404 and forgets them.
   const current = updated ?? device;
-  const incidents = [...after.filter(entry => entry.reported && !listed.find(previous => previous.id === entry.id)?.reported).map(entry => ({ entry, abandoned: false })),
-    ...listed.filter(entry => abandoned.has(entry.id)).map(entry => ({ entry, abandoned: true }))];
-  for (const { entry, abandoned: dropped } of incidents) {
-    console.error(JSON.stringify({ level: "error", scope: "telephony", code: "credential_deletion_stuck", deviceKind: deps.deviceKind ?? "web", failures: entry.failures, abandoned: dropped }));
-    const audit = await deps.admin.from("motorist_audit_log").insert({ organization_id: device.organization_id, actor_profile_id: null,
-      action: "telephony.credential_deletion_stuck", entity_type: "operator_device", entity_id: device.profile_id, source: "telephony",
-      after_payload: toJson({ credentialId: entry.id, deviceKind: deps.deviceKind ?? "web", failures: entry.failures, since: entry.since, abandoned: dropped }) });
-    if (audit.error) console.error("Credential deletion incident could not be audited:", audit.error.message);
+  for (const entry of after.filter(candidate => candidate.reported && !listed.find(previous => previous.id === candidate.id)?.reported)) {
+    await auditStuckDeletion(deps, device, entry, false);
   }
   if (failure && (mode === "strict" || after.some(entry => results.get(entry.id) === "failed" && pendingBlocks(entry, now)))) throw failure;
   return current;
@@ -345,6 +356,9 @@ const LEASE_CONTENTION = "native_lease_contention";
 const LEASE_ON_CALL = "native_lease_on_call";
 /** A replaced iPhone lease: only an explicit takeover brings it back. */
 const LEASE_STALE = "native_lease_stale";
+/** The device is revoked (lease and current credential gone); only an older, superseded credential
+ * is still pending at Telnyx. The caller may finish locally and retry the cleanup. */
+export const CREDENTIAL_CLEANUP_PENDING = "credential_cleanup_pending";
 /** Credential rotations per operator on one server instance (TEST shares its Telnyx account with production). */
 const ROTATION_LIMIT = { limit: 6, windowMs: 10 * 60 * 1000, message: "Telefón sa prepína medzi zariadeniami príliš často. Skúste to o chvíľu." };
 
@@ -558,12 +572,24 @@ export async function disconnectDevice(
   if (!device) return null;
   // A delayed mobile logout may never revoke a newer device's lease.
   if (input.deviceSessionId && device.device_session_id !== input.deviceSessionId) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
-  // Superseded credentials still alive at Telnyx go first; while one stays alive the revocation fails.
-  const revoked = await drainPendingDeletions(deps, await revokeDeviceSession(deps, device), "strict");
+  // Superseded credentials still alive at Telnyx are retried too, but one Telnyx refuses never
+  // keeps the live lease and credential in place: the revocation finishes first, and only then
+  // the pending failure is reported as a retryable 502 the phone can tell apart.
+  const session = await revokeDeviceSession(deps, device);
+  let pendingFailure: unknown = null;
+  const revoked = await drainPendingDeletions(deps, session, "strict").catch(async (error: unknown) => {
+    pendingFailure = error;
+    return (await getOperatorDevice(deps, input)) ?? session;
+  });
+  const cleanupPending = () => new OperatorDeviceError("Telefón je odpojený, ale staré prihlasovacie údaje sa u operátora ešte nepodarilo zrušiť. Skúste to znova.",
+    502, { code: CREDENTIAL_CLEANUP_PENDING, cause: pendingFailure });
   // Whether this call took anything away: a live lease, a pending credential, or (below) the credential.
-  const tookAway = !device.device_session_id?.startsWith("revoked:")
-    || pendingCredentialEntries(revoked.metadata).length < pendingCredentialEntries(device.metadata).length;
-  if (input.keepCredential || !revoked.telnyx_credential_id) return { device: revoked, deletedCredentialId: null, revoked: tookAway };
+  const hadLease = Boolean(device.device_session_id && !device.device_session_id.startsWith("revoked:"));
+  const tookAway = hadLease || pendingCredentialEntries(revoked.metadata).length < pendingCredentialEntries(device.metadata).length;
+  if (input.keepCredential || !revoked.telnyx_credential_id) {
+    if (pendingFailure) throw cleanupPending();
+    return { device: revoked, deletedCredentialId: null, revoked: tookAway };
+  }
 
   const credentialId = revoked.telnyx_credential_id;
   await deleteCredentialAtProvider(deps, credentialId, "Telefón sme odhlásili, ale prihlasovacie údaje sa nepodarilo zrušiť u operátora");
@@ -575,6 +601,7 @@ export async function disconnectDevice(
       metadata: toJson({ ...retainDeviceLastOnline(current, nowOf(deps)), deleted_credential_id: credentialId, deleted_credential_at: nowOf(deps).toISOString() }),
     }));
   if (!cleared) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
+  if (pendingFailure) throw cleanupPending();
   return { device: cleared, deletedCredentialId: credentialId, revoked: true };
 }
 

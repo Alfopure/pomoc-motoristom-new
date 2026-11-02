@@ -587,22 +587,36 @@ async function revokeOperatorAccess(
 ) {
 
   if (credentialIds.length > 0) {
+    // Best effort, but never without a record: a credential Telnyx did not delete is logged with its
+    // ID and audited for a manager, since its device row (the other record) goes regardless.
+    const settled = new Set<string>();
+    const recordUndeleted = async (credentialId: string, error: unknown) => {
+      settled.add(credentialId);
+      // Telnyx no longer knowing it means it is gone.
+      if ((error as { status?: unknown } | null)?.status === 404) return;
+      console.error(JSON.stringify({ level: "error", scope: "telephony", code: "credential_deletion_stuck", credentialId, removal: true,
+        message: error instanceof Error ? error.message : String(error) }));
+      const audit = await supabase.from("motorist_audit_log").insert({ organization_id: profile.organization_id, actor_profile_id: null,
+        action: "telephony.credential_deletion_stuck", entity_type: "operator_device", entity_id: profile.id, source: "telephony",
+        after_payload: { credentialId, removal: true } as unknown as Json });
+      if (audit.error) console.error(JSON.stringify({ level: "error", scope: "telephony", code: "credential_deletion_unaudited", credentialId, message: audit.error.message }));
+    };
     try {
       const { getTelnyxConfig } = await import("@/server/telephony/telnyx/env");
       const config = getTelnyxConfig();
-      if (config.configured) {
-        const { createTelnyxClient } = await import("@/server/telephony/telnyx/client");
-        const client = createTelnyxClient({ config, liveGate: { callsEnabled: true, smsEnabled: false } });
-        for (const credentialId of credentialIds) {
-          // Best effort per credential: one Telnyx already forgot must not stop
-          // the others, and the device rows go regardless.
-          await client.deleteTelephonyCredential(credentialId).catch((error: unknown) => {
-            console.error("Telnyx credential deletion during account removal failed:", error);
-          });
-        }
+      if (!config.configured) throw new Error("Telnyx is not configured");
+      const { createTelnyxClient } = await import("@/server/telephony/telnyx/client");
+      const client = createTelnyxClient({ config, liveGate: { callsEnabled: true, smsEnabled: false } });
+      for (const credentialId of credentialIds) {
+        // Best effort per credential: one Telnyx already forgot must not stop
+        // the others, and the device rows go regardless.
+        try {
+          await client.deleteTelephonyCredential(credentialId);
+          settled.add(credentialId);
+        } catch (error) { await recordUndeleted(credentialId, error); }
       }
     } catch (error) {
-      console.error("Telnyx cleanup during account removal failed:", error);
+      for (const credentialId of credentialIds) if (!settled.has(credentialId)) await recordUndeleted(credentialId, error);
     }
   }
 

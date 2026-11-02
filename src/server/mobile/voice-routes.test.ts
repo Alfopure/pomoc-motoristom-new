@@ -8,6 +8,7 @@ import { POST as presence } from "@/app/api/mobile/v1/voice/presence/route";
 import { POST as end } from "@/app/api/mobile/v1/voice/calls/[id]/end/route";
 import { POST as status } from "@/app/api/mobile/v1/voice/calls/[id]/status/route";
 import { MutationError } from "@/server/mutation-error";
+import { OperatorDeviceError } from "@/server/telephony/service-errors";
 
 const mocks = vi.hoisted(() => ({ actor: vi.fn(), deps: vi.fn(), lease: vi.fn(), session: vi.fn(), token: vi.fn(), touch: vi.fn(),
   dial: vi.fn(), disconnect: vi.fn(), hangup: vi.fn(), continue: vi.fn(), after: vi.fn(), callCase: vi.fn(), handedAway: vi.fn(), access: vi.fn() }));
@@ -66,6 +67,11 @@ describe("mobile voice HTTP contract", () => {
     expect(mocks.token).toHaveBeenCalledTimes(30);
     mocks.actor.mockResolvedValue({ ...actor, profileId: "another-operator" });
     expect((await token(request({ deviceSessionId: id }))).status).toBe(200);
+  });
+  it("tells the phone apart a finished logout whose older credential cleanup is still pending", async () => {
+    mocks.disconnect.mockRejectedValue(new OperatorDeviceError("Telefón je odpojený, ale staré prihlasovacie údaje…", 502, { code: "credential_cleanup_pending" }));
+    const response = await disconnect(request({ deviceSessionId: id }));
+    expect(response.status).toBe(502); expect(await response.json()).toMatchObject({ code: "credential_cleanup_pending" });
   });
   it("revokes and withholds a token minted while the operator was deactivated or removed", async () => {
     mocks.token.mockResolvedValue({ token: "jwt", deviceSessionId: id, expiresAt: "2026-10-12T12:00:00Z", sipUsername: "sip", credentialId: "cred" });

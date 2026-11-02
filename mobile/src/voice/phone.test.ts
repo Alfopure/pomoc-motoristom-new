@@ -593,6 +593,15 @@ describe("native phone lifecycle", () => {
     await expect(f.phone.disconnect()).rejects.toMatchObject({ status: 503 }); expect(f.store.clear).not.toHaveBeenCalled();
     await f.phone.disconnect(); expect(f.api.disconnect).toHaveBeenCalledTimes(2); expect(f.store.clear).toHaveBeenCalled();
   });
+  it("finishes a logout the server revoked even when an older credential's cleanup is still pending", async () => {
+    const f = await connected();
+    vi.mocked(f.api.disconnect).mockRejectedValueOnce(new MobileApiError("Prístup telefónu sa nepodarilo zrušiť.", 502, "credential_cleanup_pending"));
+    await f.phone.disconnect("logout");
+    expect(f.store.clear).toHaveBeenCalled(); expect(f.phone.state.registration).toBe("unregistered");
+    // A plain 502 is not a finished revocation: the lease stays for a retry.
+    const g = await connected(); vi.mocked(g.api.disconnect).mockRejectedValueOnce(new MobileApiError("Prístup telefónu sa nepodarilo zrušiť.", 502));
+    await expect(g.phone.disconnect("logout")).rejects.toMatchObject({ status: 502 }); expect(g.store.clear).not.toHaveBeenCalled();
+  });
   it("authorizes a foreground SDK INVITE by leg UUID before a control ID exists", async () => {
     const f = await connected(); f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
     expect(f.api.authorize).toHaveBeenCalledWith(lease, { providerLegId: id });

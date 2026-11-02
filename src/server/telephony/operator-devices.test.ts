@@ -491,7 +491,7 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
     expect(order.lastIndexOf("deleteTelephonyCredential")).toBeLessThan(order.indexOf("mintCredentialToken"));
     expect(token.credentialId).not.toBe("old-credential");
   });
-  it("forgets a pending credential Telnyx no longer knows, and finishes it before revoking the phone", async () => {
+  it("forgets a pending credential Telnyx no longer knows, and retries pending ones on every revocation", async () => {
     const h = createTelephonyHarness();
     seedPhone(h, { metadata: { pending_credential_deletions: ["gone-credential", "stale-credential"] } });
     h.telnyx.failNext("deleteTelephonyCredential", new TelnyxCommandError({ code: "not_found", status: 404, detail: "gone" }));
@@ -501,8 +501,9 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
     expect(result).toMatchObject({ deletedCredentialId: "old-credential", device: { telnyx_credential_id: null } });
     const failing = createTelephonyHarness(); seedPhone(failing, { metadata: { pending_credential_deletions: ["stale-credential"] } });
     failing.telnyx.failNext("deleteTelephonyCredential", "provider down");
-    await expect(disconnectDevice(phone(failing), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 502 });
-    expect(deleted(failing)).toEqual(["stale-credential"]);
+    await expect(disconnectDevice(phone(failing), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 502, code: "credential_cleanup_pending" });
+    // The live credential still went; only the pending one is left for the retry.
+    expect(deleted(failing)).toEqual(["stale-credential", "old-credential"]);
   });
   it("answers a replaced iPhone's renewal as stale and never lets it rotate the new phone's credential", async () => {
     const h = createTelephonyHarness(); seedPhone(h);
@@ -606,10 +607,37 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
     const h = createTelephonyHarness();
     seedPhone(h, { metadata: { pending_credential_deletions: [{ id: "stuck-credential", since: new Date(h.now().getTime() - 24 * 3_600_000).toISOString(), failures: 50, reported: true }] } });
     h.telnyx.failNext("deleteTelephonyCredential", "provider down");
-    await expect(disconnectDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 502 });
+    await expect(disconnectDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 502, code: "credential_cleanup_pending" });
+    // The revocation itself finished first: the lease and the live credential are gone.
+    expect(deleted(h)).toEqual(["stuck-credential", "old-credential"]);
+    expect(await row(h)).toMatchObject({ telnyx_credential_id: null }); expect((await row(h)).device_session_id).toMatch(/^revoked:/);
+    expect((await pendingOf(h)).map(entry => entry.id)).toEqual(["stuck-credential"]);
     // Minting is relieved for the same entry; the revocation is not.
     h.telnyx.failNext("deleteTelephonyCredential", "provider down");
-    expect(await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE, rotateCredential: false }))).toMatchObject({ credentialId: "old-credential" });
+    expect((await issueWebphoneToken(phone(h), input({ rotateCredential: false }))).credentialId).not.toBe("old-credential");
+  });
+  it("reports a revocation as not done when the live credential itself survives", async () => {
+    const h = createTelephonyHarness(); seedPhone(h);
+    h.telnyx.failNext("deleteTelephonyCredential", "provider down");
+    const refusal = await disconnectDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }).catch((error: { status: number; code?: string }) => error);
+    expect(refusal).toMatchObject({ status: 502 }); expect((refusal as { code?: string }).code).toBeUndefined();
+    expect(await row(h)).toMatchObject({ telnyx_credential_id: "old-credential" });
+  });
+  it("says nothing was revoked for a phone without a lease or credential", async () => {
+    const h = createTelephonyHarness(); seedPhone(h, { device_session_id: null, telnyx_credential_id: null, sip_username: null, registration_state: "unregistered" });
+    expect(await disconnectDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 })).toMatchObject({ revoked: false });
+    const live = createTelephonyHarness(); seedPhone(live);
+    expect(await disconnectDevice(phone(live), { organizationId: ORG, profileId: PROFILES.o1 })).toMatchObject({ revoked: true });
+  });
+  it("drops an abandoned pending deletion only after its audit row is written", async () => {
+    const h = createTelephonyHarness();
+    seedPhone(h, { metadata: { pending_credential_deletions: [{ id: "ancient", since: new Date(h.now().getTime() - 8 * 24 * 3_600_000).toISOString(), failures: 300 }] } });
+    h.db.failNext("motorist_audit_log", "insert", "audit unavailable");
+    await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE, rotateCredential: false }));
+    expect((await pendingOf(h)).map(entry => entry.id)).toEqual(["ancient"]); expect(deleted(h)).toEqual([]);
+    await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE, rotateCredential: false }));
+    expect(await pendingOf(h)).toEqual([]);
+    expect(h.rows("motorist_audit_log").map(entry => (entry.after_payload as { credentialId: string }).credentialId)).toEqual(["ancient"]);
   });
   it("retries at most twenty pending deletions, none after a week, and audits the rest", async () => {
     const h = createTelephonyHarness();
@@ -618,7 +646,8 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
       ...Array.from({ length: 22 }, (_, index) => `pending-${index}`)] } });
     h.telnyx.failAlways("deleteTelephonyCredential", "provider down");
     await expect(disconnectDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 })).rejects.toMatchObject({ status: 502 });
-    expect(deleted(h)).toEqual(Array.from({ length: 20 }, (_, index) => `pending-${index + 2}`));
+    // Twenty retried, then the live credential (refused too).
+    expect(deleted(h)).toEqual([...Array.from({ length: 20 }, (_, index) => `pending-${index + 2}`), "old-credential"]);
     expect((await pendingOf(h)).map(entry => entry.id)).toEqual(Array.from({ length: 20 }, (_, index) => `pending-${index + 2}`));
     expect(h.rows("motorist_audit_log").filter(entry => (entry.after_payload as { abandoned?: boolean }).abandoned).map(entry => (entry.after_payload as { credentialId: string }).credentialId))
       .toEqual(["ancient", "pending-0", "pending-1"]);

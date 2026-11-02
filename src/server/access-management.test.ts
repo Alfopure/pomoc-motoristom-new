@@ -414,6 +414,20 @@ describe("the iPhone credential on deactivation and removal (call-speed S8.1)", 
     expect(fake.db.rows("motorist_audit_log")).toHaveLength(0); expect(deleteUser).not.toHaveBeenCalled();
     expect(fake.db.rows("motorist_operator_mobile_devices")).toHaveLength(1);
   });
+  it("records every browser credential Telnyx did not delete at removal, with its ID, and keeps removal best-effort", async () => {
+    fake.db.seed("motorist_operator_devices", [{ id: "web-1", organization_id: ORG, profile_id: TARGET, environment: "development", telnyx_credential_id: "web-cred",
+      metadata: { pending_credential_deletions: ["web-pending", "web-gone"] } }]);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    deleteTelephonyCredential.mockImplementation(async (id: string) => {
+      if (id === "web-cred") throw new Error("provider down");
+      if (id === "web-gone") throw Object.assign(new Error("not found"), { status: 404 });
+    });
+    await deleteAccessUser(actor, TARGET);
+    expect(fake.db.rows("motorist_profiles").map(row => row.id)).toEqual([ADMIN]);
+    expect(fake.db.rows("motorist_audit_log").filter(row => row.action === "telephony.credential_deletion_stuck"))
+      .toEqual([expect.objectContaining({ entity_id: TARGET, after_payload: { credentialId: "web-cred", removal: true } })]);
+    expect(logged.mock.calls.some(([line]) => String(line).includes("\"credentialId\":\"web-cred\""))).toBe(true);
+  });
   it("needs no Telnyx round trip to remove an account without an iPhone", async () => {
     await deleteAccessUser(actor, TARGET);
     expect(createTelephonyDeps).not.toHaveBeenCalled(); expect(disconnectDevice).not.toHaveBeenCalled();

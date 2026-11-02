@@ -1185,9 +1185,10 @@ export class DispatchPhone {
     const leaseId = this.leaseId ?? await this.leases?.load();
     if (leaseId) try { await this.api.disconnect(leaseId); } catch (error) {
       this.diag("phone.disconnect_error", { reason, ...failure(error) });
-      // A superseded lease is already disconnected. Provider/network failures
-      // retain the saved lease so the user can retry revocation before logout.
-      if (!(error instanceof MobileApiError && error.status === 409)) throw error;
+      // A superseded lease is already disconnected, and so is one the server revoked while only
+      // an older credential's cleanup is still pending (the server retries that). Provider or
+      // network failures retain the saved lease so the user can retry revocation before logout.
+      if (!(error instanceof MobileApiError && (error.status === 409 || error.code === "credential_cleanup_pending"))) throw error;
     }
     await this.leases?.clear(); this.leaseId = null;
     this.update({ registration: "unregistered", call: null, holdPhase: "idle", nativeSyncPending: false, termination: null, dialing: false, cancelingAttempt: false, audioActive: false, muted: false, speaker: false,
