@@ -21,7 +21,7 @@ import { effectsDeps, ownedSessionWork } from "./session-runner";
 import { cancelRevokedOffers } from "./state/cancelled-offers";
 import { reconcileTermination } from "./termination";
 import { readMeta, type SessionRow } from "./state/types";
-import { CLOUDFLARE_SIGNATURE_BANNED_CODE, createTelnyxClient, TelnyxCommandError, type TelnyxRequestLog } from "./telnyx/client";
+import { CLOUDFLARE_SIGNATURE_BANNED_CODE, createTelnyxClient, isSessionCallGoneError, TelnyxCommandError, type TelnyxRequestLog } from "./telnyx/client";
 import { encodeClientState } from "./telnyx/client-state";
 import { getTelnyxConfig } from "./telnyx/env";
 import { createTelnyxRequestLogger } from "./telnyx/request-telemetry";
@@ -513,7 +513,7 @@ describe("recording provider host", () => {
     expect(unbound.db.log).toEqual([]);
   });
 
-  it.each([["production", production], ["a local run", () => vi.stubEnv("TELNYX_API_KEY", "synthetic")]])("adds no read and no failure mode in %s, where no session can be frozen to eu", async (_case, environment) => {
+  it.each([["production", production], ["an unreadable environment", () => { vi.stubEnv("TELNYX_API_KEY", "synthetic"); vi.stubEnv("MOTORIST_APP_ENV", "bogus"); }]])("adds no read and no failure mode in %s, where no session can be frozen to eu", async (_case, environment) => {
     environment();
     const fetch = stubFetch();
     const { db, ctx } = context({ start_mode: { apiRegion: "eu" } });
@@ -521,6 +521,13 @@ describe("recording provider host", () => {
     await fetchTelnyxRecording(ctx, "recording", { method: "DELETE" });
     expect(urls(fetch)).toEqual(["DELETE https://api.telnyx.com/v2/recordings/recording"]);
     expect(db.log).toEqual([]);
+  });
+
+  it("follows an EU session's recording to .eu on a local run too (it may use the TEST database), though it cannot freeze eu itself", async () => {
+    vi.stubEnv("TELNYX_API_KEY", "synthetic");
+    const fetch = stubFetch();
+    await fetchTelnyxRecording(context({ start_mode: { apiRegion: "eu" } }).ctx, "recording", { method: "DELETE" });
+    expect(urls(fetch)).toEqual(["DELETE https://api.telnyx.eu/v2/recordings/recording"]);
   });
 
   it("fails a step for a retry rather than guess when the session cannot be read", async () => {
@@ -608,9 +615,9 @@ describe("an EU session's supervision, recording, termination clean-up and cance
   });
 
   /** An EU contract-2 session with one owned, accepted dial, as the termination pass finds it. */
-  async function euSessionWithDial(h: TelephonyHarness, sessionId: string) {
+  async function euSessionWithDial(h: TelephonyHarness, sessionId: string, apiRegion: "us" | "eu" = "eu") {
     h.db.seed("motorist_call_sessions", [{ id: sessionId, organization_id: ORG, direction: "outbound", state: "talking", writer_contract: 2, lease_generation: 0,
-      metadata: { start_mode: { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "eu", origin: "web" } } }]);
+      metadata: { start_mode: { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion, origin: "web" } } }]);
     const dialed = await ownedSessionWork(h.deps, sessionId, () => h.telnyx.client.dial({ commandId: `${sessionId}-dial`, to: NUMBERS.customer, from: NUMBERS.allianz }));
     return dialed.callControlId;
   }
@@ -634,6 +641,48 @@ describe("an EU session's supervision, recording, termination clean-up and cance
     const result = await ownedSessionWork(h.deps, sessionId, () => cancelRevokedOffers(effectsDeps(h.deps), h.session(sessionId) as SessionRow));
     expect(result).toMatchObject({ cancelled: 1, pending: 0 });
     expect(routesOf(h, sessionId).map(route => `${route.method} ${route.region}`)).toEqual(["dial eu", "hangup eu"]);
+  });
+
+  /** A refusal that names no call-gone code; only its prose reads like one. */
+  const proseOnly = () => new TelnyxCommandError({ code: "http_404", status: 404, detail: "Call does not exist" });
+
+  it("counts only Telnyx's call-gone codes as gone in an EU session; a `us` session and unowned work keep the prose match", () => {
+    const ended = () => new TelnyxCommandError({ code: "90018", status: 422, detail: "Call has already ended" });
+    const classify = () => [isSessionCallGoneError(proseOnly()), isSessionCallGoneError(ended()), isSessionCallGoneError(new Error("Call does not exist"))];
+    expect(sessionOwnership.run(owner("eu"), classify)).toEqual([false, true, false]);
+    expect(sessionOwnership.run(owner("us"), classify)).toEqual([true, true, false]);
+    expect(classify()).toEqual([true, true, false]);
+  });
+
+  it.each([["eu", []], ["us", ["dial"]]] as const)("termination in a %s session completes a hangup refused only in prose: %j", async (region, completed) => {
+    const { h } = harness();
+    const sessionId = "00000000-0000-4000-8000-00000000d003";
+    const leg = await euSessionWithDial(h, sessionId, region);
+    h.db.registerRpc("motorist_provider_termination_legs_v2", () => [{ commandId: `${sessionId}-dial`, callControlId: leg }]);
+    h.telnyx.failNext("hangup", proseOnly());
+    await ownedSessionWork(h.deps, sessionId, () => reconcileTermination({ ...h.deps, telnyx: h.telnyx.client }, sessionId));
+    const checkpoint = h.db.log.find(entry => entry.kind === "rpc" && entry.table === "motorist_provider_termination_checkpoint_v2");
+    expect((checkpoint?.payload as { p_completed_commands: string[] }).p_completed_commands).toEqual(completed.map(() => `${sessionId}-dial`));
+  });
+
+  it.each([["eu", { cancelled: 0, pending: 1 }], ["us", { cancelled: 1, pending: 0 }]] as const)("a revoked offer in a %s session refused only in prose is %j", async (region, outcome) => {
+    const { h } = harness();
+    const sessionId = "00000000-0000-4000-8000-00000000d004";
+    const leg = await euSessionWithDial(h, sessionId, region);
+    h.db.update("motorist_call_sessions", { presence_cancellations: { token: { profileId: PROFILES.o2, requestedAt: h.now().toISOString(), reason: "revoked" } } }, row => row.id === sessionId);
+    h.db.seed("motorist_call_legs", [{ organization_id: ORG, session_id: sessionId, telnyx_call_control_id: leg, role: "operator", profile_id: PROFILES.o2,
+      state: "ringing", client_state: { sid: sessionId, role: "operator", operatorId: PROFILES.o2, offerToken: "token" }, ended_at: null }]);
+    h.telnyx.failNext("hangup", proseOnly());
+    const result = await ownedSessionWork(h.deps, sessionId, () => cancelRevokedOffers(effectsDeps(h.deps), h.session(sessionId) as SessionRow));
+    expect(result).toMatchObject(outcome);
+  });
+
+  it.each([["eu", "command_failed"], ["us", "call_gone"]] as const)("a hold refused only in prose in a %s session reports %s", async (region, code) => {
+    const { h, deps } = harness({ api_region: region });
+    const call = await outboundTalking(h, deps());
+    expect(regionOf(h, call.sessionId)).toBe(region);
+    h.telnyx.failNext("createConference", proseOnly());
+    await expect(holdCall(deps(), o1, call.sessionId)).rejects.toMatchObject({ code });
   });
 });
 

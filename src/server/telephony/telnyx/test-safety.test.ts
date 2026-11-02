@@ -322,6 +322,16 @@ describe("TEST provider boundary", () => {
     await expect(api.dial({ to: "sip:test_user@sip.telnyx.com", from: FROM, commandId: "sip", linkTo: "copied-prod" })).rejects.toMatchObject({ code: "test_provider_boundary" });
     expect((fetch.mock.calls as unknown as Array<[string, RequestInit]>).every(([, options]) => options.method === "GET")).toBe(true);
   });
+  it("treats the S2 prefetch's refusal as a refusal: it is reported ahead of a sibling's transient failure (S5)", async () => {
+    // The prefetched destination proof refuses a copied credential; the link_to proof meanwhile
+    // fails for an unrelated reason. Before, the first (unrelated) failure was reported.
+    const { api, fetch } = client(ENV, { resource_id: "connection:production", sip_username: "test_user" });
+    const proof = api.proveSipDestination!("sip:test_user@sip.telnyx.com");
+    await expect(proof).rejects.toMatchObject({ code: "test_provider_boundary" });
+    vi.mocked(hasTestCallProvenance).mockImplementationOnce(async () => { throw new Error("database unavailable"); });
+    await expect(api.dial({ to: "sip:test_user@sip.telnyx.com", from: FROM, commandId: "sip", linkTo: "existing" })).rejects.toMatchObject({ code: "test_provider_boundary" });
+    expect(fetch.mock.calls.every(([, options]) => options?.method === "GET")).toBe(true);
+  });
   it("never lets a transient read failure mask a refusal another check reaches only later (S5)", async () => {
     // The call proof is slow and passes; meanwhile the credential read fails with a 503; the
     // conference read that follows the proof still runs, and its refusal is what is reported.

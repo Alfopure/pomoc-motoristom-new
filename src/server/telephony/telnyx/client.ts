@@ -97,6 +97,19 @@ export function isCallGoneError(error: unknown): error is TelnyxCommandError {
   return /no longer active|call (has )?(already )?ended|does not exist/i.test(`${error.detail ?? ""} ${error.title ?? ""} ${error.message}`);
 }
 
+/**
+ * `isCallGoneError` for the session whose ownership is current (call-speed
+ * S5). In an EU session only Telnyx's own call-gone codes count: the prose
+ * match ("does not exist", ...) could be the answer of a region that never
+ * knew the call (an older build, a changed host) while the customer is still
+ * connected. A `us` session, and work outside a session, keep
+ * `isCallGoneError` unchanged.
+ */
+export function isSessionCallGoneError(error: unknown): error is TelnyxCommandError {
+  if (sessionOwnership.getStore()?.providerRegion !== "eu") return isCallGoneError(error);
+  return error instanceof TelnyxCommandError && TELNYX_CALL_GONE_CODES.has(String(error.code));
+}
+
 export class TelnyxLiveCallsDisabledError extends TelnyxCommandError {
   constructor() {
     super({ code: "live_calls_disabled", status: 423, message: LIVE_CALLS_DISABLED_MESSAGE });
@@ -416,6 +429,9 @@ export function resolveApiRegion(path: string, explicit?: TelnyxApiRegion): Teln
   return sessionOwnership.getStore()?.providerRegion ?? explicit ?? "us";
 }
 
+/** The TEST boundary's refusal, as the guard and the S2 prefetch report it. */
+const TEST_PROVIDER_BOUNDARY_CODE: TestProviderSafetyError["code"] = "test_provider_boundary";
+
 /** A Cloudflare edge refusal, not a Telnyx answer (see `cloudflareSignatureBanned`). */
 export const CLOUDFLARE_SIGNATURE_BANNED_CODE = "cloudflare_1010";
 
@@ -673,8 +689,12 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       let refused = false;
       const stopped = new Error("TEST guard stopped after another check refused");
       const stop = () => { if (refused) throw stopped; };
+      // A refusal is the boundary's own error, or the S2 prefetch's refusal,
+      // which reaches this request already as a `TelnyxCommandError`.
+      const isRefusal = (error: unknown) => error instanceof TestProviderSafetyError ||
+        error instanceof TelnyxCommandError && error.code === TEST_PROVIDER_BOUNDARY_CODE;
       const chain = (work: () => Promise<void>) => work().catch((error: unknown) => {
-        if (error instanceof TestProviderSafetyError) refused = true;
+        if (isRefusal(error)) refused = true;
         throw error;
       });
       const settled = await Promise.allSettled([
@@ -726,7 +746,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         }),
       ]);
       const failures = settled.flatMap(result => result.status === "rejected" && result.reason !== stopped ? [result.reason as unknown] : []);
-      if (failures.length) throw failures.find(error => error instanceof TestProviderSafetyError) ?? failures[0];
+      if (failures.length) throw failures.find(isRefusal) ?? failures[0];
     } catch (error) {
       if (error instanceof TestProviderSafetyError) throw new TelnyxCommandError({ code: error.code, status: error.status, message: error.message, commandId });
       throw error;

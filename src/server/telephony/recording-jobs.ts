@@ -1,6 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
+import { resolveAppEnvironment } from "@/lib/app-environment";
 import { euApiRegionAllowed, sessionApiRegion } from "./latency-flags";
 import { CLOUDFLARE_SIGNATURE_BANNED_CODE, cloudflareSignatureBanned } from "./telnyx/client";
 import { apiBaseUrlFor, getTelnyxConfig, TELNYX_DEFAULT_API_BASE_URL, TELNYX_DEFAULT_EU_API_BASE_URL, type TelnyxApiRegion } from "./telnyx/env";
@@ -29,16 +30,19 @@ export function record(value: unknown): Record<string, Json | undefined> {
  * Call-speed S5: the API region of this recording's GET and DELETE. A
  * recording lives in the region of the session that created it
  * (`metadata.start_mode.apiRegion`); no session, or one from before S5, is
- * `us`. Only a deployment that can freeze a session to `eu`
- * (`euApiRegionAllowed`: TEST until spike S5.0 passes) reads the session, so
- * production and local runs do exactly what they did before. That read is
- * bounded at 1.5 s, and an unreadable session fails the step for a retry
- * rather than guessing: cleanup would take the wrong region's 404 for
- * "already removed".
+ * `us`. Every deployment that is not production reads the session (a local
+ * run against the TEST database may process recordings of EU sessions), and
+ * so does production once it may freeze `eu` (`euApiRegionAllowed`); until
+ * then production, which cannot have an EU session, reads nothing extra. An
+ * unreadable environment counts as production. The read is bounded at 1.5 s,
+ * and an unreadable session fails the step for a retry rather than guessing:
+ * cleanup would take the wrong region's 404 for "already removed".
  */
 async function recordingApiRegion(ctx: Pick<RecordingJobContext, "admin" | "organizationId" | "recording" | "signal">): Promise<TelnyxApiRegion> {
   const sessionId = ctx.recording?.session_id;
-  if (!sessionId || !euApiRegionAllowed()) return "us";
+  let production = true;
+  try { production = resolveAppEnvironment() === "production"; } catch { /* unreadable counts as production */ }
+  if (!sessionId || production && !euApiRegionAllowed()) return "us";
   const session = await ctx.admin.from("motorist_call_sessions").select("metadata").eq("organization_id", ctx.organizationId)
     .eq("id", sessionId).abortSignal(AbortSignal.any([ctx.signal, AbortSignal.timeout(1_500)])).maybeSingle();
   if (session.error) throw new RecordingProcessingError("recording_region_unavailable", true);
