@@ -19,7 +19,7 @@ import { readMeta } from "../state/types";
 import { loadParticipantManifest, observeParticipants } from "../state/participants";
 import { enqueueSavedRecording } from "../recording-jobs";
 import { recordingIntent } from "../state/recording";
-import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, type WebhookClaim } from "./webhook-ledger";
+import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, WEBHOOK_CLAIM_STALE_AFTER_MS, type WebhookClaim } from "./webhook-ledger";
 import { acceptsTestProviderEvent, getTestProviderSafety, hasTestCallProvenance } from "./test-safety";
 import { decodeClientState } from "./client-state";
 import { freezeStartMode, latencyFlagsOf, providerRegionOf } from "../latency-flags";
@@ -58,6 +58,8 @@ export type ProcessorDeps = SessionRunnerDeps & {
   deferMaintenance?: (work: () => Promise<void>) => void;
   /** Internal: this host's own claim on the event, kept across a lease wait (S1.3). Never from a request. */
   heldClaim?: { eventId: string; claim: WebhookClaim };
+  /** Wall-clock end for the post-processing inbox drain of a held run (S1.3). */
+  replayDeadline?: number;
 };
 
 /** Keep SIP processing fast; the larger route duration also covers after-response push. */
@@ -463,7 +465,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
   }
 
   // A claim-holding drain re-enters with the claim it never gave up (S1.3).
-  const claim = deps.heldClaim?.eventId === event.id ? deps.heldClaim.claim : await claimWebhookEvent(deps.admin, {
+  const held = heldClaimOf(deps, event);
+  const claim = held ? held.claim : await claimWebhookEvent(deps.admin, {
     eventId: event.id,
     eventType: event.type,
     payload: toJson(event.type.includes("recording.") ? { recording_id: event.payload.recording_id ?? null, recording_started_at: event.payload.recording_started_at ?? null,
@@ -644,7 +647,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     let observationAudit: (() => Promise<void>) | undefined;
     // A held claim has just seen the lease free; if it is taken again, the
     // drain goes back to waiting read-only instead of polling the acquire RPC.
-    const result = await ownedSessionWork({ ...deps, leaseWaitMs: deps.heldClaim ? 0 : WEBHOOK_LEASE_WAIT_MS }, ownedSession.id, async () => {
+    const result = await ownedSessionWork({ ...deps, leaseWaitMs: held ? 0 : WEBHOOK_LEASE_WAIT_MS }, ownedSession.id, async () => {
       processingStarted = true;
       runnerStartedAt = now().toISOString();
       if (eventClass === "bookkeeping") {
@@ -702,13 +705,19 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // inbox claim must not keep the next answer behind one more DB round trip.
     // Failed-owner bookkeeping stays in the scope above for terminal recovery.
     // An observation-only bridge (S1.2) writes its audit row here, lease-free
-    // (`motorist_call_events` is not fenced), and still before the ledger.
-    if (observationAudit) await observationAudit();
+    // (`motorist_call_events` is not fenced), alongside the ledger finish. The
+    // leg fact is committed and released: a failed audit insert is logged, never
+    // turned into a failed delivery, a retry or an incident.
+    const audit = observationAudit?.().catch((auditError: unknown) => {
+      try { deps.logger?.({ level: "warn", scope: "webhook", eventId: event.id, sessionId: ownedSession.id, code: "observation_audit_failed",
+        error: auditError instanceof Error ? auditError.message : String(auditError) }); }
+      catch { /* Diagnostic only. */ }
+    });
     if (result.outcome === "processed" || result.outcome === "ignored") {
-      if (await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger })) {
-        logWebhookLatency(deps, event, claim, ownedSession.id, runnerStartedAt, false);
-      }
-    }
+      const [finished] = await Promise.allSettled([markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger }), audit]);
+      if (finished.status === "rejected") throw finished.reason;
+      if (finished.value) logWebhookLatency(deps, event, claim, ownedSession.id, runnerStartedAt, false);
+    } else await audit;
     // The owned scope has exited before optional maintenance. A failed apply
     // may still have durable effects pending; its ledger failure stays truthful.
     // Release can warn without failing the operation; replay must acquire a
@@ -755,17 +764,18 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     const selfDrainable = error instanceof SessionLeaseBusyError && !processingStarted && !deps.ledgerReplay &&
       Boolean(session) && Boolean(event.callControlId) && DEFERRED_EVENT_RANK[event.type] !== undefined;
     // A held claim met a holder again (S1.3): it stays claimed and waits again.
-    if (deps.heldClaim && error instanceof SessionLeaseBusyError && !processingStarted) {
+    if (held && error instanceof SessionLeaseBusyError && !processingStarted) {
       return done({ ...identity, claim, sessionId: session?.id ?? null, status: 200, outcome: "deferred", error: message, notes: [HELD_CLAIM_WAITING] });
     }
     // `claim_holding_drain` (S1.3): keep this claim rather than deferring the
     // row, whose SQL backoff refuses any re-claim for ≥ 500 ms, and finish the
     // event under it once the holder releases. Durability is the claim's: a
-    // host that dies leaves it stale after 30 s for the cron's replay.
-    if (selfDrainable && !deps.heldClaim && session && deps.deferMaintenance && claim.claimedAt &&
+    // host that dies leaves it stale after 30 s for the session's next inbox
+    // drain, and the cron's replay behind that.
+    if (selfDrainable && !held && session && deps.deferMaintenance && claim.claimedAt &&
       latencyFlagsOf(deps).claim_holding_drain && Date.now() - ingressWall <= DEFERRED_ACK_MAX_ELAPSED_MS) {
       const heldSessionId = session.id;
-      const waiter: HeldClaimWaiter = { event, envelope, claim };
+      const waiter: HeldClaimWaiter = { event, envelope, claim, ingressWall };
       const start = holdClaim(deps, heldSessionId, waiter);
       try {
         deps.deferMaintenance(async () => {
@@ -913,31 +923,45 @@ async function runDeferredDeliveryDrain(deps: ProcessorDeps, sessionId: string, 
  * then, so even an immediately free lease cost that floor plus a poll gap.
  *
  * Waiting is read-only — one session row per round, shared by every waiter of
- * the session on this host — on a fine ladder, then the existing one. Once the
- * lease is free the waiters run in rank order (hangup, answer, bridge,
- * initiated…), each under its own claim, so the highest-ranked takes the lease
- * first. One that finds the lease taken again goes back to waiting.
+ * the session on this host — every 100, 150, then 250 ms. Once the lease is
+ * free the waiters run in rank order (hangup, answer, bridge, initiated…),
+ * each under its own claim, so the highest-ranked takes the lease first. One
+ * that finds the lease taken again goes back to waiting. A run that processed
+ * its event does the holder's post-release inbox drain, as a delivery would.
  *
- * The wait ends `HELD_CLAIM_MAX_MS` after the claim, below the ledger's 30 s
- * stale window (`WEBHOOK_CLAIM_STALE_AFTER_MS`); the row is then deferred in
- * the ledger exactly as without the switch. If the host dies instead, the
- * claim goes stale and the cron's stalled-event replay takes it over after
- * 60 s — today's durability. A holder's post-release drain only selects
- * deferred rows, and a redelivery meets the fresh claim (`busy`), so nothing
- * is processed twice.
+ * Bounds, as for `drainDeferredDelivery`: no waiter starts later than
+ * `DEFERRED_SELF_DRAIN_WINDOW_MS` after the ingress of the request that
+ * retains the drain (30 s, plus at most `SESSION_WORK_MS` of owned work, is
+ * inside the route's 60 s `maxDuration`), nor `HELD_CLAIM_MAX_MS` after its
+ * own claim (below the ledger's 30 s stale window). A waiter that misses
+ * either, or whose run ends without finishing its row (thrown, refused before
+ * the claim), is given back to the ledger as deferred — visible to every
+ * other drainer, exactly as without the switch.
+ *
+ * If the host dies holding a claim, the claim goes stale after
+ * `WEBHOOK_CLAIM_STALE_AFTER_MS`; from then on any of the session's inbox
+ * drains takes it over (`replayReadySessionEvents`), and the cron's
+ * stalled-event replay remains the backstop. A redelivery meets the fresh
+ * claim (`busy`), so nothing is processed twice.
  */
-const HELD_CLAIM_POLL_MS: readonly number[] = [100, 150, 250, 400, 600, 800, 1_000, ...DEFERRED_SELF_DRAIN_POLL_MS.filter(ms => ms > 1_000)];
+const HELD_CLAIM_POLL_MS: readonly number[] = [100, 150, 250];
 export const HELD_CLAIM_MAX_MS = 25_000;
-/** One host's shared drain, joiners included, stays well inside the route's 60 s `maxDuration`. */
-const HELD_CLAIM_RETAIN_MS = 40_000;
-const HELD_CLAIM_MAX_ROUNDS = 60;
+/** A guard only: the deadlines end the wait first. */
+const HELD_CLAIM_MAX_ROUNDS = 160;
 /** Note on the result of a held run that found the lease taken again. */
 const HELD_CLAIM_WAITING = "claim held: lease busy";
+/** Results that return before the ledger claim, so nothing finished the held row. */
+const BEFORE_CLAIM_OUTCOMES: ReadonlySet<ProcessorOutcome> = new Set(["malformed", "unverified_connection"]);
 
-type HeldClaimWaiter = { event: TelephonyEvent; envelope: unknown; claim: WebhookClaim };
-/** `startedAt` is wall time; `slept` also bounds it under a test clock. */
-type HeldClaimDrain = { waiters: HeldClaimWaiter[]; work: Promise<void> | null; startedAt: number; slept: number };
+type HeldClaimWaiter = { event: TelephonyEvent; envelope: unknown; claim: WebhookClaim; ingressWall: number };
+/** `deadline` is wall time; `slept` also bounds the wait under a test clock. */
+type HeldClaimDrain = { waiters: HeldClaimWaiter[]; work: Promise<void> | null; startedAt: number; deadline: number; slept: number };
 const heldClaimDrains = new Map<string, HeldClaimDrain>();
+
+/** The claim this invocation already holds for exactly this event, if any. */
+function heldClaimOf(deps: ProcessorDeps, event: TelephonyEvent): ProcessorDeps["heldClaim"] | null {
+  return deps.heldClaim?.eventId === event.id ? deps.heldClaim : null;
+}
 
 const heldClaimKey = (deps: ProcessorDeps, sessionId: string) => `${deps.environment}:${deps.organizationId}:${sessionId}`;
 
@@ -950,7 +974,10 @@ function heldOnThisHost(eventId: string): boolean {
 function holdClaim(deps: ProcessorDeps, sessionId: string, waiter: HeldClaimWaiter): () => Promise<void> {
   const key = heldClaimKey(deps, sessionId);
   let drain = heldClaimDrains.get(key);
-  if (!drain) heldClaimDrains.set(key, drain = { waiters: [], work: null, startedAt: Date.now(), slept: 0 });
+  // A drain past its window only gives waiters back; a later fact gets its own,
+  // retained by its own request. The old one still finishes what it holds.
+  if (!drain || Date.now() >= drain.deadline) heldClaimDrains.set(key, drain = { waiters: [], work: null, startedAt: Date.now(),
+    deadline: waiter.ingressWall + DEFERRED_SELF_DRAIN_WINDOW_MS, slept: 0 });
   drain.waiters.push(waiter);
   return () => {
     const current = heldClaimDrains.get(key);
@@ -981,10 +1008,10 @@ const heldOrder = (a: HeldClaimWaiter, b: HeldClaimWaiter) => heldRank(a) - held
 
 async function runHeldClaimDrain(deps: ProcessorDeps, sessionId: string, drain: HeldClaimDrain): Promise<void> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
-  // Each claim's own age decides its staleness margin; the drain's age bounds
-  // this host's retained work, however many waiters join it.
+  // Each claim's own age bounds its staleness margin; the retaining request's
+  // window bounds this host's work (wall clock, or the time slept under a test clock).
   const expired = (waiter: HeldClaimWaiter) => nowOf(deps)().getTime() - Date.parse(waiter.claim.claimedAt ?? "") >= HELD_CLAIM_MAX_MS ||
-    Math.max(Date.now() - drain.startedAt, drain.slept) >= HELD_CLAIM_RETAIN_MS;
+    Math.max(Date.now(), drain.startedAt + drain.slept) >= drain.deadline;
   const release = async (waiter: HeldClaimWaiter, reason: string) => {
     drain.waiters = drain.waiters.filter(item => item !== waiter);
     try {
@@ -1013,13 +1040,17 @@ async function runHeldClaimDrain(deps: ProcessorDeps, sessionId: string, drain: 
       if (expired(next)) { await release(next, "window"); continue; }
       let result: ProcessorResult | null = null;
       try {
-        result = await processTelnyxEvent({ ...deps, heldClaim: { eventId: next.event.id, claim: next.claim },
-          replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, next.envelope);
+        // The run that processes its event holds the lease: it also drains the
+        // session's ready inbox afterwards, bounded by this drain's window.
+        result = await processTelnyxEvent({ ...deps, heldClaim: { eventId: next.event.id, claim: next.claim }, replayDeadline: drain.deadline,
+          sweepAfterEvent: false, deferMaintenance: undefined }, next.envelope);
       } catch (error) {
         deps.logger?.({ level: "warn", scope: "webhook", sessionId, eventId: next.event.id, message: "held claim run failed", error: error instanceof Error ? error.message : String(error) });
       }
       if (result?.notes.includes(HELD_CLAIM_WAITING)) { step = 0; break; }
-      // Finished one way or another: processed, ignored, or recorded in the ledger.
+      // Thrown, or refused before the claim: the row is still held. Give it back.
+      if (!result || BEFORE_CLAIM_OUTCOMES.has(result.outcome)) { await release(next, result ? result.outcome : "error"); continue; }
+      // Otherwise the run finished the row: processed, ignored, failed or deferred.
       drain.waiters = drain.waiters.filter(item => item !== next);
     }
   }
@@ -1068,9 +1099,9 @@ function logWebhookLatency(deps: ProcessorDeps, event: TelephonyEvent, claim: We
     const processedAt = nowOf(deps)();
     deps.logger?.({ scope: "webhook-latency", eventId: event.id, eventType: event.type, sessionId, receivedAt: claim.receivedAt, runnerStartedAt,
       processedAt: processedAt.toISOString(), deferrals: Math.max(0, claim.attempts - 1), attempts: claim.attempts,
-      path: deps.ledgerReplay ? deps.replaySource ?? "replay" : deps.heldClaim ? "held_claim" : leaseFree ? "lease_free" : "leased",
+      path: deps.ledgerReplay ? deps.replaySource ?? "replay" : heldClaimOf(deps, event) ? "held_claim" : leaseFree ? "lease_free" : "leased",
       // A held claim never counts as a deferral; this is what its wait cost.
-      ...(deps.heldClaim && claim.claimedAt ? { heldMs: Math.max(0, processedAt.getTime() - Date.parse(claim.claimedAt)) } : {}) });
+      ...(heldClaimOf(deps, event) && claim.claimedAt ? { heldMs: Math.max(0, processedAt.getTime() - Date.parse(claim.claimedAt)) } : {}) });
   } catch { /* Telemetry cannot change acknowledgement policy. */ }
 }
 
@@ -1104,7 +1135,7 @@ export function storedWebhookEnvelope(row: { event_id: string; event_type: strin
 
 async function replayCorrelatedEvents(deps: ProcessorDeps, current: TelephonyEvent, session: SessionRow): Promise<void> {
   if (deps.replayCorrelated === false) return;
-  return replayReadySessionEvents(deps, session, current);
+  return replayReadySessionEvents(deps, session, current, false, { deadline: deps.replayDeadline });
 }
 
 /** Called by an authenticated action's retained after-response work, once its
@@ -1171,12 +1202,24 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
     // known. Draining that ready ledger entry after the owner releases avoids
     // waiting for provider exponential redelivery or the five-minute cron.
     // A shared provider session ID is never enough to select another leg.
-    const deferred = controlIds.size ? await deps.admin.from("motorist_telnyx_webhook_events").select("*")
-      .eq("organization_id", deps.organizationId).eq("retry_state", "deferred")
-      .in("call_control_id", [...controlIds]).in("event_type", customerTerminalOnly ? ["call.hangup"] : DEFERRED_DRAIN_TYPES)
-      .lte("next_attempt_at", new Date(nowOf(deps)().getTime() + 5_000).toISOString()).neq("event_id", current?.id ?? "")
-      .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null };
+    const drainTypes = customerTerminalOnly ? ["call.hangup"] : DEFERRED_DRAIN_TYPES;
+    const [deferred, staleHeld] = await Promise.all([
+      controlIds.size ? deps.admin.from("motorist_telnyx_webhook_events").select("*")
+        .eq("organization_id", deps.organizationId).eq("retry_state", "deferred")
+        .in("call_control_id", [...controlIds]).in("event_type", drainTypes)
+        .lte("next_attempt_at", new Date(nowOf(deps)().getTime() + 5_000).toISOString()).neq("event_id", current?.id ?? "")
+        .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null },
+      // `claim_holding_drain` (S1.3): a fact whose host died holding its claim
+      // is never deferred. Once the claim is stale — the takeover the claim RPC
+      // grants anyone — this drain finishes it instead of leaving it to the cron.
+      controlIds.size && latencyFlagsOf(deps).claim_holding_drain ? deps.admin.from("motorist_telnyx_webhook_events").select("*")
+        .eq("organization_id", deps.organizationId).eq("retry_state", "ready").in("status", ["queued", "failed"])
+        .in("call_control_id", [...controlIds]).in("event_type", drainTypes)
+        .lt("claimed_at", new Date(nowOf(deps)().getTime() - WEBHOOK_CLAIM_STALE_AFTER_MS).toISOString()).neq("event_id", current?.id ?? "")
+        .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null },
+    ]);
     if (deferred.error) throw new Error(deferred.error.message);
+    if (staleHeld.error) throw new Error(staleHeld.error.message);
     // The customer may hang up before inbound creation saves its leg. A failed
     // answer still releases an owner with that exact leg now durable; recover
     // the early fact here, before the ledger's unchanged 60-second expiry.
@@ -1200,7 +1243,7 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
     if (mirrors.error) throw new Error(mirrors.error.message);
     const occurredAt = (row: { occurred_at: string | null; received_at: string | null }) => Date.parse(row.occurred_at ?? row.received_at ?? "") || 0;
     const rows = [
-      ...(deferred.data ?? []).sort((a, b) => (DEFERRED_EVENT_RANK[a.event_type] ?? 9) - (DEFERRED_EVENT_RANK[b.event_type] ?? 9) || occurredAt(a) - occurredAt(b)),
+      ...[...(deferred.data ?? []), ...(staleHeld.data ?? [])].sort((a, b) => (DEFERRED_EVENT_RANK[a.event_type] ?? 9) - (DEFERRED_EVENT_RANK[b.event_type] ?? 9) || occurredAt(a) - occurredAt(b)),
       ...(earlyCustomer.data ?? []),
       ...(mirrors.data ?? []),
       ...(correlation.data ?? []),
@@ -1242,8 +1285,8 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       if (Date.now() + waitMs >= deadline) break;
       if (waitMs) await (deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(waitMs);
       if (Date.now() >= deadline) break;
-      const replay = await processTelnyxEvent({ ...deps, ledgerReplay: row.retry_state === "deferred" ? "cron" : "correlation",
-        replaySource: "drain", replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope);
+      const replay = await processTelnyxEvent({ ...deps, ledgerReplay: row.retry_state === "awaiting_correlation" ? "correlation" : "cron",
+        replaySource: "drain", replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined, heldClaim: undefined, replayDeadline: undefined }, envelope);
       if (mirror) mirrorsReplayed++; else replayed++;
       if (customerTerminalOnly && replayed >= limit) break;
       if (replay.outcome === "busy" || replay.error?.includes("SessionLeaseBusyError")) break;

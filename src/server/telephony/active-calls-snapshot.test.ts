@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
-import { loadActiveCalls, loadActiveCallsCached, readActiveCallRows, resetActiveCallsCache } from "./active-calls";
+import { ACTIVE_CALLS_FRESH_GAP_MS, loadActiveCalls, loadActiveCallsCached, readActiveCallRows, resetActiveCallsCache } from "./active-calls";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); resetActiveCallsCache(); });
 
@@ -26,9 +26,22 @@ describe("fresh read after a doorbell or a control write (call-speed S1.4)", () 
     // A pending pass from before the doorbell, then a cached one: both refused.
     await Promise.all([early, loadActiveCallsCached(deps, actor, { minStartedAt: changedAt })]);
     expect(passes(h) - before).toBe(2);
-    tick(1);
+    tick(ACTIVE_CALLS_FRESH_GAP_MS + 50);
     await loadActiveCallsCached(deps, actor, { minStartedAt: at() });
     expect(passes(h) - before).toBe(3);
+  });
+
+  it("starts forced passes at most one gap apart, and lets every later ask join the planned one", async () => {
+    const { h, deps, tick } = world();
+    resetActiveCallsCache();
+    await loadActiveCallsCached(deps, actor);
+    const before = passes(h);
+
+    // Three doorbells within the gap: one more pass, not three.
+    const asks = [tick(1), tick(1), tick(1)].map(changedAt => loadActiveCallsCached(deps, actor, { minStartedAt: changedAt }));
+    await Promise.all(asks);
+
+    expect(passes(h) - before).toBe(1);
   });
 
   it("shares one pass between tabs asking for the same or an older instant, and with ordinary polls", async () => {

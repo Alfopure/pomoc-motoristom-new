@@ -7,8 +7,10 @@ import type { Operator } from "@/domain/types";
 import {
   buildPhoneBarModel,
   EMPTY_ACTIVE_CALLS,
+  freshAfterQuery,
   liveCallCenterCalls,
   pollActivityInput,
+  serverClockOffsetMs,
   waitingRoomCalls,
   type ActiveCallsPayload,
   type PhoneBarModel,
@@ -396,9 +398,9 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     let coalesced = false;
     // The newest change a queued read must not predate.
     let coalescedAfter: number | undefined;
-    // Server minus browser clock, from the last snapshot's `checkedAt`: `after`
-    // is compared with server time, and a fast browser clock would otherwise
-    // force a pass per tab instead of sharing one.
+    // Server minus browser clock (`serverClockOffsetMs`): `after` is compared
+    // with server time; the estimate errs late, never answering with a pass
+    // that predates the change.
     let clockOffsetMs = 0;
     let failures = 0;
     let activity: Parameters<typeof activeCallPollDelayMs>[0]["activity"] = "idle";
@@ -412,7 +414,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       inFlight = true;
       const snapshotRequest = ++snapshotRequestRef.current;
       // Only a server that honours it is asked for a pass started after the change.
-      const fresh = after !== undefined && snapshotRef.current.tuning?.freshAfterWrite === true ? `?after=${Math.floor(after + clockOffsetMs)}` : "";
+      const fresh = freshAfterQuery(after, snapshotRef.current.tuning, clockOffsetMs);
       try {
         const presenceGeneration = presenceGenerationRef.current;
         const sentAt = Date.now();
@@ -420,8 +422,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           label: "aktívne hovory",
           timeoutMs: TELEPHONY_TIMEOUT_MS.snapshot,
         });
-        const checkedAt = Date.parse(result.body?.checkedAt ?? "");
-        if (result.ok && Number.isFinite(checkedAt)) clockOffsetMs = checkedAt - (sentAt + Date.now()) / 2;
+        const offset = result.ok ? serverClockOffsetMs(result.body?.checkedAt, sentAt) : null;
+        if (offset !== null) clockOffsetMs = offset;
         if (cancelled) return;
         if (isTelephonyNotConfigured(result)) {
           setConfigured(false);

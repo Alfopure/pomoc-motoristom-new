@@ -43,7 +43,11 @@ const BOUND_S1 = {
   colleagueStart: { 1: { requests: 40, toOwnDial: 15, resolved: 29 }, 2: { requests: 41, toOwnDial: 15, resolved: 29 } },
   internalOwnAnswer: { 1: { requests: 35, toColleagueDial: 13 }, 2: { requests: 45, toColleagueDial: 13 } },
   internalCalleeAnswer: { requests: 28, toBridge: 11, toTalking: 7, toCalleeAnswered: 8 },
-  firstBridged: { requests: 19, leases: 1, waves: 13 },
+  // The whole delivery, not the lease: claim, session, duplicate check, lease,
+  // snapshot, one write (+ call identity), release, audit ∥ ledger finish, then
+  // the post-release inbox drain (three reads) the harness awaits inline.
+  // Lease held for 2 of them.
+  firstBridged: { requests: 19, leases: 1, waves: 11 },
   duplicateBridged: { requests: 13, leases: 0 },
 } as const;
 
@@ -447,8 +451,7 @@ describe("contract 2 dependent waves", () => {
       expect(duplicate.value.outcome).toBe("ignored");
       bounded(duplicate.requests, BOUND_S1.duplicateBridged.requests);
       // Lease-free: none at all, not merely few.
-      expect(duplicate.leases).toBe(BOUND_S1.duplicateBridged.leases);
-      // Below the switch-off contract on every measured step.
+      expect(duplicate.leases).toBe(BOUND_S1.duplicateBridged.leases);      // Below the switch-off contract on every measured step.
       expect(BOUND_S1.internalCalleeAnswer.toBridge).toBeLessThan(BOUND.internalCalleeAnswer.toBridge);
       expect(BOUND_S1.internalCalleeAnswer.toCalleeAnswered).toBeLessThan(BOUND.internalCalleeAnswer.toCalleeAnswered);
       expect(BOUND_S1.firstBridged.requests).toBeLessThan(BOUND.firstBridged.requests);

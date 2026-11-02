@@ -11,6 +11,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run && node --test tests/*.test.mjs",
+    "test:latency-flags": "vitest run --config vitest.latency-flags.config.ts",
     "typecheck": "tsc --noEmit",
     "seed:demo": "node scripts/seed-demo-data.mjs",
     "webdispecink:discover": "node scripts/webdispecink-discovery.mjs",

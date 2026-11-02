@@ -71,18 +71,33 @@ describe("observation-only call.bridged", () => {
     expect(h.db.log.slice(from).filter(row => row.operation === "update" && ["motorist_call_sessions", "motorist_call_legs"].includes(row.table))).toHaveLength(0);
     expect(leg(h, call.sessionId, callee)).toMatchObject({ state: "bridged", bridged_at: expect.any(String) });
     expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries).toHaveLength(0);
-    // Audit after the lease is released, the ledger after the audit.
+    // Audit and ledger finish both after the lease is released.
     const order = h.db.log.slice(from);
     const release = order.findIndex(row => row.table === "motorist_session_lease_release_v2");
     const audit = order.findIndex(row => row.table === "motorist_call_events" && row.operation === "upsert");
     const finish = order.findIndex(row => row.table === "motorist_telnyx_finish_webhook_event_v2");
     expect(release).toBeGreaterThan(-1);
     expect(audit).toBeGreaterThan(release);
-    expect(finish).toBeGreaterThan(audit);
+    expect(finish).toBeGreaterThan(release);
     const row = h.callEvents(call.sessionId).find(entry => entry.event_type === "call.bridged")!;
     expect(row).toMatchObject({ handled_status: "processed" });
     expect((row.normalized_payload as { notes: string[] }).notes).toContain("observation only");
     expect(h.session(call.sessionId).lease_token).toBeNull();
+  });
+
+  it("finishes the delivery when only the audit row after the release fails", async () => {
+    const h = harness();
+    const { call, callee } = await talkingColleague(h);
+    const incidents = h.rows("motorist_job_incidents").length;
+    h.db.failNext("motorist_call_events", "upsert", "audit unavailable");
+
+    const result = await h.legEvent(callee, "call.bridged", {}, "audit-lost");
+
+    expect(result).toMatchObject({ status: 200, outcome: "processed" });
+    expect(leg(h, call.sessionId, callee)).toMatchObject({ state: "bridged", bridged_at: expect.any(String) });
+    expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "audit-lost")).toMatchObject({ status: "processed" });
+    expect(h.rows("motorist_job_incidents")).toHaveLength(incidents);
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook", eventId: "audit-lost", code: "observation_audit_failed" }));
   });
 
   it("keeps the staged path while the switch is off", async () => {
@@ -241,6 +256,31 @@ describe("exact duplicate call.bridged", () => {
     expect(result.outcome).toBe("processed");
     expect(named(h, from, "motorist_session_lease_acquire_v2")).toHaveLength(1);
     expect(named(h, from, "motorist_stage_transition_v1")).toHaveLength(1);
+  });
+
+  // Each precondition alone keeps the duplicate on the leased path.
+  it.each([
+    ["a recording", (session: SessionRow) => ({ metadata: { ...readMeta(session), recording: { version: 1, policy: { enabled: true, inbound: true, outbound: true },
+      epoch: 0, noticeCompletedAt: null, noticeFailed: false, suppressedAt: null, suppressionReason: null, recorders: [], error: null } } })],
+    ["pending effects", (session: SessionRow) => ({ pending_effects: { version: 1, entries: [{ id: "left-behind", generation: 0, createdAt: session.started_at,
+      event: { kind: "app", type: "sweep", id: "left-behind", actorProfileId: null, occurredAt: session.started_at }, stateBefore: session.state,
+      previousConferenceId: null, branch: "main", transition: { session: {}, legs: [], attempts: [], presence: [], callbacks: [], call: {}, memberTouches: [], notes: [] },
+      commands: [], compensations: [], databaseCursor: 0, completedCommands: [], attempts: 0, lastError: null, auditComplete: false }] } })],
+    ["a committed termination", () => ({ termination_requested_at: "2026-09-03T08:00:00.000Z" })],
+    ["offer cancellations", () => ({ cancellations_next_attempt_at: "2099-01-01T00:00:00.000Z" })],
+    ["callback contact accounting", (session: SessionRow) => ({ metadata: { ...readMeta(session),
+      callback_contact: { version: 1, operations: [{ id: "operation-1" }], proofs: [] } } })],
+  ])("is not acknowledged lease-free with %s", async (_name, values) => {
+    const h = harness();
+    const { call, callee } = await talkingColleague(h);
+    await h.legEvent(callee, "call.bridged");
+    h.db.update("motorist_call_sessions", values(h.session(call.sessionId) as SessionRow), row => row.id === call.sessionId);
+    const from = h.db.log.length;
+
+    const result = await redeliver(h, call.sessionId, callee).catch(() => null);
+
+    expect(result?.notes ?? []).not.toContain("lease-free");
+    expect(named(h, from, "motorist_session_lease_acquire_v2").length).toBeGreaterThan(0);
   });
 
   it("is not a duplicate once the leg is held", async () => {

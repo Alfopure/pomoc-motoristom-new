@@ -1091,11 +1091,17 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
         effectsMayHaveStarted = true;
         // No expected version: like a staged entry's critical write, a leg fact
         // under the fenced lease neither needs nor bumps the session revision.
-        const applied = await measureRequestStep("write", () => ownershipRpc<{ applied: boolean; session?: SessionRow } | null>(deps.admin, "motorist_apply_critical_v2", {
-          p_session_id: sessionId, p_expected_version: null, p_patch: null,
-          p_legs: result.next.legs.map(leg => ({ callControlId: leg.callControlId, values: leg.values })), p_attempts: [],
-        }));
+        // The audit row's call identity is read alongside, so after the release
+        // the audit is a single insert next to the ledger finish.
+        const [applied, call] = await Promise.all([
+          measureRequestStep("write", () => ownershipRpc<{ applied: boolean; session?: SessionRow } | null>(deps.admin, "motorist_apply_critical_v2", {
+            p_session_id: sessionId, p_expected_version: null, p_patch: null,
+            p_legs: result.next.legs.map(leg => ({ callControlId: leg.callControlId, values: leg.values })), p_attempts: [],
+          })),
+          deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", sessionId).maybeSingle(),
+        ]);
         if (!applied?.applied || !applied.session) throw new Error("observation write returned no session");
+        if (!call.error && call.data?.id) effects.callIds?.set(sessionId, call.data.id);
         const session = applied.session;
         const notes = [...result.next.notes, "observation only"];
         const auditTiming = timing(effectsStarted);
