@@ -7,8 +7,8 @@ import type {
   TelnyxClient,
   TelnyxLiveGate,
 } from "@/server/telephony/telnyx/client";
-import { TelnyxCommandError, TelnyxLiveCallsDisabledError, TelnyxSmsDisabledError } from "@/server/telephony/telnyx/client";
-import { getTelnyxConfig, type TelnyxConfig } from "@/server/telephony/telnyx/env";
+import { resolveApiRegion, TelnyxCommandError, TelnyxLiveCallsDisabledError, TelnyxSmsDisabledError } from "@/server/telephony/telnyx/client";
+import { apiBaseUrlFor, getTelnyxConfig, type TelnyxApiRegion, type TelnyxConfig } from "@/server/telephony/telnyx/env";
 import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "@/server/telephony/provider-journal";
 import { sessionOwnership } from "@/server/telephony/ownership";
 
@@ -33,6 +33,8 @@ export const FAKE_TELNYX_ENV = {
 };
 
 export type FakeTelnyxCall = { method: string; params: Record<string, unknown> };
+/** Where a command would have gone (call-speed S5): the real client's region resolution, at send time. */
+export type FakeTelnyxRoute = { method: string; path: string; region: TelnyxApiRegion; baseUrl: string; sessionId: string | null };
 type FakeCallStatus = { alive: boolean; known?: boolean; callLegId?: string | null; callSessionId?: string | null };
 type FakeExecuteOptions = {
   journalled?: boolean;
@@ -56,6 +58,8 @@ export type PhysicalProvider = {
 export type FakeTelnyx = {
   client: TelnyxClient;
   calls: FakeTelnyxCall[];
+  /** Every command and provider read with the API region and base URL it would have used. */
+  routes: FakeTelnyxRoute[];
   /** When each journalled command left for the provider (`Date.now()`), for wave counting. */
   sent: Array<{ method: string; at: number }>;
   /** Every journalled command waits this long at the provider; 0 (the default) adds no await. */
@@ -140,6 +144,11 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   if (!config.configured) throw new Error("fake telnyx needs a configured env");
   const liveGate: TelnyxLiveGate = { callsEnabled: true, smsEnabled: true, ...(options.liveGate ?? {}) };
   const calls: FakeTelnyxCall[] = [];
+  const routes: FakeTelnyxRoute[] = [];
+  const route = (method: string, path: string, explicit?: TelnyxApiRegion) => {
+    const region = resolveApiRegion(path, explicit);
+    routes.push({ method, path, region, baseUrl: apiBaseUrlFor(config, region), sessionId: sessionOwnership.getStore()?.sessionId ?? null });
+  };
   const sends: FakeTelnyx["sent"] = [];
   let fetchDelayMs = 0;
   const oneShot = new Map<string, Error[]>();
@@ -199,6 +208,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       journal,
       async () => {
         sends.push({ method, at: Date.now() });
+        if (wire) route(method, wire.path);
         recordOnly(method, params);
         options?.onSend?.();
         if (fetchDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, fetchDelayMs));
@@ -327,6 +337,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
           observe: requestOptions?.observe,
         }) as never;
       }
+      route(method, path, requestOptions?.region);
       record("request", { method, path, ...(requestOptions ?? {}) });
       const participants = /^\/conferences\/([^/]+)\/participants$/.exec(path);
       if (method === "GET" && participants) {
@@ -472,7 +483,8 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
       }
       });
     },
-    async retrieveCall(callControlId: string) {
+    async retrieveCall(callControlId: string, options?: { region?: TelnyxApiRegion }) {
+      route("GET", `/calls/${encodeURIComponent(callControlId)}`, options?.region);
       record("retrieveCall", { callControlId });
       const verdict = callStatuses.get(callControlId);
       const leg = physicalLegs.get(callControlId);
@@ -517,6 +529,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
   return {
     client,
     calls,
+    routes,
     sent: sends,
     setFetchDelay(ms) { fetchDelayMs = ms; },
     physical,
@@ -546,6 +559,7 @@ export function createFakeTelnyx(options: { config?: TelnyxConfig; liveGate?: Pa
     },
     reset() {
       calls.length = 0;
+      routes.length = 0;
       sends.length = 0;
       physicalLegs.clear(); bridgePairs.clear(); conferenceParticipants.clear(); accepted.clear();
       conferenceParticipantSnapshots.clear(); conferenceParticipantFlags.clear();

@@ -68,6 +68,24 @@ Time-boxed verifications that cannot be done offline. Record the outcome (date, 
 
 **Result.** _Not yet run._
 
+### S5.0 — Telnyx EU API (call-speed S5)
+
+**Why.** With `api_region: "eu"` in `latency_flags`, every outbound, colleague and callback session created afterwards is frozen to `start_mode.apiRegion = "eu"`: its calls, conferences, the TEST guard's conference reads, reconcile reads and recording GET/DELETE go to `TELNYX_EU_API_BASE_URL` (default `https://api.telnyx.eu/v2`). Telnyx processes a call in the region whose API created it, and conferences cannot span regions, so the region never changes during a call. Inbound sessions stay `us` (no evidence yet which region processes our inbound calls). Credentials, tokens, connections, profiles, numbers and SMS stay on `TELNYX_API_BASE_URL`. The `telnyx-http` log line carries `region`.
+
+**How.** On stable TEST only, with its own provider resources:
+- read back `anchorsite_override` of the call control application and the credential connection (expected Amsterdam/Frankfurt); on production read only, with `sip_uri_calling_preference` and the outbound profile;
+- set `api_region: "eu"` and start **new** calls: a loop call with hold, unhold, consult and hangup; a colleague call; a recorded call if TEST recording is on (`recording.saved`, then the import's GET and the cleanup DELETE);
+- negative check: a `.com` session must not be able to join a `.eu` conference (confirms the pinning is needed);
+- compare `headersMs` per command between `region: "us"` and `region: "eu"` lines, and the target's dial → SDK invite time;
+- check `download_urls` of an EU recording: if its host is not `recordings.telnyx.com`, add it to `TELNYX_RECORDING_DOWNLOAD_HOSTS` (otherwise the import fails `source_host_not_allowed`); never construct EU media URLs;
+- a `telnyx-http` line with `errorCode: "cloudflare_1010"` means Cloudflare refused our User-Agent before Telnyx: set the switch back to `us`.
+
+**Pass criteria.** Every command of an EU session succeeds against `.eu`, and the saving is at least 100 ms per command or 300 ms on invite delivery (plan S5 gate). Otherwise keep the switch `us` and record the evidence here.
+
+**Rollback.** `api_region: "us"` affects only new sessions; sessions already frozen to `eu` finish on `.eu`. Do not roll back to a build without S5 while an EU call is live: an older build would control it through `.com`.
+
+**Result.** _Not yet run._
+
 ### S2 — Slovak TTS availability (secondary)
 
 Pre-recorded Slovak prompts in `public/telephony/` are primary and are served from `TELNYX_MEDIA_BASE_URL`. TTS (`Azure.sk-SK-ViktoriaNeural`) is used only when that variable is unset. If TTS quality or availability is unacceptable, the answer is to fix the media base URL, not to change the code path.

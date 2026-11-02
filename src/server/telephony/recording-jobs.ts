@@ -1,6 +1,8 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/database.types";
+import { sessionApiRegion } from "./latency-flags";
+import { apiBaseUrlFor, getTelnyxConfig, TELNYX_DEFAULT_API_BASE_URL, TELNYX_DEFAULT_EU_API_BASE_URL } from "./telnyx/env";
 
 export type RecordingAdmin = SupabaseClient<Database>;
 export type RecordingJob = Database["public"]["Tables"]["motorist_call_processing_jobs"]["Row"];
@@ -21,6 +23,23 @@ export class RecordingProcessingError extends Error {
 }
 export function record(value: unknown): Record<string, Json | undefined> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, Json | undefined> : {};
+}
+/**
+ * Call-speed S5: the Telnyx REST base for this recording's GET and DELETE. A
+ * recording lives in the API region of the session that created it
+ * (`metadata.start_mode.apiRegion`); no session, or one from before S5, is
+ * `us`. An unreadable session fails the step for a retry rather than guessing:
+ * cleanup would take the wrong region's 404 for "already removed".
+ */
+export async function recordingApiBaseUrl(ctx: Pick<RecordingJobContext, "admin" | "organizationId" | "recording" | "signal">): Promise<string> {
+  const config = getTelnyxConfig();
+  const bases = config.configured ? config : { apiBaseUrl: TELNYX_DEFAULT_API_BASE_URL, euApiBaseUrl: TELNYX_DEFAULT_EU_API_BASE_URL };
+  const sessionId = ctx.recording?.session_id;
+  if (!sessionId) return apiBaseUrlFor(bases, "us");
+  const session = await ctx.admin.from("motorist_call_sessions").select("metadata").eq("organization_id", ctx.organizationId)
+    .eq("id", sessionId).abortSignal(ctx.signal).maybeSingle();
+  if (session.error) throw new RecordingProcessingError("recording_region_unavailable", true);
+  return apiBaseUrlFor(bases, sessionApiRegion(session.data?.metadata));
 }
 export async function enqueueSavedRecording(admin: RecordingAdmin, input: {
   organizationId: string; callId: string; sessionId: string; providerRecordingId: string;

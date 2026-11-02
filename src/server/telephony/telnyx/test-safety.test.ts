@@ -305,11 +305,36 @@ describe("TEST provider boundary", () => {
     await expect(api.createTelephonyCredential({ name: "synthetic", connectionId: "production" })).rejects.toMatchObject({ code: "test_provider_boundary" });
     expect(fetch).not.toHaveBeenCalled();
     await expect(api.mintCredentialToken("copied-production-credential")).rejects.toMatchObject({ code: "test_provider_boundary" });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    // The SIP connection is read alongside the copied credential (S5); the token write never goes out.
+    expect(String(fetch.mock.calls[0][0])).toContain("/telephony_credentials/copied-production-credential");
     expect(fetch.mock.calls.every(([, options]) => options?.method === "GET")).toBe(true);
     const allowed = client();
     await allowed.api.mintCredentialToken("test-credential");
     expect(allowed.fetch.mock.calls.map(([, options]) => options?.method)).toEqual(["GET", "GET", "GET", "POST"]);
+  });
+  it("reads the credential and the SIP connection together before a token, still refusing on either (S5)", async () => {
+    const pending: Array<{ url: string; release: () => void }> = [];
+    const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>(resolve => {
+      const url = String(input);
+      const data = init?.method !== "GET" ? { token: "token" } : url.includes("/credential_connections/") ? { active: true, sip_uri_calling_preference: "internal", outbound: { outbound_voice_profile_id: "disabled" } }
+        : url.includes("/outbound_voice_profiles/") ? { enabled: false } : { resource_id: "connection:test-connection" };
+      pending.push({ url, release: () => resolve(new Response(JSON.stringify({ data }), { headers: { "content-type": "application/json" } })) });
+    }));
+    const api = createTelnyxClient({ config: getTelnyxConfig(ENV), liveGate: { callsEnabled: true, smsEnabled: true }, fetch });
+    const minted = api.mintCredentialToken("test-credential");
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    // Both independent reads are in flight before either answers; the profile waits for its connection.
+    expect(pending.map(entry => new URL(entry.url).pathname)).toEqual(["/v2/telephony_credentials/test-credential", "/v2/credential_connections/test-connection"]);
+    pending[1].release();
+    await vi.waitFor(() => expect(pending).toHaveLength(3));
+    expect(new URL(pending[2].url).pathname).toBe("/v2/outbound_voice_profiles/disabled");
+    pending[2].release();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(pending).toHaveLength(3); // no token write before the credential itself is proven
+    pending[0].release();
+    await vi.waitFor(() => expect(pending).toHaveLength(4));
+    pending[3].release();
+    await expect(minted).resolves.toBe("token");
   });
   it.each([
     [{ active: true, sip_uri_calling_preference: "internal", outbound: {} }, { enabled: false }],

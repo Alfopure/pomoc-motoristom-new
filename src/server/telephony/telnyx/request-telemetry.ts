@@ -26,7 +26,7 @@ function resourcePath(path: string): string {
 /** Only the client's generated error prefix is inspected; provider prose is never logged. */
 function errorCode(error: string | null): string | null {
   if (!error) return null;
-  return /^TelnyxCommandError: Telnyx (\d{5}|timeout|network|http_[1-5]\d{2}) \([1-5]\d{2}\)(?::|$)/.exec(error)?.[1] ?? "provider_error";
+  return /^TelnyxCommandError: Telnyx (\d{5}|timeout|network|http_[1-5]\d{2}|cloudflare_1010) \([1-5]\d{2}\)(?::|$)/.exec(error)?.[1] ?? "provider_error";
 }
 
 function duration(value: number | null): number | null {
@@ -41,8 +41,11 @@ export function createTelnyxRequestLogger(logger: (entry: Record<string, unknown
   return (entry) => {
     try {
       const code = errorCode(entry.error);
-      const safe = { scope: "telnyx-http", level: code ? "warn" : "info",
+      // A Cloudflare 1010 is a deployment configuration error (S5), not a provider hiccup.
+      const safe = { scope: "telnyx-http", level: code === "cloudflare_1010" ? "error" : code ? "warn" : "info",
         method: METHODS.has(entry.method) ? entry.method : "OTHER", path: resourcePath(entry.path),
+        // S5: compare `.com` and `.eu` headersMs per command on TEST.
+        region: entry.region === "eu" ? "eu" : "us",
         commandId: isUuid(entry.commandId) ? entry.commandId : null,
         ms: duration(entry.ms), status: status(entry.status),
         retried: entry.retried === true, errorCode: code,

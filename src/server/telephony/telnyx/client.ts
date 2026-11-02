@@ -5,7 +5,7 @@ import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../pr
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
-import { getTelnyxConfig, type TelnyxConfig } from "./env";
+import { apiBaseUrlFor, getTelnyxConfig, type TelnyxApiRegion, type TelnyxConfig } from "./env";
 import { checkTestProviderRequest, getTestProviderSafety, hasTestCallProvenance, resolveTestSipCredential, TestProviderSafetyError, testSipUsername, type TestProviderContext } from "./test-safety";
 
 /**
@@ -122,6 +122,8 @@ export type TelnyxHttpAttempt = {
 export type TelnyxRequestLog = {
   method: string;
   path: string;
+  /** Call-speed S5: the API region the request went to. */
+  region: TelnyxApiRegion;
   status: number | null;
   ms: number;
   commandId: string | null;
@@ -350,7 +352,8 @@ export type TelnyxClient = {
   sendDtmf(params: SendDtmfParams): Promise<void>;
   createConference(params: CreateConferenceParams): Promise<ConferenceResult>;
   conferenceAction(conferenceId: string, action: ConferenceAction, body: Record<string, unknown> & { commandId?: string }): Promise<void>;
-  retrieveCall(callControlId: string): Promise<TelnyxCallStatus>;
+  /** Outside an owned session, `region` is the session's frozen `start_mode.apiRegion`. */
+  retrieveCall(callControlId: string, options?: { region?: TelnyxApiRegion }): Promise<TelnyxCallStatus>;
   switchSupervisorRole(params: { callControlId: string; role: SupervisorRole; commandId: string }): Promise<void>;
   listPhoneNumbers(params?: { pageSize?: number; phoneNumber?: string }): Promise<TelnyxPhoneNumber[]>;
   createTelephonyCredential(params: CreateTelephonyCredentialParams): Promise<TelephonyCredential>;
@@ -388,7 +391,46 @@ export type RequestOptions = {
   skipJournal?: boolean;
   /** What the provider answered, handed back before any error is thrown. */
   observe?: (sent: { status: number; result: unknown; retryAfterMs?: number }) => void;
+  /**
+   * Call-speed S5: for a caller outside an owned session (cron, reconcile,
+   * the TEST guard before correlation), the session's frozen
+   * `start_mode.apiRegion`. An owned session's own region always wins.
+   */
+  region?: TelnyxApiRegion;
 };
+
+/** Calls, conferences and recordings live in the region whose API created them. */
+const REGIONAL_PATH = /^\/(calls|conferences|recordings)(\/|$)/;
+
+/**
+ * Call-speed S5: the API region of one request. Telnyx processes a call or
+ * conference in the region whose API created it, and a call created through
+ * `.eu` must be controlled through `.eu`; conferences cannot span regions. So
+ * inside an owned session its frozen region wins, then a region the caller
+ * passes, then `us`. Account-level resources (credentials, credential
+ * connections, outbound profiles, numbers, messages) are global and stay on
+ * `us` whatever the session.
+ */
+export function resolveApiRegion(path: string, explicit?: TelnyxApiRegion): TelnyxApiRegion {
+  if (!REGIONAL_PATH.test(path.startsWith("/") ? path : `/${path}`)) return "us";
+  return sessionOwnership.getStore()?.providerRegion ?? explicit ?? "us";
+}
+
+/** A Cloudflare edge refusal, not a Telnyx answer (see `cloudflareSignatureBanned`). */
+export const CLOUDFLARE_SIGNATURE_BANNED_CODE = "cloudflare_1010";
+
+/**
+ * Cloudflare in front of `api.telnyx.eu` refuses some client signatures (for
+ * example `Python-urllib`) with 403 and error 1010 "browser_signature_banned"
+ * before the request reaches Telnyx. That is our configuration, never the
+ * provider's verdict on the command.
+ */
+function cloudflareSignatureBanned(status: number, body: unknown): boolean {
+  if (status !== 403) return false;
+  if (typeof body === "string") return /error code:?\s*1010\b|browser_signature_banned/i.test(body);
+  const record = asRecord(body);
+  return record.error_code === 1010 || record.error_code === "1010" || record.error_name === "browser_signature_banned";
+}
 
 // --- helpers ---------------------------------------------------------------
 
@@ -446,6 +488,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
   const configured: TelnyxConfigured = config;
   // New provider sockets are counted next to the database's (`telnyxConnects`).
   registerTelnyxOrigin(configured.apiBaseUrl);
+  registerTelnyxOrigin(configured.euApiBaseUrl);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? TELNYX_COMMAND_TIMEOUT_MS;
   const sleep = options.sleep ?? defaultSleep;
@@ -603,7 +646,8 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const requestDeadline = Math.min(requestStarted + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS), boundaryDeadline, sessionOwnership.getStore()?.deadline ?? Infinity);
     const commandId = requestOptions.journalCommandId ?? requestOptions.commandId ?? null;
     const wireCommandId = requestOptions.commandId ?? null;
-    const url = new URL(`${configured.apiBaseUrl}${path.startsWith("/") ? path : `/${path}`}`);
+    const region = resolveApiRegion(path, requestOptions.region);
+    const url = new URL(`${apiBaseUrlFor(configured, region)}${path.startsWith("/") ? path : `/${path}`}`);
     for (const [key, value] of Object.entries(requestOptions.query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
@@ -611,45 +655,57 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const safety = configured.testSafety ?? getTestProviderSafety();
     try {
       const checked = checkTestProviderRequest({ ...configured, safety }, method, path, payload);
-      // Independent local proofs run together, but retain the boundary that
-      // rejects a foreign call before even reading its conference at Telnyx.
-      // Every check still precedes journal preparation and provider mutation.
-      await Promise.all([...new Set(checked.callIds)].map(callId => verifyTestCall(callId, safety, requestDeadline)));
       const owner = sessionOwnership.getStore();
-      await Promise.all([...new Set(checked.conferenceIds)].map(async conferenceId => {
-        if (owner && createdTestConferences.get(owner)?.has(conferenceId)) return;
-        const response = await request<unknown>("GET", `/conferences/${encodeURIComponent(conferenceId)}`, {}, requestDeadline);
-        if (asRecord(asRecord(response).data).connection_id !== configured.callControlAppId) throw new TestProviderSafetyError();
-      }));
-      // Tokens and SIP targets must belong to the dedicated TEST connection,
-      // including credentials restored from a copied or stale device row.
-      const credentials = new Map<string, string | undefined>();
-      if (checked.credentialId) credentials.set(checked.credentialId, undefined);
-      for (const username of new Set(checked.sipUsernames)) {
-        // Proven earlier in this request (S2 prefetch): used once, then gone.
-        // Only a completed positive proof replaces this check; a refusal
-        // throws as the check would, and anything inconclusive (including a
-        // check still running when it ends that way) falls through to it.
-        const prefetched = method === "POST" && path === "/calls" ? prefetchedSipProofs.get(username) : undefined;
-        if (prefetched) {
-          prefetchedSipProofs.delete(username);
-          if (await prefetched === "proven") continue;
-        }
-        if (now() >= requestDeadline) throw new TestProviderSafetyError();
-        credentials.set(await resolveSipCredential(username), username);
-      }
-      for (const [credentialId, username] of credentials) await assertTestCredential(credentialId, username, method, requestDeadline);
-      if (checked.credentialId && method === "POST") {
-        // A browser possessing the JWT can dial without our REST client. Its
-        // dedicated SIP connection must therefore have provider-side PSTN off.
-        const response = await request<unknown>("GET", `/credential_connections/${encodeURIComponent(configured.credentialConnectionId!)}`, {}, requestDeadline);
-        const connection = asRecord(asRecord(response).data);
-        const outboundProfile = str(asRecord(connection.outbound).outbound_voice_profile_id);
-        if (connection.active !== true || connection.sip_uri_calling_preference !== "internal" || !outboundProfile || !configured.outboundVoiceProfileId ||
-          outboundProfile === configured.outboundVoiceProfileId) throw new TestProviderSafetyError();
-        const profileResponse = await request<unknown>("GET", `/outbound_voice_profiles/${encodeURIComponent(outboundProfile)}`, {}, requestDeadline);
-        if (asRecord(asRecord(profileResponse).data).enabled !== false) throw new TestProviderSafetyError();
-      }
+      // Three independent chains run together (call-speed S5): the referenced
+      // calls and then their conferences; the SIP destinations and their
+      // credentials; for a token, the SIP connection and then its profile.
+      // Each stays fail-closed and every check still precedes journal
+      // preparation and provider mutation. A refusal in one chain only lets
+      // the read-only GETs already started in another finish.
+      await Promise.all([
+        (async () => {
+          // Independent local proofs run together, but retain the boundary that
+          // rejects a foreign call before even reading its conference at Telnyx.
+          await Promise.all([...new Set(checked.callIds)].map(callId => verifyTestCall(callId, safety, requestDeadline)));
+          await Promise.all([...new Set(checked.conferenceIds)].map(async conferenceId => {
+            if (owner && createdTestConferences.get(owner)?.has(conferenceId)) return;
+            const response = await request<unknown>("GET", `/conferences/${encodeURIComponent(conferenceId)}`, { region }, requestDeadline);
+            if (asRecord(asRecord(response).data).connection_id !== configured.callControlAppId) throw new TestProviderSafetyError();
+          }));
+        })(),
+        (async () => {
+          // Tokens and SIP targets must belong to the dedicated TEST connection,
+          // including credentials restored from a copied or stale device row.
+          const credentials = new Map<string, string | undefined>();
+          if (checked.credentialId) credentials.set(checked.credentialId, undefined);
+          for (const username of new Set(checked.sipUsernames)) {
+            // Proven earlier in this request (S2 prefetch): used once, then gone.
+            // Only a completed positive proof replaces this check; a refusal
+            // throws as the check would, and anything inconclusive (including a
+            // check still running when it ends that way) falls through to it.
+            const prefetched = method === "POST" && path === "/calls" ? prefetchedSipProofs.get(username) : undefined;
+            if (prefetched) {
+              prefetchedSipProofs.delete(username);
+              if (await prefetched === "proven") continue;
+            }
+            if (now() >= requestDeadline) throw new TestProviderSafetyError();
+            credentials.set(await resolveSipCredential(username), username);
+          }
+          await Promise.all([...credentials].map(([credentialId, username]) => assertTestCredential(credentialId, username, method, requestDeadline)));
+        })(),
+        (async () => {
+          if (!checked.credentialId || method !== "POST") return;
+          // A browser possessing the JWT can dial without our REST client. Its
+          // dedicated SIP connection must therefore have provider-side PSTN off.
+          const response = await request<unknown>("GET", `/credential_connections/${encodeURIComponent(configured.credentialConnectionId!)}`, {}, requestDeadline);
+          const connection = asRecord(asRecord(response).data);
+          const outboundProfile = str(asRecord(connection.outbound).outbound_voice_profile_id);
+          if (connection.active !== true || connection.sip_uri_calling_preference !== "internal" || !outboundProfile || !configured.outboundVoiceProfileId ||
+            outboundProfile === configured.outboundVoiceProfileId) throw new TestProviderSafetyError();
+          const profileResponse = await request<unknown>("GET", `/outbound_voice_profiles/${encodeURIComponent(outboundProfile)}`, {}, requestDeadline);
+          if (asRecord(asRecord(profileResponse).data).enabled !== false) throw new TestProviderSafetyError();
+        })(),
+      ]);
     } catch (error) {
       if (error instanceof TestProviderSafetyError) throw new TelnyxCommandError({ code: error.code, status: error.status, message: error.message, commandId });
       throw error;
@@ -661,7 +717,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const log = (status: number | null, retried: boolean, error: string | null, cached = false) => {
       // Even a custom failing logger must not change the accepted command outcome.
       try {
-        void Promise.resolve(options.onRequest?.({ method, path, status, ms: now() - started,
+        void Promise.resolve(options.onRequest?.({ method, path, region, status, ms: now() - started,
           commandId, retried, error, attempts, cached })).catch(() => undefined);
       } catch { /* Telemetry is not part of command execution. */ }
     };
@@ -673,6 +729,12 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         journal,
         async () => {
           const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline, { started, attempts }));
+          // Thrown before anything is observed or journalled: Telnyx never saw
+          // the request, so it is neither its outcome nor worth a retry.
+          if (cloudflareSignatureBanned(result.response.status, result.parsed)) {
+            throw new TelnyxCommandError({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, status: 403, retryable: false, commandId,
+              detail: `Cloudflare refused the ${region} API request (error 1010, browser signature banned) before it reached Telnyx; check the client's User-Agent` });
+          }
           const sent = { status: result.response.status, result: result.parsed, raw: result,
             retryAfterMs: result.response.status === 429 ? parseRetryAfterMs(result.response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS : undefined };
           // A batch member records its own answer, and records it whether the
@@ -1116,10 +1178,10 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       await request<unknown>("POST", `/conferences/${encodeURIComponent(conferenceId)}/actions/${action}`, { body: compact(rest), commandId: idempotencyId, journalCommandId: commandId });
     },
 
-    async retrieveCall(callControlId: string) {
+    async retrieveCall(callControlId: string, retrieveOptions = {}) {
       if (!callControlId) throw new TelnyxCommandError({ code: "invalid_call_control_id", status: 400, detail: "retrieveCall: callControlId is required" });
       try {
-        const response = await request<unknown>("GET", `/calls/${encodeURIComponent(callControlId)}`);
+        const response = await request<unknown>("GET", `/calls/${encodeURIComponent(callControlId)}`, { region: retrieveOptions.region });
         const raw = asRecord(asRecord(response).data);
         return { callControlId, known: true, alive: raw.is_alive === true, callSessionId: str(raw.call_session_id), raw };
       } catch (error) {

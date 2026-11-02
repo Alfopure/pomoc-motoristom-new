@@ -118,11 +118,13 @@ describe("latency flags", () => {
       own_leg_timeout_secs_concurrent: 9, internal_auto_bridge: true, api_region: "eu" };
     expect([concurrentDialFor(flags, "outbound", "web"), concurrentDialFor(flags, "outbound", "mobile"),
       concurrentDialFor(flags, "internal", "web"), concurrentDialFor(flags, "internal", "mobile")]).toEqual([true, false, false, true]);
-    // S0 implements none of these: the session records the sequential 30 s dial and the region its client calls.
-    for (const [direction, origin] of [["outbound", "web"], ["internal", "mobile"], ["inbound", null]] as const) {
+    // S6 is not implemented: the session records the sequential 30 s dial. S5 is: a session we create
+    // takes the flag's API region, while an inbound call keeps the region its client calls.
+    for (const [direction, origin, apiRegion] of [["outbound", "web", "eu"], ["internal", "mobile", "eu"], ["inbound", null, "us"]] as const) {
       expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" })).toEqual({ concurrent: false, autoBridge: false,
-        ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin });
+        ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion, origin });
     }
+    expect(freezeStartMode({ ...flags, api_region: "us" }, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
     // S7b ships its behaviour: join-with-hold is frozen when asked for, and only then; never for a colleague call.
     const joinHeld = { ...flags, hold_join_with_hold: true };
     expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
@@ -149,7 +151,7 @@ describe("latency flags", () => {
     const deps = { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }), latencyFlags: asked };
     const first = await startOutboundCall(deps, { profileId: PROFILES.o1, role: "dispatcher" }, { to: NUMBERS.customer });
     const startMode = (sessionId: string) => readMeta(h.session(sessionId) as SessionRow).start_mode;
-    const sequential = { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "us" };
+    const sequential = { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "eu" };
     expect(startMode(first.sessionId)).toEqual({ ...sequential, origin: "web" });
     // ...which is what happened: a 30 s own-leg dial, and the customer only after it answered.
     expect(h.telnyx.of("dial").map(dial => dial.params.timeoutSecs)).toEqual([30]);
@@ -160,8 +162,9 @@ describe("latency flags", () => {
 
     const second = await callColleague(deps, { profileId: PROFILES.o2, role: "dispatcher" }, { targetProfileId: PROFILES.o5 });
     expect(startMode(second.sessionId)).toEqual({ ...sequential, origin: "web" });
+    // S5: Telnyx created the inbound call; it keeps the region the deployment calls.
     const inbound = await h.inbound({ to: NUMBERS.allianz, answer: false });
-    expect(startMode(inbound.sessionId)).toEqual({ ...sequential, origin: null });
+    expect(startMode(inbound.sessionId)).toEqual({ ...sequential, apiRegion: "us", origin: null });
   });
 });
 

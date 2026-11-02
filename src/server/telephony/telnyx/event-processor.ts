@@ -22,7 +22,7 @@ import { recordingIntent } from "../state/recording";
 import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, WEBHOOK_CLAIM_STALE_AFTER_MS, type WebhookClaim } from "./webhook-ledger";
 import { acceptsTestProviderEvent, getTestProviderSafety, hasTestCallProvenance } from "./test-safety";
 import { decodeClientState } from "./client-state";
-import { freezeStartMode, latencyFlagsOf, providerRegionOf } from "../latency-flags";
+import { freezeStartMode, latencyFlagsOf, providerRegionOf, sessionApiRegion } from "../latency-flags";
 
 /**
  * Telnyx webhook processor (design §2.3).
@@ -140,6 +140,21 @@ export function allowedConnectionIds(deps: Pick<ProcessorDeps, "config">): Set<s
     if (deps.config.credentialConnectionId) ids.add(deps.config.credentialConnectionId);
   }
   return ids;
+}
+
+/**
+ * Call-speed S5: the TEST guard reads a connection-less conference event's
+ * conference, before correlation and outside any lease, in the region of the
+ * session that created it (by `conference_id`, else the event's own client
+ * state). No such session, or one from before S5, is `us`.
+ */
+async function conferenceEventRegion(deps: ProcessorDeps, conferenceId: string, sid: string | null): Promise<"us" | "eu"> {
+  const read = (column: "conference_id" | "id", value: string) => deps.admin.from("motorist_call_sessions").select("metadata")
+    .eq("organization_id", deps.organizationId).eq(column, value).maybeSingle();
+  let session = await read("conference_id", conferenceId);
+  if (!session.error && !session.data && sid) session = await read("id", sid);
+  if (session.error) throw new Error("conference session lookup failed");
+  return sessionApiRegion(session.data?.metadata);
 }
 
 async function findSession(admin: AdminClient, organizationId: string, event: TelephonyEvent): Promise<SessionRow | null> {
@@ -442,7 +457,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     testEventAllowed = false;
     if (event.callControlId) testEventAllowed = await hasTestCallProvenance(boundary, event.callControlId, deps);
     if (event.conferenceId && deps.telnyx) {
-      const response = await deps.telnyx.request<{ data?: { connection_id?: string } }>("GET", `/conferences/${encodeURIComponent(event.conferenceId)}`);
+      const response = await deps.telnyx.request<{ data?: { connection_id?: string } }>("GET", `/conferences/${encodeURIComponent(event.conferenceId)}`,
+        { region: await conferenceEventRegion(deps, event.conferenceId, event.clientState?.sid ?? null) });
       testEventAllowed = (!event.callControlId || testEventAllowed) && response.data?.connection_id === boundary.callControlAppId;
     }
   }

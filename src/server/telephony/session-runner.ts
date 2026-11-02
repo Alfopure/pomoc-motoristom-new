@@ -53,7 +53,7 @@ import {
 import type { TelnyxClient } from "./telnyx/client";
 import type { TelnyxClientState } from "./telnyx/client-state";
 import type { TelnyxConfig } from "./telnyx/env";
-import { latencyFlagsOf, type LatencyFlags } from "./latency-flags";
+import { latencyFlagsOf, sessionApiRegion, type LatencyFlags } from "./latency-flags";
 
 /**
  * Runs one event through the per-session pipeline shared by the webhook
@@ -823,9 +823,10 @@ export async function ownedSessionWork<T>(
   // The caller often just read this row (webhook correlation); re-reading it
   // only to look at `writer_contract` is a round trip on the critical path.
   // `writer_contract === undefined` means "no lease at all", so a partial row
-  // must never be accepted here: it would silently skip ownership.
+  // must never be accepted here: it would silently skip ownership. Nor one
+  // without `metadata`: it would lose the session's frozen API region (S5).
   const known = options.known?.id === sessionId && options.known.organization_id === deps.organizationId &&
-    options.known.writer_contract !== undefined ? options.known : null;
+    options.known.writer_contract !== undefined && options.known.metadata !== undefined ? options.known : null;
   const probe = known ? { data: known, error: null }
     : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
   if (probe.error) throw new SessionEventDeferredError(`Session ownership lookup failed: ${probe.error.message}`, "snapshot_unavailable");
@@ -860,7 +861,9 @@ export async function ownedSessionWork<T>(
   }
   const owner: Ownership = { admin: deps.admin, sessionId, organizationId: deps.organizationId, token,
     generation: claim.generation, contract: claim.contract, deadline: Date.now() + SESSION_WORK_MS,
-    acquiredAt: Date.now(), leaseWaitMs: Math.max(0, Date.now() - started) };
+    acquiredAt: Date.now(), leaseWaitMs: Math.max(0, Date.now() - started),
+    // S5: every call and conference command of this session goes to the region it was created in.
+    providerRegion: sessionApiRegion(probe.data.metadata) };
   // `route` and `eventType` name the holder, so a deferred webhook (which never
   // logs a wait of its own) can be matched to it by session and time.
   const leaseLog = { scope: "lease-timing", sessionId, generation: owner.generation,

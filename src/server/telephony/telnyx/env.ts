@@ -13,7 +13,10 @@ export type TelnyxConfig =
   | {
       configured: true;
       apiKey: string;
+      /** Region `us`: `api.telnyx.com` unless overridden. */
       apiBaseUrl: string;
+      /** Region `eu` (call-speed S5): `api.telnyx.eu` unless overridden. */
+      euApiBaseUrl: string;
       publicKey: string | null;
       callControlAppId: string | null;
       credentialConnectionId: string | null;
@@ -31,6 +34,7 @@ export type TelnyxConfig =
 export type EnvRecord = Record<string, string | undefined>;
 
 export const TELNYX_DEFAULT_API_BASE_URL = "https://api.telnyx.com/v2";
+export const TELNYX_DEFAULT_EU_API_BASE_URL = "https://api.telnyx.eu/v2";
 export const TELNYX_DEFAULT_ALPHA_SENDER = "PomocMotor";
 
 function readEnv(env: EnvRecord, name: string): string | null {
@@ -54,6 +58,7 @@ export function getTelnyxConfig(env: EnvRecord = process.env): TelnyxConfig {
     configured: true,
     apiKey,
     apiBaseUrl: (readEnv(env, "TELNYX_API_BASE_URL") ?? TELNYX_DEFAULT_API_BASE_URL).replace(/\/+$/, ""),
+    euApiBaseUrl: (readEnv(env, "TELNYX_EU_API_BASE_URL") ?? TELNYX_DEFAULT_EU_API_BASE_URL).replace(/\/+$/, ""),
     publicKey: readEnv(env, "TELNYX_PUBLIC_KEY"),
     callControlAppId: readEnv(env, "TELNYX_CALL_CONTROL_APP_ID"),
     credentialConnectionId: readEnv(env, "TELNYX_CREDENTIAL_CONNECTION_ID"),
@@ -66,6 +71,19 @@ export function getTelnyxConfig(env: EnvRecord = process.env): TelnyxConfig {
     smsLiveSendsEnabled: readFlag(env, "TELNYX_SMS_LIVE_SENDS"),
     testSafety: getTestProviderSafety(env),
   };
+}
+
+/**
+ * The Telnyx API region a call is created and controlled in (call-speed S5).
+ * Telnyx processes a call or conference in the region whose API created it,
+ * and a call created through `.eu` must be controlled through `.eu`, so a
+ * session's region is frozen at creation (`metadata.start_mode.apiRegion`).
+ */
+export type TelnyxApiRegion = "us" | "eu";
+
+/** The REST base for a region: `TELNYX_API_BASE_URL` for `us`, `TELNYX_EU_API_BASE_URL` for `eu`. */
+export function apiBaseUrlFor(config: Pick<Extract<TelnyxConfig, { configured: true }>, "apiBaseUrl" | "euApiBaseUrl">, region: TelnyxApiRegion): string {
+  return region === "eu" ? config.euApiBaseUrl : config.apiBaseUrl;
 }
 
 /** True only when the key exists AND the corresponding live switch is on. */

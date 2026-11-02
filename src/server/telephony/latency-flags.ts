@@ -239,7 +239,7 @@ export function concurrentDialFor(flags: LatencyFlags, direction: "outbound" | "
  * what it really does, whatever the flags ask, and no later build can mistake
  * an earlier session for one that ran the optimisation.
  */
-const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: false, holdJoinWithHold: true } as const;
+const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: true, holdJoinWithHold: true } as const;
 
 /**
  * S7b is implemented, but whether Telnyx plays the hold music to a participant
@@ -263,6 +263,15 @@ export function providerRegionOf(config: TelnyxConfig): "us" | "eu" {
   catch { return "us"; }
 }
 
+/**
+ * The Telnyx API region a session was frozen to (call-speed S5). A session
+ * without `start_mode.apiRegion` (created before S0/S5) is `us` for good.
+ */
+export function sessionApiRegion(metadata: unknown): "us" | "eu" {
+  const startMode = record(record(metadata)?.start_mode);
+  return startMode?.apiRegion === "eu" ? "eu" : "us";
+}
+
 /** What a new session keeps for its whole life, whatever the flags say later. */
 export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null; providerRegion: "us" | "eu" }): SessionStartMode {
   const concurrent = HONOURED_START_SWITCHES.concurrent && input.direction !== "inbound" && input.origin !== null &&
@@ -272,7 +281,11 @@ export function freezeStartMode(flags: LatencyFlags, input: { direction: "inboun
   const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold && joinWithHoldAllowed();
   return { concurrent, autoBridge: HONOURED_START_SWITCHES.autoBridge && input.direction === "internal" && flags.internal_auto_bridge,
     ownLegTimeoutSecs: concurrent ? flags.own_leg_timeout_secs_concurrent : SEQUENTIAL_OWN_LEG_TIMEOUT_SECS,
-    apiRegion: HONOURED_START_SWITCHES.apiRegion ? flags.api_region : input.providerRegion, origin: input.origin,
+    // S5: a session we create is created and controlled in the flag's region.
+    // An inbound call was created by Telnyx, in a region we have no evidence
+    // for on this account, so it keeps the region the deployment really calls
+    // (`us`); a separate inbound switch would need the S5.0 inbound spike.
+    apiRegion: HONOURED_START_SWITCHES.apiRegion && input.direction !== "inbound" ? flags.api_region : input.providerRegion, origin: input.origin,
     ...(holdJoinWithHold ? { holdJoinWithHold: true as const } : {}) };
 }
 
