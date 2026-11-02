@@ -431,19 +431,40 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
     await issueWebphoneToken(phone(h), input());
     expect(deleted(h)).toEqual(["old-credential"]);
   });
-  it("never rotates its own renewal, a lease already revoked, without the switch or for a browser", async () => {
+  it("never rotates its own renewal, without the switch or for a browser", async () => {
     const h = createTelephonyHarness(); seedPhone(h);
     const renewed = await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE }));
     expect(renewed).toMatchObject({ deviceSessionId: OLD_LEASE, credentialId: "old-credential" });
-    const revoked = createTelephonyHarness(); seedPhone(revoked, { device_session_id: "revoked:00000000-0000-4000-8000-0000000000a2", registration_state: "unregistered" });
-    await issueWebphoneToken(phone(revoked), input());
     const off = createTelephonyHarness(); seedPhone(off);
     await issueWebphoneToken(phone(off), input({ takeover: true, rotateCredential: false }));
     const browser = createTelephonyHarness();
     await issueWebphoneToken(deps(browser), input({ takeover: true }));
-    for (const harness of [h, revoked, off, browser]) {
+    for (const harness of [h, off, browser]) {
       expect(deleted(harness)).toEqual([]); expect(harness.telnyx.of("createTelephonyCredential")).toEqual([]);
     }
+  });
+  it("rotates a revoked lease whose credential survived, and only enrolls one whose credential is gone", async () => {
+    // A deactivation whose Telnyx deletion failed leaves exactly this row behind.
+    const kept = createTelephonyHarness(); seedPhone(kept, { device_session_id: "revoked:00000000-0000-4000-8000-0000000000a2", registration_state: "unregistered" });
+    await issueWebphoneToken(phone(kept), input());
+    expect(deleted(kept)).toEqual(["old-credential"]);
+    const gone = createTelephonyHarness();
+    seedPhone(gone, { device_session_id: "revoked:00000000-0000-4000-8000-0000000000a2", registration_state: "unregistered", telnyx_credential_id: null, sip_username: null });
+    await issueWebphoneToken(phone(gone), input());
+    expect(deleted(gone)).toEqual([]); expect(gone.telnyx.of("createTelephonyCredential")).toHaveLength(1);
+  });
+  it("records how long a JWT issued for caching may be used, and rotates during that window even with the switch off", async () => {
+    const h = createTelephonyHarness(); seedPhone(h);
+    await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE, rotateCredential: false, tokenCache: true }));
+    const until = (await getOperatorDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }))?.metadata as Record<string, unknown>;
+    expect(Date.parse(String(until.token_cache_until)) - h.now().getTime()).toBe(13 * 3_600_000);
+    // The switch was turned off since: a takeover still deletes the credential the old phone may have cached.
+    await issueWebphoneToken(phone(h), input({ takeover: true, rotateCredential: false }));
+    expect(deleted(h)).toEqual(["old-credential"]);
+    // After the window the switch decides again.
+    const later = createTelephonyHarness(); seedPhone(later, { metadata: { token_cache_until: new Date(later.now().getTime() - 1).toISOString() } });
+    await issueWebphoneToken(phone(later), input({ takeover: true, rotateCredential: false }));
+    expect(deleted(later)).toEqual([]);
   });
   it("refuses the takeover when Telnyx keeps the old credential, so the old JWT is never silently left valid", async () => {
     const h = createTelephonyHarness(); seedPhone(h);

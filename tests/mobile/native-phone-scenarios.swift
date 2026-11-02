@@ -594,18 +594,21 @@ do {
 // Call-speed S8: login switches from the app, and a JWT the app cached in the Keychain.
 do {
   let owner = phone()
-  check("a connect without switches logs in as today: region auto, no trickle ICE", TxClient.last.server?.region == .auto && TxClient.last.config?.useTrickleIce == false)
+  check("a connect without switches logs in as today: default host, region auto, no trickle ICE", TxClient.last.server?.signalingServer == nil
+    && TxClient.last.server?.region == .auto && TxClient.last.config?.useTrickleIce == false)
   owner.disconnect()
 }
 do {
   let owner = LinkaPhone(), id = UUID()
   try! owner.connect(token: "cached-keychain-token", options: .init(["region": "eu", "trickleIce": true]))
-  check("the EU region and trickle ICE reach the SDK login", TxClient.last.server?.region == .eu && TxClient.last.config?.useTrickleIce == true)
+  // Region auto with the EU host: SDK 4.2.2 would double a region prefix on its own reconnects.
+  check("the EU host and trickle ICE reach the SDK login", TxClient.last.server?.signalingServer?.absoluteString == "wss://eu.rtc.telnyx.com"
+    && TxClient.last.server?.region == .auto && TxClient.last.config?.useTrickleIce == true)
   owner.onClientReady()
   push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture"]])
   try! owner.connect(token: "cached-keychain-token", options: .init(["cached": true, "region": "eu", "trickleIce": true]))
   check("a push is prepared in the EU region with trickle ICE", TxClient.last.prepares == 1 && TxClient.last.server?.region == .eu
-    && TxClient.last.config?.useTrickleIce == true)
+    && TxClient.last.server?.signalingServer == nil && TxClient.last.config?.useTrickleIce == true)
   owner.disconnect()
 }
 do {

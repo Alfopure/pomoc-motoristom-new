@@ -13,6 +13,7 @@ import { type MotoristActor, resolveDefaultOrganizationId } from "./api-auth";
 import { assertRateLimit, rateLimitKey, requestIp } from "./rate-limit";
 import { MutationError } from "./motorist-mutations";
 import { readLatencyFlags } from "./telephony/latency-flags";
+import { mobileTokenCacheOpen } from "@/lib/telephony/device-liveness";
 
 /** Account removal and availability changes also alter shared live phone routing. */
 function assertOperatorAccessDeployment(): void {
@@ -198,12 +199,16 @@ export async function updateAccessUser(actor: MotoristActor, profileId: string, 
 }
 
 /**
- * Call-speed S8.1, `mobile_rotate_on_deactivation`: the iPhone's lease is revoked and its Telnyx
- * credential deleted, so a JWT the phone cached can no longer register. Reactivation enrolls a new
- * credential. A repeated deactivation repeats the revocation.
+ * Call-speed S8.1: the iPhone's lease is revoked and its Telnyx credential deleted, so a JWT the
+ * phone cached can no longer register. With `mobile_rotate_on_deactivation`, or fail-closed while
+ * a JWT issued for caching may still be in use (or that cannot be read). Reactivation enrolls a
+ * new credential. A repeated deactivation repeats the revocation.
  */
 async function revokeDeactivatedPhone(supabase: ReturnType<typeof createSupabaseAdminClient>, organizationId: string, profileId: string) {
-  if (!(await readLatencyFlags(supabase, organizationId)).mobile_rotate_on_deactivation) return;
+  if (!(await readLatencyFlags(supabase, organizationId)).mobile_rotate_on_deactivation) {
+    const phones = await supabase.from("motorist_operator_mobile_devices").select("metadata").eq("organization_id", organizationId).eq("profile_id", profileId);
+    if (!phones.error && !(phones.data ?? []).some(row => mobileTokenCacheOpen(row.metadata, new Date()))) return;
+  }
   try {
     const { createTelephonyDeps } = await import("@/server/telephony/runtime");
     const { disconnectDevice } = await import("@/server/telephony/operator-devices");
@@ -304,7 +309,7 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
   const keepHistory = await hasRecordedHistory(supabase, profile);
   const mode: DeleteAccessUserResult["mode"] = keepHistory ? "anonymised" : "deleted";
 
-  // S8.1: with `mobile_rotate_on_deactivation`, removal also takes the iPhone credential.
+  // S8.1: with `mobile_rotate_on_deactivation`, or while a cached JWT may be in use, removal also takes the iPhone credential.
   const mobile = (await readLatencyFlags(supabase, actor.organizationId)).mobile_rotate_on_deactivation;
   const accessSnapshot = await loadOperatorAccessSnapshot(supabase, profile, mobile);
   const audit = await supabase.from("motorist_audit_log").insert({
@@ -350,7 +355,7 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
     }
   }
 
-  await revokeOperatorAccess(supabase, profile, accessSnapshot.credentialIds, mobile);
+  await revokeOperatorAccess(supabase, profile, accessSnapshot.credentialIds, accessSnapshot.phones);
 
   let authWarning: string | null = null;
   if (profile.user_id) {
@@ -521,12 +526,14 @@ function isMissingRelation(error: DatabaseLookupError, relation: string): boolea
 async function loadOperatorAccessSnapshot(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow, mobile = false) {
   const [web, phone] = await Promise.all([
     supabase.from("motorist_operator_devices").select("id, telnyx_credential_id").eq("profile_id", profile.id),
-    mobile ? supabase.from("motorist_operator_mobile_devices").select("id, telnyx_credential_id").eq("profile_id", profile.id) : null,
+    supabase.from("motorist_operator_mobile_devices").select("id, telnyx_credential_id, metadata").eq("profile_id", profile.id),
   ]);
-  if (web.error || phone?.error) {
+  if (web.error || phone.error) {
     throw new MutationError("Telefónne prístupy používateľa sa nepodarilo načítať.", 500);
   }
-  const devices = [...web.data ?? [], ...phone?.data ?? []];
+  // The iPhone credential goes with the switch on, or fail-closed while a cached JWT may be in use.
+  const phones = (phone.data ?? []).filter(row => mobile || mobileTokenCacheOpen(row.metadata, new Date()));
+  const devices = [...web.data ?? [], ...phones];
 
   const memberships = await supabase.from("motorist_ring_group_members").select("id").eq("profile_id", profile.id);
   if (memberships.error) {
@@ -535,7 +542,7 @@ async function loadOperatorAccessSnapshot(supabase: ReturnType<typeof createSupa
 
   const credentialIds = devices.map((row) => row.telnyx_credential_id).filter((id): id is string => Boolean(id));
 
-  return { credentialIds, ringGroupMembershipCount: (memberships.data ?? []).length };
+  return { credentialIds, ringGroupMembershipCount: (memberships.data ?? []).length, phones: phones.length > 0 };
 }
 
 /**

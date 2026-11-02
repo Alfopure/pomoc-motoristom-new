@@ -17,14 +17,14 @@ async function issue(request: Request) {
     const deps = await nativeVoiceDeps(actor);
     const body = await readJsonBody<Record<string, unknown>>(request);
     const flags = latencyFlagsOf(deps);
+    // Every connect carries the phone's switches (S8): a push wake uses the last ones it saw.
+    const voiceTuning = mobileVoiceTuning(flags);
     const token = await issueWebphoneToken({ ...deps, deviceKind: "mobile" }, {
       organizationId: actor.organizationId, profileId: actor.profileId,
       deviceSessionId: typeof body.deviceSessionId === "string" ? body.deviceSessionId : null,
       userAgent: request.headers.get("user-agent"), takeover: body.takeover === true,
-      rotateCredential: flags.mobile_rotate_on_takeover,
+      rotateCredential: flags.mobile_rotate_on_takeover, tokenCache: voiceTuning.mobileTokenCache,
     });
-    // Every connect carries the phone's switches (S8): a push wake uses the last ones it saw.
-    const voiceTuning = mobileVoiceTuning(flags);
     // The SIP password and provider credential ID never reach the app.
     return mobileJson({ ...mobileScope(actor), token: token.token, expiresAt: token.expiresAt, deviceSessionId: token.deviceSessionId, voiceTuning,
       // Only a refetch signal is read from this private topic, never its payload (S8.5).

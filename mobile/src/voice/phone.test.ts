@@ -1298,6 +1298,30 @@ describe("call-speed S8 phone switches", () => {
     s.f.emit({ type: "registration", state: "error" }); await settle();
     expect(s.f.api.token).toHaveBeenCalledTimes(2);
   });
+  it("keeps the push that a fresh JWT prepares again after Telnyx refused the cached one mid-refresh", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(s);
+    let release!: (token: VoiceToken) => void;
+    vi.mocked(s.f.api.token).mockReturnValue(new Promise(done => { release = done; }));
+    await s.f.phone.initialise(); await settle();
+    s.f.emit({ type: "registration", state: "error" }); await settle();
+    expect(s.f.phone.state.registration).toBe("connecting");
+    // Native forgot the push; the fresh JWT prepares it again and native announces it once more.
+    let announced = false;
+    vi.mocked(s.f.native.connect).mockImplementation(async token => {
+      if (token === "fresh-jwt" && !announced) { announced = true; s.f.emit({ type: "push", callId: id, providerLegId: "" }); }
+    });
+    release(freshToken({ mobileTokenCache: true })); await settle();
+    expect(s.f.native.connect).toHaveBeenCalledWith("fresh-jwt");
+    s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    expect(s.f.native.reject).not.toHaveBeenCalled(); expect(s.f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg");
+  });
+  it("wipes a cached JWT when a token request without it is refused, without revoking the phone", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry());
+    vi.mocked(s.f.api.token).mockRejectedValue(new MobileApiError("Telefón používa iné zariadenie.", 409));
+    await s.f.phone.initialise(); await s.f.phone.connect(); await settle();
+    expect(s.tokens.value).toBeNull(); expect(s.f.native.disconnect).not.toHaveBeenCalled();
+    expect(s.f.phone.state.takeoverRequired).toBe(true);
+  });
   it("lets a refreshing push wait for the fresh JWT once native dropped the cached login", async () => {
     const s = speedFixture({ mobileTokenCache: true }, cachedEntry());
     vi.mocked(s.f.native.snapshot).mockResolvedValueOnce({ ready: false, audioActive: false, wasEnabled: true, pending: [{ type: "push", callId: id, providerLegId: "" }] })

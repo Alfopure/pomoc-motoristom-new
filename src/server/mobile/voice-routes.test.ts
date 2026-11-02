@@ -47,14 +47,14 @@ describe("mobile voice HTTP contract", () => {
     expect(off.voiceTuning).toEqual({ mobileTokenCache: false, mobileRtcRegion: "auto", mobileTrickleIce: false, mobileRealtimeStatus: false,
       mobileEarlyAccept: false, mobileParallelOffers: false });
     expect(off).not.toHaveProperty("realtimeTopic");
-    expect(mocks.token).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ rotateCredential: false }));
+    expect(mocks.token).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ rotateCredential: false, tokenCache: false }));
     vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ mobile_rotate_on_takeover: true, mobile_rotate_on_deactivation: true,
       client: { mobileTokenCache: true, mobileRealtimeStatus: true, mobileRtcRegion: "eu" } }));
     try {
       const on = await (await token(request({ deviceSessionId: id, takeover: true }))).json();
       expect(on.voiceTuning).toMatchObject({ mobileTokenCache: true, mobileRealtimeStatus: true, mobileRtcRegion: "eu" });
       expect(on.realtimeTopic).toBe("org:organization:telephony");
-      expect(mocks.token).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ takeover: true, rotateCredential: true }));
+      expect(mocks.token).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ takeover: true, rotateCredential: true, tokenCache: true }));
       expect(JSON.stringify(on)).not.toMatch(/private-sip|private-provider/);
     } finally { vi.unstubAllEnvs(); }
   });

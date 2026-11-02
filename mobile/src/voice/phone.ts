@@ -139,8 +139,8 @@ export class DispatchPhone {
   private cacheOps: Promise<void> = Promise.resolve();
   /** The JWT in native came from the Keychain and no refresh has replaced it yet. */
   private cachedInUse = false;
-  /** A native login with a cached JWT, until it registers or fails. */
-  private cachedLogin: { generation: number; settled: boolean; done: Promise<boolean> } | null = null;
+  /** A native login with a cached JWT: `running` until it reached native, `settled` once it registered or failed. */
+  private cachedLogin: { generation: number; running: boolean; settled: boolean; done: Promise<boolean> } | null = null;
   /** When this phone received its current JWT, by its own clock. */
   private tokenIssuedAt = 0;
   /** Offers read while the start POST was in flight (S8.4). */
@@ -206,6 +206,11 @@ export class DispatchPhone {
       this.diag("token.cache", { outcome: "saved" });
     });
   }
+  /** Read in order with the writes, so a wipe queued before it always applies first. */
+  private readCachedToken(store: PhoneSecretStore) {
+    let raw: string | null = null;
+    return this.queueCache(async () => { raw = await store.load(); }).then(() => raw);
+  }
   /** Never fails; logged only when a JWT may have been cached. */
   private wipeCachedToken(reason: string) {
     const store = this.options.tokens;
@@ -220,12 +225,15 @@ export class DispatchPhone {
    * INVITE. False when nothing usable is cached: the caller connects as before. */
   private connectCached(): Promise<boolean> {
     const generation = this.generation, store = this.options.tokens, profileId = this.options.profileId;
-    if (this.cachedLogin?.generation === generation && !this.cachedLogin.settled) return this.cachedLogin.done;
+    // Another push of the same wake joins the cached login while it or its refresh is under way;
+    // a later push logs in (and refreshes) again.
+    const login0 = this.cachedLogin;
+    if (login0?.generation === generation && (login0.running || !login0.settled && this.connecting)) return login0.done;
     if (!this.native || this.stopped || !this.tuning.mobileTokenCache || !store || !profileId || this.connecting || this.state.cancelingAttempt) return Promise.resolve(false);
-    const login = { generation, settled: false, done: Promise.resolve(false) };
+    const login = { generation, running: true, settled: false, done: Promise.resolve(false) };
     login.done = (async () => {
       const leaseId = this.leaseId ?? await this.leases?.load() ?? null;
-      const raw = await store.load().catch(() => null);
+      const raw = await this.readCachedToken(store);
       if (!this.current(generation)) return true;
       const result = usableCachedToken(raw, { profileId, deviceSessionId: leaseId, appBuild: this.options.appBuild ?? null, now: this.now() });
       if (!("token" in result)) {
@@ -247,7 +255,7 @@ export class DispatchPhone {
       this.tokenIssuedAt = cached.issuedAt; this.cachedInUse = true;
       void this.connect();
       return true;
-    })();
+    })().finally(() => { login.running = false; });
     this.cachedLogin = login;
     return login.done;
   }
@@ -259,6 +267,9 @@ export class DispatchPhone {
     if (registration === "registered") return;
     this.diag("token.cache", { outcome: "login_failed" });
     void this.wipeCachedToken("login_failed");
+    // Native forgot the push it prepared with that JWT and a fresh JWT prepares it again: the
+    // phone is connecting, not failed, so the re-prepared push is not refused as not ready.
+    this.update({ registration: "connecting" });
     void (async () => {
       await this.connecting;
       if (this.current(generation) && this.state.registration !== "registered") await this.connect();
@@ -388,8 +399,10 @@ export class DispatchPhone {
           if (error instanceof MobileApiError && error.status !== 0 && error.status !== 408 && error.status !== 429
             && !(error.status >= 500 && error.status <= 599 && error.status !== 502)) this.connectionRequested = false;
           this.update({ registration: "error", takeoverRequired: error instanceof MobileApiError && error.status === 409 });
-          this.fail(error, false, step === "token" && this.cachedInUse && error instanceof MobileApiError && error.status >= 400 && error.status < 500
-            && ![408, 429].includes(error.status));
+          // A refused token request also refuses any JWT this phone cached for its lease.
+          const refused = step === "token" && error instanceof MobileApiError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
+          if (refused) void this.wipeCachedToken("refused");
+          this.fail(error, false, refused && this.cachedInUse);
         }
       } finally {
         if (automatic && this.current(generation) && !this.idleForRecovery() && this.state.registration === "connecting") {

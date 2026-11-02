@@ -11,7 +11,7 @@ import { deviceLastOnlineAt, LAST_ONLINE_METADATA_KEY, retainDeviceLastOnline } 
 import { OperatorDeviceError } from "./service-errors";
 import { telnyxSipUri, toJson, type DeviceRow, type TelephonyEnvironment } from "./state/types";
 import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
-import { nativeMobilePushReachable, nativePushLease } from "@/lib/telephony/device-liveness";
+import { MOBILE_TOKEN_CACHE_UNTIL, MOBILE_TOKEN_CACHE_WINDOW_MS, mobileTokenCacheOpen, nativeMobilePushReachable, nativePushLease } from "@/lib/telephony/device-liveness";
 
 export { OperatorDeviceError } from "./service-errors";
 
@@ -237,7 +237,9 @@ export async function issueWebphoneToken(
   deps: DeviceDeps,
   input: { organizationId: string; profileId: string; userAgent?: string | null; takeover?: boolean; handoff?: boolean; deviceSessionId?: string | null;
     /** iPhone only (`mobile_rotate_on_takeover`): a lease that replaces another phone's lease gets a new credential. */
-    rotateCredential?: boolean },
+    rotateCredential?: boolean;
+    /** iPhone only: the phone may cache this JWT (S8.1); the device records until when. */
+    tokenCache?: boolean },
 ): Promise<WebphoneToken> {
   if (!deps.telnyx) throw new OperatorDeviceError(TELEPHONY_NOT_CONFIGURED_MESSAGE, 503);
   const reachable = (device: DeviceRow) => deviceIsLive(device, nowOf(deps)) || deps.deviceKind === "mobile" && nativeMobilePushReachable(device, nowOf(deps));
@@ -247,20 +249,20 @@ export async function issueWebphoneToken(
     if (presence.error) throw new OperatorDeviceError("Stav operátora sa nepodarilo overiť.", 503);
     if (presence.data?.status === "on_call") throw new OperatorDeviceError("Prebiehajúci hovor nemožno presunúť pripojením iného prehliadača. Najprv ho dokončite.", 409);
   }
-  const rotating = input.rotateCredential === true && deps.deviceKind === "mobile";
   // Opening the dispatch on a second device must not silently steal incoming
   // calls from a live phone, even between calls. Own-token renewal is allowed.
-  const current = !input.takeover || rotating ? await getOperatorDevice(deps, input) : null;
+  const current = !input.takeover || deps.deviceKind === "mobile" ? await getOperatorDevice(deps, input) : null;
   if (!input.takeover) {
     const sameTab = Boolean(input.deviceSessionId && current?.device_session_id === input.deviceSessionId);
     if (current && !sameTab && reachable(current)) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
   }
   // The phone that held the replaced lease may keep a JWT of this credential in its Keychain
   // (S8.1) and log in with it before its refresh is refused. Deleting the credential at Telnyx
-  // ends that JWT and the old phone's registration. Renewing one's own lease never rotates; a
-  // revoked lease already lost its credential, or holds a fresh one.
-  const force = rotating && Boolean(current?.telnyx_credential_id && current.device_session_id
-    && !current.device_session_id.startsWith("revoked:") && current.device_session_id !== input.deviceSessionId);
+  // ends that JWT and the old phone's registration. Fail-closed: while a JWT issued for caching
+  // may still be in use, this happens whatever the switch says now. Renewing one's own lease
+  // never rotates.
+  const rotating = deps.deviceKind === "mobile" && (input.rotateCredential === true || mobileTokenCacheOpen(current?.metadata, nowOf(deps)));
+  const force = rotating && Boolean(current?.telnyx_credential_id && current.device_session_id && current.device_session_id !== input.deviceSessionId);
   const device = await ensureOperatorCredential(deps, { ...input, force });
   const sameTab = Boolean(input.deviceSessionId && device.device_session_id === input.deviceSessionId);
   if (!input.takeover && !sameTab && reachable(device)) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
@@ -284,6 +286,11 @@ export async function issueWebphoneToken(
     const metadata = retainDeviceLastOnline(current, nowOf(deps));
     const revoked = Array.isArray(metadata.revoked_sessions) ? (metadata.revoked_sessions as unknown[]).slice(-9) : [];
     if (!renewing && current.device_session_id) revoked.push({ id: current.device_session_id, revoked_at: now.toISOString() });
+    if (input.tokenCache && deps.deviceKind === "mobile") {
+      // Only ever extended: an earlier JWT may still be cached somewhere.
+      const previous = Date.parse(String(metadata[MOBILE_TOKEN_CACHE_UNTIL] ?? "")), until = now.getTime() + MOBILE_TOKEN_CACHE_WINDOW_MS;
+      metadata[MOBILE_TOKEN_CACHE_UNTIL] = new Date(Number.isFinite(previous) ? Math.max(previous, until) : until).toISOString();
+    }
     return {
       last_token_issued_at: now.toISOString(),
       token_expires_at: expiresAt.toISOString(),

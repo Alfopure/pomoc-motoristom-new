@@ -75,7 +75,8 @@ struct TxConfig { enum PushEnvironment { case production }; enum LogLevel { case
   init(token: String, pushDeviceToken: String?, pushEnvironment: PushEnvironment, logLevel: LogLevel, reconnectClient: Bool, debug: Bool, useTrickleIce: Bool = false, enableCallReports: Bool) {
     self.token = token; self.reconnectClient = reconnectClient; self.useTrickleIce = useTrickleIce } }
 enum Region { case auto, eu }
-struct TxServerConfiguration { let region: Region; init(region: Region = .auto) { self.region = region } }
+struct TxServerConfiguration { let signalingServer: URL?; let region: Region
+  init(signalingServer: URL? = nil, region: Region = .auto) { self.signalingServer = signalingServer; self.region = region } }
 protocol TxClientDelegate: AnyObject { func onClientReady(); func onSocketConnected(); func onSocketDisconnected(); func onClientError(error: Error); func onPushDisabled(success: Bool, message: String); func onSessionUpdated(sessionId: String); func onIncomingCall(call: Call); func onPushCall(call: Call); func onRemoteCallEnded(callId: UUID, reason: CallTerminationReason?); func onCallStateUpdated(callState: CallState, callId: UUID) }
 class TxClient {
   static var last: TxClient!; weak var delegate: TxClientDelegate?; var registry: [UUID: Call] = [:]; var config: TxConfig?; var server: TxServerConfiguration?; var prepares = 0

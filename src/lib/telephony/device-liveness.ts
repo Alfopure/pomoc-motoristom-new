@@ -67,3 +67,15 @@ export function nativeMobilePushReachable(device: NativeMobileDevice | null | un
   return Number.isFinite(until) && until > now.getTime() && until <= now.getTime() + NATIVE_PUSH_LEASE_MS
     && credentialExpiry > now.getTime() && until <= credentialExpiry;
 }
+
+/** Mobile device metadata (call-speed S8.1): until when an iPhone may still use a JWT it cached.
+ * While it lies ahead, a replaced lease and a deactivation revoke the credential whatever the
+ * switches say by then, so turning them off never strands a usable cached JWT. */
+export const MOBILE_TOKEN_CACHE_UNTIL = "token_cache_until";
+/** The phone uses a cached JWT at most 12 h after issue by its own clock; one more hour covers skew. */
+export const MOBILE_TOKEN_CACHE_WINDOW_MS = 13 * 60 * 60 * 1000;
+export function mobileTokenCacheOpen(metadata: unknown, now: Date): boolean {
+  const value = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>)[MOBILE_TOKEN_CACHE_UNTIL] : null;
+  const until = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(until) && until > now.getTime();
+}

@@ -447,8 +447,12 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     let options = TxConfig(token: token, pushDeviceToken: pushToken,
       pushEnvironment: .production, logLevel: .none, reconnectClient: true,
       debug: false, useTrickleIce: connectOptions.trickleIce, enableCallReports: false)
-    // The SDK keeps the region on the push path and falls back to auto when it fails.
-    let server = TxServerConfiguration(region: connectOptions.eu ? .eu : .auto)
+    // SDK 4.2.2 prefixes the region again when it reconnects a configuration that already carries
+    // it (wss://eu.eu.rtc.telnyx.com once a voice_sdk_id exists), so a login names the EU host
+    // itself and keeps region auto. A push is prepared from the region alone (the SDK ignores the
+    // host there): its own later reconnects try that doubled host and fall back to auto.
+    let server = connectOptions.eu ? TxServerConfiguration(signalingServer: URL(string: "wss://eu.rtc.telnyx.com"), region: .auto) : TxServerConfiguration()
+    let pushServer = TxServerConfiguration(region: connectOptions.eu ? .eu : .auto)
     diag("voice.enabled", ["value": true, "was": UserDefaults.standard.bool(forKey: "linka.voice.enabled"), "source": "connect"])
     UserDefaults.standard.set(true, forKey: "linka.voice.enabled")
     let prepare = pushes.first.map { preparedPush != $0.key && calls[$0.key] == nil } ?? false
@@ -460,7 +464,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       if preparedPush != pending.key && calls[pending.key] == nil {
         ready = false; connectingPushToken = pushToken
         replaceClient(); cachedLogin = connectOptions.cached
-        do { try client?.processVoIPNotification(txConfig: options, serverConfiguration: server, pushMetaData: pending.value) }
+        do { try client?.processVoIPNotification(txConfig: options, serverConfiguration: pushServer, pushMetaData: pending.value) }
         catch { diag("phone.connect_error", ["path": "push", "call": pending.key, "error": error]); throw error }
         preparedPush = pending.key
       }

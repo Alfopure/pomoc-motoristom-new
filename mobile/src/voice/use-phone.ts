@@ -1,7 +1,7 @@
 import { useContext, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { randomUUID } from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import { MobileApiError } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 import { appVersion } from "../lib/app-version";
@@ -16,6 +16,8 @@ const idle: PhoneState = { supported: false, registration: "unregistered", takeo
   microphonePermission: "unknown", pushRegistered: null, lastHeartbeatAt: null, heartbeatError: null, diagnosticsError: null, checkingDiagnostics: false, retryTarget: null, holdPhase: "idle", nativeSyncPending: false, transferPending: null };
 const noSubscribe = () => () => {};
 const idleSnapshot = () => idle;
+/** The last call signal channel's removal; the next join waits for it (S8.5). */
+let realtimeRemoval: Promise<unknown> = Promise.resolve();
 
 export function useDispatchPhone(config: MobileConfig, client: SupabaseClient, userId: string, profileId: string | null, active: boolean) {
   const reporter = useContext(ErrorReporterContext);
@@ -40,16 +42,18 @@ export function useDispatchPhone(config: MobileConfig, client: SupabaseClient, u
       profileId, appBuild: appVersion().build,
       // Only a refetch signal: the status itself is read through the server API, never from the message.
       realtime: (topic, onSignal, onState) => {
-        const channel = client.channel(topic, { config: { private: true } });
-        channel.on("broadcast", { event: "*" }, () => onSignal());
-        let closed = false;
-        // A private join needs the user's JWT on the socket first.
-        void client.realtime.setAuth().catch(() => {}).then(() => {
+        let closed = false, channel: RealtimeChannel | null = null;
+        // The client hands out a leaving channel of the same topic until its removal ends;
+        // a private join also needs the user's JWT on the socket first.
+        void realtimeRemoval.then(() => client.realtime.setAuth()).catch(() => {}).then(() => {
           if (closed) return;
+          const joined = client.channel(topic, { config: { private: true } });
+          channel = joined;
+          joined.on("broadcast", { event: "*" }, () => onSignal());
           // A (re)join may have missed signals: read once when it succeeds.
-          channel.subscribe(status => { onState(status.toLowerCase()); if (status === "SUBSCRIBED") onSignal(); });
+          joined.subscribe(status => { onState(status.toLowerCase()); if (status === "SUBSCRIBED") onSignal(); });
         });
-        return () => { closed = true; void client.removeChannel(channel); };
+        return () => { closed = true; if (channel) realtimeRemoval = client.removeChannel(channel).catch(() => "error"); };
       },
     });
   }, [config, client, userId, profileId, reporter]);

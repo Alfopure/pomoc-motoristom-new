@@ -360,6 +360,18 @@ describe("the iPhone credential on deactivation and removal (call-speed S8.1)", 
     await updateAccessUser(actor, TARGET, { displayName: "Natália N." });
     expect(disconnectDevice).toHaveBeenCalledOnce();
   });
+  it("revokes fail-closed with the switch off while a JWT issued for caching may still be in use", async () => {
+    const open = { token_cache_until: new Date(Date.now() + 3_600_000).toISOString() };
+    fake.db.seed("motorist_operator_mobile_devices", [{ ...mobileDevice, metadata: { token_cache_until: new Date(Date.now() - 1).toISOString() } }]);
+    await updateAccessUser(actor, TARGET, { active: false });
+    expect(disconnectDevice).not.toHaveBeenCalled();
+    fake.db.update("motorist_operator_mobile_devices", { metadata: open }, () => true);
+    await updateAccessUser(actor, TARGET, { active: false });
+    expect(disconnectDevice).toHaveBeenCalledOnce();
+    seed(); fake.db.seed("motorist_operator_mobile_devices", [{ ...mobileDevice, metadata: open }]);
+    await deleteAccessUser(actor, TARGET);
+    expect(deleteTelephonyCredential.mock.calls.map(([credential]) => credential)).toEqual(["mobile-cred"]);
+  });
   it("says so when Telnyx keeps the iPhone credential, so the manager repeats the deactivation", async () => {
     rotation(); disconnectDevice.mockRejectedValue(new Error("provider down"));
     vi.spyOn(console, "error").mockImplementation(() => undefined);
