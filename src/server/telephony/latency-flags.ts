@@ -177,8 +177,9 @@ export async function readLatencyFlags(admin: AdminClient, organizationId: strin
     } catch {
       // As with the live gate, a failed read falls back and is not reused.
       if (cache.get(organizationId) === entry) cache.delete(organizationId);
-      return base;
+      return confirmStartPrivacy(admin, base, logger);
     }
+    flags = await confirmStartPrivacy(admin, flags, logger);
     const effective = JSON.stringify(flags);
     if (logged.get(organizationId) !== effective) {
       logged.set(organizationId, effective);
@@ -191,9 +192,32 @@ export async function readLatencyFlags(admin: AdminClient, organizationId: strin
   return entry.value;
 }
 
-/** Deps built outside `createTelephonyDeps` (tests, cron helpers) use env alone. */
+/**
+ * `own_leg_request_header` (call-speed S3) puts the client's start `requestId`
+ * on the operator's own leg, so it is honoured only where the database confirms
+ * that members can neither read call sessions nor receive their rows over
+ * Realtime (`motorist_telephony_start_privacy_v1`, migrations 20261031100000–
+ * 20261031100200). False, an error or an older database keeps it off; the
+ * result is cached with the flags. Asked only while the switch is on.
+ */
+async function confirmStartPrivacy(admin: AdminClient, flags: LatencyFlags, logger: Logger): Promise<LatencyFlags> {
+  if (!flags.own_leg_request_header) return flags;
+  let confirmed = false;
+  try {
+    const { data, error } = await admin.rpc("motorist_telephony_start_privacy_v1");
+    confirmed = !error && data === true;
+  } catch { /* Unknown is not confirmed. */ }
+  if (confirmed) return flags;
+  reportOnce(logger, "own_leg_request_header:start_privacy_unconfirmed");
+  return { ...flags, own_leg_request_header: false };
+}
+
+/**
+ * Deps built outside `createTelephonyDeps` (tests, cron helpers) use env alone.
+ * Env cannot confirm the database's start privacy, so that switch stays off.
+ */
 export function latencyFlagsOf(deps: { latencyFlags?: LatencyFlags; logger?: Logger }): LatencyFlags {
-  return deps.latencyFlags ?? envLatencyFlags(process.env, deps.logger);
+  return deps.latencyFlags ?? { ...envLatencyFlags(process.env, deps.logger), own_leg_request_header: false };
 }
 
 export function concurrentDialFor(flags: LatencyFlags, direction: "outbound" | "internal", origin: Origin): boolean {

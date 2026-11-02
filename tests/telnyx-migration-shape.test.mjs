@@ -578,3 +578,23 @@ test("call sessions are readable by the service role only", () => {
   assert.doesNotMatch(sql, /create policy/);
   assert.deepEqual([...new Set([...sql.matchAll(/public\.(motorist_[a-z_]+)/g)].map((match) => match[1]))], ["motorist_call_sessions"]);
 });
+
+test("the start-privacy check reads the live catalog, writes nothing and serves the service role only", () => {
+  const sql = readFileSync(new URL("../supabase/migrations/20261031100200_telephony_start_privacy_check.sql", import.meta.url), "utf8")
+    .replace(/--[^\n]*/g, "");
+  const fn = sql.match(/create or replace function public\.motorist_telephony_start_privacy_v1\(\)[\s\S]*?\$\$;/);
+  assert.ok(fn, "the check function is defined");
+  assert.match(fn[0], /returns boolean\s+language sql\s+stable\s+set search_path = ''/);
+  assert.doesNotMatch(fn[0], /security definer|\b(insert|update|delete|grant|revoke)\b/i);
+  // Both members, table or any column, and the doorbell body (not the full-row broadcast).
+  for (const role of ["authenticated", "anon"]) {
+    assert.match(fn[0], new RegExp(`not pg_catalog\\.has_any_column_privilege\\('${role}', 'public\\.motorist_call_sessions', 'select'\\)`));
+  }
+  assert.match(fn[0], /strpos\(p\.prosrc, 'broadcast_changes'\) = 0/);
+  assert.match(fn[0], /strpos\(p\.prosrc, 'realtime\.send\(''\{\}''::jsonb'\) > 0/);
+  assert.match(fn[0], /n\.nspname = 'app_private' and p\.proname = 'motorist_broadcast_telephony_change'/);
+  // A missing broadcast function is not a confirmation.
+  assert.match(fn[0], /coalesce\(\([\s\S]*\), false\)/);
+  assert.match(sql, /revoke all on function public\.motorist_telephony_start_privacy_v1\(\)\s+from public, anon, authenticated;/);
+  assert.match(sql, /grant execute on function public\.motorist_telephony_start_privacy_v1\(\)\s+to service_role;/);
+});

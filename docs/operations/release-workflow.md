@@ -49,7 +49,16 @@ Pri DB zmene pripraviť presný SQL, cieľový projekt, poradie voči kódu a kr
 
 Migračné timestampy sa medzi projektmi historicky líšia. Pred novou konkrétnou migráciou porovnať príslušné objekty a ich definície s ledgerom oboch projektov, zaznamenať ekvivalentné už aplikované zmeny a aplikovať len chýbajúci autorizovaný SQL. Hromadné prepisovanie migračnej histórie nie je podmienkou bežného release.
 
-**Skoré prijatie vlastnej vetvy (call-speed S3).** Pred zapnutím `own_leg_request_header` a `client.webEarlyAccept` v danom projekte musia byť v jeho databáze aplikované migrácie `20261031100000_telephony_realtime_doorbell` a `20261031100100_call_sessions_service_only`. Bez nich vidí identitu prebiehajúceho štartu hovoru každý člen organizácie (Realtime aj priamy select). Aplikácia overuje `sip_uri_calling_preference` credential connection iba na TESTe (TEST guard v `src/server/telephony/telnyx/client.ts`). Pred zapnutím v produkcii ju preto treba len čítaním overiť aj tam:
+**Skoré prijatie vlastnej vetvy (call-speed S3).** Pred zapnutím `own_leg_request_header` a `client.webEarlyAccept` v danom projekte musia byť v jeho databáze aplikované tri migrácie:
+- `20261031100000_telephony_realtime_doorbell`;
+- `20261031100100_call_sessions_service_only`;
+- `20261031100200_telephony_start_privacy_check`.
+
+Bez prvých dvoch vidí identitu prebiehajúceho štartu hovoru každý člen organizácie (Realtime aj priamy select). Server tento stav overuje sám: `own_leg_request_header` berie do úvahy iba vtedy, keď `motorist_telephony_start_privacy_v1()` vráti `true`. Výsledok sa cachuje spolu s prepínačmi (5 s). Pri `false`, chybe alebo chýbajúcej funkcii zostáva prepínač vypnutý a do logu sa raz za inštanciu zapíše `latency_flag_ignored` s `own_leg_request_header:start_privacy_unconfirmed`.
+
+Návrat S3 znamená iba vypnúť prepínače. **Migrácie zostávajú** a nevracajú sa: chránia dáta relácií nezávisle od S3. Správy, ktoré Realtime uložil pred migráciou doorbellu, obsahujú celé riadky a v `realtime.messages` sa dajú prehrať (Broadcast replay) ešte najviac 3 dni. Ich zmazanie je zásah do dát a robí sa iba na výslovné povolenie pre konkrétny projekt.
+
+Aplikácia overuje `sip_uri_calling_preference` credential connection iba na TESTe (TEST guard v `src/server/telephony/telnyx/client.ts`). Pred zapnutím v produkcii ju preto treba len čítaním overiť aj tam:
 - `GET /v2/credential_connections/<TELNYX_CREDENTIAL_CONNECTION_ID>` → `active` a `sip_uri_calling_preference`;
 - outbound voice profile tejto connection → `enabled`.
 
