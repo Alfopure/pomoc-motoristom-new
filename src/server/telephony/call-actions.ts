@@ -753,13 +753,19 @@ function appEvent(type: AppEventType, actor: CallActor | null, deps: CallActionD
   return { kind: "app", id: randomUUID(), type, actorProfileId: actor?.profileId ?? null, occurredAt: nowOf(deps).toISOString(), ...extra };
 }
 
-async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessionId: string, options: { nativeHangupCleanup?: boolean } = {}): Promise<SessionRow> {
+/** Rows the caller already read for this session under its lease (call-speed S7a.2). */
+export type KnownSessionRows = { session: SessionRow; legs: LegRow[] };
+
+async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessionId: string, options: { nativeHangupCleanup?: boolean; known?: KnownSessionRows } = {}): Promise<SessionRow> {
   // The session and the legs that authorise the actor are independent reads,
   // and both stand between the click and the command.
-  const [session, legs] = await Promise.all([
-    loadSession(deps, sessionId),
-    deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", sessionId).neq("role", "supervisor").is("ended_at", null),
-  ]);
+  const known = options.known?.session.id === sessionId && options.known.session.organization_id === deps.organizationId ? options.known : null;
+  const [session, legs] = known
+    ? [known.session, { data: known.legs.filter(leg => leg.session_id === sessionId && leg.role !== "supervisor" && !leg.ended_at), error: null }]
+    : await Promise.all([
+      loadSession(deps, sessionId),
+      deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", sessionId).neq("role", "supervisor").is("ended_at", null),
+    ]);
   if (!ACTIVE_SESSION_STATES.has(session.state)) throw new CallActionError("Hovor už nie je aktívny.", 409, "not_active");
   const meta = readMeta(session);
   const acceptedId = meta.accepted_device_legs?.[actor.profileId];
@@ -781,8 +787,8 @@ async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessio
   return session;
 }
 
-export async function holdCall(deps: CallActionDeps, actor: CallActor, sessionId: string, event?: Pick<AppEvent, "id" | "nativeHold">): Promise<CallActionResult> {
-  const session = await ownedActiveSession(deps, actor, sessionId);
+export async function holdCall(deps: CallActionDeps, actor: CallActor, sessionId: string, event?: Pick<AppEvent, "id" | "nativeHold">, known?: KnownSessionRows): Promise<CallActionResult> {
+  const session = await ownedActiveSession(deps, actor, sessionId, { known });
   return runAction(deps, session, appEvent("hold", actor, deps, event), "Podržanie hovoru zlyhalo. Rozšírené funkcie hovoru nie sú dostupné.");
 }
 
@@ -798,8 +804,8 @@ export async function reconcileCallRecordingPolicy(deps: CallActionDeps, session
   return runSessionEvent(deps, session.id, { kind: "app", id: randomUUID(), type: "recording_policy_stop", actorProfileId: null, occurredAt: nowOf(deps).toISOString() });
 }
 
-export async function unholdCall(deps: CallActionDeps, actor: CallActor, sessionId: string, event?: Pick<AppEvent, "id" | "nativeHold">): Promise<CallActionResult> {
-  const session = await ownedActiveSession(deps, actor, sessionId);
+export async function unholdCall(deps: CallActionDeps, actor: CallActor, sessionId: string, event?: Pick<AppEvent, "id" | "nativeHold">, known?: KnownSessionRows): Promise<CallActionResult> {
+  const session = await ownedActiveSession(deps, actor, sessionId, { known });
   return runAction(deps, session, appEvent("unhold", actor, deps, event), "Obnovenie hovoru zlyhalo.");
 }
 

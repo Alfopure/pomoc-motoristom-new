@@ -97,7 +97,10 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
 // Reviewed increase 59 → 60: the call-speed latency switches (latency-flags.ts)
 // freeze a new inbound session's start mode. Pure functions plus a cached
 // settings read at deps creation, with type-only imports and no import-time I/O.
-const MAX_MODULES = 60;
+// Reviewed increase 60 → 61: command-settlement.ts (call-speed S7a.5) is one
+// AsyncLocalStorage and two functions, imported by effects for the web hold's
+// early answer; a webhook never installs an observer. No import-time I/O.
+const MAX_MODULES = 61;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);

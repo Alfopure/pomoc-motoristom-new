@@ -18,7 +18,8 @@ export function pendingCallControl(session: SessionRow): {
     if (session.state !== targetState || !["talking", "held"].includes(entry.stateBefore)) continue;
     const mediaKinds = action === "park" ? ["conference_leave", "hangup", "playback_start"]
       : [action === "hold" ? "conference_hold" : "conference_unhold"];
-    const mediaPending = entry.commands.some(command => mediaKinds.includes(command.kind) &&
+    // A join-with-hold (call-speed S7b) is the hold's media command.
+    const mediaPending = entry.commands.some(command => (mediaKinds.includes(command.kind) || command.kind === "conference_join" && Boolean(command.holdOnJoin)) &&
       !entry.completedCommands.includes(commandKey(command)));
     // A history/audit retry must not keep an already completed control busy.
     if (!mediaPending) continue;

@@ -2839,12 +2839,12 @@ function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
  * could restore (see docs/operations/telnyx-runbook.md, spike "conference
  * promotion").
  */
-function promoteToConference(b: TransitionBuilder, customer: LegRow, operator: LegRow, actor: string | null): void {
+function promoteToConference(b: TransitionBuilder, customer: LegRow, operator: LegRow, actor: string | null, holdOnJoin?: MediaRef): void {
   if (b.session.conference_id) return;
   const createId = b.cmdId(operator.telnyx_call_control_id, "conference:create");
   b.cmd({ kind: "conference_create", commandId: createId, leg: ref(operator), name: `sess-${b.session.id}` });
   const joinId = b.cmdId(customer.telnyx_call_control_id, "conference:join");
-  b.cmd({ kind: "conference_join", commandId: joinId, leg: ref(customer) });
+  b.cmd({ kind: "conference_join", commandId: joinId, leg: ref(customer), ...(holdOnJoin ? { holdOnJoin: { media: holdOnJoin } } : {}) });
   // Supervisors dialled onto the bridged call are attached to the operator's
   // leg, not to a conference. Once the call becomes one they have to follow, or
   // they would keep listening to a leg whose audio now lives in the conference
@@ -2866,6 +2866,9 @@ function promoteToConference(b: TransitionBuilder, customer: LegRow, operator: L
   const failed = b.fork();
   failed.patchSession({ state: b.session.state, hold_started_at: b.session.hold_started_at, conference_id: null, conference_name: null });
   failed.patchMeta({ conference: null, consult: null, holdControl: b.meta.holdControl ?? null });
+  // The join carried the hold: its refusal is also the hold's, so the
+  // customer's leg keeps its previous state as `appHold`'s own refusal does.
+  if (holdOnJoin) failed.leg(customer.telnyx_call_control_id, { state: customer.state });
   b.compensate(createId, "conference promotion failed → call stays bridged", [], failed.transition());
   const rebridgeId = b.cmdId(customer.telnyx_call_control_id, "bridge:rejoin");
   failed.patchMeta({ holdRecovery: { commandId: rebridgeId, customerControlId: customer.telnyx_call_control_id, operatorControlId: operator.telnyx_call_control_id } });
@@ -2889,17 +2892,40 @@ function requireOperatorLeg(b: TransitionBuilder): LegRow {
   return leg;
 }
 
+/**
+ * Join-with-hold (call-speed S7b) only for the promoting hold of a session
+ * frozen with it, with recording frozen off, and never for the phone's own
+ * hold: its receipt and the recording participant intervals both look for a
+ * separate `conference_hold`.
+ */
+function joinsHeld(b: TransitionBuilder): boolean {
+  const meta = b.meta;
+  return meta.start_mode?.holdJoinWithHold === true && !b.session.conference_id && !(b.event.kind === "app" && b.event.nativeHold) &&
+    meta.recording?.policy.enabled === false && !meta.recording.recorders.length && !meta.recording.barrier &&
+    !meta.recording.pendingAudio && !meta.announcement_sequence;
+}
+
 function appHold(b: TransitionBuilder, customer: LegRow): ReduceResult {
   if (b.session.state !== "talking") throw new CallActionRejected("Podržať je možné len prebiehajúci hovor.", 409);
   const operator = requireOperatorLeg(b);
-  promoteToConference(b, customer, operator, (b.event as AppEvent).actorProfileId);
-  const holdCommandId = b.cmdId(customer.telnyx_call_control_id, "conference:hold");
-  const rejected = b.fork().patchSession({ state: "talking", hold_started_at: b.session.hold_started_at })
-    .patchMeta({ holdControl: b.meta.holdControl ?? null });
-  rejected.leg(customer.telnyx_call_control_id, { state: customer.state });
-  b.compensate(holdCommandId, "definite hold rejection preserves previous media", [], rejected.transition());
-  b.patchMeta({ holdControl: { commandId: holdCommandId, held: true, customerControlId: customer.telnyx_call_control_id }, holdRecovery: null });
-  b.cmd({ kind: "conference_hold", commandId: holdCommandId, legs: [ref(customer)], media: { key: "moh" } });
+  const media: MediaRef = { key: "moh" };
+  if (joinsHeld(b)) {
+    // Call-speed S7b (frozen `start_mode.holdJoinWithHold`): the customer joins
+    // the new conference already held, so the first hold costs two provider
+    // commands instead of three. The join is the hold's witness and its
+    // compensation (leave + re-bridge) is the hold's refusal.
+    promoteToConference(b, customer, operator, (b.event as AppEvent).actorProfileId, media);
+    b.patchMeta({ holdControl: { commandId: b.cmdId(customer.telnyx_call_control_id, "conference:join"), held: true, customerControlId: customer.telnyx_call_control_id }, holdRecovery: null });
+  } else {
+    promoteToConference(b, customer, operator, (b.event as AppEvent).actorProfileId);
+    const holdCommandId = b.cmdId(customer.telnyx_call_control_id, "conference:hold");
+    const rejected = b.fork().patchSession({ state: "talking", hold_started_at: b.session.hold_started_at })
+      .patchMeta({ holdControl: b.meta.holdControl ?? null });
+    rejected.leg(customer.telnyx_call_control_id, { state: customer.state });
+    b.compensate(holdCommandId, "definite hold rejection preserves previous media", [], rejected.transition());
+    b.patchMeta({ holdControl: { commandId: holdCommandId, held: true, customerControlId: customer.telnyx_call_control_id }, holdRecovery: null });
+    b.cmd({ kind: "conference_hold", commandId: holdCommandId, legs: [ref(customer)], media });
+  }
   b.setState("held").patchSession({ hold_started_at: b.nowIso });
   b.leg(customer.telnyx_call_control_id, { state: "held" });
   return b.note("hold").result();

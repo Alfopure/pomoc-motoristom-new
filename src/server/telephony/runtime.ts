@@ -119,7 +119,7 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
   ]);
   if (config.configured) {
     telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data), testProvenanceContext: { admin, organizationId },
-      onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger) });
+      onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger), testConferenceSelfProof: latencyFlags.test_conference_self_proof });
   }
 
   return {

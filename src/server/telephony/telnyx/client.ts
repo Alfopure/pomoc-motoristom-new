@@ -143,6 +143,12 @@ export type TelnyxClientOptions = {
   maxRetryAfterMs?: number;
   onRequest?: (entry: TelnyxRequestLog) => void;
   now?: () => number;
+  /**
+   * `test_conference_self_proof` (call-speed S7a.3): a conference this client
+   * created with `POST /conferences` under the current session ownership
+   * needs no `GET /conferences/:id` before the next action on it.
+   */
+  testConferenceSelfProof?: boolean;
 };
 
 // --- command parameter types ---------------------------------------------
@@ -443,6 +449,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
   // admin, organization and provider boundary; later actions prove it again.
   // Mutable enrollment, credential validity and all dispatch fences stay fresh.
   const ownedTestCallProofs = new WeakMap<Ownership, Map<string, Promise<void>>>();
+  // Conferences this client created under one fenced ownership (S7a.3). The
+  // create itself passed the guard on its call; its id comes from Telnyx.
+  const createdTestConferences = new WeakMap<Ownership, Set<string>>();
 
   async function verifyTestCall(callId: string, safety: ReturnType<typeof getTestProviderSafety>, deadline: number): Promise<void> {
     if (now() >= deadline) throw new TestProviderSafetyError();
@@ -554,7 +563,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       // rejects a foreign call before even reading its conference at Telnyx.
       // Every check still precedes journal preparation and provider mutation.
       await Promise.all([...new Set(checked.callIds)].map(callId => verifyTestCall(callId, safety, requestDeadline)));
+      const owner = sessionOwnership.getStore();
       await Promise.all([...new Set(checked.conferenceIds)].map(async conferenceId => {
+        if (owner && createdTestConferences.get(owner)?.has(conferenceId)) return;
         const response = await request<unknown>("GET", `/conferences/${encodeURIComponent(conferenceId)}`, {}, requestDeadline);
         if (asRecord(asRecord(response).data).connection_id !== configured.callControlAppId) throw new TestProviderSafetyError();
       }));
@@ -664,6 +675,14 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     if (safety.restricted && method === "POST" && path === "/calls") {
       const created = str(asRecord(asRecord(parsed).data).call_control_id);
       if (created && createdTestCalls.size < 128) createdTestCalls.add(created);
+    }
+    if (safety.restricted && options.testConferenceSelfProof && method === "POST" && path === "/conferences" && owner?.contract === 2) {
+      const created = str(asRecord(asRecord(parsed).data).id);
+      if (created) {
+        const conferences = createdTestConferences.get(owner) ?? new Set<string>();
+        conferences.add(created);
+        createdTestConferences.set(owner, conferences);
+      }
     }
     return parsed as T;
   }

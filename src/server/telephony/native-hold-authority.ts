@@ -1,12 +1,27 @@
 import { CallActionError } from './service-errors';
-import { readMeta, telnyxSipUri, type LegRow, type NativeHoldGuard, type SessionRow } from './state/types';
+import { readMeta, telnyxSipUri, type DeviceRow, type LegRow, type NativeHoldGuard, type SessionRow } from './state/types';
 import type { SessionRunnerDeps } from './session-runner';
-/** Media authority is narrower than originating/accepted-leg cleanup authority. */
-export async function assertNativeHoldAuthority(deps: Pick<SessionRunnerDeps, 'admin' | 'organizationId' | 'environment' | 'now'>, session: SessionRow, identity: Omit<NativeHoldGuard, 'customerControlId'> & {
+type AuthorityDeps = Pick<SessionRunnerDeps, 'admin' | 'organizationId' | 'environment' | 'now'>;
+type DeviceRead = { data: DeviceRow | null; error: unknown };
+function deviceQuery(deps: AuthorityDeps, profileId: string) {
+    return deps.admin.from('motorist_operator_mobile_devices').select('*')
+        .eq('organization_id', deps.organizationId).eq('profile_id', profileId).eq('environment', deps.environment).maybeSingle();
+}
+/** The device and legs `assertNativeHoldAuthority` reads, issued together (call-speed S7a.2). */
+export async function readNativeHoldAuthorityRows(deps: AuthorityDeps, profileId: string, sessionId: string): Promise<{ device: DeviceRead; legs: { data: LegRow[] | null; error: unknown } }> {
+    const [device, legs] = await Promise.all([
+        deviceQuery(deps, profileId),
+        deps.admin.from('motorist_call_legs').select('*').eq('organization_id', deps.organizationId).eq('session_id', sessionId),
+    ]);
+    return { device, legs };
+}
+/** Media authority is narrower than originating/accepted-leg cleanup authority.
+ * `knownDevice` is the result of this profile's mobile device read from the
+ * caller's own wave (call-speed S7a.2); `undefined` reads it here. */
+export async function assertNativeHoldAuthority(deps: AuthorityDeps, session: SessionRow, identity: Omit<NativeHoldGuard, 'customerControlId'> & {
     customerControlId?: string;
-}, knownLegs?: LegRow[]) {
-    const deviceResult = await deps.admin.from('motorist_operator_mobile_devices').select('*')
-        .eq('organization_id', deps.organizationId).eq('profile_id', identity.profileId).eq('environment', deps.environment).maybeSingle();
+}, knownLegs?: LegRow[], knownDevice?: DeviceRead) {
+    const deviceResult = knownDevice ?? await deviceQuery(deps, identity.profileId);
     if (deviceResult.error)
         throw new CallActionError('Telefón sa nepodarilo overiť.', 503, 'native_hold_read');
     const device = deviceResult.data;

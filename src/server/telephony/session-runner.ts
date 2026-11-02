@@ -614,6 +614,31 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
       ...(initiatedObservation ? { lean: true } : {}),
     };
   }
+  // Hold and unhold (`hold_lean_context`, call-speed S7a.4). `appHold`,
+  // `appUnhold` and `promoteToConference` read only `now`; around them the
+  // recording wrapper reads the frozen policy and, for the optional action
+  // prompt, the announcements frozen at answer. With recording frozen off that
+  // is all: not the line, IVR, settings, presence or capacity. The MOH URL is
+  // resolved at dispatch from the deployment's media base, not from here.
+  // Pending work keeps the full context, except a contact check: the callback
+  // contact proof a conference promotion stages has no command and changes
+  // nothing these reducers read, yet stays pending while the caller is held.
+  if (event?.kind === "app" && (event.type === "hold" || event.type === "unhold") && latencyFlagsOf(deps).hold_lean_context &&
+    meta.recording?.policy.enabled === false && !meta.recording.recorders.length && !meta.recording.barrier &&
+    !meta.recording.pendingAudio && !meta.announcement_sequence && Boolean(meta.announcements) &&
+    readPendingEffects(session).entries.every(entry => entry.id.startsWith("contact-check:") && !entry.commands.length)) {
+    const config = deps.config;
+    return {
+      now, organizationId, environment: deps.environment, line: null,
+      businessHours: null, ivr: null, ringPlan: null, ringPlans: {}, presence: [], devices: [],
+      openOffers: [], activeLegCount: 0, settings: DEFAULT_ROUTING_SETTINGS,
+      fromNumber: (config.configured ? config.defaultFromNumber : null) ?? null,
+      mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
+      announcements: readAnnouncementConfig(meta.announcements),
+      recordingPolicy: meta.recording?.policy,
+      lean: true,
+    };
+  }
   const { line, settings, recordingPolicy, routing, businessHours, ivr, ringPlan, ringPlans } =
     await measureRequestStep("routing.configuration", () => loadRoutingConfiguration(deps, session, now, noContinuation, event, snapshotLegs));
 

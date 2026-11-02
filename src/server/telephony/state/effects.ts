@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { measureControlStage, requestStepCount, requestTimingContext } from "@/server/request-metrics";
 import { assertOwnership, firstProviderDispatchAt, guardTiming, measureGuard, ownershipRpc, sessionOwnership, withTelephonyDatabaseBudget, type Ownership } from "../ownership";
 import { payloadFingerprint } from "../provider-journal";
+import { reportCommandSettled } from "../command-settlement";
 import { isDeepStrictEqual } from "node:util";
 
 import type { Database, Json } from "@/lib/supabase/database.types";
@@ -958,10 +959,14 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
   // stronger boundary, but serializes several DB requests ahead of each call.
   if (sessionOwnership.getStore()?.contract !== 2) await assertOwnership();
   if (command.nativeHold && !["hangup", "recording_stop", "conference_leave"].includes(command.kind)) {
-    const { assertNativeHoldAuthority } = await import("../native-hold-authority");
-    const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
+    const { assertNativeHoldAuthority, readNativeHoldAuthorityRows } = await import("../native-hold-authority");
+    // `hold_mobile_dedupe` (call-speed S7a.2): the same three fresh reads in one wave.
+    const [fresh, rows] = await Promise.all([
+      deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle(),
+      latencyFlagsOf(deps).hold_mobile_dedupe ? readNativeHoldAuthorityRows(deps, command.nativeHold.profileId, ctx.session.id) : null,
+    ]);
     if (fresh.error || !fresh.data) throw new EffectsError("Native hold authority unavailable");
-    await assertNativeHoldAuthority(deps, fresh.data, command.nativeHold);
+    await assertNativeHoldAuthority(deps, fresh.data, command.nativeHold, rows && !rows.legs.error ? rows.legs.data ?? [] : undefined, rows?.device);
   }
   const telnyx = requireTelnyx(deps);
   // Defense at the provider boundary: even a replayed/stale command cannot
@@ -1187,6 +1192,10 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         call_control_id: resolveLeg(ctx, command.leg),
         supervisor_role: command.supervisorRole,
         whisper_call_control_ids: command.whisper?.map((leg) => resolveLeg(ctx, leg)),
+        // Call-speed S7b: the participant joins held. Telnyx documents
+        // `hold_audio_url` for conferences created without starting; TEST
+        // spike S7.0 decides whether ours (started on create) plays it.
+        ...(command.holdOnJoin ? { hold: true, hold_audio_url: mediaUrl(deps.mediaBaseUrl, command.holdOnJoin.media) ?? undefined } : {}),
         commandId: command.commandId,
       });
       return { skipped: false, ...(command.supervisorRole ? { detail: { supervisorRole: command.supervisorRole } } : {}) };
@@ -2262,6 +2271,11 @@ async function executeReduceResult(
         if (checkpointed?.writer_contract === 2 && owner?.contract === 2 && owner.admin === deps.admin &&
           owner.organizationId === deps.organizationId && owner.sessionId === session.id &&
           checkpointed.id === session.id && checkpointed.organization_id === deps.organizationId) nextValidity = { session: checkpointed, owner };
+        // Call-speed S7a.5: the provider took this media-first control's
+        // command and its cursor is durable, so a watching route may answer;
+        // what remains is the leg projection, history and audit.
+        if (mediaBeforeLegProjection && checkpointed && !executed.skipped) reportCommandSettled(() => ({ eventId: input.event.id,
+          last: index === dispatchList.length - 1, state: checkpointed.state, commands: outcomes.map(({ kind, ok, error }) => ({ kind, ok, error })) }));
       }
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
