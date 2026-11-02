@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { Call, IClientOptions, TelnyxRTC } from "@telnyx/webrtc";
 
-import { TelnyxWebphone, isAuthFailure, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
+import { EU_EDGE_LOGIN_TIMEOUT_MS, TelnyxWebphone, isAuthFailure, resetEuEdgeFallback, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
 import type { TelephonyJsonResult } from "./client-request";
-import { EXPECTED_LEG_TTL_MS, EXPECTED_REQUEST_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_RECOVERY_TIMEOUT_MS } from "./webphone-model";
+import { EXPECTED_LEG_TTL_MS, EXPECTED_REQUEST_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_EDGE_FALLBACK_RETRY_MS, WEBPHONE_MAX_CONNECT_FAILURES, WEBPHONE_RECOVERY_TIMEOUT_MS, webphoneRetryDelayMs } from "./webphone-model";
+import { MOBILE_PREPARE_TIMEOUT_MS } from "./coordinated-webphone";
 import { isDeviceLive } from "./device-liveness";
 import * as browserTiming from "./browser-call-telemetry";
 import * as browserTransport from "./browser-call-transport";
@@ -32,6 +33,9 @@ class FakeClient implements WebphoneSdkClient {
   options: { login_token?: string };
   connection = { connected: false, socketGeneration: 1 };
   calls = new Set<WebphoneSdkCall>();
+  region: string | null = null;
+  dc: string | null = null;
+  clearReconnectToken = vi.fn();
   constructor(options: { login_token?: string } = {}) { this.options = options; }
   login = vi.fn(async (options?: Parameters<WebphoneSdkClient["login"]>[0]) => {
     // Real 2.27.10 returns without callbacks when its socket is not alive.
@@ -107,7 +111,7 @@ function fakeCall(overrides: Partial<WebphoneSdkCall> = {}): WebphoneSdkCall & {
 
 type Request = { url: string; body: unknown; init: Parameters<NonNullable<TelnyxWebphoneOptions["requestJson"]>>[1] };
 
-function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: boolean; deviceKind?: TelnyxWebphoneOptions["deviceKind"]; token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; offerStatus?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"] } = {}) {
+function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: boolean; deviceKind?: TelnyxWebphoneOptions["deviceKind"]; token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; offerStatus?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"]; random?: TelnyxWebphoneOptions["random"] } = {}) {
   const requests: Request[] = [];
   const timers: Array<{ id: number; handler: () => void; delayMs: number }> = [];
   let nextTimer = 1;
@@ -120,6 +124,7 @@ function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: b
     now: options.now ?? (() => Date.parse("2026-09-03T08:00:00.000Z")),
     createClient: options.createClient ?? (options.loadSdk ? undefined : credentials => { client.options.login_token = credentials.token; return client; }),
     loadSdk: options.loadSdk,
+    random: options.random,
     setTimeout: (handler, delayMs) => {
       const id = nextTimer++;
       timers.push({ id, handler, delayMs });
@@ -2184,5 +2189,282 @@ describe("Telnyx SDK authentication and recovery contract", () => {
     h.client.emit("telnyx.notification", { type: "callUpdate", call: replacement });
     expect(h.phone.getSnapshot().call).toMatchObject({ id: "recovered-call", sessionId: "accepted-session", telnyxCallControlId: "new-cc" });
     h.phone.stop();
+  });
+});
+
+describe("browser RTC edge and ICE prefetch (call-speed S5)", () => {
+  const epoch = Date.parse("2026-09-03T08:00:00.000Z");
+  const TODAY = { login_token: "jwt", trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5 };
+  const fallbackRetry = (timer: { delayMs: number }) => timer.delayMs === WEBPHONE_EDGE_FALLBACK_RETRY_MS;
+  const euBound = (timer: { delayMs: number }) => timer.delayMs === EU_EDGE_LOGIN_TIMEOUT_MS;
+  beforeEach(() => resetEuEdgeFallback());
+
+  /** The real `createTelnyxClient` over a recording SDK; the token route answers with `switches`. */
+  function edgeHarness(switches: Record<string, unknown>, options: { logger?: TelnyxWebphoneOptions["logger"]; connectFailures?: Error[]; random?: () => number } = {}) {
+    const created: Array<{ options: IClientOptions; client: FakeClient }> = [];
+    /** `clear:<n>` / `connect:<n>` of the n-th client, in the order the SDK saw them. */
+    const order: string[] = [];
+    const connectFailures = options.connectFailures ?? [];
+    const token = { ok: true, status: 200, body: { token: "jwt", expiresAt: new Date(epoch + 3_600_000).toISOString(), deviceSessionId: "device-1", sipUsername: "gencred1", ...switches } };
+    const h = harness({ token, logger: options.logger, random: options.random, loadSdk: async () => ({ TelnyxRTC: class extends FakeClient {
+      private readonly index = created.length;
+      constructor(sdkOptions: IClientOptions) {
+        super(sdkOptions);
+        created.push({ options: sdkOptions, client: this });
+        this.clearReconnectToken = vi.fn(() => { order.push(`clear:${this.index}`); });
+      }
+      override async connect() {
+        order.push(`connect:${this.index}`);
+        const failure = connectFailures.shift();
+        if (failure) throw failure;
+        await super.connect();
+      }
+    } }) });
+    return { ...h, token, created, order };
+  }
+  const logged = (logger: ReturnType<typeof vi.fn>, event: string) => logger.mock.calls.filter(([entry]) => entry.event === event);
+  const fallbacks = (logger: ReturnType<typeof vi.fn>) => logged(logger, "rtc_region_fallback");
+
+  it.each([
+    ["switches off", { webRtcRegion: "auto", webPrefetchIce: false }, TODAY],
+    ["an older server", {}, TODAY],
+    ["values the flags never produce", { webRtcRegion: "us-central", webPrefetchIce: "yes" }, TODAY],
+    ["the EU edge", { webRtcRegion: "eu", webPrefetchIce: false }, { ...TODAY, region: "eu" }],
+    ["ICE prefetch", { webRtcRegion: "auto", webPrefetchIce: true }, { ...TODAY, prefetchIceCandidates: true }],
+    ["both", { webRtcRegion: "eu", webPrefetchIce: true }, { ...TODAY, region: "eu", prefetchIceCandidates: true }],
+  ])("creates the SDK client for %s with exactly the expected options", async (_name, switches, expected) => {
+    const h = edgeHarness(switches);
+    h.phone.start(); await flush();
+    expect(h.created).toHaveLength(1);
+    // Strict: a switch that is off leaves no key behind, not even an undefined one.
+    expect(h.created[0].options).toStrictEqual(expected);
+    h.phone.stop();
+  });
+
+  it.each([
+    ["socket_error", (client: FakeClient) => client.emit("telnyx.socket.error", { socketGeneration: 1 })],
+    ["socket_closed", (client: FakeClient) => client.emit("telnyx.socket.close", { socketGeneration: 1 })],
+    ["sdk_error", (client: FakeClient) => client.emit("telnyx.error", { error: { code: 46001, fatal: true, message: "Authentication failed" } })],
+  ])("replaces an EU client that fails before login (%s) at once and keeps the page on the default edge", async (trigger, fail) => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    expect(h.created[0].options).toMatchObject({ region: "eu" });
+    fail(h.created[0].client); await flush();
+    expect(h.created[0].client.disconnected).toBe(true);
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    h.runTimer(fallbackRetry); await flush();
+    expect(h.created).toHaveLength(2);
+    expect(h.created[1].options).toStrictEqual(TODAY);
+    h.created[1].client.region = "us-central";
+    h.created[1].client.emit("telnyx.ready");
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    expect(logged(logger, "rtc_edge_connected")).toEqual([[expect.objectContaining({ reason: "rtc_edge_connected", rtcEdge: "default", rtcRegion: "us-central" })]]);
+    // Sticky for the page: a later phone instance (mobile standby, ownership change) still skips the EU edge.
+    h.phone.stop();
+    const next = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    next.phone.start(); await flush();
+    expect(next.created[0].options).toStrictEqual(TODAY);
+    expect(fallbacks(logger)).toEqual([[expect.objectContaining({ scope: "webphone", reason: "rtc_region_fallback", rtcEdge: "eu", rtcTrigger: trigger })]]);
+    next.phone.stop();
+  });
+
+  it("replaces an EU client whose connect is rejected", async () => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger, connectFailures: [new Error("socket refused")] });
+    h.phone.start(); await flush();
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    h.runTimer(fallbackRetry); await flush();
+    expect(h.created.map(entry => entry.options)).toStrictEqual([{ ...TODAY, region: "eu" }, TODAY]);
+    expect(fallbacks(logger)).toEqual([[expect.objectContaining({ rtcTrigger: "connect_rejected" })]]);
+    h.phone.stop();
+  });
+
+  it("does not count the fallback towards the phone's connect failures", async () => {
+    const random = () => 0.5;
+    const h = edgeHarness({ webRtcRegion: "eu" }, { random });
+    Object.assign(h.token, { ok: false, status: 500 });
+    h.phone.start(); await flush();
+    for (let attempts = 1; attempts < WEBPHONE_MAX_CONNECT_FAILURES; attempts++) {
+      if (attempts === WEBPHONE_MAX_CONNECT_FAILURES - 1) Object.assign(h.token, { ok: true, status: 200 });
+      h.runTimer(timer => timer.delayMs === webphoneRetryDelayMs(attempts, random)); await flush();
+    }
+    // Four failed mints, then an EU client: one more counted failure would be terminal.
+    expect(h.created).toHaveLength(1);
+    h.created[0].client.emit("telnyx.socket.error", { socketGeneration: 1 }); await flush();
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    h.runTimer(fallbackRetry); await flush();
+    h.created[1].client.emit("telnyx.ready");
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    h.phone.stop();
+  });
+
+  it("bounds the first login of an EU client only", async () => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    h.runTimer(euBound); await flush();
+    expect(h.created[0].client.disconnected).toBe(true);
+    h.runTimer(fallbackRetry); await flush();
+    expect(h.created[1].options).toStrictEqual(TODAY);
+    // The default edge keeps today's behaviour: no such bound.
+    expect(h.timers.some(euBound)).toBe(false);
+    expect(fallbacks(logger)).toEqual([[expect.objectContaining({ rtcTrigger: "login_timeout" })]]);
+    h.phone.stop();
+  });
+
+  it("removes the EU bound when the phone stops before login", async () => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    expect(h.timers.some(euBound)).toBe(true);
+    h.phone.stop();
+    expect(h.timers.some(euBound)).toBe(false);
+    expect(fallbacks(logger)).toEqual([]);
+    h.phone.start(); await flush();
+    expect(h.created[1].options).toMatchObject({ region: "eu" });
+    h.phone.stop();
+  });
+
+  it.each([45004, 46003])("leaves recoverable SDK error %i before login to today's handling, and the bound still falls back", async code => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    h.created[0].client.emit("telnyx.error", { error: { code, fatal: false } }); await flush();
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    expect(h.created[0].client.disconnected).toBe(false);
+    expect(fallbacks(logger)).toEqual([]);
+    h.runTimer(euBound); await flush();
+    expect(h.created[0].client.disconnected).toBe(true);
+    h.runTimer(fallbackRetry); await flush();
+    expect(h.created[1].options).toStrictEqual(TODAY);
+    expect(fallbacks(logger)).toEqual([[expect.objectContaining({ rtcTrigger: "login_timeout" })]]);
+    h.phone.stop();
+  });
+
+  it.each(["telnyx.socket.error", "telnyx.socket.close"])("keeps a logged-in EU client and its active call through %s", async event => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    const client = h.created[0].client;
+    Object.assign(client, { region: "eu", dc: "fr5" });
+    client.emit("telnyx.ready");
+    expect(logged(logger, "rtc_edge_connected")).toEqual([[expect.objectContaining({ rtcEdge: "eu", rtcRegion: "eu", rtcDc: "fr5" })]]);
+    expect(h.timers.some(euBound)).toBe(false);
+    const call = fakeCall({ state: "active" });
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "session-1" });
+    client.emit("telnyx.notification", { type: "callUpdate", call });
+    client.emit(event, { socketGeneration: 1 }); await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "reconnecting", call: { id: call.id, active: true } });
+    expect(client.disconnected).toBe(false);
+    expect(call.hungUp).toBe(false);
+    expect(h.created).toHaveLength(1);
+    expect(fallbacks(logger)).toEqual([]);
+    h.phone.stop();
+    // The page still uses the EU edge next time.
+    h.phone.start(); await flush();
+    expect(h.created[1].options).toMatchObject({ region: "eu" });
+    h.phone.stop();
+  });
+
+  it("applies a flag change at the next client creation, never to the client carrying a call", async () => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "auto", webPrefetchIce: false }, { logger });
+    h.phone.start(); await flush();
+    const client = h.created[0].client;
+    client.emit("telnyx.ready");
+    expect(logged(logger, "rtc_edge_connected")).toEqual([]);
+    const call = fakeCall({ state: "active" });
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "session-1" });
+    client.emit("telnyx.notification", { type: "callUpdate", call });
+    Object.assign(h.token.body, { token: "jwt-b", webRtcRegion: "eu", webPrefetchIce: true });
+    client.emit("telnyx.warning", { warning: { code: 34001 } }); await flush();
+    expect(h.created).toHaveLength(1);
+    expect(client.login.mock.calls.map(([options]) => options?.creds)).toEqual([{ login_token: "jwt-b" }]);
+    expect(client.disconnected).toBe(false);
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { id: call.id, active: true } });
+    h.phone.stop();
+    h.phone.start(); await flush();
+    expect(h.created[1].options).toStrictEqual({ ...TODAY, login_token: "jwt-b", region: "eu", prefetchIceCandidates: true });
+    h.phone.stop();
+  });
+
+  describe("the tab's SDK signaling session", () => {
+    function storage(initial: Record<string, string> = {}) {
+      const data = new Map(Object.entries(initial));
+      vi.stubGlobal("sessionStorage", { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value); }, removeItem: (key: string) => { data.delete(key); } });
+      return data;
+    }
+
+    it("starts afresh only when the tab's edge changes, before that client's socket opens", async () => {
+      const data = storage();
+      // Default edge as before: nothing stored, nothing cleared.
+      const off = edgeHarness({ webRtcRegion: "auto" });
+      off.phone.start(); await flush();
+      expect(off.order).toEqual(["connect:0"]);
+      expect(data.size).toBe(0);
+      off.phone.stop();
+
+      const h = edgeHarness({ webRtcRegion: "eu" });
+      h.phone.start(); await flush();
+      expect(h.order).toEqual(["clear:0", "connect:0"]);
+      expect(data.get("pm:phone-rtc-edge")).toBe("eu");
+      // Another client on the same edge resumes the session.
+      h.phone.stop(); h.phone.start(); await flush();
+      expect(h.order).toEqual(["clear:0", "connect:0", "connect:1"]);
+      // The fallback goes back to the default edge: afresh again.
+      h.created[1].client.emit("telnyx.socket.error", { socketGeneration: 1 }); await flush();
+      h.runTimer(fallbackRetry); await flush();
+      expect(h.order).toEqual(["clear:0", "connect:0", "connect:1", "clear:2", "connect:2"]);
+      expect(data.get("pm:phone-rtc-edge")).toBe("default");
+      h.phone.stop();
+    });
+
+    it("never clears a session the SDK may still reattach a call to", async () => {
+      const data = storage({ "telnyx-voice-sdk-active-calls": JSON.stringify({ calls: [{ id: "call-1" }], storedAt: epoch }) });
+      const h = edgeHarness({ webRtcRegion: "eu" });
+      h.phone.start(); await flush();
+      expect(h.order).toEqual(["connect:0"]);
+      expect(data.has("pm:phone-rtc-edge")).toBe(false);
+      h.phone.stop();
+    });
+  });
+
+  it("fits a silent EU failure, the fallback and a default connect into the mobile prepareForCall budget", async () => {
+    vi.useFakeTimers({ now: epoch });
+    try {
+      const MINT_MS = 1_500, DEFAULT_CONNECT_MS = 2_500;
+      const regions: Array<string | undefined> = [];
+      const body = { token: "jwt", expiresAt: new Date(epoch + 3_600_000).toISOString(), deviceSessionId: "device-1", sipUsername: "gencred1", webRtcRegion: "eu" };
+      const phone = new TelnyxWebphone({
+        silent: true, deviceKind: "mobile", now: () => Date.now(),
+        setTimeout: (handler, delayMs) => setTimeout(handler, delayMs) as unknown as number,
+        clearTimeout: (handle) => clearTimeout(handle),
+        loadSdk: async () => ({ TelnyxRTC: class extends FakeClient {
+          private readonly euEdge: boolean;
+          constructor(options: IClientOptions) { super(options); this.euEdge = options.region === "eu"; regions.push(options.region); }
+          override async connect() {
+            await super.connect();
+            // The EU edge stays silent; the default edge logs in after a realistic delay.
+            if (!this.euEdge) setTimeout(() => this.emit("telnyx.ready"), DEFAULT_CONNECT_MS);
+          }
+        } }),
+        requestJson: (async (url: string) => url.includes("/webphone/token")
+          ? new Promise(resolve => setTimeout(() => resolve({ ok: true, status: 200, body }), MINT_MS))
+          : { ok: true, status: 200, body: {} }) as never,
+      });
+      let registeredAt: number | null = null;
+      phone.subscribe(snapshot => { if (snapshot.status === "registered" && registeredAt === null) registeredAt = Date.now(); });
+      phone.start();
+      await vi.advanceTimersByTimeAsync(MOBILE_PREPARE_TIMEOUT_MS);
+      expect(regions).toEqual(["eu", undefined]);
+      // Mint, EU bound, fallback retry, mint, default connect: nothing else waits.
+      const elapsed = registeredAt! - epoch;
+      expect(elapsed).toBe(MINT_MS + EU_EDGE_LOGIN_TIMEOUT_MS + WEBPHONE_EDGE_FALLBACK_RETRY_MS + MINT_MS + DEFAULT_CONNECT_MS);
+      expect(elapsed).toBeLessThanOrEqual(MOBILE_PREPARE_TIMEOUT_MS - 5_000);
+      phone.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -7,6 +7,8 @@ type RequestIntent = { id: string; expiresAt: number; pending: boolean };
 const REQUEST_INTENT_MS = 60_000;
 /** Reuse a foreground phone between calls without keeping an idle PWA online indefinitely. */
 export const MOBILE_VISIBLE_STANDBY_MS = 120_000;
+/** How long an on-demand mobile phone may take to register for a call. */
+export const MOBILE_PREPARE_TIMEOUT_MS = 20_000;
 type Message = { type: "operatorRequest"; intent: RequestIntent } | { type: "hello" } | { type: "state"; snapshot: WebphoneSnapshot } | { type: "command"; id: string; command: Command; callId: string | null; value?: unknown } | { type: "result"; id: string; error?: string };
 type Pending = { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 
@@ -293,7 +295,7 @@ export class CoordinatedWebphone {
     this.startLocal();
     const phone = this.local!;
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { off(); reject(new Error("Mobilný telefón sa nepripojil. Skúste hovor prijať znova.")); }, 20_000);
+      const timer = setTimeout(() => { off(); reject(new Error("Mobilný telefón sa nepripojil. Skúste hovor prijať znova.")); }, MOBILE_PREPARE_TIMEOUT_MS);
       const check = (state: WebphoneSnapshot) => {
         if (state.status === "registered") { clearTimeout(timer); off(); resolve(); }
         else if (["failed", "superseded", "not_configured"].includes(state.status)) { clearTimeout(timer); off(); reject(new Error(state.message ?? "Mobilný telefón sa nepripojil.")); }
