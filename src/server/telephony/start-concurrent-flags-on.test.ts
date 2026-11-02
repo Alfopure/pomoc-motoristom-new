@@ -8,8 +8,9 @@ import { envLatencyFlags } from "./latency-flags";
  * origin and direction, and the colleague auto-bridge — on top of the S1/S2
  * execution switches TEST runs with. A frozen concurrent start changes when
  * the far end is dialled, never who is reserved, what a client is told or how
- * the call ends. Legacy-writer suites freeze the sequential start they run
- * (`honestLegacyStartMode`); a few assertions describe the sequential shape on
+ * the call ends. Legacy-writer suites keep the start mode frozen at creation
+ * but run sequentially, with no `meta.far_end` and no auto-bridge (S6 needs
+ * writer contract 2); a few assertions describe the sequential shape on
  * purpose and pin `concurrent_dial` off themselves.
  *
  * Not imported: suites that spell out the sequential order step by step (the
@@ -23,7 +24,11 @@ const ON = {
   internal_lean_path: true, bridged_observation_fast: true, start_fast_path: true, start_test_proof_prefetch: true,
   concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } }, internal_auto_bridge: true,
 };
-beforeEach(() => { vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify(ON)); });
+// Until spikes S6.0/1–4 pass only a TEST deployment freezes a concurrent start.
+beforeEach(() => {
+  vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify(ON));
+  vi.stubEnv("MOTORIST_APP_ENV", "test");
+});
 
 /** Which startup entries really dialled the far end next to the own leg. */
 const seen = vi.hoisted(() => ({ concurrent: 0, sequential: 0 }));

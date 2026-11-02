@@ -911,14 +911,23 @@ function isLegAlreadyGone(error: unknown): boolean {
 }
 
 /**
- * Telnyx's 422 for a bridge between legs it has already bridged (TEST spike
- * S6.0/4 records the exact wording). A call that is gone is not this: its
- * bridge failed and the caller's compensation still runs.
+ * A 422 for a bridge whose pair Telnyx may have bridged itself
+ * (`bridge_on_answer`). Its wording is not evidence either way ("already
+ * bridged", "Call is currently in a bridge", …; TEST spike S6.0/4 records the
+ * real one), so it never decides the outcome by itself: a concurrent bridge
+ * waits for `call.bridged`, any other bridge for the target leg's own
+ * `call.bridged`. A call that is gone is not this: its bridge failed.
  */
-export function isAlreadyBridgedRefusal(error: unknown): boolean {
-  if (!(error instanceof TelnyxCommandError) || error.status !== 422) return false;
-  const text = `${error.title ?? ""} ${error.detail ?? ""} ${error.message}`;
-  return !isCallGoneError(error) && /already\b.{0,24}\bbridg/i.test(text);
+export function isUnprovenBridgeRefusal(error: unknown): boolean {
+  return error instanceof TelnyxCommandError && error.status === 422 && !isSessionCallGoneError(error);
+}
+
+/** Whether this leg has reported `call.bridged` (its row, read now, under this session's lease). */
+async function legReportedBridged(deps: EffectsDeps, ctx: ExecutionContext, callControlId: string): Promise<boolean> {
+  const leg = await deps.admin.from("motorist_call_legs").select("bridged_at").eq("organization_id", deps.organizationId)
+    .eq("session_id", ctx.session.id).eq("telnyx_call_control_id", callControlId).maybeSingle();
+  if (leg.error) throw new EffectsError("bridge target evidence unavailable");
+  return Boolean((leg.data as { bridged_at?: string | null } | null)?.bridged_at);
 }
 
 /**
@@ -1097,10 +1106,14 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
           clientState,
         });
       } catch (error) {
-        // Call-speed S6.2: Telnyx bridged this pair itself (`bridge_on_answer`).
-        // That is the connection this command asked for; a replay of the
-        // journalled refusal lands here again with the same answer.
-        if (command.alreadyBridgedOk && isAlreadyBridgedRefusal(error)) return { skipped: true, detail: { reason: "already_bridged" } };
+        if (isUnprovenBridgeRefusal(error)) {
+          // Call-speed S6.2: a concurrent start's bridge is settled by
+          // `call.bridged` or by its deadline, never by a refusal (M1).
+          if (command.concurrentBridge) return { skipped: true, detail: { reason: "awaiting_bridged_evidence" } };
+          // S6.3: Telnyx bridged this pair itself only if the target leg says
+          // so; a caller bridged to another leg answers with the same 422.
+          if (command.alreadyBridgedOk && await legReportedBridged(deps, ctx, resolveLeg(ctx, command.target))) return { skipped: true, detail: { reason: "already_bridged" } };
+        }
         throw error;
       }
       return { skipped: false };
@@ -2318,6 +2331,18 @@ async function executeReduceResult(
       }
       if (input.continuation) for (const change of transition.presence) {
         if (change.afterCommandId === key) await applyPresenceChange(deps, ctx.session, change);
+      }
+      if (command.kind === "bridge" && command.concurrentBridge && !executed.skipped) {
+        // Call-speed S6.2: Telnyx accepted the explicit concurrent bridge. The
+        // call still connects on `call.bridged`; this keeps the deadline sweep
+        // from ending a pair whose evidence is merely late.
+        const meta = readMeta(ctx.session), bridge = meta.far_end?.bridge;
+        if (meta.far_end && bridge?.commandId === command.commandId && !bridge.acceptedAt) {
+          const accepted = emptyTransition();
+          accepted.session.metadata = toJson({ ...meta, far_end: { ...meta.far_end, bridge: { ...bridge, acceptedAt: deps.now().toISOString() } } });
+          session = await persistTransition(deps, { session: ctx.session, transition: accepted, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
+          ctx.session = session;
+        }
       }
       const ivrOutcome = ivrDispatchOutcome(ctx.session, command, executed, dispatchedAt);
       if (ivrOutcome) {

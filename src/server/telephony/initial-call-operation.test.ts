@@ -420,6 +420,8 @@ describe("hangup before the first dial", () => {
 describe("a concurrent start's two-command entry", () => {
   it("resumes a rate-limited far dial by cron, once, without redialling the own leg", async () => {
     vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    // Until spikes S6.0/1–4 pass only a TEST deployment freezes a concurrent start.
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
     const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
     h.deps.latencyFlags = { ...latencyFlagsOf(h.deps), start_fast_path: true,
       concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } } };

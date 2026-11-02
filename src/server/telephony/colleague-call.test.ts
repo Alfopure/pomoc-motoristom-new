@@ -57,6 +57,8 @@ describe.each(MODES)("colleague call ($name)", ({ stability, writerContract }) =
 
   async function talking(h: TelephonyHarness, actor: CallActor = jana, target: string = PROFILES.o2) {
     const call = await ringing(h, actor, target);
+    // The colleague answers after the caller, as the provider stamps it.
+    h.advance(300);
     await h.legEvent(call.callee, "call.answered");
     await completeCallAnnouncements(h, call.sessionId);
     expect(h.session(call.sessionId).state).toBe("talking");
@@ -178,6 +180,9 @@ describe.each(MODES)("colleague call ($name)", ({ stability, writerContract }) =
     const mobile = await pickupWaitingCall({ ...deps(h), deviceKind: "mobile" }, peter, call.sessionId);
     const mobileLeg = mobile.operatorLegCallControlId!;
     await h.legEvent(mobileLeg, "call.answered");
+    // The server's bridge to the phone is confirmed by Telnyx's `call.bridged`
+    // (a concurrent start, S6.2, connects on that evidence alone).
+    await h.legEvent(mobileLeg, "call.bridged");
     await completeCallAnnouncements(h, call.sessionId);
     expect(h.session(call.sessionId).state).toBe("talking");
     // The pickup claim expires after a minute; the periodic sweep must not cut the call.

@@ -54,7 +54,7 @@ import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
 import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, ownershipRpc, sessionOwnership, withTelephonyDatabaseBudget } from "./ownership";
-import { concurrentDialFor, freezeStartMode, latencyFlagsOf, providerRegionOf } from "./latency-flags";
+import { freezeStartMode, latencyFlagsOf, providerRegionOf } from "./latency-flags";
 import { humansOnly } from "@/server/profile-kind";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { nativeVoiceEnabled } from "@/lib/app-environment";
@@ -615,12 +615,6 @@ async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: {
   const { line, from } = fromLine.value;
   const callerName = caller.status === "fulfilled" ? caller.value?.trim() || null : null;
   const plan = { to: target.value.sipUri, from, sipUri: device.value.sipUri, fromDisplayName: sipDisplayText(callerName) };
-  // Call-speed S6.1: a concurrent start dials the colleague in this same
-  // request, so the TEST destination proof of each endpoint leaves now too.
-  if (sipProof && concurrentDialFor(latencyFlagsOf(deps), "internal", deps.deviceKind ?? "web")) {
-    for (const endpoint of target.value.endpoints) deps.telnyx?.proveSipDestination?.(endpoint.sipUri);
-  }
-
   const session = await createSession(deps, {
     direction: "internal",
     callerNumber: from,
@@ -634,6 +628,12 @@ async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: {
         caller_name: callerName, target_name: target.value.label, caller_display: plan.fromDisplayName ?? null },
       line_label: line?.label ?? null },
   });
+  // Call-speed S6.1: a session frozen concurrent dials the colleague in this
+  // same request, so the TEST destination proof of each endpoint leaves now
+  // too (the frozen decision, not the live switch: they can differ).
+  if (sipProof && readMeta(session).start_mode?.concurrent === true) {
+    for (const endpoint of target.value.endpoints) deps.telnyx?.proveSipDestination?.(endpoint.sipUri);
+  }
   return initializeOutgoingSession(deps, actor, session, plan, false, { sipProof, early });
 }
 

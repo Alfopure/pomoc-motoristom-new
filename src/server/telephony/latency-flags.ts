@@ -245,14 +245,15 @@ const HONOURED_START_SWITCHES = { concurrent: true, autoBridge: true, apiRegion:
  * S7b is implemented, but whether Telnyx plays the hold music to a participant
  * joining held into a conference that started on create is TEST spike S7.0
  * (docs/operations/telnyx-runbook.md). Until the runbook records a pass, only
- * a non-production deployment may freeze it: the spike runs on TEST with the
- * switch alone, while production cannot reach it without a reviewed change
- * here. An unreadable environment counts as production.
+ * a deployment whose application environment is exactly `test` may freeze it:
+ * the spike runs on TEST with the switch alone, while production, a local run
+ * (`development`, which may point at production data) and an unreadable
+ * environment cannot reach it without a reviewed change here.
  */
 const JOIN_WITH_HOLD_PROVEN = false;
 function joinWithHoldAllowed(): boolean {
   if (JOIN_WITH_HOLD_PROVEN) return true;
-  try { return resolveAppEnvironment() !== "production"; }
+  try { return resolveAppEnvironment() === "test"; }
   catch { return false; }
 }
 
@@ -277,14 +278,15 @@ export function euApiRegionAllowed(): boolean {
  * operator's own leg still rings (outcome A, B or C), two auto-bridged
  * endpoints answering together, and the wording of its "already bridged"
  * refusal are TEST spikes S6.0/1–4 (docs/operations/telnyx-runbook.md). Until
- * the runbook records a pass, only a non-production deployment freezes a
- * concurrent start or the colleague auto-bridge, exactly as for S7b. An
- * unreadable environment counts as production.
+ * the runbook records a pass, only a deployment whose application environment
+ * is exactly `test` freezes a concurrent start or the colleague auto-bridge,
+ * as for S5 and S7b: production, a local run (`development`, which may point
+ * at production data) and an unreadable environment keep the sequential start.
  */
 const CONCURRENT_START_PROVEN = false;
 function concurrentStartAllowed(): boolean {
   if (CONCURRENT_START_PROVEN) return true;
-  try { return resolveAppEnvironment() !== "production"; }
+  try { return resolveAppEnvironment() === "test"; }
   catch { return false; }
 }
 

@@ -10,6 +10,7 @@ import {
   isDtmfKey,
   LOCAL_FIRST_TALKING_MS,
   localFirstCandidate,
+  localFirstTalking,
   partyBusyKey,
   phoneBarCapabilities,
   phoneBarFocusedCall,
@@ -316,5 +317,17 @@ describe("colleague call capabilities", () => {
       [colleague({ direction: "outbound", state: "ringing", connecting: true, autoBridge: true, browserCallControlIds: ["colleague-invite"], callerAnswered: true }), browser(), true],
     ] as const) expect(localFirstCandidate(call, sdk, enabled)).toBe(false);
     expect(LOCAL_FIRST_TALKING_MS).toBe(3_000);
+  });
+
+  it("shows its own \"Prebieha\" for a moment, and keeps it once its remote audio plays", () => {
+    // The moment: until the candidate's time runs out.
+    expect(localFirstTalking("call-1", null, undefined)).toBe(true);
+    expect(localFirstTalking("call-1", "call-1", undefined)).toBe(false);
+    expect(localFirstTalking("call-1", "call-1", true)).toBe(false);
+    // Remote audio already playing: no flip back to "Spájam…" when the moment ends.
+    expect(localFirstTalking("call-1", "call-1", false)).toBe(true);
+    // Another candidate, or none, is not held back by an earlier expiry.
+    expect(localFirstTalking("call-2", "call-1", undefined)).toBe(true);
+    expect(localFirstTalking(null, null, false)).toBe(false);
   });
 });

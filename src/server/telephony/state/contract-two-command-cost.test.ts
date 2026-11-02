@@ -554,6 +554,8 @@ describe("contract 2 dependent waves", () => {
       if (kind === 2) h.db.seed("motorist_operator_mobile_devices", [{ organization_id: ORG, profile_id: PROFILES.o2, environment: "development",
         sip_username: "native-colleague", device_session_id: requestId(9103), device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
       const all = { web: concurrent, mobile: concurrent };
+      // Until spikes S6.0/1–4 pass only a TEST deployment freezes a concurrent start.
+      vi.stubEnv("MOTORIST_APP_ENV", "test");
       h.deps.latencyFlags = { ...defaultLatencyFlags(), ...BOUND_S2_FLAGS, internal_auto_bridge: concurrent, concurrent_dial: { outbound: all, internal: all } };
       let early: number | null = null;
       const hook = () => { early ??= Date.now(); };
@@ -590,6 +592,7 @@ describe("contract 2 dependent waves", () => {
 
     it("connects an auto-bridged colleague with no bridge command: Telnyx bridged at the answer (S6.3)", async () => {
       const h = harness();
+      vi.stubEnv("MOTORIST_APP_ENV", "test");
       h.deps.latencyFlags = { ...defaultLatencyFlags(), internal_lean_path: true, bridged_observation_fast: true, internal_auto_bridge: true,
         concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } } };
       const { call } = await colleague(h);
@@ -628,7 +631,12 @@ describe("contract 2 dependent waves", () => {
   });
 
   /** The S7 switches, set before the call so a frozen one (join-with-hold) applies. */
-  const s7 = (h: TelephonyHarness, flags: Partial<LatencyFlags>) => { h.deps.latencyFlags = { ...defaultLatencyFlags(), ...flags }; return h; };
+  const s7 = (h: TelephonyHarness, flags: Partial<LatencyFlags>) => {
+    // Until spike S7.0 passes only a TEST deployment freezes join-with-hold.
+    if (flags.hold_join_with_hold) vi.stubEnv("MOTORIST_APP_ENV", "test");
+    h.deps.latencyFlags = { ...defaultLatencyFlags(), ...flags };
+    return h;
+  };
   /** As the control routes do after every action: retire the contact check a promotion leaves behind. */
   const settle = (h: TelephonyHarness, sessionId: string) => recoverSessionContactChecks(h.deps, sessionId);
 

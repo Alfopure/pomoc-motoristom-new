@@ -849,12 +849,15 @@ function onBridged(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
   if (firstSignal && isCustomer(leg) && (b.session.direction === "outbound" || b.session.direction === "internal")) {
     return onLegAnswered(b, leg, { alreadyBridged: true, at: event.occurredAt ?? b.nowIso });
   }
-  // Call-speed S6.2: the far leg of a concurrent start reports itself bridged.
-  // That is the provider's evidence that the pair is connected, whichever leg
-  // answered first and whatever the own leg's row says yet.
-  if (concurrentStart(b) && b.session.state === "ringing" && leg.answered_at &&
-    concurrentFarLeg(b)?.telnyx_call_control_id === leg.telnyx_call_control_id) {
-    return connectCall(b, event.occurredAt ?? b.nowIso, "far end bridged → talking");
+  // Call-speed S6.2: a leg of a concurrent start's pair reports itself
+  // bridged. That is the provider's evidence that the pair is connected,
+  // whichever leg answered first, whatever the other row says yet, and
+  // whether the bridge was Telnyx's own or our pending explicit one.
+  if (concurrentStart(b) && b.session.state === "ringing" && leg.answered_at) {
+    const far = concurrentFarLeg(b);
+    const isFar = far?.telnyx_call_control_id === leg.telnyx_call_control_id;
+    const isOwn = Boolean(far?.answered_at) && concurrentOwnLeg(b)?.telnyx_call_control_id === leg.telnyx_call_control_id;
+    if (isFar || isOwn) return connectCall(b, event.occurredAt ?? b.nowIso, `${isFar ? "far end" : "own leg"} bridged → talking`);
   }
   return b.note("bridged").result();
 }
@@ -1522,7 +1525,7 @@ function onFarEndAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBrid
 function onConcurrentFarAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
   const own = concurrentOwnLeg(b);
   if (!concurrentBridged(own, leg, opts) && !own?.answered_at) return awaitOwnLeg(b, opts.at).result();
-  if (own) connectConcurrent(b, own, leg, opts, { farAt: opts.at, ownAt: own.answered_at });
+  if (own && connectConcurrent(b, own, leg, opts, { farAt: opts.at, ownAt: own.answered_at })) return b.result();
   return connectCall(b, opts.at, "far end answered → talking");
 }
 
@@ -1579,34 +1582,82 @@ function providerBridgesAtAnswer(b: TransitionBuilder, far: LegRow): boolean {
  * second answer. Without bridged evidence the pair gets the explicit bridge
  * when the far end answered first at the provider (Telnyx may or may not
  * complete that bridge itself: outcomes A and B) or when Telnyx never bridges
- * this far leg; otherwise Telnyx bridged it at the far end's answer.
+ * this far leg; otherwise Telnyx bridged it at the far end's answer. Returns
+ * true while that explicit bridge waits for its evidence: the call stays
+ * `ringing` until then (a duplicate answer sends no second bridge).
  */
-function connectConcurrent(b: TransitionBuilder, own: LegRow, far: LegRow, opts: { alreadyBridged: boolean }, at: { farAt: string | null; ownAt: string | null }): void {
-  if (concurrentBridged(own, far, opts)) return;
-  if (farAnsweredFirst(at.farAt, at.ownAt) || !providerBridgesAtAnswer(b, far)) bridgeConcurrentPair(b, own, far);
+function connectConcurrent(b: TransitionBuilder, own: LegRow, far: LegRow, opts: { alreadyBridged: boolean }, at: { farAt: string | null; ownAt: string | null }): boolean {
+  if (concurrentBridged(own, far, opts)) return false;
+  if (!farAnsweredFirst(at.farAt, at.ownAt) && providerBridgesAtAnswer(b, far)) return false;
+  if (!b.meta.far_end?.bridge) bridgeConcurrentPair(b, own, far, at.farAt);
+  return true;
 }
+
+/** S6.2: how long an explicit concurrent bridge waits for its `call.bridged` evidence before the sweep ends both legs. */
+export const CONCURRENT_BRIDGE_DEADLINE_MS = 8_000;
 
 /**
  * The explicit bridge of S6.2, in today's direction: the operator's leg
- * bridges to the far end and parks itself if that bridge ends. A 422 "already
- * bridged" is the connection it asked for; any other refusal hangs up both and
- * ends the call as never connected. The customer's bridge keeps the contact
- * intent of the dial that reached them (callback contact proof).
+ * bridges to the far end and parks itself if that bridge ends. It is not the
+ * connection: `call.bridged` is. A refusal of any wording (Telnyx may have
+ * bridged the pair itself), a 5xx or a lost response therefore neither
+ * connects the call nor tears it down; the call stays `ringing` until the
+ * evidence arrives, and the sweep at `deadlineAt` ends a pair that never
+ * proved itself connected (`onConcurrentBridgeDeadline`). The customer's
+ * bridge keeps the contact intent of the dial that reached them (callback
+ * contact proof).
  */
-function bridgeConcurrentPair(b: TransitionBuilder, own: LegRow, far: LegRow): void {
+function bridgeConcurrentPair(b: TransitionBuilder, own: LegRow, far: LegRow, farAt: string | null): void {
   const bridgeId = b.cmdId(own.telnyx_call_control_id, "bridge:concurrent");
   const contact = b.session.direction === "outbound" ? b.meta.outbound_auto_bridge?.commandId : undefined;
-  b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(own), target: ref(far), parkAfterUnbridge: "self", alreadyBridgedOk: true,
+  b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(own), target: ref(far), parkAfterUnbridge: "self", concurrentBridge: true, bestEffort: true,
     ...(contact ? { contactCommandId: contact } : {}) });
-  const failed = b.fork();
-  failed.setState("ended").patchSession({ ended_at: b.nowIso, answered_at: null });
-  failed.call.status = "ended";
-  failed.call.end_reason = "bridge_failed";
-  failed.call.answered_at = null;
-  failed.call.ended_at = b.nowIso;
-  releaseTalkingOperators(failed, false);
-  b.compensate(bridgeId, "concurrent connection failed → hang up both legs",
-    [hangupCmd(failed, far, "bridge_failed"), hangupCmd(failed, own, "bridge_failed")], failed.transition());
+  const farEnd = b.meta.far_end!;
+  b.patchMeta({ far_end: { ...farEnd, answeredAt: farEnd.answeredAt ?? farAt ?? b.nowIso,
+    bridge: { commandId: bridgeId, sentAt: b.nowIso, deadlineAt: new Date(b.ctx.now.getTime() + CONCURRENT_BRIDGE_DEADLINE_MS).toISOString() } } });
+  b.note("explicit concurrent bridge sent → waiting for its call.bridged");
+}
+
+/**
+ * S6.2, the sweep after an explicit concurrent bridge's deadline. A bridge
+ * Telnyx accepted (2xx), or a leg that reported itself bridged, connects the
+ * call; anything else (refused, unknown, no `call.bridged`) was never a
+ * conversation: both legs end as `bridge_failed`, presence is released once
+ * and the history keeps no answer.
+ */
+function onConcurrentBridgeDeadline(b: TransitionBuilder): ReduceResult | null {
+  const bridge = b.meta.far_end?.bridge;
+  if (b.session.state !== "ringing" || !concurrentStart(b) || !bridge) return null;
+  const deadline = Date.parse(bridge.deadlineAt);
+  if (!Number.isFinite(deadline) || deadline > b.ctx.now.getTime()) return null;
+  const own = concurrentOwnLeg(b), far = concurrentFarLeg(b);
+  if (bridge.acceptedAt || own?.bridged_at || far?.bridged_at) return connectCall(b, bridge.acceptedAt ?? b.nowIso, "concurrent bridge accepted → talking");
+  b.setState("ended").patchSession({ ended_at: b.nowIso, answered_at: null });
+  b.call.status = "ended";
+  b.call.end_reason = "bridge_failed";
+  b.call.answered_at = null;
+  b.call.ended_at = b.nowIso;
+  for (const leg of b.openLegs()) b.cmd(hangupCmd(b, leg, "bridge_failed"));
+  releaseTalkingOperators(b, false);
+  return b.note("concurrent bridge unproven at its deadline → both legs ended").result();
+}
+
+/**
+ * Call-speed S6.2: why a concurrent start that never connected ended with its
+ * far leg. A colleague whose answer was refused because they had become busy
+ * is `colleague_busy`. A far end that answered — its row says so, or Telnyx
+ * cleared it normally before its `call.answered` was processed — and hung up
+ * itself (`hangup_source: callee`) left before the connection; one the
+ * provider (outcome C) or we cleared is `bridge_failed`. Anything else is an
+ * ordinary unanswered ring (null).
+ */
+function concurrentFarEndReason(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent): string | null {
+  if (!concurrentStart(b)) return null;
+  if (b.meta.far_end?.busyControlId === leg.telnyx_call_control_id) return "colleague_busy";
+  const answered = Boolean(leg.answered_at) || (event.hangupCause ?? "").toLowerCase() === "normal_clearing";
+  if (!answered) return null;
+  if (event.hangupSource === "callee") return b.session.direction === "internal" ? "colleague_left_before_connect" : "customer_left_before_connect";
+  return "bridge_failed";
 }
 
 /**
@@ -1647,13 +1698,18 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   }
   const rejected = b.fork();
   rejected.cmd(hangupCmd(rejected, leg, "operator_busy", false));
+  // S6.2: the hangup of this refused leg then ends the call as `colleague_busy`.
+  const farEnd = b.meta.far_end;
+  if (farEnd) rejected.patchMeta({ far_end: { ...farEnd, busyControlId: leg.telnyx_call_control_id } });
   const caller = b.openLegs().find((other) => legIntent(other) === "internal_caller");
   const concurrent = concurrentStart(b);
   // S6.2: a concurrent start connects on bridged evidence or once the caller's
-  // own leg has answered; until then the colleague is accepted but waits.
+  // own leg has answered; until then the colleague is accepted but waits. An
+  // explicit bridge also waits, for its own `call.bridged`.
   const waiting = concurrent && !concurrentBridged(caller, leg, opts) && !caller?.answered_at;
+  const bridgePending = concurrent && !waiting && caller ? connectConcurrent(b, caller, leg, opts, { farAt: opts.at, ownAt: caller.answered_at }) : false;
   if (waiting) awaitOwnLeg(b, opts.at);
-  else {
+  else if (!bridgePending) {
     b.setState("talking").patchSession({ answered_at: b.session.answered_at ?? opts.at });
     b.call.status = "answered";
     b.call.answered_at = b.session.answered_at ?? opts.at;
@@ -1661,9 +1717,7 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   }
   if (telephonyStabilityEnabled() || hasStabilityContract(b.session) || b.meta.internal?.endpoints?.length || (leg.client_state as { autoAnswer?: boolean } | null)?.autoAnswer) {
     if (!caller) throw new CallActionRejected("Volajúci už nie je pripojený.", 409);
-    if (concurrent) {
-      if (!waiting) connectConcurrent(b, caller, leg, opts, { farAt: opts.at, ownAt: caller.answered_at });
-    } else if (!autoBridgedColleagueLeg(b, leg)) {
+    if (!concurrent && !autoBridgedColleagueLeg(b, leg)) {
       // S6.3: Telnyx bridges an auto-bridged leg to the answered caller
       // itself. A leg this call cannot prove it dialled with the auto-bridge
       // may have been bridged anyway.
@@ -1683,7 +1737,7 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
         : { result: "cancelled", ended_at: opts.at });
     }
   }
-  if (!waiting) b.note("colleague answered → talking");
+  if (!waiting && !bridgePending) b.note("colleague answered → talking");
   if (leg.profile_id) b.guard = { profileId: leg.profile_id, offerToken: (leg.client_state as TelnyxClientState | null)?.offerToken,
     allowPaused: true, onRejected: { next: rejected.transition(), commands: rejected.commands } };
   return b.result();
@@ -1866,7 +1920,7 @@ function onConcurrentOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: s
   if (b.session.state === "talking") return b.note("own leg answered; the far end is already connected").result();
   const far = concurrentFarLeg(b);
   if (!far?.answered_at) return b.note("own leg answered; the far end still rings").result();
-  connectConcurrent(b, leg, far, opts, { farAt: far.answered_at, ownAt: opts.at });
+  if (connectConcurrent(b, leg, far, opts, { farAt: far.answered_at, ownAt: opts.at })) return b.result();
   return connectCall(b, opts.at, "own leg answered after the far end → talking");
 }
 
@@ -2231,9 +2285,10 @@ function onInternalPartyHangup(b: TransitionBuilder, leg: LegRow, event: Telepho
       b.setState("ended").patchSession({ ended_at: at });
       b.call.status = "ended";
       // S6.2: in a concurrent start the colleague can answer before the
-      // caller's own leg, and the caller's leg can time out unanswered.
+      // caller's own leg (and leave, or be busy), and the caller's leg can
+      // time out unanswered.
       b.call.end_reason = intent === "internal"
-        ? concurrentStart(b) && leg.answered_at ? "bridge_failed" : classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause })
+        ? concurrentFarEndReason(b, leg, event) ?? classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause })
         : concurrentStart(b) && !leg.answered_at ? "operator_leg_unavailable" : "operator_cancel";
       b.call.ended_at = at;
       releaseTalkingOperators(b, false);
@@ -2330,8 +2385,8 @@ function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEve
     b.call.status = answered ? "ended" : b.session.direction === "inbound" ? "missed" : "ended";
     // S6.2: a far end that answered a concurrent start and left (or was hung
     // up by the provider) before the call connected was never a conversation.
-    b.call.end_reason = answered ? cause : concurrentStart(b) && leg.answered_at ? "bridge_failed"
-      : classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause });
+    b.call.end_reason = answered ? cause : concurrentFarEndReason(b, leg, event)
+      ?? classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause });
     b.call.ended_at = at;
     if (!answered && b.session.direction === "inbound") {
       b.callback({ source: "missed", callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id) });
@@ -3821,6 +3876,8 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   if (ACTIVE_SESSION_STATES.has(state) && customer && b.legEnded(customer) && b.openLegs().length === 0) {
     return finaliseAlreadyEndedCall(b);
   }
+  const concurrentBridgeDue = onConcurrentBridgeDeadline(b);
+  if (concurrentBridgeDue) return concurrentBridgeDue;
   const pickup = b.session.presence_pickup as { v?: number; profileId?: string; offerToken?: string; expiresAt?: string } | null;
   // A colleague who accepted a colleague call in the mobile app talks on it
   // without owning the session (the caller does); their claim is not stale.

@@ -405,6 +405,17 @@ export function isRingStepOverdue(session: SessionRow, now: Date): boolean {
   return deadline !== null && deadline < now.getTime();
 }
 
+/**
+ * Call-speed S6.2: a concurrent start whose explicit bridge has had no
+ * `call.bridged` evidence by its deadline. The sweep connects an accepted
+ * (2xx) bridge, or ends both legs as `bridge_failed`.
+ */
+export function isConcurrentBridgeOverdue(session: SessionRow, now: Date): boolean {
+  if (session.state !== "ringing") return false;
+  const deadline = ms(readMeta(session).far_end?.bridge?.deadlineAt);
+  return deadline !== null && deadline <= now.getTime();
+}
+
 function isQueueExpired(session: SessionRow, now: Date): boolean {
   const meta = readMeta(session);
   const since = ms(meta.waiting?.since);
@@ -457,7 +468,7 @@ export async function findOverdueSessions(admin: AdminClient, input: { organizat
   const rows = data ?? [];
   return {
     greeting: rows.filter((row) => isGreetingOverdue(row, input.now)),
-    ringing: rows.filter((row) => isRingStepOverdue(row, input.now)),
+    ringing: rows.filter((row) => isRingStepOverdue(row, input.now) || isConcurrentBridgeOverdue(row, input.now)),
     waiting: rows.filter((row) => isWaitingTickStale(row, input.now) || isQueueOfferDue(row, input.now))
       .sort((a, b) => (ms(readMeta(a).waiting?.since) ?? ms(a.started_at) ?? 0) - (ms(readMeta(b).waiting?.since) ?? ms(b.started_at) ?? 0)),
     stale: rows.filter((row) => isSessionStale(row, input.now)),

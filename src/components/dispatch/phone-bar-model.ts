@@ -246,6 +246,17 @@ export function localFirstCandidate(call: PhoneBarCall | null, browserCall: Webp
     call.callerAnswered && call.state === "ringing" && (call.connecting || call.kind === "offer") && phoneBarCallMatchesBrowser(call, browserCall));
 }
 
+/**
+ * Call-speed S6.4: whether the bar shows its own "Prebieha" for the local-first
+ * candidate `candidateId`. Only for `LOCAL_FIRST_TALKING_MS` (`expiredId` is
+ * the candidate whose time ran out), unless its remote audio is already
+ * playing (`audioBlocked === false` after a successful play): then the bar
+ * does not flip back to "Spájam…" and only the server's next state changes it.
+ */
+export function localFirstTalking(candidateId: string | null, expiredId: string | null, audioBlocked: boolean | undefined): boolean {
+  return Boolean(candidateId && (expiredId !== candidateId || audioBlocked === false));
+}
+
 export function phoneBarStateLabel(call: PhoneBarCall, options: { localTalking?: boolean } = {}): PhoneBarStateLabel {
   if (options.localTalking) return { label: "Prebieha", tone: "live" };
   // S6.2: answered, waiting for the caller's own phone to connect.

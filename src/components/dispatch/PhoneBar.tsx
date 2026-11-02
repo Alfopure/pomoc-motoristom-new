@@ -48,6 +48,7 @@ import {
   formatCallTimer,
   LOCAL_FIRST_TALKING_MS,
   localFirstCandidate,
+  localFirstTalking,
   partyBusyKey,
   phoneBarCapabilities,
   phoneBarCallMatchesBrowser,
@@ -197,9 +198,10 @@ function PhoneBarControls(props: PhoneBarProps) {
   useEffect(() => {
     if (!localFirstId) return;
     const timer = window.setTimeout(() => { setLocalFirstExpired(localFirstId); onRefresh?.(); }, LOCAL_FIRST_TALKING_MS);
-    return () => window.clearTimeout(timer);
+    // A candidate that comes back later starts its own moment again.
+    return () => { window.clearTimeout(timer); setLocalFirstExpired(null); };
   }, [localFirstId, onRefresh]);
-  const localTalking = Boolean(localFirstId && localFirstExpired !== localFirstId);
+  const localTalking = localFirstTalking(localFirstId, localFirstExpired, phone.audioBlocked);
 
   const capabilities = useMemo(
     () =>
