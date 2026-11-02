@@ -96,6 +96,11 @@ export type WebphoneSdkClient = {
   disconnect: () => Promise<void>;
   /** `HTMLMediaElement | string | Function` in the SDK; kept opaque so both stay assignable. */
   remoteElement: unknown;
+  /** Where the SDK registered, set before `telnyx.ready` (2.27.10); see `rtc_edge_connected`. */
+  region?: string | null;
+  dc?: string | null;
+  /** Forgets the tab's SDK signaling session (`voice_sdk_id`) before the next socket. */
+  clearReconnectToken?: () => void;
 };
 
 export type WebphoneSdkNotification = {
@@ -176,6 +181,19 @@ const ACTIVE_STATES = new Set(["active", "held", "early", "answering"]);
 const DEAD_STATES = new Set(["hangup", "destroy", "purge"]);
 const SDK_LOGIN_TIMEOUT_MS = 15_000;
 
+type RtcEdge = "eu" | "default";
+type EuEdgeTrigger = "connect_rejected" | "socket_closed" | "socket_error" | "sdk_error" | "login_timeout";
+/**
+ * An EU-edge client must log in within this (call-speed S5). With the
+ * immediate fallback retry and a default connect, a silent EU failure still
+ * fits the mobile `prepareForCall` budget.
+ */
+export const EU_EDGE_LOGIN_TIMEOUT_MS = 8_000;
+/** Ours: the edge this tab's SDK signaling session last used (sessionStorage). */
+const RTC_EDGE_STORAGE_KEY = "pm:phone-rtc-edge";
+/** SDK 2.27.10's sessionStorage marker of calls it reattaches after a reload. */
+const SDK_ACTIVE_CALLS_KEY = "telnyx-voice-sdk-active-calls";
+
 /**
  * `webRtcRegion` (call-speed S5): set once an EU-edge client of this page
  * failed before its first login. Every later client of the page, whichever
@@ -241,8 +259,8 @@ export class TelnyxWebphone {
   private loginTimer: number | null = null;
   /** Bounds an EU-edge client's first login; see `abandonEuEdge`. */
   private euEdgeTimer: number | null = null;
-  /** The EU-edge client until its first `telnyx.ready` (call-speed S5). */
-  private euEdgeUnproven: WebphoneSdkClient | null = null;
+  /** A client created while `webRtcRegion` asks for the EU edge, until its first `telnyx.ready` (call-speed S5). */
+  private edgeTrial: { client: WebphoneSdkClient; edge: RtcEdge } | null = null;
   private heartbeatTimer: number | null = null;
   private heartbeatWorker: Worker | null = null;
   private expectedLegTimer: number | null = null;
@@ -946,10 +964,12 @@ export class TelnyxWebphone {
     if (this.connecting) return;
     this.connecting = true;
     const generation = ++this.clientGeneration;
+    // Call-speed S5: one edge per client, from its mint. The test seam `createClient` chooses none.
+    const edge: RtcEdge | null = this.options.createClient ? null : credentials.webRtcRegion === "eu" && !euEdgeFailed ? "eu" : "default";
     try {
       const client = await (this.options.createClient
         ? this.options.createClient(credentials)
-        : this.createTelnyxClient(credentials));
+        : this.createTelnyxClient(credentials, edge === "eu"));
       if (!this.started || generation !== this.clientGeneration) {
         await Promise.resolve(client.disconnect()).catch(() => undefined);
         return;
@@ -960,9 +980,12 @@ export class TelnyxWebphone {
       const current = () => this.started && this.client === client && generation === this.clientGeneration;
       client.on("telnyx.ready", (() => {
         if (!current()) return;
-        if (this.euEdgeUnproven === client) {
-          this.euEdgeUnproven = null;
+        const trial = this.edgeTrial;
+        if (trial?.client === client) {
+          this.edgeTrial = null;
           this.clearTimer("euEdgeTimer");
+          // The edge the switch really reached, as the SDK's registration reported it.
+          this.log({ event: "rtc_edge_connected", reason: "rtc_edge_connected", rtcEdge: trial.edge, rtcRegion: client.region, rtcDc: client.dc });
         }
         this.sdkReady = true;
         this.authenticationNeeded = false;
@@ -1006,11 +1029,15 @@ export class TelnyxWebphone {
       }) as (payload: never) => void);
       const element = this.getRemoteAudio();
       if (element) client.remoteElement = element;
-      if (this.euEdgeUnproven === client) {
-        this.euEdgeTimer = this.schedule(() => {
-          this.euEdgeTimer = null;
-          if (current()) this.abandonEuEdge(client, "login_timeout");
-        }, SDK_LOGIN_TIMEOUT_MS);
+      if (edge) this.matchReconnectToken(client, edge);
+      if (edge && credentials.webRtcRegion === "eu") {
+        this.edgeTrial = { client, edge };
+        if (edge === "eu") {
+          this.euEdgeTimer = this.schedule(() => {
+            this.euEdgeTimer = null;
+            if (current()) this.abandonEuEdge(client, "login_timeout");
+          }, EU_EDGE_LOGIN_TIMEOUT_MS);
+        }
       }
       await client.connect();
     } catch (error) {
@@ -1025,32 +1052,45 @@ export class TelnyxWebphone {
     }
   }
 
-  private async createTelnyxClient(credentials: WebphoneCredentials): Promise<WebphoneSdkClient> {
+  private async createTelnyxClient(credentials: WebphoneCredentials, euEdge: boolean): Promise<WebphoneSdkClient> {
     const { TelnyxRTC } = await this.loadSdk();
-    const euEdge = credentials.webRtcRegion === "eu" && !euEdgeFailed;
     // Send the SDP answer immediately and deliver ICE candidates as they
     // arrive, avoiding the SDK's non-trickle gathering wait before answering.
     // The call-speed S5 switches add their options only when on.
-    const client = new TelnyxRTC({ login_token: credentials.token, trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5,
+    return new TelnyxRTC({ login_token: credentials.token, trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5,
       ...(euEdge ? { region: "eu" } : {}), ...(credentials.webPrefetchIce === true ? { prefetchIceCandidates: true } : {}) });
-    if (euEdge) this.euEdgeUnproven = client;
-    return client;
+  }
+
+  /**
+   * SDK 2.27.10 keeps one signaling session per tab (`voice_sdk_id` in
+   * sessionStorage) and resumes it on whichever edge it connects to. A client
+   * on another edge than the tab last used starts a fresh session, unless a
+   * call may still be reattached to the old one. Nothing is stored or cleared
+   * while the tab stays on the default edge.
+   */
+  private matchReconnectToken(client: WebphoneSdkClient, edge: RtcEdge): void {
+    try {
+      if (typeof sessionStorage === "undefined" || (sessionStorage.getItem(RTC_EDGE_STORAGE_KEY) ?? "default") === edge) return;
+      if (this.call || sessionStorage.getItem(SDK_ACTIVE_CALLS_KEY)) return;
+      client.clearReconnectToken?.();
+      sessionStorage.setItem(RTC_EDGE_STORAGE_KEY, edge);
+    } catch { /* Storage refused: the SDK keeps its session, as before. */ }
   }
 
   /**
    * An EU-edge client that fails before its first login (call-speed S5) is
-   * replaced through the ordinary connect retry, and this page stays on the
-   * SDK's default edge from then on. Nothing rides on it yet: invites arrive
-   * only after login, so the switch can never cost a call. At most once per
-   * page, since no EU-edge client is created after it.
+   * replaced at once on the default edge, and this page stays there. Nothing
+   * rides on it yet: invites arrive only after login, so the switch can never
+   * cost a call, nor count as a failed connection of the phone. At most once
+   * per page, since no EU-edge client is created after it.
    */
-  private abandonEuEdge(client: WebphoneSdkClient, trigger: "connect_rejected" | "socket_closed" | "socket_error" | "sdk_error" | "login_timeout"): boolean {
-    if (this.euEdgeUnproven !== client) return false;
-    this.euEdgeUnproven = null;
+  private abandonEuEdge(client: WebphoneSdkClient, trigger: EuEdgeTrigger): boolean {
+    if (this.edgeTrial?.client !== client || this.edgeTrial.edge !== "eu") return false;
+    this.edgeTrial = null;
     this.clearTimer("euEdgeTimer");
     euEdgeFailed = true;
-    this.log({ event: "rtc_region_fallback", reason: "rtc_region_fallback", trigger });
-    this.dispatch({ type: "client_error" });
+    this.log({ event: "rtc_region_fallback", reason: "rtc_region_fallback", rtcEdge: "eu", rtcTrigger: trigger });
+    this.dispatch({ type: "client_error", edgeFallback: true });
     return true;
   }
 
@@ -1214,7 +1254,7 @@ export class TelnyxWebphone {
     this.loginRequest = null;
     this.loginFailureEvent = null;
     this.lastWarningRefreshAt = -Infinity;
-    this.euEdgeUnproven = null;
+    this.edgeTrial = null;
     this.clearTimer("recoveryTimer");
     this.clearTimer("loginTimer");
     this.clearTimer("euEdgeTimer");

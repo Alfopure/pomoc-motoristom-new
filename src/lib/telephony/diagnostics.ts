@@ -1,5 +1,5 @@
 import { recordDiagnostic } from "@/lib/diagnostics/client";
-import { DIAGNOSTIC_REASONS, isDiagnosticUuid, type DiagnosticEventInput, type DiagnosticOperation, type DiagnosticReason } from "@/lib/diagnostics/types";
+import { DIAGNOSTIC_REASONS, DIAGNOSTIC_RTC_EDGES, DIAGNOSTIC_RTC_REGIONS, DIAGNOSTIC_RTC_TRIGGERS, isDiagnosticRtcDc, isDiagnosticUuid, type DiagnosticEventInput, type DiagnosticOperation, type DiagnosticReason } from "@/lib/diagnostics/types";
 import { expectedVoiceSilence, voiceQualityWarning } from "@/lib/diagnostics/voice-quality";
 import type { ActiveCallPayload } from "./active-calls-model";
 import type { WebphoneCallView } from "./telnyx-webphone";
@@ -34,7 +34,18 @@ export function webphoneDiagnostic(entry: Record<string, unknown>): DiagnosticEv
   if (!reason) return null;
   return { type: "phone_lifecycle", module: "telephony", outcome: ["superseded", "recovery_timeout", "auth_failure", "disconnected", "sdk_socket_error", "early_accept_mismatch", "early_accept_cancelled", "rtc_region_fallback"].includes(reason) ? "failed" : "ok", reason,
     ...(isDiagnosticUuid(entry.deviceSessionId) ? { deviceSessionId: entry.deviceSessionId } : {}),
-    ...(isDiagnosticUuid(entry.callSessionId) ? { callSessionId: entry.callSessionId } : {}) };
+    ...(isDiagnosticUuid(entry.callSessionId) ? { callSessionId: entry.callSessionId } : {}),
+    ...rtcEdgeDiagnostic(reason, entry) };
+}
+
+const oneOf = <T extends string>(values: readonly T[], value: unknown): value is T => typeof value === "string" && (values as readonly string[]).includes(value);
+
+/** Call-speed S5: the edge, the fallback's trigger and the SDK's own region/dc; anything else is dropped. */
+function rtcEdgeDiagnostic(reason: DiagnosticReason, entry: Record<string, unknown>): Partial<DiagnosticEventInput> {
+  if ((reason !== "rtc_region_fallback" && reason !== "rtc_edge_connected") || !oneOf(DIAGNOSTIC_RTC_EDGES, entry.rtcEdge)) return {};
+  if (reason === "rtc_region_fallback") return { rtcEdge: entry.rtcEdge, ...(oneOf(DIAGNOSTIC_RTC_TRIGGERS, entry.rtcTrigger) ? { rtcTrigger: entry.rtcTrigger } : {}) };
+  return { rtcEdge: entry.rtcEdge, ...(oneOf(DIAGNOSTIC_RTC_REGIONS, entry.rtcRegion) ? { rtcRegion: entry.rtcRegion } : {}),
+    ...(isDiagnosticRtcDc(entry.rtcDc) ? { rtcDc: entry.rtcDc } : {}) };
 }
 
 /** Resolve only the current media leg, never the first/most recent app call.

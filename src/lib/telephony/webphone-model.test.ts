@@ -21,7 +21,9 @@ import {
   TOKEN_REFRESH_MIN_MS,
   webphoneRegistrationView,
   webphoneRetryDelayMs,
+  WEBPHONE_EDGE_FALLBACK_RETRY_MS,
   WEBPHONE_INITIAL_STATE,
+  WEBPHONE_MAX_CONNECT_FAILURES,
   WEBPHONE_RECONNECT_MAX_MS,
   type WebphoneCredentials,
   type WebphoneEvent,
@@ -136,6 +138,16 @@ describe("connect lifecycle", () => {
     expect(failed.state.status).toBe("reconnecting");
     expect(failed.state.credentials).toBeNull();
     expect(failed.effects).toContainEqual({ kind: "disconnect" });
+  });
+
+  it("retries an EU-edge fallback at once without counting it towards the attempt limit (call-speed S5)", () => {
+    const fourFailures: WebphoneState = { status: "connecting", attempts: WEBPHONE_MAX_CONNECT_FAILURES - 1, credentials: credentials(), message: null };
+    const fallback = reduceWebphone(fourFailures, { type: "client_error", edgeFallback: true }, { now: NOW });
+    expect(fallback.state).toMatchObject({ status: "reconnecting", attempts: WEBPHONE_MAX_CONNECT_FAILURES - 1, credentials: credentials() });
+    expect(fallback.effects).toEqual([{ kind: "clear_timers" }, { kind: "disconnect" }, { kind: "retry_after", delayMs: WEBPHONE_EDGE_FALLBACK_RETRY_MS }]);
+    // The same state without the marker is the phone's fifth failure.
+    expect(reduceWebphone(fourFailures, { type: "client_error" }, { now: NOW }).state.status).toBe("failed");
+    expect(reduceWebphone({ ...fourFailures, status: "failed" }, { type: "client_error", edgeFallback: true }, { now: NOW }).effects).toEqual([]);
   });
 });
 

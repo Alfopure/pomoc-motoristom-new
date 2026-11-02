@@ -30,6 +30,8 @@ export const WEBPHONE_RECONNECT_MAX_MS = 60_000;
 /** SDK reconnects itself; the application only bounds an unsuccessful recovery. */
 export const WEBPHONE_RECOVERY_TIMEOUT_MS = 60_000;
 export const WEBPHONE_MAX_CONNECT_FAILURES = 5;
+/** Retry on the default edge after the EU edge failed before login (call-speed S5); not a connect failure. */
+export const WEBPHONE_EDGE_FALLBACK_RETRY_MS = 250;
 /** A dial we started stops being interesting after this long without an invite. */
 export const EXPECTED_LEG_TTL_MS = 90_000;
 
@@ -84,7 +86,8 @@ export type WebphoneEvent =
   | { type: "client_ready" }
   | { type: "client_recovering"; message?: string | null }
   | { type: "recovery_failed"; message?: string | null }
-  | { type: "client_error"; message?: string | null; authFailure?: boolean }
+  /** `edgeFallback`: the EU edge failed before login (call-speed S5); the phone itself did not. */
+  | { type: "client_error"; message?: string | null; authFailure?: boolean; edgeFallback?: boolean }
   | { type: "socket_closed" }
   /** The refresh timer fired: mint a new token for the same registration. */
   | { type: "token_expiring" }
@@ -274,6 +277,14 @@ export function reduceWebphone(
 
     case "client_error": {
       if (state.status === "idle" || isTerminalWebphoneStatus(state.status)) return { state, effects: [] };
+      if (event.edgeFallback) {
+        // Not counted towards the attempt limit: the same blip on the default
+        // edge would have stayed in recovery, so the fallback must not end in `failed`.
+        return {
+          state: { ...state, status: "reconnecting", message: event.message ?? "Spojenie telefónu vypadlo, obnovujem ho." },
+          effects: [{ kind: "clear_timers" }, { kind: "disconnect" }, { kind: "retry_after", delayMs: WEBPHONE_EDGE_FALLBACK_RETRY_MS }],
+        };
+      }
       const attempts = state.attempts + 1;
       const message =
         (event.type === "client_error" ? event.message : null) ?? "Spojenie telefónu vypadlo, obnovujem ho.";
