@@ -18,7 +18,7 @@ import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, failureAudits, failureAuditsComplete, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
-import { isCallGoneError, TELNYX_CALL_ENDED_CODE, TELNYX_CALL_GONE_CODES, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { isCallGoneError, isSessionCallGoneError, TELNYX_CALL_ENDED_CODE, TELNYX_CALL_GONE_CODES, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
 import { pendingAudioStillOwned, recordingCommandOutcome, recordingFrozenOff, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
@@ -2486,10 +2486,10 @@ async function executeReduceResult(
       if (command.bestEffort) {
         // The first refusal for the leg was logged; its follow-ups are retired quietly.
         if (!knownGone) deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, command: command.kind, error: message, bestEffort: true });
-        if (input.continuation && (isCallGoneError(error) || command.kind !== "recording_start" && command.kind !== "hangup" && command.kind !== "recording_stop")) await checkpointCommand(key);
+        if (input.continuation && (isSessionCallGoneError(error) || command.kind !== "recording_start" && command.kind !== "hangup" && command.kind !== "recording_stop")) await checkpointCommand(key);
         continue;
       }
-      failure = { command: key, error: message, callGone: isCallGoneError(error), ...(error instanceof CommandPrerequisiteRejectedError ? { prerequisiteRejected: true } : {}) };
+      failure = { command: key, error: message, callGone: isSessionCallGoneError(error), ...(error instanceof CommandPrerequisiteRejectedError ? { prerequisiteRejected: true } : {}) };
       if (input.continuation) {
         rememberFailure();
         // A compensation recursively resumes and can retire this entry. Its

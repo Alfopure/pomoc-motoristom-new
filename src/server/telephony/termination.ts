@@ -4,7 +4,7 @@ import { ownershipRpc, sessionOwnership } from "./ownership";
 import type { SessionOwnershipDeps } from "./session-runner";
 import { SessionLeaseLostError } from "./service-errors";
 import { commandId } from "./telnyx/command-id";
-import { isCallGoneError, type TelnyxClient } from "./telnyx/client";
+import { isSessionCallGoneError, type TelnyxClient } from "./telnyx/client";
 
 type TerminationLeg = { commandId: string; callControlId: string };
 
@@ -91,7 +91,7 @@ export async function reconcileTermination(deps: SessionOwnershipDeps & { telnyx
   };
   const settle = (leg: { commandId: string }, error: unknown) => {
     if (error === null) { completed.push(leg.commandId); return; }
-    if (isCallGoneError(error)) completed.push(leg.commandId);
+    if (isSessionCallGoneError(error)) completed.push(leg.commandId);
     else deps.logger?.({ level: "warn", scope: "termination", sessionId, code: "termination_leg_outcome_pending" });
   };
   // Under contract 2 the legs go out together: the customer's leg does not wait

@@ -1,6 +1,6 @@
 import { SessionLeaseLostError } from "../service-errors";
 import { commandId } from "../telnyx/command-id";
-import { isCallGoneError, TELNYX_CALL_ENDED_CODE } from "../telnyx/client";
+import { isSessionCallGoneError, TELNYX_CALL_ENDED_CODE } from "../telnyx/client";
 import type { TelnyxClientState } from "../telnyx/client-state";
 import { providerEndedLegs } from "../termination";
 import type { EffectsDeps } from "./effects";
@@ -58,7 +58,7 @@ export async function cancelRevokedOffers(deps: EffectsDeps, input: SessionRow, 
         cancelled += 1;
       } catch (error) {
         if (error instanceof SessionLeaseLostError) throw error;
-        if (isCallGoneError(error)) {
+        if (isSessionCallGoneError(error)) {
           cancelled += 1;
           if (String(error.code) === TELNYX_CALL_ENDED_CODE && !deps.endedLegs?.has(callControlId)) deps.endedLegs?.set(callControlId, null);
         }
