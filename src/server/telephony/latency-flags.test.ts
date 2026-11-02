@@ -182,7 +182,7 @@ describe("latency flags", () => {
     errors.mockRestore();
   });
 
-  it("freezes the start mode into every new session as the call really runs, whatever the flags ask", async () => {
+  it("freezes the start mode once, at creation; a legacy writer runs the sequential start and records no far end", async () => {
     vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
     vi.stubEnv("MOTORIST_APP_ENV", "test");
     const h = createTelephonyHarness();
@@ -190,22 +190,31 @@ describe("latency flags", () => {
       internal_auto_bridge: true, api_region: "eu" };
     const deps = { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }), latencyFlags: asked };
     const first = await startOutboundCall(deps, { profileId: PROFILES.o1, role: "dispatcher" }, { to: NUMBERS.customer });
-    const startMode = (sessionId: string) => readMeta(h.session(sessionId) as SessionRow).start_mode;
-    const sequential = { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "eu" };
-    // A legacy writer has no staged startup entry to carry a far-end dial (S6): it records the sequential start it runs.
-    expect(startMode(first.sessionId)).toEqual({ ...sequential, origin: "web" });
-    // ...which is what happened: a 30 s own-leg dial, and the customer only after it answered.
+    const meta = (sessionId: string) => readMeta(h.session(sessionId) as SessionRow);
+    const frozen = { concurrent: true, autoBridge: false, ownLegTimeoutSecs: 12, apiRegion: "eu", origin: "web" };
+    expect(meta(first.sessionId).start_mode).toEqual(frozen);
+    // A legacy writer has no staged startup entry to carry a far-end dial (S6): a 30 s own-leg dial,
+    // the customer only after it answered, and no `far_end`, which is what records the sequential run.
     expect(h.telnyx.of("dial").map(dial => dial.params.timeoutSecs)).toEqual([30]);
     h.telnyx.physical.answered(first.operatorLegCallControlId);
     await h.legEvent(first.operatorLegCallControlId, "call.answered");
     expect(h.telnyx.of("dial")).toHaveLength(2);
-    expect(startMode(first.sessionId)).toEqual({ ...sequential, origin: "web" });
+    expect(meta(first.sessionId).far_end).toBeUndefined();
+    // Never rewritten after creation: the API region stays pinned (S5).
+    expect(meta(first.sessionId).start_mode).toEqual(frozen);
 
     const second = await callColleague(deps, { profileId: PROFILES.o2, role: "dispatcher" }, { targetProfileId: PROFILES.o5 });
-    expect(startMode(second.sessionId)).toEqual({ ...sequential, origin: "web" });
+    expect(meta(second.sessionId).start_mode).toEqual({ ...frozen, autoBridge: true });
+    // Nor does a legacy writer auto-bridge: the colleague, dialled at the caller's answer, gets the explicit bridge.
+    const dials = h.telnyx.of("dial").length;
+    h.telnyx.physical.answered(second.operatorLegCallControlId);
+    await h.legEvent(second.operatorLegCallControlId, "call.answered");
+    expect(h.telnyx.of("dial").slice(dials)).toEqual([expect.objectContaining({ params: expect.not.objectContaining({ bridgeOnAnswer: true }) })]);
+    expect(meta(second.sessionId).far_end).toBeUndefined();
+    expect(meta(second.sessionId).internal_auto_bridge).toBeUndefined();
     // S5: Telnyx created the inbound call; it keeps the region the deployment calls.
     const inbound = await h.inbound({ to: NUMBERS.allianz, answer: false });
-    expect(startMode(inbound.sessionId)).toEqual({ ...sequential, apiRegion: "us", origin: null });
+    expect(meta(inbound.sessionId).start_mode).toEqual({ concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "us", origin: null });
   });
 });
 

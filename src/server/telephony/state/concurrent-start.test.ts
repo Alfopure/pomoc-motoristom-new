@@ -184,7 +184,7 @@ describe("S6.1 the far end is dialled in the startup entry", () => {
     expect(meta(s, sequential.sessionId).start_mode).toMatchObject({ concurrent: false });
   });
 
-  it("records the sequential start it runs when a session frozen concurrent cannot dial so", async () => {
+  it("falls back to the sequential start when a session frozen concurrent cannot dial so, leaving start_mode as created", async () => {
     const t = world();
     const call = await outbound(t, 9013);
     const row = t.h.session(call.sessionId) as SessionRow;
@@ -195,9 +195,11 @@ describe("S6.1 the far end is dialled in the startup entry", () => {
       profileId: actor.profileId, externalNumber: null, clientState: t.h.clientStateOf(call.own), linkTo: null, timeoutSecs: 30 };
     const event: AppEvent = { kind: "app", type: "sweep", id: "startup", actorProfileId: actor.profileId, occurredAt: t.h.now().toISOString() };
     const plan = planInitialCall(session, await loadRoutingContext(t.h.deps, session), event, { ownDial });
+    // One own dial with its sequential timeout, and no far end planned.
     expect(plan.commands).toEqual([ownDial]);
-    expect(readMeta({ ...session, metadata: plan.next.session.metadata } as SessionRow).start_mode)
-      .toMatchObject({ concurrent: false, ownLegTimeoutSecs: 30 });
+    // `start_mode` is written once, at creation (S5 pins the API region in it):
+    // the missing `far_end` is what records the sequential run.
+    expect(plan.next.session.metadata).toBeUndefined();
   });
 
   it("uses the 422 rule only for an already-bridged refusal, never for a call that is gone", () => {
@@ -740,8 +742,9 @@ describe("S6 pause boundaries of a concurrent colleague dial", () => {
   const windows = ["before_authorization", "authorized_before_send", "response_pending", "identity_persisted"] as const;
   const pauseReason = "00000000-0000-4000-8000-000000002501";
 
-  it.each(windows)("%s", async (window) => {
-    const t = world();
+  const cases = windows.flatMap(window => [false, true].map(autoBridge => [window, autoBridge] as const));
+  it.each(cases)("%s (auto-bridge=%s)", async (window, autoBridge) => {
+    const t = world({ internal_auto_bridge: autoBridge });
     let paused = false;
     const pause = async (sessionId: string) => {
       paused = true;
@@ -781,8 +784,12 @@ describe("S6 pause boundaries of a concurrent colleague dial", () => {
       const revoked = decodeClientState(colleagueDials[0].params.clientState)!.offerToken!;
       expect(t.h.session(session.id).presence_cancellations).toHaveProperty(revoked);
       const leg = String(t.h.legs(session.id).find(row => (row.client_state as { offerToken?: string } | null)?.offerToken === revoked)!.telnyx_call_control_id);
+      // The revoked leg is hung up as soon as its identity is known, so even
+      // an auto-bridged dial (bridge_on_answer) has nothing left to connect.
+      expect(t.h.telnyx.physical.legs.get(leg)?.ended).toBe(true);
       t.h.telnyx.physical.answered(own);
       t.h.telnyx.physical.answered(leg);
+      expect(t.h.telnyx.physical.connected(own, leg)).toBe(false);
       await t.h.legEvent(leg, "call.answered");
       expect(t.h.telnyx.physical.legs.get(leg)?.ended).toBe(true);
       expect(t.h.telnyx.physical.connected(own, leg)).toBe(false);

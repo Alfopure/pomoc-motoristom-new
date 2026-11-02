@@ -54,7 +54,7 @@ import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
 import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, ownershipRpc, sessionOwnership, withTelephonyDatabaseBudget } from "./ownership";
-import { concurrentDialFor, freezeStartMode, latencyFlagsOf, providerRegionOf, SEQUENTIAL_OWN_LEG_TIMEOUT_SECS } from "./latency-flags";
+import { concurrentDialFor, freezeStartMode, latencyFlagsOf, providerRegionOf } from "./latency-flags";
 import { humansOnly } from "@/server/profile-kind";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { nativeVoiceEnabled } from "@/lib/app-environment";
@@ -1518,21 +1518,7 @@ async function createSession(
   }
   if (inserted.error?.code === "PT409" && inserted.error.message.includes("request identity")) throw new CallActionError("Obnovte aplikáciu pred novým volaním.", 409, "reload_required");
   if (inserted.error) throw new CallActionError(`Hovor sa nepodarilo založiť: ${inserted.error.message}`, 500);
-  return honestLegacyStartMode(deps, inserted.data);
-}
-
-/**
- * The concurrent start and the colleague auto-bridge need the staged startup
- * entry of writer contract 2 (every production start). A legacy-writer session
- * runs sequentially, so it must not keep a frozen promise it cannot honour.
- */
-async function honestLegacyStartMode(deps: CallActionDeps, session: SessionRow): Promise<SessionRow> {
-  const mode = readMeta(session).start_mode;
-  if (session.writer_contract === 2 || !mode || !mode.concurrent && !mode.autoBridge) return session;
-  const metadata = toJson({ ...readMeta(session), start_mode: { ...mode, concurrent: false, autoBridge: false, ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS } });
-  const updated = await deps.admin.from("motorist_call_sessions").update({ metadata }).eq("id", session.id).select("*").single();
-  if (updated.error) throw new CallActionError(`Hovor sa nepodarilo založiť: ${updated.error.message}`, 500);
-  return updated.data;
+  return inserted.data;
 }
 
 async function markSessionFailed(deps: CallActionDeps, session: SessionRow, reason: string): Promise<void> {

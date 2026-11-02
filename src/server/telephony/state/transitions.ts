@@ -1628,14 +1628,15 @@ function autoBridgedColleagueLeg(b: TransitionBuilder, leg: LegRow): boolean {
 
 /**
  * Frozen `start_mode.autoBridge`: the colleague dial carries `bridge_on_answer`
- * (stable writers only). A colleague with web and mobile endpoints keeps the
- * explicit bridge: the server picks the winner, and with two auto-bridged
+ * (writer contract 2 only, like the concurrent start; a legacy writer keeps
+ * the explicit bridge). A colleague with web and mobile endpoints keeps the
+ * explicit bridge too: the server picks the winner, and with two auto-bridged
  * endpoints Telnyx could bridge one while the server accepts the other (spike
  * S6.0/3 decides whether that can be widened).
  */
 function internalAutoBridge(b: TransitionBuilder): boolean {
   return b.session.direction === "internal" && b.meta.start_mode?.autoBridge === true && !b.meta.internal?.endpoints?.length &&
-    (telephonyStabilityEnabled() || hasStabilityContract(b.session));
+    b.session.writer_contract === 2 && (telephonyStabilityEnabled() || hasStabilityContract(b.session));
 }
 
 /** Internal call: the colleague answered → reserve them, the bridge placed at dial time completes. */
@@ -1895,8 +1896,8 @@ export function planInitialCall(session: SessionRow, context: RoutingContext, ev
     const next = emptyTransition();
     next.call = { status: "outbound" };
     next.notes = ["initial operator dial materialization"];
-    // A session frozen concurrent that cannot run so records what it runs.
-    if (meta.start_mode?.concurrent) next.session.metadata = mergeMeta(session, { start_mode: { ...meta.start_mode, concurrent: false, ownLegTimeoutSecs: own.timeoutSecs } });
+    // `start_mode` is written once, at creation (S5 pins its API region); a
+    // start that runs sequentially is recorded by the missing `far_end`.
     return { next, commands: [own], compensations: [release], guard: null, ignored: null };
   }
   const timeout = meta.start_mode?.ownLegTimeoutSecs;

@@ -316,6 +316,10 @@ export function sessionApiRegion(metadata: unknown): "us" | "eu" {
  * cannot connect directly (start announcements, and with them recording).
  * `autoBridgeEligible` (S6.3) is false for a colleague with web and mobile
  * endpoints, whose winner the server keeps choosing with an explicit bridge.
+ * Written once, at creation (S5 pins the API region in it), so a writer that
+ * cannot run S6 (a legacy contract-1 session) keeps what was frozen: the
+ * concurrent start that really ran is `meta.far_end`, the colleague dial that
+ * really carried the auto-bridge `meta.internal_auto_bridge`.
  */
 export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null; providerRegion: "us" | "eu";
   concurrentEligible?: boolean; autoBridgeEligible?: boolean }): SessionStartMode {
