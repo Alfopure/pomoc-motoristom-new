@@ -684,6 +684,103 @@ describe("an EU session's supervision, recording, termination clean-up and cance
     h.telnyx.failNext("createConference", proseOnly());
     await expect(holdCall(deps(), o1, call.sessionId)).rejects.toMatchObject({ code });
   });
+
+  /**
+   * F4: an EU hangup or recording stop refused without a call-gone code is
+   * confirmed with the leg's status in its region: ended retires the
+   * obligation; alive, unknown or an unreadable status keeps it.
+   */
+  const refused = () => new TelnyxCommandError({ code: "http_404", status: 404, detail: "Resource not found" });
+  const confirmations: Array<{ leg: string; status: (h: TelephonyHarness, leg: string) => void; retired: boolean }> = [
+    { leg: "ended (is_alive: false)", status: (h, leg) => h.telnyx.setCallStatus(leg, { alive: false }), retired: true },
+    { leg: "still alive", status: (h, leg) => h.telnyx.setCallStatus(leg, { alive: true }), retired: false },
+    { leg: "unknown there (404)", status: (h, leg) => h.telnyx.setCallStatus(leg, { alive: false, known: false }), retired: false },
+    { leg: "unreadable (the GET fails)", status: (h) => h.telnyx.failNext("retrieveCall", new TelnyxCommandError({ code: "timeout", status: 504, retryable: true })), retired: false },
+  ];
+  const statusReads = (h: TelephonyHarness, leg: string) => h.telnyx.routes.filter(route => route.method === "GET" && route.path === `/calls/${leg}`);
+
+  it.each(confirmations)("termination clean-up in an EU session, leg $leg: retired=$retired", async ({ status, retired }) => {
+    const { h } = harness();
+    const sessionId = "00000000-0000-4000-8000-00000000d005";
+    const leg = await euSessionWithDial(h, sessionId);
+    h.db.registerRpc("motorist_provider_termination_legs_v2", () => [{ commandId: `${sessionId}-dial`, callControlId: leg }]);
+    h.telnyx.failNext("hangup", refused());
+    status(h, leg);
+    await ownedSessionWork(h.deps, sessionId, () => reconcileTermination({ ...h.deps, telnyx: h.telnyx.client }, sessionId));
+    const checkpoint = h.db.log.find(entry => entry.kind === "rpc" && entry.table === "motorist_provider_termination_checkpoint_v2");
+    expect((checkpoint?.payload as { p_completed_commands: string[] }).p_completed_commands).toEqual(retired ? [`${sessionId}-dial`] : []);
+    expect(statusReads(h, leg).map(route => route.region)).toEqual(["eu"]);
+  });
+
+  it.each(confirmations)("a revoked offer in an EU session, leg $leg: retired=$retired", async ({ status, retired }) => {
+    const { h } = harness();
+    const sessionId = "00000000-0000-4000-8000-00000000d006";
+    const leg = await euSessionWithDial(h, sessionId);
+    h.db.update("motorist_call_sessions", { presence_cancellations: { token: { profileId: PROFILES.o2, requestedAt: h.now().toISOString(), reason: "revoked" } } }, row => row.id === sessionId);
+    h.db.seed("motorist_call_legs", [{ organization_id: ORG, session_id: sessionId, telnyx_call_control_id: leg, role: "operator", profile_id: PROFILES.o2,
+      state: "ringing", client_state: { sid: sessionId, role: "operator", operatorId: PROFILES.o2, offerToken: "token" }, ended_at: null }]);
+    h.telnyx.failNext("hangup", refused());
+    status(h, leg);
+    const result = await ownedSessionWork(h.deps, sessionId, () => cancelRevokedOffers(effectsDeps(h.deps), h.session(sessionId) as SessionRow));
+    expect(result).toMatchObject(retired ? { cancelled: 1, pending: 0 } : { cancelled: 0, pending: 1 });
+    expect(statusReads(h, leg).map(route => route.region)).toEqual(["eu"]);
+  });
+
+  it.each(confirmations)("an operator's hangup in an EU session, customer leg $leg: retired=$retired", async ({ status, retired }) => {
+    const { h, deps } = harness({ api_region: "eu" });
+    const call = await outboundTalking(h, deps());
+    h.telnyx.failAlways("hangup", refused());
+    status(h, call.customer);
+    status(h, call.operatorLegCallControlId);
+    await hangupCall(deps(), o1, call.sessionId).catch(() => undefined);
+    const hangups = h.callEvents(call.sessionId).flatMap(row =>
+      ((row.normalized_payload as { commands?: Array<{ kind: string; ok: boolean; skipped: boolean }> } | null)?.commands ?? []).filter(command => command.kind === "hangup"));
+    expect(hangups.length).toBeGreaterThan(0);
+    expect(hangups.map(command => command.ok && command.skipped)).toEqual(hangups.map(() => retired));
+    expect(statusReads(h, call.customer).length).toBeGreaterThan(0);
+    expect(statusReads(h, call.customer).every(route => route.region === "eu")).toBe(true);
+  });
+
+  it("asks nothing in a `us` session: its refusals keep today's meaning", async () => {
+    const { h } = harness();
+    const sessionId = "00000000-0000-4000-8000-00000000d007";
+    const leg = await euSessionWithDial(h, sessionId, "us");
+    h.db.registerRpc("motorist_provider_termination_legs_v2", () => [{ commandId: `${sessionId}-dial`, callControlId: leg }]);
+    h.telnyx.failNext("hangup", refused());
+    h.telnyx.setCallStatus(leg, { alive: false });
+    await ownedSessionWork(h.deps, sessionId, () => reconcileTermination({ ...h.deps, telnyx: h.telnyx.client }, sessionId));
+    const checkpoint = h.db.log.find(entry => entry.kind === "rpc" && entry.table === "motorist_provider_termination_checkpoint_v2");
+    expect((checkpoint?.payload as { p_completed_commands: string[] }).p_completed_commands).toEqual([]);
+    expect(statusReads(h, leg)).toEqual([]);
+  });
+
+  // F1: a stop refused only in prose ("does not exist") is no longer taken for a gone leg in an EU session.
+  it.each(confirmations.flatMap(confirmation => [{ ...confirmation, refusal: "a bare 404" }, { ...confirmation, refusal: "a prose-only 404" }]))(
+    "a recording stop in an EU session refused with $refusal, customer leg $leg: stopped=$retired", async ({ status, retired, refusal }) => {
+    const { h, deps } = harness({ api_region: "eu" });
+    for (const key of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED", "TELNYX_RECORDING_CONFERENCE_VERIFIED",
+      "TELNYX_RECORDING_TRANSFER_VERIFIED", "TELNYX_RECORDING_CHANNELS_VERIFIED"]) vi.stubEnv(key, "true");
+    h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(),
+      inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
+    h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), outboundStartAnnouncements: true } } }, () => true);
+    const call = await startOutboundCall(deps(), o1, { to: NUMBERS.customer, requestId: requestId() });
+    h.telnyx.physical.answered(call.operatorLegCallControlId);
+    await h.legEvent(call.operatorLegCallControlId, "call.answered");
+    const customer = String(h.legs(call.sessionId).find(leg => leg.role === "customer")!.telnyx_call_control_id);
+    h.telnyx.physical.answered(customer);
+    await h.legEvent(customer, "call.answered", { direction: "outgoing" });
+    await completeCallAnnouncements(h, call.sessionId);
+    const recorded = String(h.telnyx.of("recordingStart").at(-1)!.params.callControlId);
+    h.telnyx.failNext("recordingStop", refusal === "a bare 404" ? refused() : proseOnly());
+    status(h, recorded);
+    await stopCallRecording(deps(), o1, call.sessionId).catch(() => undefined);
+    const stops = h.callEvents(call.sessionId).flatMap(row =>
+      ((row.normalized_payload as { commands?: Array<{ kind: string; ok: boolean }> } | null)?.commands ?? []).filter(command => command.kind === "recording_stop"));
+    expect(stops.length).toBeGreaterThan(0);
+    expect(stops[0].ok).toBe(retired);
+    expect(statusReads(h, recorded).length).toBeGreaterThan(0);
+    expect(statusReads(h, recorded).every(route => route.region === "eu")).toBe(true);
+  });
 });
 
 describe("the EU switch end to end from the database flags (production guard)", () => {

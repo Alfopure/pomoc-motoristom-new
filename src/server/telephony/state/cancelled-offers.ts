@@ -1,6 +1,6 @@
 import { SessionLeaseLostError } from "../service-errors";
 import { commandId } from "../telnyx/command-id";
-import { isSessionCallGoneError, TELNYX_CALL_ENDED_CODE } from "../telnyx/client";
+import { confirmEuLegEnded, isSessionCallGoneError, TELNYX_CALL_ENDED_CODE } from "../telnyx/client";
 import type { TelnyxClientState } from "../telnyx/client-state";
 import { providerEndedLegs } from "../termination";
 import type { EffectsDeps } from "./effects";
@@ -62,6 +62,8 @@ export async function cancelRevokedOffers(deps: EffectsDeps, input: SessionRow, 
           cancelled += 1;
           if (String(error.code) === TELNYX_CALL_ENDED_CODE && !deps.endedLegs?.has(callControlId)) deps.endedLegs?.set(callControlId, null);
         }
+        // In an EU session a refusal without a call-gone code is confirmed by the leg's status first (S5).
+        else if (await confirmEuLegEnded(deps.telnyx, callControlId, error)) cancelled += 1;
         else {
           pending += 1;
           deps.logger?.({ level: "warn", scope: "offers", sessionId: session.id, offerToken: token, code: "offer_cancel_pending" });

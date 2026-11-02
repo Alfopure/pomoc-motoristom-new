@@ -18,7 +18,7 @@ import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, failureAudits, failureAuditsComplete, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
-import { isCallGoneError, isSessionCallGoneError, TELNYX_CALL_ENDED_CODE, TELNYX_CALL_GONE_CODES, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { confirmEuLegEnded, isCallGoneError, isSessionCallGoneError, TELNYX_CALL_ENDED_CODE, TELNYX_CALL_GONE_CODES, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
 import { pendingAudioStillOwned, recordingCommandOutcome, recordingFrozenOff, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
@@ -1034,19 +1034,23 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       await toLeg(deps, leg, "control", () => telnyx.answer({ callControlId: leg, commandId: command.commandId, clientState: encodeClientState(command.clientState) }));
       return { skipped: false };
     }
-    case "hangup":
+    case "hangup": {
+      let leg: string | null = null;
       try {
-        const leg = resolveLeg(ctx, command.leg);
-        await toLeg(deps, leg, "control", () => telnyx.hangup({ callControlId: leg, commandId: command.commandId }), command.commandId);
+        leg = resolveLeg(ctx, command.leg);
+        const target = leg;
+        await toLeg(deps, target, "control", () => telnyx.hangup({ callControlId: target, commandId: command.commandId }), command.commandId);
       } catch (error) {
         // The leg is already gone (the far end hung up a moment earlier): that
         // is exactly the outcome we asked for, not a failed transition. Without
         // this, an operator pressing "Ukončiť" on a call the caller just ended
-        // gets a 502 for a session that is already terminal.
-        if (!isLegAlreadyGone(error)) throw error;
+        // gets a 502 for a session that is already terminal. In an EU session
+        // a refusal without a call-gone code is confirmed first (S5).
+        if (!isLegAlreadyGone(error) && !(leg && await confirmEuLegEnded(telnyx, leg, error))) throw error;
         return { skipped: true, detail: { reason: command.reason, alreadyGone: true, ...(error instanceof KnownCallGoneError ? { notSent: true } : {}) } };
       }
       return { skipped: false, detail: { reason: command.reason } };
+    }
     case "bridge": {
       if (command.recordingConferenceName) return executeRecordedConnection(deps, ctx, command);
       assertLegsLive(deps, [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)], "control");
@@ -1103,16 +1107,23 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         clientState: encodeClientState({ sid: ctx.session.id, role: "customer", intent: recordingIntent(command.recorderId) }) }));
       return { skipped: false, detail: { providerRecordingId: recording.recordingId } };
     }
-    case "recording_stop":
+    case "recording_stop": {
       await deps.renewLease?.();
-      try { const leg = resolveLeg(ctx, command.leg); await toLeg(deps, leg, "control", () => telnyx.recordingStop({ callControlId: leg, commandId: command.commandId })); }
-      catch (error) {
+      let leg: string | null = null;
+      try {
+        leg = resolveLeg(ctx, command.leg);
+        const target = leg;
+        await toLeg(deps, target, "control", () => telnyx.recordingStop({ callControlId: target, commandId: command.commandId }));
+      } catch (error) {
         // After our own accepted hangup the capture ends with the leg; say so
-        // instead of reporting a STOP that was never sent.
+        // instead of reporting a STOP that was never sent. A leg that has
+        // ended stopped its capture with it (in an EU session only on a
+        // call-gone code, or a refusal confirmed by its status, S5).
         if (error instanceof KnownCallGoneError) return { skipped: true, detail: { reason: "call_gone", notSent: true } };
-        if (!isCallGoneError(error)) throw error;
+        if (!isSessionCallGoneError(error) && !(leg && await confirmEuLegEnded(telnyx, leg, error))) throw error;
       }
       return { skipped: false };
+    }
     case "playback_start": {
       const prompt = resolvePrompt(deps, ctx, command.media);
       const common = {
@@ -1676,8 +1687,12 @@ async function executeOverlappedRun(deps: EffectsDeps, ctx: ExecutionContext, ru
     else if (action.action === "hangup" && typeof deps.endedLegs?.get(action.callControlId) !== "string") deps.endedLegs?.set(action.callControlId, action.commandId);
     if (outcome.status === "fulfilled") {
       out.set(commandKey(command), Promise.resolve({ skipped: false, ...(reason ? { detail: { reason } } : {}) }));
-    } else if (command.kind === "hangup" && isLegAlreadyGone(outcome.reason)) {
-      out.set(commandKey(command), Promise.resolve({ skipped: true, detail: { reason, alreadyGone: true, ...(outcome.reason instanceof KnownCallGoneError ? { notSent: true } : {}) } }));
+    } else if (command.kind === "hangup") {
+      const refusal: unknown = outcome.reason;
+      const gone = { skipped: true, detail: { reason, alreadyGone: true, ...(refusal instanceof KnownCallGoneError ? { notSent: true } : {}) } };
+      // In an EU session a refusal without a call-gone code is confirmed first (S5).
+      out.set(commandKey(command), isLegAlreadyGone(refusal) ? Promise.resolve(gone)
+        : confirmEuLegEnded(deps.telnyx, action.callControlId, refusal).then((ended) => { if (!ended) throw refusal; return gone; }));
     } else {
       out.set(commandKey(command), Promise.reject(outcome.reason));
     }
@@ -2432,7 +2447,7 @@ async function executeReduceResult(
           const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
           if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
           ctx.session = latest.data;
-          const changed = recordingCommandOutcome(ctx.session, command, false, deps.now().toISOString(), isCallGoneError(error), error instanceof EffectsError && error.message === "recording_admission_denied" || command.kind === "recording_start" && isCallGoneError(error));
+          const changed = recordingCommandOutcome(ctx.session, command, false, deps.now().toISOString(), isSessionCallGoneError(error), error instanceof EffectsError && error.message === "recording_admission_denied" || command.kind === "recording_start" && isSessionCallGoneError(error));
           const update = emptyTransition();
           update.session.metadata = changed.metadata;
           session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
