@@ -2,7 +2,7 @@ import { TelnyxWebphone, type WebphoneSnapshot, type IncomingOfferPolicy, type T
 import { WEBPHONE_INITIAL_STATE, webphoneRegistrationView } from "./webphone-model";
 
 const idle = (): WebphoneSnapshot => ({ status: "idle", registration: webphoneRegistrationView(WEBPHONE_INITIAL_STATE), sipUsername: null, deviceSessionId: null, call: null, message: null });
-type Command = "answer" | "hangup" | "confirmCallEnded" | "toggleMute" | "sendDtmf" | "expectOperatorLeg" | "dismissCallError" | "setIncomingOfferPolicy" | "beginOperatorRequest" | "endOperatorRequest";
+type Command = "answer" | "hangup" | "confirmCallEnded" | "toggleMute" | "sendDtmf" | "expectOperatorLeg" | "dismissCallError" | "setIncomingOfferPolicy" | "beginOperatorRequest" | "endOperatorRequest" | "expectOperatorRequest" | "releaseOperatorRequest";
 type RequestIntent = { id: string; expiresAt: number; pending: boolean };
 const REQUEST_INTENT_MS = 60_000;
 /** Reuse a foreground phone between calls without keeping an idle PWA online indefinitely. */
@@ -183,11 +183,21 @@ export class CoordinatedWebphone {
         break;
       }
       case "expectOperatorLeg": {
-        const leg = value as { callControlId?: unknown; sessionId?: unknown; timingOperationId?: unknown } | null;
+        const leg = value as { callControlId?: unknown; sessionId?: unknown; timingOperationId?: unknown; requestId?: unknown } | null;
         if (typeof leg?.callControlId !== "string" || typeof leg.sessionId !== "string") throw new Error("Neplatný hovor.");
         phone.expectOperatorLeg({ callControlId: leg.callControlId, sessionId: leg.sessionId,
-          ...(typeof leg.timingOperationId === "string" ? { timingOperationId: leg.timingOperationId } : {}) }); break;
+          ...(typeof leg.timingOperationId === "string" ? { timingOperationId: leg.timingOperationId } : {}),
+          ...(typeof leg.requestId === "string" ? { requestId: leg.requestId } : {}) }); break;
       }
+      case "expectOperatorRequest": {
+        const request = value as { requestId?: unknown; timingOperationId?: unknown } | null;
+        if (typeof request?.requestId !== "string") throw new Error("Neplatná požiadavka hovoru.");
+        phone.expectOperatorRequest({ requestId: request.requestId,
+          ...(typeof request.timingOperationId === "string" ? { timingOperationId: request.timingOperationId } : {}) }); break;
+      }
+      case "releaseOperatorRequest":
+        if (typeof value !== "string") throw new Error("Neplatná požiadavka hovoru.");
+        phone.releaseOperatorRequest(value); break;
     }
   }
 
@@ -208,7 +218,10 @@ export class CoordinatedWebphone {
   confirmCallEnded(callId: string) { return this.command("confirmCallEnded", callId).catch((error) => this.report(error)); }
   toggleMute() { void this.command("toggleMute").catch((error) => this.report(error)); }
   sendDtmf(digit: string) { void this.command("sendDtmf", digit).catch((error) => this.report(error)); }
-  expectOperatorLeg(leg: { callControlId: string; sessionId: string; timingOperationId?: string }) { void this.command("expectOperatorLeg", leg).catch((error) => this.report(error)); }
+  expectOperatorLeg(leg: { callControlId: string; sessionId: string; timingOperationId?: string; requestId?: string }) { void this.command("expectOperatorLeg", leg).catch((error) => this.report(error)); }
+  /** Early accept (call-speed S3) on the media owner. Only an optimisation: a lost message leaves the exact response match. */
+  expectOperatorRequest(request: { requestId: string; timingOperationId?: string }) { void this.command("expectOperatorRequest", request).catch(() => undefined); }
+  releaseOperatorRequest(requestId: string) { void this.command("releaseOperatorRequest", requestId).catch((error) => this.report(error)); }
   setIncomingOfferPolicy(policy: IncomingOfferPolicy) {
     if ((policy.presenceRevision ?? 0) < (this.incomingPolicy.presenceRevision ?? 0)) return;
     this.storeIncomingPolicy(policy);

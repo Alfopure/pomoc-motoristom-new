@@ -32,7 +32,7 @@ export function webphoneDiagnostic(entry: Record<string, unknown>): DiagnosticEv
     : entry.status === "superseded" ? "superseded"
     : entry.status === "failed" ? "disconnected" : null;
   if (!reason) return null;
-  return { type: "phone_lifecycle", module: "telephony", outcome: ["superseded", "recovery_timeout", "auth_failure", "disconnected", "sdk_socket_error"].includes(reason) ? "failed" : "ok", reason,
+  return { type: "phone_lifecycle", module: "telephony", outcome: ["superseded", "recovery_timeout", "auth_failure", "disconnected", "sdk_socket_error", "early_accept_mismatch", "early_accept_cancelled"].includes(reason) ? "failed" : "ok", reason,
     ...(isDiagnosticUuid(entry.deviceSessionId) ? { deviceSessionId: entry.deviceSessionId } : {}),
     ...(isDiagnosticUuid(entry.callSessionId) ? { callSessionId: entry.callSessionId } : {}) };
 }

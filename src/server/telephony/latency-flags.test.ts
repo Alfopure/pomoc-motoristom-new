@@ -6,7 +6,7 @@ import { FAKE_TELNYX_ENV } from "@/test/fake-telnyx";
 import { callColleague, createRateLimiter, startOutboundCall } from "./call-actions";
 import {
   clearLatencyFlagsCache, concurrentDialFor, defaultLatencyFlags, envLatencyFlags, freezeStartMode, LATENCY_FLAGS_CACHE_TTL_MS,
-  mobileVoiceTuning, providerRegionOf, readLatencyFlags, SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, webCallTuning, type LatencyFlags,
+  latencyFlagsOf, mobileVoiceTuning, providerRegionOf, readLatencyFlags, SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, webCallTuning, type LatencyFlags,
 } from "./latency-flags";
 import { getTelnyxConfig } from "./telnyx/env";
 import { readMeta, type SessionRow } from "./state/types";
@@ -139,5 +139,65 @@ describe("latency flags", () => {
     expect(startMode(second.sessionId)).toEqual({ ...sequential, origin: "web" });
     const inbound = await h.inbound({ to: NUMBERS.allianz, answer: false });
     expect(startMode(inbound.sessionId)).toEqual({ ...sequential, origin: null });
+  });
+});
+
+describe("own-leg request header guard (call-speed S3)", () => {
+  const PRIVACY_RPC = "motorist_telephony_start_privacy_v1";
+  const env = { TELEPHONY_LATENCY_FLAGS: JSON.stringify({ own_leg_request_header: true }) };
+  const asks = (fake: ReturnType<typeof createFakeSupabase>) => fake.db.log.filter(row => row.kind === "rpc" && row.table === PRIVACY_RPC).length;
+
+  it("honours the switch only when the database confirms start privacy", async () => {
+    const fake = settings();
+    fake.db.registerRpc(PRIVACY_RPC, () => true);
+    expect((await readLatencyFlags(fake.admin, ORG, { logger: () => {}, env })).own_leg_request_header).toBe(true);
+    expect(asks(fake)).toBe(1);
+  });
+
+  it.each([
+    ["denies it", (fake: ReturnType<typeof createFakeSupabase>) => fake.db.registerRpc(PRIVACY_RPC, () => false)],
+    ["predates the check (no function)", () => undefined],
+    ["fails the check", (fake: ReturnType<typeof createFakeSupabase>) => {
+      fake.db.registerRpc(PRIVACY_RPC, () => true);
+      fake.db.failNext(PRIVACY_RPC, "rpc", "connection reset");
+    }],
+  ])("keeps the switch off when the database %s, and logs that once without values", async (_case, arrange) => {
+    const logger = vi.fn();
+    vi.useFakeTimers();
+    for (let round = 0; round < 2; round += 1) {
+      const fake = settings({ own_leg_request_header: true });
+      arrange(fake);
+      expect((await readLatencyFlags(fake.admin, ORG, { logger, env: {} })).own_leg_request_header).toBe(false);
+      vi.advanceTimersByTime(LATENCY_FLAGS_CACHE_TTL_MS);
+    }
+    const warnings = logger.mock.calls.map(([entry]) => entry).filter(entry => entry.level === "warn");
+    expect(warnings).toEqual([{ level: "warn", scope: "latency-flags", code: "latency_flag_ignored", problem: "own_leg_request_header:start_privacy_unconfirmed" }]);
+  });
+
+  it("keeps the switch off when env asks for it but the flags read fails and privacy is unconfirmed", async () => {
+    const fake = settings();
+    fake.db.failNext("motorist_telephony_settings", "select", "connection reset");
+    expect((await readLatencyFlags(fake.admin, ORG, { logger: () => {}, env })).own_leg_request_header).toBe(false);
+  });
+
+  it("asks only while the switch is on, and caches the answer with the flags", async () => {
+    const off = settings();
+    await readLatencyFlags(off.admin, ORG, { logger: () => {}, env: {} });
+    expect(asks(off)).toBe(0);
+    clearLatencyFlagsCache();
+    const on = settings({ own_leg_request_header: true });
+    on.db.registerRpc(PRIVACY_RPC, () => true);
+    vi.useFakeTimers();
+    await readLatencyFlags(on.admin, ORG, { logger: () => {}, env: {} });
+    await readLatencyFlags(on.admin, ORG, { logger: () => {}, env: {} });
+    expect(asks(on)).toBe(1);
+    vi.advanceTimersByTime(LATENCY_FLAGS_CACHE_TTL_MS);
+    await readLatencyFlags(on.admin, ORG, { logger: () => {}, env: {} });
+    expect(asks(on)).toBe(2);
+  });
+
+  it("never honours it from env alone, where no database confirmed anything", () => {
+    vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ own_leg_request_header: true, hold_fast_web: true }));
+    expect(latencyFlagsOf({ logger: () => {} })).toMatchObject({ own_leg_request_header: false, hold_fast_web: true });
   });
 });

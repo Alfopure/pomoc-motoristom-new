@@ -16,7 +16,7 @@ import {
 } from "@/lib/telephony/active-calls-model";
 import { matchesRequestedDeferOffer, matchesRequestedIncomingOffer } from "@/lib/telephony/browser-invite";
 import { telephonyJson, TELEPHONY_TIMEOUT_MS } from "@/lib/telephony/client-request";
-import { prepareCallStartRequest, type PendingCallStartRequest } from "@/lib/telephony/call-start-request";
+import { prepareCallStartRequest, withEarlyAccept, type PendingCallStartRequest } from "@/lib/telephony/call-start-request";
 import { beginBrowserCallStep } from "@/lib/telephony/call-timing";
 import { browserCallTelemetry } from "@/lib/telephony/browser-call-telemetry";
 import { browserCallStartError, checkMicrophone, type PhoneReadiness } from "@/lib/telephony/call-preflight";
@@ -880,7 +880,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   }, []);
   const dial = useCallback(async (phoneNumber: string, caseId?: string, options?: { lineId?: string | null; callbackTargetVerificationId?: string }) => {
     const operation = prepareStart("/api/telephony/calls", { to: phoneNumber, caseId, lineId: options?.lineId ?? undefined, callbackTargetVerificationId: options?.callbackTargetVerificationId });
-    const execute = async (webphone: CoordinatedWebphone | null) => {
+    const execute = withEarlyAccept(operation.requestId, () => snapshotRef.current.tuning?.webEarlyAccept === true, async (webphone: CoordinatedWebphone | null) => {
       pendingStartRef.current = operation;
       const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
         operation.path,
@@ -913,10 +913,11 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           callControlId: result.body.operatorLegCallControlId,
           sessionId: result.body.sessionId,
           timingOperationId: operation.requestId,
+          requestId: operation.requestId,
         });
       }
       refreshRef.current?.();
-    };
+    });
     if (pendingStartRef.current) await reconcileCallStart(execute);
     else await startOutboundRequest(execute, operation.requestId);
   }, [startOutboundRequest, reconcileCallStart, prepareStart]);
@@ -929,7 +930,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
    */
   const callBackRequest = useCallback(async (requestId: string, verificationId?: string) => {
     const operation = prepareStart(`/api/telephony/callbacks/${encodeURIComponent(requestId)}/call`, { verificationId });
-    const execute = async (webphone: CoordinatedWebphone | null) => {
+    const execute = withEarlyAccept(operation.requestId, () => snapshotRef.current.tuning?.webEarlyAccept === true, async (webphone: CoordinatedWebphone | null) => {
       pendingStartRef.current = operation;
       const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
         operation.path,
@@ -960,10 +961,11 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           callControlId: result.body.operatorLegCallControlId,
           sessionId: result.body.sessionId,
           timingOperationId: operation.requestId,
+          requestId: operation.requestId,
         });
       }
       refreshRef.current?.();
-    };
+    });
     if (pendingStartRef.current) await reconcileCallStart(execute);
     else await startOutboundRequest(execute, operation.requestId);
   }, [startOutboundRequest, reconcileCallStart, prepareStart]);
@@ -975,7 +977,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
    */
   const callColleague = useCallback(async (targetProfileId: string) => {
     const operation = prepareStart("/api/telephony/calls/internal", { targetProfileId });
-    const execute = async (webphone: CoordinatedWebphone | null) => {
+    const execute = withEarlyAccept(operation.requestId, () => snapshotRef.current.tuning?.webEarlyAccept === true, async (webphone: CoordinatedWebphone | null) => {
       pendingStartRef.current = operation;
       const result = await telephonyJson<{ error?: string; sessionId?: string; operatorLegCallControlId?: string }>(
         operation.path,
@@ -1006,10 +1008,11 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
           callControlId: result.body.operatorLegCallControlId,
           sessionId: result.body.sessionId,
           timingOperationId: operation.requestId,
+          requestId: operation.requestId,
         });
       }
       refreshRef.current?.();
-    };
+    });
     if (pendingStartRef.current) await reconcileCallStart(execute);
     else await startOutboundRequest(execute, operation.requestId);
   }, [startOutboundRequest, reconcileCallStart, prepareStart]);

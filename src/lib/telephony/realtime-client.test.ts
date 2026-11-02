@@ -20,7 +20,8 @@ const ORG = "8c2f9b1e-0f3d-4c1a-9f61-3b2c1d4e5f60";
 type FakeChannel = RealtimeChannelLike & {
   topic: string;
   privateChannel: boolean;
-  emit(): void;
+  filter?: { event: string };
+  emit(payload?: unknown): void;
   report(status: string): void;
   removed: boolean;
 };
@@ -35,7 +36,8 @@ function createFakeClient() {
         topic,
         privateChannel: options?.config?.private === true,
         removed: false,
-        on(_type, _filter, callback) {
+        on(_type, filter, callback) {
+          channel.filter = filter;
           handler = callback;
           return channel;
         },
@@ -43,8 +45,8 @@ function createFakeClient() {
           statusCallback = callback ?? null;
           return channel;
         },
-        emit() {
-          handler?.({ event: "UPDATE" });
+        emit(payload = { event: "UPDATE" }) {
+          handler?.(payload);
         },
         report(status: string) {
           statusCallback?.(status);
@@ -100,6 +102,20 @@ describe("telephony realtime subscription", () => {
     stopSecond();
     expect(channels[0].removed).toBe(true);
     expect(telephonyRealtimeStatus(ORG)).toBeNull();
+  });
+
+  it("treats the content-free doorbell (and any other message) only as a refetch signal", () => {
+    const { client, channels } = createFakeClient();
+    const onChange = vi.fn();
+    const stop = subscribeTelephonyRealtime({ organizationId: ORG, onChange, seams: seamsFor(client, []) });
+    // 20261031100000: `realtime.send('{}', 'invalidate', topic, true)`.
+    expect(channels[0].filter).toEqual({ event: "*" });
+    channels[0].emit({ type: "broadcast", event: "invalidate", payload: {} });
+    channels[0].emit({ type: "broadcast", event: "UPDATE", payload: { record: { metadata: { secret: true } } } });
+    expect(onChange).toHaveBeenCalledTimes(2);
+    // Nothing from the message reaches the subscriber.
+    for (const call of onChange.mock.calls) expect(call).toEqual([]);
+    stop();
   });
 
   it("refetches once the channel is connected, because a reconnect may have missed messages", () => {
