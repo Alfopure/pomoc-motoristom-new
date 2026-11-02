@@ -34,6 +34,16 @@ describe("latency flags", () => {
     expect(envLatencyFlags({})).toEqual(flags);
   });
 
+  it("lets the phone cache its JWT only while both mobile credential rotations are on (S8.1)", () => {
+    const tuning = (flags: Record<string, unknown>) => mobileVoiceTuning(envLatencyFlags({ TELEPHONY_LATENCY_FLAGS: JSON.stringify(flags) }));
+    expect(defaultLatencyFlags()).toMatchObject({ mobile_rotate_on_takeover: false, mobile_rotate_on_deactivation: false });
+    expect(tuning({ client: { mobileTokenCache: true } }).mobileTokenCache).toBe(false);
+    expect(tuning({ client: { mobileTokenCache: true }, mobile_rotate_on_takeover: true }).mobileTokenCache).toBe(false);
+    expect(tuning({ client: { mobileTokenCache: true }, mobile_rotate_on_deactivation: true }).mobileTokenCache).toBe(false);
+    expect(tuning({ client: { mobileTokenCache: true }, mobile_rotate_on_takeover: true, mobile_rotate_on_deactivation: true }).mobileTokenCache).toBe(true);
+    expect(tuning({ mobile_rotate_on_takeover: true, mobile_rotate_on_deactivation: true }).mobileTokenCache).toBe(false);
+  });
+
   it("reads env alone", () => {
     const flags = envLatencyFlags({ TELEPHONY_LATENCY_FLAGS: JSON.stringify({ internal_lean_path: true, api_region: "eu",
       concurrent_dial: { internal: { web: true } }, own_leg_timeout_secs_concurrent: 15, client: { webEarlyAccept: true } }) });

@@ -142,6 +142,8 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   private var outgoingTimer: Timer?
   private var finishedCalls = [UUID]()
   private var preparedPush: UUID?
+  /** The current client logs in with a JWT the app cached in the Keychain (S8.1), not yet ready. */
+  private var cachedLogin = false
   /** A push refused before JS listened (cold launch) is still reported from the snapshot. */
   private var lastPushRejection: [String: Any]?
 
@@ -431,24 +433,34 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     diag("phone.start", ["pushkit": registry != nil])
   }
 
-  func connect(token: String) throws {
+  /** The app's login switches (S8). Without them the login is today's: region auto, no trickle ICE. */
+  struct ConnectOptions {
+    var cached = false, eu = false, trickleIce = false
+    init(_ value: [String: Any]? = nil) {
+      cached = value?["cached"] as? Bool == true; eu = value?["region"] as? String == "eu"; trickleIce = value?["trickleIce"] as? Bool == true
+    }
+  }
+  func connect(token: String, options connectOptions: ConnectOptions = ConnectOptions()) throws {
     guard Self.enabled, !token.isEmpty else { diag("phone.connect", ["result": "refused", "enabled": Self.enabled]); throw PhoneError() }
     start()
     // A configuration is created first so SDK construction cannot enable logs.
     let options = TxConfig(token: token, pushDeviceToken: pushToken,
       pushEnvironment: .production, logLevel: .none, reconnectClient: true,
-      debug: false, enableCallReports: false)
+      debug: false, useTrickleIce: connectOptions.trickleIce, enableCallReports: false)
+    // The SDK keeps the region on the push path and falls back to auto when it fails.
+    let server = TxServerConfiguration(region: connectOptions.eu ? .eu : .auto)
     diag("voice.enabled", ["value": true, "was": UserDefaults.standard.bool(forKey: "linka.voice.enabled"), "source": "connect"])
     UserDefaults.standard.set(true, forKey: "linka.voice.enabled")
     let prepare = pushes.first.map { preparedPush != $0.key && calls[$0.key] == nil } ?? false
     diag("phone.connect", ["path": pushes.isEmpty ? calls.isEmpty ? "login" : "kept" : "push", "replaced": pushes.isEmpty ? calls.isEmpty : prepare,
       "call": pushes.first?.key as Any, "pushes": pushes.count, "calls": calls.count, "prepared": preparedPush != nil,
-      "had_client": client != nil, "push_token": pushToken != nil])
+      "had_client": client != nil, "push_token": pushToken != nil, "cached": connectOptions.cached, "region": connectOptions.eu ? "eu" : "auto",
+      "trickle": connectOptions.trickleIce])
     if let pending = pushes.first {
       if preparedPush != pending.key && calls[pending.key] == nil {
         ready = false; connectingPushToken = pushToken
-        replaceClient()
-        do { try client?.processVoIPNotification(txConfig: options, serverConfiguration: TxServerConfiguration(), pushMetaData: pending.value) }
+        replaceClient(); cachedLogin = connectOptions.cached
+        do { try client?.processVoIPNotification(txConfig: options, serverConfiguration: server, pushMetaData: pending.value) }
         catch { diag("phone.connect_error", ["path": "push", "call": pending.key, "error": error]); throw error }
         preparedPush = pending.key
       }
@@ -456,8 +468,8 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
       emit(["type": "push", "callId": pending.key.uuidString, "providerLegId": pending.value["telnyx_leg_id"] as? String ?? ""])
     } else if calls.isEmpty {
       ready = false; connectingPushToken = pushToken
-      replaceClient()
-      do { try client?.connect(txConfig: options) } catch { diag("phone.connect_error", ["path": "login", "error": error]); throw error }
+      replaceClient(); cachedLogin = connectOptions.cached
+      do { try client?.connect(txConfig: options, serverConfiguration: server) } catch { diag("phone.connect_error", ["path": "login", "error": error]); throw error }
     }
   }
 
@@ -502,7 +514,7 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
     clientDelegate = nil
     client?.delegate = nil
     client?.disconnect()
-    client = nil; ready = false; registeredPushToken = nil; connectingPushToken = nil; expected = nil; outgoingTimer?.invalidate(); outgoingTimer = nil
+    client = nil; ready = false; cachedLogin = false; registeredPushToken = nil; connectingPushToken = nil; expected = nil; outgoingTimer?.invalidate(); outgoingTimer = nil
     for id in Set(reported).union(calls.keys).union(pushes.keys) { finish(id, reason: .failed, source: "disconnect") }
     calls.removeAll(); pushes.removeAll(); sessions.removeAll(); preparedPush = nil; audioActive = false
     emit(["type": "registration", "state": "unregistered"])
@@ -915,8 +927,8 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
 
   func onClientReady() {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onClientReady() }; return }
-    diag("sdk.ready", ["reported": reported.count, "push_token": connectingPushToken != nil])
-    ready = true; registeredPushToken = connectingPushToken
+    diag("sdk.ready", ["reported": reported.count, "push_token": connectingPushToken != nil, "cached": cachedLogin])
+    ready = true; cachedLogin = false; registeredPushToken = connectingPushToken
     for id in reported { updateHoldCapability(id) }
     emit(["type": "registration", "state": "registered"])
   }
@@ -930,6 +942,14 @@ final class LinkaPhone: NSObject, PKPushRegistryDelegate, CXProviderDelegate {
   func onClientError(error: Error) {
     guard Thread.isMainThread else { DispatchQueue.main.async { self.onClientError(error: error) }; return }
     diag("sdk.error", ["error": error, "reported": reported.count, "was_ready": ready])
+    if cachedLogin && !ready {
+      // A cached JWT refused at login (its credential was rotated or it expired): the app's next
+      // connect, with a fresh JWT, prepares this push again instead of keeping the failed client.
+      cachedLogin = false
+      let stale = preparedPush.map { calls[$0] == nil } ?? false
+      if stale { preparedPush = nil }
+      diag("sdk.cached_login_failed", ["cleared": stale])
+    }
     ready = false
     for id in reported { detachHold(id); failMirror(id); updateHoldCapability(id) }
     emit(["type": "registration", "state": "error"])

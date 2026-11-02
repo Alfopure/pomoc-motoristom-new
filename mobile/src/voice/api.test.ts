@@ -63,6 +63,16 @@ describe("native voice transport", () => {
     await createVoiceApi(config, "operator", async () => "user-token", fetch).token(id);
     expect(fetch).toHaveBeenCalledWith(config.apiOrigin + "/api/mobile/v1/voice/token", expect.objectContaining({ method: "POST", credentials: "omit", headers: expect.objectContaining({ Authorization: "Bearer user-token", "X-PM-App-Environment": "test" }), body: JSON.stringify({ deviceSessionId: id, takeover: false }) }));
   });
+  it("reads the phone switches and realtime topic with the token, and leaves them off when absent or malformed", async () => {
+    const topic = "org:00000000-0000-4000-8000-0000000000aa:telephony";
+    const read = async (extra: object) => createVoiceApi(config, "operator", async () => "user-token",
+      vi.fn<MobileTransport>().mockResolvedValue(Response.json({ ...token, ...extra }))).token(id);
+    expect(await read({ voiceTuning: { mobileTokenCache: true, mobileRtcRegion: "eu" }, realtimeTopic: topic })).toMatchObject({ token: "provider-token",
+      voiceTuning: { mobileTokenCache: true, mobileRtcRegion: "eu", mobileTrickleIce: false, mobileRealtimeStatus: false, mobileEarlyAccept: false, mobileParallelOffers: false },
+      realtimeTopic: topic });
+    expect(await read({})).toMatchObject({ voiceTuning: { mobileTokenCache: false, mobileRtcRegion: "auto" }, realtimeTopic: null });
+    expect(await read({ voiceTuning: "on", realtimeTopic: "org:other:telephony" })).toMatchObject({ voiceTuning: { mobileTokenCache: false }, realtimeTopic: null });
+  });
   it.each([{ ...token, environment: "production" }, { ...token, profileId: "someone-else" }, { ...token, expiresAt: "invalid" }, { ...token, deviceSessionId: "invalid" }, null])("rejects unsafe token contracts %#", async body => {
     const fetch = vi.fn<MobileTransport>().mockResolvedValue(Response.json(body));
     await expect(createVoiceApi(config, "operator", async () => "user-token", fetch).token()).rejects.toMatchObject({ status: 502 });

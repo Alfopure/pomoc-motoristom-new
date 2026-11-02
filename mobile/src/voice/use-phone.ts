@@ -29,11 +29,29 @@ export function useDispatchPhone(config: MobileConfig, client: SupabaseClient, u
       return data.session.access_token;
     });
     const key = "pm-voice-" + config.environment + "-" + profileId;
-    return new DispatchPhone(api, native, randomUUID, {
-      load: () => SecureStore.getItemAsync(key),
-      save: id => SecureStore.setItemAsync(key, id, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY }),
-      clear: () => SecureStore.deleteItemAsync(key),
-    }, error => reporter?.report("error", error, "voice-push"));
+    // Keychain items of this device only, readable after the first unlock so a locked phone's push wake can use them.
+    const keychain = (name: string) => ({
+      load: () => SecureStore.getItemAsync(name),
+      save: (value: string) => SecureStore.setItemAsync(name, value, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY }),
+      clear: () => SecureStore.deleteItemAsync(name),
+    });
+    return new DispatchPhone(api, native, randomUUID, keychain(key), error => reporter?.report("error", error, "voice-push"), {
+      tokens: keychain("pm-voice-jwt-" + config.environment + "-" + profileId), tuning: keychain("pm-voice-tuning-" + config.environment + "-" + profileId),
+      profileId, appBuild: appVersion().build,
+      // Only a refetch signal: the status itself is read through the server API, never from the message.
+      realtime: (topic, onSignal, onState) => {
+        const channel = client.channel(topic, { config: { private: true } });
+        channel.on("broadcast", { event: "*" }, () => onSignal());
+        let closed = false;
+        // A private join needs the user's JWT on the socket first.
+        void client.realtime.setAuth().catch(() => {}).then(() => {
+          if (closed) return;
+          // A (re)join may have missed signals: read once when it succeeds.
+          channel.subscribe(status => { onState(status.toLowerCase()); if (status === "SUBSCRIBED") onSignal(); });
+        });
+        return () => { closed = true; void client.removeChannel(channel); };
+      },
+    });
   }, [config, client, userId, profileId, reporter]);
   // Device log: whether a cleanup below is an unmount or a replaced phone, and
   // which input replaced it. Every cleanup turns native voice off.

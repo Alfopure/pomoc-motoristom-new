@@ -70,14 +70,18 @@ class Call {
   func hangup() { hangs += 1; callState = .DONE() }
   func muteAudio() { mutes += 1; isMuted = true }; func unmuteAudio() { mutes -= 1; isMuted = false }; func dtmf(dtmf: String) { tones += 1 }
 }
-struct TxConfig { enum PushEnvironment { case production }; enum LogLevel { case none }; let reconnectClient: Bool; init(token: String, pushDeviceToken: String?, pushEnvironment: PushEnvironment, logLevel: LogLevel, reconnectClient: Bool, debug: Bool, enableCallReports: Bool) { self.reconnectClient = reconnectClient } }
-struct TxServerConfiguration {}
+// TelnyxRTC 4.2.2 signatures (TxConfig.swift, TxServerConfiguration.swift, Region.swift), defaults included.
+struct TxConfig { enum PushEnvironment { case production }; enum LogLevel { case none }; let token: String; let reconnectClient: Bool; let useTrickleIce: Bool
+  init(token: String, pushDeviceToken: String?, pushEnvironment: PushEnvironment, logLevel: LogLevel, reconnectClient: Bool, debug: Bool, useTrickleIce: Bool = false, enableCallReports: Bool) {
+    self.token = token; self.reconnectClient = reconnectClient; self.useTrickleIce = useTrickleIce } }
+enum Region { case auto, eu }
+struct TxServerConfiguration { let region: Region; init(region: Region = .auto) { self.region = region } }
 protocol TxClientDelegate: AnyObject { func onClientReady(); func onSocketConnected(); func onSocketDisconnected(); func onClientError(error: Error); func onPushDisabled(success: Bool, message: String); func onSessionUpdated(sessionId: String); func onIncomingCall(call: Call); func onPushCall(call: Call); func onRemoteCallEnded(callId: UUID, reason: CallTerminationReason?); func onCallStateUpdated(callState: CallState, callId: UUID) }
 class TxClient {
-  static var last: TxClient!; weak var delegate: TxClientDelegate?; var registry: [UUID: Call] = [:]; var config: TxConfig?
+  static var last: TxClient!; weak var delegate: TxClientDelegate?; var registry: [UUID: Call] = [:]; var config: TxConfig?; var server: TxServerConfiguration?; var prepares = 0
   init() { Self.last = self }
-  func connect(txConfig: TxConfig) throws { config = txConfig }
-  func processVoIPNotification(txConfig: TxConfig, serverConfiguration: TxServerConfiguration, pushMetaData: [String: Any]) throws { config = txConfig }
+  func connect(txConfig: TxConfig, serverConfiguration: TxServerConfiguration = TxServerConfiguration()) throws { config = txConfig; server = serverConfiguration }
+  func processVoIPNotification(txConfig: TxConfig, serverConfiguration: TxServerConfiguration, pushMetaData: [String: Any]) throws { config = txConfig; server = serverConfiguration; prepares += 1 }
   func getCall(callId: UUID) -> Call? { registry[callId] }
   var declines: [UUID] = []
   func disconnect() {}; func disablePushNotifications() {}; func endCallFromCallkit(endAction: CXEndCallAction) { declines.append(endAction.callUUID); endAction.fulfill() }

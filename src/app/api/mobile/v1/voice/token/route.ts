@@ -2,6 +2,7 @@ import { requireMobileActor } from "@/server/mobile/auth";
 import { mobileError, mobileJson, mobileScope } from "@/server/mobile/http";
 import { nativeVoiceDeps } from "@/server/mobile/voice";
 import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
+import { latencyFlagsOf, mobileVoiceTuning } from "@/server/telephony/latency-flags";
 import { issueWebphoneToken } from "@/server/telephony/operator-devices";
 import { readJsonBody } from "@/server/telephony/runtime";
 
@@ -15,12 +16,18 @@ async function issue(request: Request) {
     const actor = await measureRequestStep("auth", () => requireMobileActor(request));
     const deps = await nativeVoiceDeps(actor);
     const body = await readJsonBody<Record<string, unknown>>(request);
+    const flags = latencyFlagsOf(deps);
     const token = await issueWebphoneToken({ ...deps, deviceKind: "mobile" }, {
       organizationId: actor.organizationId, profileId: actor.profileId,
       deviceSessionId: typeof body.deviceSessionId === "string" ? body.deviceSessionId : null,
       userAgent: request.headers.get("user-agent"), takeover: body.takeover === true,
+      rotateCredential: flags.mobile_rotate_on_takeover,
     });
+    // Every connect carries the phone's switches (S8): a push wake uses the last ones it saw.
+    const voiceTuning = mobileVoiceTuning(flags);
     // The SIP password and provider credential ID never reach the app.
-    return mobileJson({ ...mobileScope(actor), token: token.token, expiresAt: token.expiresAt, deviceSessionId: token.deviceSessionId });
+    return mobileJson({ ...mobileScope(actor), token: token.token, expiresAt: token.expiresAt, deviceSessionId: token.deviceSessionId, voiceTuning,
+      // Only a refetch signal is read from this private topic, never its payload (S8.5).
+      ...(voiceTuning.mobileRealtimeStatus ? { realtimeTopic: `org:${actor.organizationId}:telephony` } : {}) });
   } catch (error) { return mobileError(error, "Telefón sa nepodarilo pripojiť."); }
 }

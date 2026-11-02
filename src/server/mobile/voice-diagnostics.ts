@@ -10,21 +10,24 @@ const NATIVE_EVENTS = ["call.answer", "call.answer_sdk", "call.authorize", "call
   "callkit.outgoing_connected", "callkit.placeholder", "callkit.report_incoming", "callkit.request", "callkit.reset", "callkit.start", "callkit.timeout",
   "callkit.update", "emit", "hold.cancelled", "hold.claim", "hold.detach", "hold.media", "hold.mirror_failed", "hold.mirror_request", "hold.request",
   "hold.resolve", "phone.connect", "phone.connect_error", "phone.disconnect", "phone.start", "push.accepted", "push.cleanup", "push.received", "push.refused",
-  "pushkit.token", "pushkit.token_invalidated", "sdk.error", "sdk.invite", "sdk.ready", "sdk.remote_ended", "sdk.socket_connected", "sdk.socket_disconnected", "sdk.state", "voice.enabled"];
+  "pushkit.token", "pushkit.token_invalidated", "sdk.cached_login_failed", "sdk.error", "sdk.invite", "sdk.ready", "sdk.remote_ended", "sdk.socket_connected", "sdk.socket_disconnected", "sdk.state", "voice.enabled"];
 const JS_EVENTS = ["call.start_response", "call.tap", "hold.cancelled", "hold.claim", "hold.failure", "hold.ignored", "hold.request", "hold.request_error", "hold.result", "hold.skip",
-  "offer.authorize_retry", "offer.authorized", "offer.done", "offer.error", "offer.prepare", "phone.connect_end", "phone.connect_error", "phone.connect_native",
+  "offer.authorize_retry", "offer.authorized", "offer.done", "offer.error", "offer.prefetch", "offer.prepare", "phone.connect_end", "phone.connect_error", "phone.connect_native",
   "phone.connect_start", "phone.disconnect", "phone.disconnect_error", "phone.event", "phone.event_error", "phone.fail", "phone.foreground", "phone.init",
-  "phone.inputs", "push.rejected", "session.end", "token.end", "token.start"];
+  "phone.inputs", "push.rejected", "realtime.state", "session.end", "token.cache", "token.end", "token.start", "tuning.applied"];
 export const VOICE_DIAGNOSTIC_EVENTS: ReadonlySet<string> = new Set([...NATIVE_EVENTS, ...JS_EVENTS.map(name => "js." + name)]);
-export const VOICE_DIAGNOSTIC_KEYS: ReadonlySet<string> = new Set(["action", "action_live", "active", "alert", "answer_pending", "answered", "answering",
-  "attempt", "attempts", "authorized", "automatic", "busy", "call", "call_id_valid", "calls", "can_hold", "changed", "claimed", "cleanup", "client", "code",
-  "config", "connected", "control", "current", "direction", "early_invites", "enabled", "error", "established", "expected", "finished", "foreground",
+export const VOICE_DIAGNOSTIC_KEYS: ReadonlySet<string> = new Set(["action", "action_live", "active", "age_min", "alert", "answer_pending", "answered", "answering",
+  "attempt", "attempts", "authorized", "automatic", "busy", "cache", "cached", "call", "call_id_valid", "calls", "can_hold", "changed", "checks", "claimed", "cleanup",
+  "cleared", "client", "code", "config", "connected", "control", "current", "direction", "early", "early_invites", "enabled", "error", "established", "expected",
+  "finished", "foreground",
   "generic", "had_client", "has_call_id", "has_leg_id", "has_name", "has_number", "has_profile", "has_reason", "has_voice_sdk_id", "held", "holdable",
-  "holds", "intent", "invite", "invited", "keys", "kind", "known", "leg", "listener", "media", "mirror", "muted", "on_hold", "outbound", "outcome", "outgoing",
+  "holds", "intent", "invite", "invited", "keys", "kind", "known", "left_min", "leg", "listener", "media", "mirror", "muted", "offers", "on_hold", "outbound",
+  "outcome", "outgoing",
   "own_call", "own_invite", "own_request", "path", "payload_keys", "pending", "pending_hold", "phase", "prepared", "profile", "push_registered",
-  "push_rejection", "push_token", "pushed", "pushed_leg", "pushes", "pushkit", "ready", "reason", "rebind", "recovering", "registration", "replaced",
-  "replay", "reported", "reporter", "requested", "result", "revoke", "role", "same_control", "same_session", "sdk_state", "session", "source", "state",
-  "status", "step", "sync_pending", "system_held", "takeover", "termination", "timed_out", "token", "tracked", "type", "user", "valid", "value",
+  "push_rejection", "push_token", "pushed", "pushed_leg", "pushes", "pushkit", "ready", "realtime", "reason", "rebind", "recovering", "region", "registration",
+  "replaced",
+  "replay", "reported", "reporter", "requested", "result", "revoke", "role", "same_control", "same_session", "sdk_state", "session", "signals", "source", "state",
+  "status", "step", "sync_pending", "system_held", "takeover", "termination", "timed_out", "token", "tracked", "trickle", "type", "user", "valid", "value",
   "version", "was", "was_enabled", "was_ready"]);
 export const MAX_VOICE_DIAGNOSTIC_EVENTS = 100;
 const VALUE = /^[A-Za-z0-9_.:,-]{1,400}$/, ID_VALUE = /^(?:[a-f0-9]{8}|true|false|none)$/;

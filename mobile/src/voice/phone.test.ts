@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DispatchPhone, sameDialTarget, type NativePhone, type VoiceEvent } from "./phone";
-import { createVoiceApi, type VoiceApi, type VoiceHoldCommand, type VoiceHoldResult, type VoiceStatus } from "./api";
+import { DispatchPhone, sameDialTarget, type NativePhone, type PhoneOptions, type VoiceEvent } from "./phone";
+import { createVoiceApi, type VoiceApi, type VoiceHoldCommand, type VoiceHoldResult, type VoiceStatus, type VoiceToken } from "./api";
 import { MobileApiError } from "../lib/api";
+import type { MobileVoiceTuning } from "../../../src/lib/mobile-api";
+import { VOICE_TUNING_OFF } from "./tuning";
 
 const lease = "00000000-0000-4000-8000-000000000001", sid = "00000000-0000-4000-8000-000000000002", id = "00000000-0000-4000-8000-000000000003";
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const phones: DispatchPhone[] = [];
 afterEach(() => { for (const phone of phones) phone.dispose(); phones.length = 0; vi.useRealTimers(); });
-function fixture(report?: (error: Error) => void) {
+function fixture(report?: (error: Error) => void, options?: PhoneOptions) {
   let event: (value: VoiceEvent) => void = () => {};
   const native: NativePhone = {
     subscribe: callback => { event = callback; return () => { event = () => {}; }; },
@@ -31,7 +33,7 @@ function fixture(report?: (error: Error) => void) {
   };
   const store = { load: vi.fn().mockResolvedValue(lease), save: vi.fn().mockResolvedValue(undefined), clear: vi.fn().mockResolvedValue(undefined) };
   const uuid = vi.fn(() => id);
-  const phone = new DispatchPhone(api, native, uuid, store, report); phones.push(phone);
+  const phone = new DispatchPhone(api, native, uuid, store, report, options); phones.push(phone);
   return { phone, api, native, store, uuid, emit: (value: VoiceEvent) => event(value) };
 }
 async function connected() { const f = fixture(); await f.phone.initialise(); await f.phone.connect(); return f; }
@@ -1176,5 +1178,232 @@ describe("device diagnostics", () => {
     vi.mocked(f.api.authorize).mockRejectedValueOnce(new MobileApiError("stale", 409, "native_lease_stale"));
     f.emit({ type: "incoming", callId: id, providerLegId: id }); await tick();
     expect(f.native.disconnect).toHaveBeenCalledWith("fail:native_lease_stale");
+  });
+});
+
+describe("call-speed S8 phone switches", () => {
+  const topic = "org:00000000-0000-4000-8000-0000000000aa:telephony";
+  const settle = async () => { for (let round = 0; round < 12; round += 1) await tick(); };
+  /** One Keychain item; `value` is what the iPhone would keep. */
+  function keychain(initial: string | null = null) {
+    const item = { value: initial,
+      load: vi.fn(async () => item.value), save: vi.fn(async (next: string) => { item.value = next; }), clear: vi.fn(async () => { item.value = null; }) };
+    return item;
+  }
+  const cachedEntry = (change: Record<string, unknown> = {}) => JSON.stringify({ v: 1, token: "keychain-jwt", expiresAt: new Date(Date.now() + 20 * 3_600_000).toISOString(),
+    issuedAt: Date.now() - 3_600_000, deviceSessionId: lease, profileId: "operator", appBuild: "41", ...change });
+  const freshToken = (tuning: Partial<MobileVoiceTuning>, change: Partial<VoiceToken> = {}): VoiceToken => ({ token: "fresh-jwt", deviceSessionId: lease,
+    expiresAt: new Date(Date.now() + 86_400_000).toISOString(), voiceTuning: { ...VOICE_TUNING_OFF, ...tuning }, realtimeTopic: tuning.mobileRealtimeStatus ? topic : null, ...change });
+  /** A phone whose Keychain holds these switches (and a cached JWT); the server keeps sending the same switches. */
+  function speedFixture(tuning: Partial<MobileVoiceTuning> = {}, cached: string | null = null) {
+    const tokens = keychain(cached), stored = keychain(JSON.stringify({ ...VOICE_TUNING_OFF, ...tuning }));
+    const channel = { off: vi.fn(), signal: () => {} };
+    const realtime = vi.fn((_topic: string, onSignal: () => void) => { channel.signal = onSignal; return channel.off; });
+    const f = fixture(undefined, { tokens, tuning: stored, profileId: "operator", appBuild: "41", realtime });
+    const debug = vi.fn(); f.native.debug = debug;
+    vi.mocked(f.api.token).mockResolvedValue(freshToken(tuning));
+    return { f, tokens, stored, realtime, channel, debug };
+  }
+  /** A cold launch by PushKit: native already reported the push to CallKit and prepares it on connect. */
+  function coldPush(s: ReturnType<typeof speedFixture>) {
+    vi.mocked(s.f.native.snapshot).mockResolvedValueOnce({ ready: false, audioActive: false, wasEnabled: true, pending: [{ type: "push", callId: id, providerLegId: "" }] })
+      .mockResolvedValue({ ready: false, audioActive: false, pending: [], preparedPushCallId: id });
+  }
+
+  it("keeps today's login, push wake and storage with every switch off", async () => {
+    const s = speedFixture({}, cachedEntry());
+    await s.f.phone.initialise(); await s.f.phone.connect();
+    s.f.emit({ type: "push", callId: id, providerLegId: id }); await settle();
+    expect(s.f.api.token).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(s.f.native.connect).mock.calls.every(call => call.length === 1 && call[0] === "fresh-jwt")).toBe(true);
+    expect(s.tokens.load).not.toHaveBeenCalled(); expect(s.tokens.save).not.toHaveBeenCalled(); expect(s.stored.save).not.toHaveBeenCalled();
+    expect(s.realtime).not.toHaveBeenCalled();
+    expect(s.debug.mock.calls.map(([event]) => event)).not.toContain("token.cache");
+  });
+  it("keeps a bounded JWT bound to its lease, profile and build in its own Keychain item, never in the log", async () => {
+    const s = speedFixture({ mobileTokenCache: true });
+    await s.f.phone.initialise(); await s.f.phone.connect(); await settle();
+    expect(JSON.parse(s.tokens.value!)).toEqual({ v: 1, token: "fresh-jwt", expiresAt: expect.any(String), issuedAt: expect.any(Number), deviceSessionId: lease,
+      profileId: "operator", appBuild: "41" });
+    expect(s.f.store.save).toHaveBeenCalledWith(lease); expect(s.f.store.save).not.toHaveBeenCalledWith(expect.stringContaining("fresh-jwt"));
+    expect(s.debug).toHaveBeenCalledWith("token.cache", { outcome: "saved" });
+    const logged = JSON.stringify(s.debug.mock.calls);
+    for (const secret of ["fresh-jwt", "keychain-jwt", lease]) expect(logged).not.toContain(secret);
+  });
+  it("logs a cold push in with the cached JWT at once and authorizes its INVITE before the refresh answers", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(s);
+    let release!: (token: VoiceToken) => void;
+    vi.mocked(s.f.api.token).mockReturnValue(new Promise(done => { release = done; }));
+    await s.f.phone.initialise(); await settle();
+    expect(s.f.native.connect).toHaveBeenCalledExactlyOnceWith("keychain-jwt", { cached: true, region: "auto", trickleIce: false });
+    // The refresh and its lease check run alongside, after native started its login.
+    expect(s.f.api.token).toHaveBeenCalledExactlyOnceWith(lease, false);
+    expect(vi.mocked(s.f.native.connect).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(s.f.api.token).mock.invocationCallOrder[0]);
+    s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    expect(s.f.api.authorize).toHaveBeenCalledWith(lease, { providerLegId: id });
+    expect(s.f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg");
+    release(freshToken({ mobileTokenCache: true })); await settle();
+    expect(JSON.parse(s.tokens.value!).token).toBe("fresh-jwt");
+    expect(s.debug).toHaveBeenCalledWith("token.cache", expect.objectContaining({ outcome: "hit", left_min: expect.any(Number), age_min: 60 }));
+  });
+  it("uses the cached JWT on a warm push without waiting for the token request", async () => {
+    const s = speedFixture({ mobileTokenCache: true });
+    await s.f.phone.initialise(); await s.f.phone.connect(); await settle();
+    let release!: (token: VoiceToken) => void;
+    vi.mocked(s.f.api.token).mockReturnValue(new Promise(done => { release = done; }));
+    vi.mocked(s.f.native.snapshot).mockResolvedValue({ ready: false, audioActive: false, pending: [], preparedPushCallId: id });
+    s.f.emit({ type: "push", callId: id, providerLegId: "" }); await settle();
+    expect(s.f.native.connect).toHaveBeenLastCalledWith("fresh-jwt", { cached: true, region: "auto", trickleIce: false });
+    s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    expect(s.f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg");
+    release(freshToken({ mobileTokenCache: true })); await settle();
+  });
+  it.each([[409, "native_lease_stale"], [409, undefined], [401, undefined], [403, undefined]])("disconnects, wipes the cache and ends the parked push when the refresh is refused (%s %s)", async (status, code) => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(s);
+    vi.mocked(s.f.api.token).mockRejectedValue(new MobileApiError("refused", status, code));
+    await s.f.phone.initialise(); await settle();
+    expect(s.f.native.connect).toHaveBeenCalledOnce();
+    // Native ends every reported call and the prepared push with its client.
+    expect(s.f.native.disconnect).toHaveBeenCalled();
+    expect(s.tokens.value).toBeNull(); expect(s.f.native.authorize).not.toHaveBeenCalled();
+    expect(s.f.phone.state.registration).toBe("error");
+  });
+  it("does not revoke the phone on a refused offer while the cached login is still refreshing", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(s);
+    vi.mocked(s.f.api.token).mockReturnValue(new Promise(() => {}));
+    vi.mocked(s.f.api.authorize).mockRejectedValue(new MobileApiError("Hovor už prijal iný telefón.", 409));
+    await s.f.phone.initialise(); await settle();
+    s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    expect(s.f.native.reject).toHaveBeenCalledWith(id); expect(s.f.native.disconnect).not.toHaveBeenCalled();
+    expect(s.tokens.value).not.toBeNull();
+  });
+  it.each([
+    ["expiring", { expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() }], ["old", { issuedAt: Date.now() - 13 * 3_600_000 }],
+    ["future", { issuedAt: Date.now() + 3_600_000 }], ["another build", { appBuild: "40" }], ["another lease", { deviceSessionId: sid }],
+    ["another operator", { profileId: "colleague" }], ["another format", { v: 2 }],
+  ])("wipes a cached JWT of %s and refreshes before native login", async (_name, change) => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry(change)); coldPush(s);
+    await s.f.phone.initialise(); await settle();
+    expect(s.f.native.connect).toHaveBeenCalled(); expect(vi.mocked(s.f.native.connect).mock.calls[0][0]).toBe("fresh-jwt");
+    expect(s.tokens.clear).toHaveBeenCalled();
+    expect(s.debug).toHaveBeenCalledWith("token.cache", expect.objectContaining({ outcome: "miss" }));
+  });
+  it("falls back once to a fresh JWT when native refuses the cached login", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(s);
+    await s.f.phone.initialise(); await settle();
+    expect(s.f.api.token).toHaveBeenCalledTimes(1);
+    s.f.emit({ type: "registration", state: "error" }); await settle();
+    expect(s.f.api.token).toHaveBeenCalledTimes(2); expect(s.f.native.connect).toHaveBeenLastCalledWith("fresh-jwt");
+    expect(s.tokens.clear).toHaveBeenCalled(); expect(s.debug).toHaveBeenCalledWith("token.cache", { outcome: "login_failed" });
+    s.f.emit({ type: "registration", state: "error" }); await settle();
+    expect(s.f.api.token).toHaveBeenCalledTimes(2);
+  });
+  it("lets a refreshing push wait for the fresh JWT once native dropped the cached login", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry());
+    vi.mocked(s.f.native.snapshot).mockResolvedValueOnce({ ready: false, audioActive: false, wasEnabled: true, pending: [{ type: "push", callId: id, providerLegId: "" }] })
+      .mockResolvedValue({ ready: false, audioActive: false, pending: [], preparedPushCallId: null });
+    let release!: (token: VoiceToken) => void;
+    vi.mocked(s.f.api.token).mockReturnValue(new Promise(done => { release = done; }));
+    await s.f.phone.initialise(); await settle();
+    // Not prepared any more: the cached JWT is not tried a second time.
+    expect(s.f.native.connect).toHaveBeenCalledOnce();
+    release(freshToken({ mobileTokenCache: true })); await settle();
+    expect(s.f.native.connect).toHaveBeenLastCalledWith("fresh-jwt");
+  });
+  it("wipes the cache on logout, after a save still in flight", async () => {
+    const s = speedFixture({ mobileTokenCache: true });
+    let finish!: () => void;
+    s.tokens.save.mockImplementationOnce(async (value: string) => { await new Promise<void>(done => { finish = done; }); s.tokens.value = value; });
+    await s.f.phone.initialise(); await s.f.phone.connect(); await tick();
+    const logout = s.f.phone.disconnect("logout"); finish(); await logout;
+    expect(s.tokens.value).toBeNull(); expect(s.debug).toHaveBeenCalledWith("token.cache", { outcome: "wiped", reason: "logout" });
+  });
+  it("wipes the cache when the server turns it off, and before a takeover", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry());
+    vi.mocked(s.f.api.token).mockResolvedValue(freshToken({}));
+    await s.f.phone.initialise(); await s.f.phone.connect(); await settle();
+    expect(s.tokens.value).toBeNull(); expect(s.tokens.save).not.toHaveBeenCalled();
+    expect(JSON.parse(s.stored.value!)).toEqual(VOICE_TUNING_OFF);
+    const t = speedFixture({ mobileTokenCache: true }, cachedEntry());
+    await t.f.phone.initialise(); vi.mocked(t.f.api.token).mockClear();
+    await t.f.phone.connect(true);
+    expect(t.tokens.clear.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(t.f.api.token).mock.invocationCallOrder[0]);
+  });
+  it("passes the EU region and trickle ICE to the native login", async () => {
+    const s = speedFixture({ mobileRtcRegion: "eu", mobileTrickleIce: true });
+    await s.f.phone.initialise(); await s.f.phone.connect();
+    expect(s.f.native.connect).toHaveBeenCalledWith("fresh-jwt", { cached: false, region: "eu", trickleIce: true });
+    expect(s.debug).not.toHaveBeenCalledWith("tuning.applied", expect.anything());
+  });
+  it("refetches the call status through the server on a realtime signal, at most every 300 ms, while a call shows", async () => {
+    const s = speedFixture({ mobileRealtimeStatus: true });
+    await s.f.phone.initialise(); await s.f.phone.connect(); await settle();
+    expect(s.realtime).not.toHaveBeenCalled();
+    vi.mocked(s.f.api.status).mockResolvedValue({ sessionId: sid, state: "ringing", connected: false, ended: false, terminationPending: false, media: { version: 1, state: "unavailable", canHold: false, callControlId: null } });
+    s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    expect(s.realtime).toHaveBeenCalledExactlyOnceWith(topic, expect.any(Function), expect.any(Function));
+    vi.useFakeTimers(); vi.mocked(s.f.api.status).mockClear();
+    // The first signal is read at once; a burst after it costs one more read 300 ms later.
+    s.channel.signal(); await vi.advanceTimersByTimeAsync(0); expect(s.f.api.status).toHaveBeenCalledExactlyOnceWith(lease, sid);
+    s.channel.signal(); s.channel.signal(); s.channel.signal();
+    await vi.advanceTimersByTimeAsync(299); expect(s.f.api.status).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1); expect(s.f.api.status).toHaveBeenCalledTimes(2);
+    s.f.phone.setForeground(false); expect(s.channel.off).toHaveBeenCalledOnce();
+    s.f.phone.setForeground(true); expect(s.realtime).toHaveBeenCalledTimes(2);
+    s.f.emit({ type: "ended", callId: id, sessionId: sid }); await vi.advanceTimersByTimeAsync(0);
+    expect(s.channel.off).toHaveBeenCalledTimes(2);
+    expect(s.debug).toHaveBeenCalledWith("realtime.state", expect.objectContaining({ state: "unsubscribed", signals: expect.any(Number), checks: expect.any(Number) }));
+  });
+  it("never subscribes without the switch or without a server topic", async () => {
+    const off = speedFixture({}), noTopic = speedFixture({ mobileRealtimeStatus: true });
+    vi.mocked(off.f.api.token).mockResolvedValue({ ...freshToken({}), realtimeTopic: topic });
+    vi.mocked(noTopic.f.api.token).mockResolvedValue(freshToken({ mobileRealtimeStatus: true }, { realtimeTopic: null }));
+    for (const s of [off, noTopic]) {
+      await s.f.phone.initialise(); await s.f.phone.connect();
+      s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+      expect(s.f.phone.state.call?.id).toBe(id); expect(s.realtime).not.toHaveBeenCalled();
+    }
+  });
+  it("reads an INVITE's offer while the start request is in flight and reuses it for the exact intent", async () => {
+    const s = speedFixture({ mobileParallelOffers: true });
+    await s.f.phone.initialise(); await s.f.phone.connect();
+    let resolve!: (value: Awaited<ReturnType<VoiceApi["start"]>>) => void;
+    vi.mocked(s.f.api.start).mockReturnValue(new Promise(done => { resolve = done; }));
+    vi.mocked(s.f.api.authorize).mockResolvedValue({ sessionId: sid, callControlId: "exact-leg", direction: "outbound", role: "caller", displayName: null, number: "+421900000002" });
+    const dial = s.f.phone.dial("+421900000002");
+    s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    expect(s.f.api.authorize).toHaveBeenCalledExactlyOnceWith(lease, { providerLegId: id }); expect(s.f.native.authorize).not.toHaveBeenCalled();
+    resolve({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "+421900000002" }); await dial; await settle();
+    expect(s.f.api.authorize).toHaveBeenCalledOnce(); expect(s.f.native.authorize).toHaveBeenCalledWith(id, sid, "exact-leg");
+    expect(s.debug).toHaveBeenCalledWith("offer.prefetch", { call: id.slice(0, 8), outcome: "reused" });
+  });
+  it("still rejects a prefetched offer of another call, and reads again after a failed prefetch", async () => {
+    const s = speedFixture({ mobileParallelOffers: true });
+    await s.f.phone.initialise(); await s.f.phone.connect();
+    let resolve!: (value: Awaited<ReturnType<VoiceApi["start"]>>) => void;
+    vi.mocked(s.f.api.start).mockReturnValue(new Promise(done => { resolve = done; }));
+    vi.mocked(s.f.api.authorize).mockResolvedValueOnce({ sessionId: lease, callControlId: "other-leg", direction: "outbound", role: "caller", displayName: null, number: null })
+      .mockRejectedValueOnce(new MobileApiError("gone", 409)).mockResolvedValueOnce({ sessionId: sid, callControlId: "exact-leg", direction: "outbound", role: "caller", displayName: null, number: null });
+    const dial = s.f.phone.dial("+421900000002");
+    s.f.emit({ type: "incoming", callId: "another-call", providerLegId: lease }); s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    resolve({ sessionId: sid, operatorLegCallControlId: "exact-leg", to: "+421900000002" }); await dial; await settle();
+    expect(s.f.native.reject).toHaveBeenCalledWith("another-call");
+    expect(s.f.api.authorize).toHaveBeenCalledTimes(3); expect(s.f.native.authorize).toHaveBeenCalledExactlyOnceWith(id, sid, "exact-leg");
+  });
+  it("drops prefetched offers with their INVITEs when the start is refused, and never prefetches when off", async () => {
+    const s = speedFixture({ mobileParallelOffers: true });
+    await s.f.phone.initialise(); await s.f.phone.connect();
+    let refuse!: () => void;
+    vi.mocked(s.f.api.start).mockReturnValue(new Promise((_done, fail) => { refuse = () => fail(new MobileApiError("denied", 400)); }));
+    const dial = s.f.phone.dial("+421900000002");
+    s.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    refuse(); await dial; await settle();
+    expect(s.f.native.reject).toHaveBeenCalledWith(id); expect(s.f.native.authorize).not.toHaveBeenCalled();
+    const off = speedFixture({});
+    await off.f.phone.initialise(); await off.f.phone.connect();
+    vi.mocked(off.f.api.start).mockReturnValue(new Promise(() => {}));
+    void off.f.phone.dial("+421900000002");
+    off.f.emit({ type: "incoming", callId: id, providerLegId: id }); await settle();
+    expect(off.f.api.authorize).not.toHaveBeenCalled();
   });
 });

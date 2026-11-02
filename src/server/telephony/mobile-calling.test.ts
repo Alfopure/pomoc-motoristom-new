@@ -96,6 +96,21 @@ describe("separate explicit mobile calling", () => {
     expect(h.rows("motorist_operator_mobile_devices")[0].telnyx_credential_id).toBeNull();
   });
 
+  it("leaves the replaced iPhone's lease and JWT useless after a rotating takeover, and calls the new SIP identity (S8.1)", async () => {
+    const h = createTelephonyHarness(); readyMobile(h);
+    const old = h.rows("motorist_operator_mobile_devices")[0];
+    const token = await issueWebphoneToken(deviceDeps(h), { organizationId: ORG, profileId: PROFILES.o1, takeover: true, rotateCredential: true });
+    // Deleted at Telnyx: a JWT the old phone cached can no longer register on this identity.
+    expect(h.telnyx.of("deleteTelephonyCredential").map(call => call.params)).toEqual([{ credentialId: old.telnyx_credential_id }]);
+    expect(await touchDevice(deviceDeps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: String(old.device_session_id), registrationState: "registered" }))
+      .toEqual({ ok: false, reason: "stale_session" });
+    expect(await touchDevice(deviceDeps(h), { organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: token.deviceSessionId, registrationState: "registered" }))
+      .toMatchObject({ ok: true });
+    const call = await startOutboundCall(deps(h), actor(), { to: "+421905123456" });
+    expect(h.legFor(call.sessionId, PROFILES.o1)?.to_number).toContain(token.sipUsername);
+    expect(token.sipUsername).not.toBe(old.sip_username);
+  });
+
   it("does not allow an active desktop call to be replaced with a new mobile outbound call", async () => {
     const h = createTelephonyHarness(); readyMobile(h);
     const call = await h.inbound();

@@ -591,6 +591,70 @@ do {
   check("a changed hold capability is reported once", CXProvider.last.updateCount == sent + 1 && CXProvider.last.updates[id]?.supportsHolding == false)
   owner.disconnect()
 }
+// Call-speed S8: login switches from the app, and a JWT the app cached in the Keychain.
+do {
+  let owner = phone()
+  check("a connect without switches logs in as today: region auto, no trickle ICE", TxClient.last.server?.region == .auto && TxClient.last.config?.useTrickleIce == false)
+  owner.disconnect()
+}
+do {
+  let owner = LinkaPhone(), id = UUID()
+  try! owner.connect(token: "cached-keychain-token", options: .init(["region": "eu", "trickleIce": true]))
+  check("the EU region and trickle ICE reach the SDK login", TxClient.last.server?.region == .eu && TxClient.last.config?.useTrickleIce == true)
+  owner.onClientReady()
+  push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture"]])
+  try! owner.connect(token: "cached-keychain-token", options: .init(["cached": true, "region": "eu", "trickleIce": true]))
+  check("a push is prepared in the EU region with trickle ICE", TxClient.last.prepares == 1 && TxClient.last.server?.region == .eu
+    && TxClient.last.config?.useTrickleIce == true)
+  owner.disconnect()
+}
+do {
+  let owner = phone(), id = UUID()
+  var events: [[String: Any]] = []; owner.listen(owner: UUID()) { events.append($0) }
+  push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture"]])
+  try! owner.connect(token: "cached-keychain-token", options: .init(["cached": true]))
+  let cachedClient = TxClient.last!
+  check("a cached JWT prepares the push at once", owner.snapshot()["preparedPushCallId"] as? String == id.uuidString && cachedClient.prepares == 1)
+  try! owner.connect(token: "fresh-push-token")
+  check("the refresh does not replace a cached login in progress", TxClient.last === cachedClient && cachedClient.prepares == 1)
+  owner.onClientError(error: NSError(domain: "TxError", code: 1))
+  check("a refused cached login forgets the push it prepared", owner.snapshot()["preparedPushCallId"] is NSNull)
+  try! owner.connect(token: "fresh-push-token")
+  check("the fresh JWT prepares the same push again", TxClient.last !== cachedClient && TxClient.last.prepares == 1
+    && TxClient.last.config?.token == "fresh-push-token" && owner.snapshot()["preparedPushCallId"] as? String == id.uuidString)
+  check("the push stays offered across the fallback", !events.contains { $0["type"] as? String == "ended" } && CXProvider.last.ended[id] == nil)
+  owner.disconnect()
+}
+do {
+  let owner = phone(), id = UUID()
+  push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture"]])
+  try! owner.connect(token: "fresh-push-token")
+  owner.onClientError(error: NSError(domain: "TxError", code: 1))
+  check("without a cached JWT a login error keeps the prepared push as before", owner.snapshot()["preparedPushCallId"] as? String == id.uuidString)
+  owner.disconnect()
+}
+do {
+  let owner = phone(), id = UUID()
+  push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture"]])
+  try! owner.connect(token: "cached-keychain-token", options: .init(["cached": true]))
+  owner.onClientReady(); owner.onClientError(error: NSError(domain: "TxError", code: 1))
+  check("a cached login that registered keeps its push on a later error", owner.snapshot()["preparedPushCallId"] as? String == id.uuidString)
+  owner.disconnect()
+}
+do {
+  let owner = phone(), id = UUID()
+  push(owner, ["metadata": ["call_id": id.uuidString, "voice_sdk_id": "fixture"]])
+  try! owner.connect(token: "cached-keychain-token", options: .init(["cached": true]))
+  let call = Call(id, leg: UUID()); TxClient.last.registry[id] = call; owner.onIncomingCall(call: call)
+  owner.onClientError(error: NSError(domain: "TxError", code: 1))
+  check("an INVITE that already arrived is kept when the cached login then reports an error", owner.snapshot()["preparedPushCallId"] as? String == id.uuidString
+    && call.hangs == 0)
+  owner.disconnect()
+}
+check("the device log names the login switches and a refused cached login, never the JWT", os.Logger.lines.contains { $0.hasPrefix("phone.connect ")
+  && $0.contains(" cached=true") && $0.contains(" region=eu") && $0.contains(" trickle=true") }
+  && os.Logger.lines.contains { $0.hasPrefix("sdk.cached_login_failed ") && $0.contains("cleared=true") }
+  && os.Logger.lines.contains { $0.hasPrefix("sdk.cached_login_failed ") && $0.contains("cleared=false") })
 // Device log (public os_log lines): codes, flags, counts and short IDs only.
 do {
   let owner = phone()
@@ -603,7 +667,7 @@ do {
   check("device log names the disconnect reason and the disabled voice flag", os.Logger.lines.contains { $0.hasPrefix("phone.disconnect ") && $0.contains(" reason=native") }
     && os.Logger.lines.last?.hasPrefix("emit ") == true && os.Logger.lines.contains("voice.enabled source=disconnect value=false was=true"))
 }
-let secrets = ["421900000", "fixture", "Kolega", "memory-token", "fresh-push-token", "next-account-token", "Incoming call!", "Call ended elsewhere"]
+let secrets = ["421900000", "fixture", "Kolega", "memory-token", "fresh-push-token", "next-account-token", "keychain-token", "Incoming call!", "Call ended elsewhere"]
 check("device log never carries a number, name, token or push value", !os.Logger.lines.isEmpty && !os.Logger.lines.contains { line in secrets.contains { line.contains($0) } })
 check("every device-log line is an event with key=value codes", os.Logger.lines.allSatisfy { $0.range(of: "^[a-z_.]+( [a-z_]+=[A-Za-z0-9_.:,-]+)*$", options: .regularExpression) != nil })
 do {

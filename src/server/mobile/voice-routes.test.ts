@@ -41,6 +41,23 @@ describe("mobile voice HTTP contract", () => {
     expect(await response.json()).toEqual(expect.objectContaining({ token: "jwt", deviceSessionId: id, profileId: actor.profileId, environment: "test" }));
     expect(mocks.token).toHaveBeenCalledWith(expect.objectContaining({ deviceKind: "mobile" }), expect.objectContaining({ profileId: actor.profileId, organizationId: actor.organizationId, takeover: false }));
   });
+  it("sends the phone switches with every token and rotates a replaced lease only when switched on (S8)", async () => {
+    mocks.token.mockResolvedValue({ token: "jwt", deviceSessionId: id, expiresAt: "2026-10-12T12:00:00Z", sipUsername: "private-sip", credentialId: "private-provider" });
+    const off = await (await token(request({ deviceSessionId: id }))).json();
+    expect(off.voiceTuning).toEqual({ mobileTokenCache: false, mobileRtcRegion: "auto", mobileTrickleIce: false, mobileRealtimeStatus: false,
+      mobileEarlyAccept: false, mobileParallelOffers: false });
+    expect(off).not.toHaveProperty("realtimeTopic");
+    expect(mocks.token).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ rotateCredential: false }));
+    vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ mobile_rotate_on_takeover: true, mobile_rotate_on_deactivation: true,
+      client: { mobileTokenCache: true, mobileRealtimeStatus: true, mobileRtcRegion: "eu" } }));
+    try {
+      const on = await (await token(request({ deviceSessionId: id, takeover: true }))).json();
+      expect(on.voiceTuning).toMatchObject({ mobileTokenCache: true, mobileRealtimeStatus: true, mobileRtcRegion: "eu" });
+      expect(on.realtimeTopic).toBe("org:organization:telephony");
+      expect(mocks.token).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ takeover: true, rotateCredential: true }));
+      expect(JSON.stringify(on)).not.toMatch(/private-sip|private-provider/);
+    } finally { vi.unstubAllEnvs(); }
+  });
   it("requires an outbound operation UUID before dialing", async () => {
     expect((await calls(request({ deviceSessionId: id, to: "+421900000001" }))).status).toBe(400); expect(mocks.dial).not.toHaveBeenCalled();
   });

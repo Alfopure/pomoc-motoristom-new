@@ -37,6 +37,9 @@ const BOOLEAN_KEYS = [
   "internal_auto_bridge", "hold_fast_web", "hold_join_with_hold", "test_conference_self_proof",
   // S7a.4 (lean routing context for hold/unhold) and S7a.2 (one read wave for the phone's hold).
   "hold_lean_context", "hold_mobile_dedupe",
+  // S8.1: a new iPhone lease that replaces another phone's lease, and an operator's deactivation,
+  // delete the mobile Telnyx credential, so a JWT cached on the old phone can no longer register.
+  "mobile_rotate_on_takeover", "mobile_rotate_on_deactivation",
 ] as const;
 const CLIENT_BOOLEAN_KEYS = ["webEarlyAccept", "webPrefetchIce", "targetLocalFirst", "mobileTokenCache", "mobileTrickleIce",
   "mobileRealtimeStatus", "mobileEarlyAccept", "mobileParallelOffers"] as const;
@@ -280,5 +283,8 @@ export function webCallTuning(flags: LatencyFlags): WebCallTuning {
 
 export function mobileVoiceTuning(flags: LatencyFlags): MobileVoiceTuning {
   const { mobileTokenCache, mobileRtcRegion, mobileTrickleIce, mobileRealtimeStatus, mobileEarlyAccept, mobileParallelOffers } = flags.client;
-  return { mobileTokenCache, mobileRtcRegion, mobileTrickleIce, mobileRealtimeStatus, mobileEarlyAccept, mobileParallelOffers };
+  // A cached JWT outlives a lost lease only as long as its credential does: the phone may cache it
+  // only while both rotations are on (S8.1).
+  return { mobileTokenCache: mobileTokenCache && flags.mobile_rotate_on_takeover && flags.mobile_rotate_on_deactivation,
+    mobileRtcRegion, mobileTrickleIce, mobileRealtimeStatus, mobileEarlyAccept, mobileParallelOffers };
 }

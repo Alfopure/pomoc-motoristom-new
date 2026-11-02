@@ -20,9 +20,16 @@ const HISTORY_TABLES = [
   "motorist_ring_attempts",
 ] as const;
 
+const updateUserById = vi.fn(async () => ({ data: null, error: null as { message: string } | null }));
+const disconnectDevice = vi.fn<(deps: unknown, input: unknown) => Promise<unknown>>();
+const createTelephonyDeps = vi.fn(async (options: unknown) => ({ telephonyDeps: options }));
+
 vi.mock("@/lib/supabase/admin", () => ({
-  createSupabaseAdminClient: () => ({ ...fake.client, auth: { admin: { deleteUser: (...args: unknown[]) => deleteUser(...(args as [string])) } } }),
+  createSupabaseAdminClient: () => ({ ...fake.client, auth: { admin: { deleteUser: (...args: unknown[]) => deleteUser(...(args as [string])), updateUserById } } }),
 }));
+
+vi.mock("@/server/telephony/runtime", () => ({ createTelephonyDeps: (options: unknown) => createTelephonyDeps(options) }));
+vi.mock("@/server/telephony/operator-devices", () => ({ disconnectDevice: (deps: unknown, input: unknown) => disconnectDevice(deps, input) }));
 
 vi.mock("@/server/telephony/telnyx/env", () => ({
   getTelnyxConfig: () => ({ configured: true }),
@@ -33,6 +40,7 @@ vi.mock("@/server/telephony/telnyx/client", () => ({
 }));
 
 import { deleteAccessUser, markPasswordCompleted, updateAccessUser } from "./access-management";
+import { clearLatencyFlagsCache } from "./telephony/latency-flags";
 
 const actor = { profileId: ADMIN, organizationId: ORG, role: "admin" as const, displayName: "Admin", userId: "auth-admin" };
 
@@ -324,5 +332,48 @@ describe("deleteAccessUser", () => {
     // The orphaned Auth login no longer resolves to an application profile, so
     // it cannot sign in to the dispatch app while an admin cleans it up.
     expect(fake.db.rows("motorist_profiles").map((row) => row.id)).toEqual([ADMIN]);
+  });
+});
+
+describe("the iPhone credential on deactivation and removal (call-speed S8.1)", () => {
+  const rotation = () => vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ mobile_rotate_on_deactivation: true }));
+  const mobileDevice = { id: "mobile-1", organization_id: ORG, profile_id: TARGET, environment: "development", telnyx_credential_id: "mobile-cred", sip_username: "mobile-sip" };
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+  beforeEach(() => {
+    seed(); clearLatencyFlagsCache();
+    for (const mock of [deleteUser, deleteTelephonyCredential, updateUserById, disconnectDevice, createTelephonyDeps]) mock.mockClear();
+    deleteUser.mockResolvedValue({ data: null, error: null }); deleteTelephonyCredential.mockResolvedValue(); disconnectDevice.mockResolvedValue(null);
+  });
+
+  it("revokes the iPhone lease and credential after the profile is inactive, only with the switch", async () => {
+    await updateAccessUser(actor, TARGET, { active: false });
+    expect(disconnectDevice).not.toHaveBeenCalled(); expect(createTelephonyDeps).not.toHaveBeenCalled();
+    rotation(); clearLatencyFlagsCache();
+    disconnectDevice.mockImplementation(async () => {
+      // The phone cannot enroll a new credential in between: its profile is already off.
+      expect(fake.db.find("motorist_profiles", row => row.id === TARGET)).toMatchObject({ active: false, access_status: "disabled" });
+      return null;
+    });
+    await updateAccessUser(actor, TARGET, { active: false });
+    expect(createTelephonyDeps).toHaveBeenCalledWith({ organizationId: ORG, deviceKind: "mobile" });
+    expect(disconnectDevice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ deviceKind: "mobile" }), { organizationId: ORG, profileId: TARGET });
+    await updateAccessUser(actor, TARGET, { displayName: "Natália N." });
+    expect(disconnectDevice).toHaveBeenCalledOnce();
+  });
+  it("says so when Telnyx keeps the iPhone credential, so the manager repeats the deactivation", async () => {
+    rotation(); disconnectDevice.mockRejectedValue(new Error("provider down"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(await fails(updateAccessUser(actor, TARGET, { active: false }))).toMatchObject({ status: 502 });
+    expect(fake.db.find("motorist_profiles", row => row.id === TARGET)).toMatchObject({ active: false });
+  });
+  it("also deletes the iPhone credential and device when the account is removed, only with the switch", async () => {
+    fake.db.seed("motorist_operator_mobile_devices", [mobileDevice]);
+    await deleteAccessUser(actor, TARGET);
+    expect(deleteTelephonyCredential).not.toHaveBeenCalled();
+    seed(); clearLatencyFlagsCache(); rotation();
+    fake.db.seed("motorist_operator_mobile_devices", [mobileDevice]);
+    await deleteAccessUser(actor, TARGET);
+    expect(deleteTelephonyCredential.mock.calls.map(([credential]) => credential)).toEqual(["mobile-cred"]);
+    expect(fake.db.rows("motorist_operator_mobile_devices")).toHaveLength(0);
   });
 });
