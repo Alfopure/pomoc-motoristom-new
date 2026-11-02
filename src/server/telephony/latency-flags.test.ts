@@ -118,12 +118,23 @@ describe("latency flags", () => {
       own_leg_timeout_secs_concurrent: 9, internal_auto_bridge: true, api_region: "eu" };
     expect([concurrentDialFor(flags, "outbound", "web"), concurrentDialFor(flags, "outbound", "mobile"),
       concurrentDialFor(flags, "internal", "web"), concurrentDialFor(flags, "internal", "mobile")]).toEqual([true, false, false, true]);
-    // S6 is not implemented: the session records the sequential 30 s dial. S5 is: on TEST a session we
-    // create takes the flag's API region, while an inbound call keeps the region its client calls.
+    // S6 ships concurrent dialing with its own-leg timeout and the colleague auto-bridge; the API region (S5) is only `eu` on TEST, below.
+    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" })).toEqual({ concurrent: true, autoBridge: false,
+      ownLegTimeoutSecs: 9, apiRegion: "us", origin: "web" });
+    expect(freezeStartMode(flags, { direction: "internal", origin: "mobile", providerRegion: "us" })).toEqual({ concurrent: true, autoBridge: true,
+      ownLegTimeoutSecs: 9, apiRegion: "us", origin: "mobile" });
+    // Per origin: the switch for outbound web says nothing about a colleague call from the web or a call from the phone.
+    for (const [direction, origin] of [["outbound", "mobile"], ["internal", "web"], ["inbound", null]] as const) {
+      expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" })).toEqual({ concurrent: false, autoBridge: direction === "internal",
+        ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin });
+    }
+    // A start that cannot run concurrently (a callback, start announcements) freezes the sequential dial.
+    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us", concurrentEligible: false }))
+      .toMatchObject({ concurrent: false, ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS });
+    // S5: on TEST a session we create takes the flag's API region, while an inbound call keeps the region its client calls.
     vi.stubEnv("MOTORIST_APP_ENV", "test");
     for (const [direction, origin, apiRegion] of [["outbound", "web", "eu"], ["internal", "mobile", "eu"], ["inbound", null, "us"]] as const) {
-      expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" })).toEqual({ concurrent: false, autoBridge: false,
-        ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion, origin });
+      expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" }).apiRegion).toBe(apiRegion);
     }
     expect(freezeStartMode({ ...flags, api_region: "us" }, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
     // Until spike S5.0 passes, only an application environment of exactly `test` may freeze `eu`:
@@ -170,6 +181,7 @@ describe("latency flags", () => {
     const first = await startOutboundCall(deps, { profileId: PROFILES.o1, role: "dispatcher" }, { to: NUMBERS.customer });
     const startMode = (sessionId: string) => readMeta(h.session(sessionId) as SessionRow).start_mode;
     const sequential = { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "eu" };
+    // A legacy writer has no staged startup entry to carry a far-end dial (S6): it records the sequential start it runs.
     expect(startMode(first.sessionId)).toEqual({ ...sequential, origin: "web" });
     // ...which is what happened: a 30 s own-leg dial, and the customer only after it answered.
     expect(h.telnyx.of("dial").map(dial => dial.params.timeoutSecs)).toEqual([30]);

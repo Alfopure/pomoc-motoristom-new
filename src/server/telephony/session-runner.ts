@@ -526,8 +526,9 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     !session.ended_at && !session.termination_requested_at && !meta.hangup && !meta.customer_gone_at &&
     event?.kind === "app" && event.type === "pickup" &&
     snapshotLegs?.some(leg => leg.id === session.customer_leg_id && leg.role === "customer" && isOpenLeg(leg));
+  // `ringing` only for a concurrent start (S6.1), whose customer was dialled with this leg.
   const outboundOwnLegAnswer = noContinuation && session.writer_contract === 2 &&
-    session.direction === "outbound" && session.state === "received" && !session.ended_at &&
+    session.direction === "outbound" && (session.state === "received" || session.state === "ringing" && meta.far_end?.mode === "concurrent") && !session.ended_at &&
     !session.termination_requested_at && !meta.hangup && Boolean(meta.outbound) && Boolean(meta.announcements) &&
     event?.kind === "telnyx" && ["call.answered", "call.bridged"].includes(event.type) &&
     event.clientState?.sid === session.id && event.clientState.role === "operator" && event.clientState.intent === "outbound" &&
@@ -570,7 +571,7 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     pickupLeg !== undefined && pickupLeg.role !== "customer";
   // `ringing` only for a session frozen as concurrent (S6), where the far end
   // is already dialled when the caller's own leg answers.
-  const internalOwnLegAnswer = internalAnswer && (session.state === "received" || session.state === "ringing" && meta.start_mode?.concurrent === true) &&
+  const internalOwnLegAnswer = internalAnswer && (session.state === "received" || session.state === "ringing" && meta.far_end?.mode === "concurrent") &&
     event.clientState?.role === "operator" && event.clientState.intent === "internal_caller" &&
     pickupLeg?.role === "operator" && isOpenLeg(pickupLeg) && !pickupLeg.answered_at &&
     pickupLeg.profile_id === session.answered_by_profile_id && savedPickup?.sid === session.id && savedPickup.intent === "internal_caller";

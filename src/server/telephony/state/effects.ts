@@ -877,6 +877,8 @@ async function sessionLegs(deps: EffectsDeps, ctx: ExecutionContext): Promise<Le
 /** A command whose execution can need a `dial` result: the dial itself, or a reference to one. */
 function referencesDial(command: Command): boolean {
   if (command.kind === "dial") return true;
+  // A colleague fan-out started with the caller's own dial links to its leg (S6.1).
+  if (command.kind === "ring_fanout") return command.dials.some((dial) => dial.linkTo !== null && typeof dial.linkTo === "object");
   for (const value of Object.values(command as Record<string, unknown>)) {
     if (value && typeof value === "object" && "fromDial" in value) return true;
     if (Array.isArray(value) && value.some((item) => item && typeof item === "object" && "fromDial" in item)) return true;
@@ -906,6 +908,17 @@ function requireTelnyx(deps: EffectsDeps): TelnyxClient {
 function isLegAlreadyGone(error: unknown): boolean {
   if (!(error instanceof TelnyxCommandError) || (error.status !== 404 && error.status !== 422)) return false;
   return sessionOwnership.getStore()?.providerRegion !== "eu" || TELNYX_CALL_GONE_CODES.has(String(error.code));
+}
+
+/**
+ * Telnyx's 422 for a bridge between legs it has already bridged (TEST spike
+ * S6.0/4 records the exact wording). A call that is gone is not this: its
+ * bridge failed and the caller's compensation still runs.
+ */
+export function isAlreadyBridgedRefusal(error: unknown): boolean {
+  if (!(error instanceof TelnyxCommandError) || error.status !== 422) return false;
+  const text = `${error.title ?? ""} ${error.detail ?? ""} ${error.message}`;
+  return !isCallGoneError(error) && /already\b.{0,24}\bbridg/i.test(text);
 }
 
 /**
@@ -1073,15 +1086,23 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
           ...(source.profile_id ? { operatorId: source.profile_id } : {}),
           ...(previous?.offerToken ? { offerToken: previous.offerToken } : {}), intent: contactOperationIntent(command.commandId) });
       }
-      await telnyx.bridge({
-        callControlId: resolveLeg(ctx, command.leg),
-        targetCallControlId: resolveLeg(ctx, command.target),
-        commandId: command.commandId,
-        parkAfterUnbridge: command.parkAfterUnbridge,
-        playRingtone: command.playRingtone,
-        ringtone: command.playRingtone ? "cz" : undefined,
-        clientState,
-      });
+      try {
+        await telnyx.bridge({
+          callControlId: resolveLeg(ctx, command.leg),
+          targetCallControlId: resolveLeg(ctx, command.target),
+          commandId: command.commandId,
+          parkAfterUnbridge: command.parkAfterUnbridge,
+          playRingtone: command.playRingtone,
+          ringtone: command.playRingtone ? "cz" : undefined,
+          clientState,
+        });
+      } catch (error) {
+        // Call-speed S6.2: Telnyx bridged this pair itself (`bridge_on_answer`).
+        // That is the connection this command asked for; a replay of the
+        // journalled refusal lands here again with the same answer.
+        if (command.alreadyBridgedOk && isAlreadyBridgedRefusal(error)) return { skipped: true, detail: { reason: "already_bridged" } };
+        throw error;
+      }
       return { skipped: false };
     }
     case "recording_start": {
@@ -1430,7 +1451,7 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     // operator is reserved on this session with exactly this token, which the
     // staged command already holds durably: `claimOperatorForDial` would only
     // answer `reused`, and an operator cannot pause while `on_call`.
-    const result = await telnyx.dial(dialParams(command));
+    const result = await telnyx.dial(dialParams(command, ctx));
     return settleDial(deps, ctx, command, result, true);
   }
   const adopted = ctx.dialResults.get(command.commandId);
@@ -1479,22 +1500,26 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     if (ctx.continuation && !options?.planOnly) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
   if (options?.planOnly) return { skipped: false, detail: { planned: true, stable } };
-  const result = await telnyx.dial(dialParams(command));
+  const result = await telnyx.dial(dialParams(command, ctx));
   return settleDial(deps, ctx, command, result, stable);
 }
 
 /** Tells the browser an invite is a colleague call; see `inviteIsColleagueCall`. */
 const COLLEAGUE_CALL_HEADER = "X-PM-Colleague-Call";
 
-/** Exactly what `dial` is called with, apart so a whole ring step can be sent at once. */
-function dialParams(command: DialCommand): DialParams {
+/**
+ * Exactly what `dial` is called with, apart so a whole ring step can be sent at
+ * once. A `link_to` naming an earlier dial of the entry (S6.1) resolves to the
+ * leg that dial created, or refuses before anything is sent.
+ */
+function dialParams(command: DialCommand, ctx: ExecutionContext): DialParams {
   const isSip = command.to.startsWith("sip:");
   return {
     commandId: command.commandId,
     to: command.to,
     from: command.from,
     clientState: encodeClientState(command.clientState),
-    linkTo: command.linkTo ?? undefined,
+    linkTo: command.linkTo == null ? undefined : typeof command.linkTo === "string" ? command.linkTo : resolveLeg(ctx, command.linkTo),
     bridgeOnAnswer: command.bridgeOnAnswer,
     preventDoubleBridge: command.preventDoubleBridge,
     extra: command.parkAfterUnbridge ? { park_after_unbridge: command.parkAfterUnbridge } : undefined,
@@ -1847,7 +1872,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     sendable.push({ index, dial: dials[index] });
     return outcome;
   });
-  const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial)));
+  const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial, ctx)));
   await Promise.all(results.map(async (result, position) => {
     const { index, dial } = sendable[position];
     if (result.status === "rejected") { dialled[index] = result; return; }
@@ -2147,7 +2172,10 @@ async function executeReduceResult(
   // customer and presence recovery needs an ended session. Run it instead.
   const compensateCancelledInitialDial = async (command: Command, key: string, refusedByJournal: boolean): Promise<boolean> => {
     const continuation = input.continuation;
-    if (!continuation?.id.startsWith("initial:") || command.kind !== "dial" || sessionOwnership.getStore()?.contract !== 2) return false;
+    // Only the entry's own-leg dial: a concurrent start's far-end dial (S6.1)
+    // refused after a termination is retired with the entry, and the
+    // termination hangs up the own leg that exists by then.
+    if (continuation?.id !== `initial:${command.kind === "dial" ? command.commandId : ""}` || command.kind !== "dial" || sessionOwnership.getStore()?.contract !== 2) return false;
     const refused = compensations.find(candidate => candidate.forCommand === key)?.next;
     if (!refused) return false;
     // `prepare_v2` refuses only a command it would dispatch now, so its

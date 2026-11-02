@@ -3,10 +3,10 @@ import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony
 import { callColleague, startOutboundCall, createRateLimiter, type CallActor } from "./call-actions";
 import { initialOperationIdentity } from "./initial-call-operation";
 import { latencyFlagsOf } from "./latency-flags";
-import { createTelnyxClient } from "./telnyx/client";
+import { createTelnyxClient, TelnyxCommandError } from "./telnyx/client";
 import { getTelnyxConfig } from "./telnyx/env";
 import { readPendingEffects } from "./state/continuation";
-import type { SessionRow } from "./state/types";
+import { readMeta, type SessionRow } from "./state/types";
 import * as effects from "./state/effects";
 import { SessionLeaseLostError } from "./service-errors";
 import { runPendingEffectRecovery } from "./cron-jobs";
@@ -15,6 +15,8 @@ const actor: CallActor = { profileId: PROFILES.o1, role: "dispatcher", displayNa
 const requestId = "00000000-0000-4000-8000-000000000991";
 const sessionId = "00000000-0000-4000-8000-000000000992";
 const input = { to: NUMBERS.customer, requestId };
+/** `concurrent_dial` all off: the switch-on rerun (`start-concurrent-flags-on.test.ts`) leaves these tests the sequential start they describe. */
+const SEQUENTIAL = { outbound: { web: false, mobile: false }, internal: { web: false, mobile: false } };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 function prepared() {
@@ -61,7 +63,8 @@ describe("initial call operation recovery", () => {
     const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
     const fetch = vi.fn(async () => new Response(JSON.stringify({ data: { call_control_id: "new-own-leg", call_leg_id: "new-leg-id", call_session_id: "new-provider-session" } }), { status: 200 }));
     const telnyx = createTelnyxClient({ config: h.deps.config, fetch, liveGate: { callsEnabled: true, smsEnabled: false } });
-    const deps = { ...h.deps, telnyx, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) };
+    // One provider answer for every POST: the sequential start's single dial (a concurrent one is `concurrent-start.test.ts`).
+    const deps = { ...h.deps, telnyx, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }), latencyFlags: { ...latencyFlagsOf(h.deps), concurrent_dial: SEQUENTIAL } };
     const input = { to: NUMBERS.customer, requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
     const first = await startOutboundCall(deps, actor, input);
     expect(h.db.log.filter(row => row.table === "motorist_provider_command_lookup_v2")).toHaveLength(0);
@@ -398,11 +401,50 @@ describe("hangup before the first dial", () => {
   it("leaves a call that dialled before the hangup to the ordinary termination", async () => {
     const t = world();
     const call = await start(t, "outbound");
+    // A concurrent start (S6) dialled its customer in the same entry and already rings.
+    const concurrent = readMeta(t.h.session(call.sessionId) as SessionRow).far_end?.mode === "concurrent";
     await t.terminate(call.sessionId);
     // A retried POST of the same request must not rewrite the dialled call as cancelled.
     await expect(start(t, "outbound")).rejects.toMatchObject({ status: 409, code: "initial_call_ended" });
-    expect(t.h.telnyx.of("dial")).toHaveLength(1);
-    expect(t.h.session(call.sessionId)).toMatchObject({ state: "received", ended_at: null });
+    expect(t.h.telnyx.of("dial")).toHaveLength(concurrent ? 2 : 1);
+    expect(t.h.session(call.sessionId)).toMatchObject({ state: concurrent ? "ringing" : "received", ended_at: null });
     expect(t.h.call(call.sessionId)?.end_reason ?? null).not.toBe("cancelled_before_dial");
+  });
+});
+
+/**
+ * Call-speed S6.1: a concurrent start's entry carries two dials, the own leg's
+ * and the far end's linked to it. A resume must adopt the first from its leg
+ * row and send only what the provider has not taken yet.
+ */
+describe("a concurrent start's two-command entry", () => {
+  it("resumes a rate-limited far dial by cron, once, without redialling the own leg", async () => {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+    h.deps.latencyFlags = { ...latencyFlagsOf(h.deps), start_fast_path: true,
+      concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } } };
+    const dial = h.telnyx.client.dial.bind(h.telnyx.client);
+    let dials = 0;
+    vi.spyOn(h.telnyx.client, "dial").mockImplementation(async params => {
+      if (++dials === 2) h.telnyx.failNext("dial", new TelnyxCommandError({ code: "rate_limited", status: 429, retryable: true }));
+      return dial(params);
+    });
+    const deps = { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) };
+    let early: string | null = null;
+    const call = await startOutboundCall(deps, actor, { to: NUMBERS.customer, requestId: "00000000-0000-4000-8000-0000000005d1" },
+      result => { early = result.operatorLegCallControlId; });
+    expect(early).toBe(call.operatorLegCallControlId);
+    const pending = readPendingEffects(h.session(call.sessionId) as SessionRow).entries;
+    expect(pending).toHaveLength(1);
+    expect(pending[0].commands.map(command => command.kind)).toEqual(["dial", "dial"]);
+    expect(h.legs(call.sessionId).map(leg => leg.role)).toEqual(["operator"]);
+    h.advance(31_000);
+    await runPendingEffectRecovery(h.deps);
+    const sent = h.telnyx.of("dial");
+    expect(sent.filter(item => String(item.params.to).startsWith("sip:"))).toHaveLength(1);
+    expect(sent.filter(item => item.params.to === NUMBERS.customer).map(item => item.params.linkTo)).toEqual([call.operatorLegCallControlId, call.operatorLegCallControlId]);
+    expect(h.legs(call.sessionId).filter(leg => leg.role === "customer")).toHaveLength(1);
+    expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries).toEqual([]);
+    expect(h.session(call.sessionId).state).toBe("ringing");
   });
 });

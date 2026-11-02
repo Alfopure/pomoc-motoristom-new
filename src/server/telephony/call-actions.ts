@@ -9,13 +9,14 @@ import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
-import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
+import { announcementConfigFromMetadata, readAnnouncementConfig } from "@/lib/telephony/announcements";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { isUuid } from "@/lib/telephony/uuid";
 import { colleaguePresenceBlock, COLLEAGUE_CALL_MESSAGES, type ColleagueCallBlock } from "@/lib/telephony/colleague-call";
 import { sipDisplayText } from "@/lib/telephony/sip-display";
 
 import { writeCallAudit } from "./audit";
+import { attachContactOperations } from "./contact-proof";
 import { isArchivedLine } from "./line-archive";
 import { deviceIsLive, deviceSipUri, getOperatorDevice, type DeviceDeps } from "./operator-devices";
 import { presenceAllowsOffer } from "./routing/eligibility";
@@ -29,9 +30,10 @@ import { isOverLegCap, loadDailyUsage, type DailyUsage } from "./usage";
 import { resumePendingEffects, upsertCallRow, upsertDialedLeg, type CommandOutcome, type InitialDispatch } from "./state/effects";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { readPendingEffects, stageEffects } from "./state/continuation";
-import { CallActionRejected } from "./state/transitions";
+import { CallActionRejected, planInitialCall } from "./state/transitions";
 import {
   ACTIVE_SESSION_STATES,
+  DEFAULT_ROUTING_SETTINGS,
   emptyTransition,
   LEG_TIME_LIMIT_SECS,
   readMeta,
@@ -42,6 +44,7 @@ import {
   type DeviceRow,
   type LegRow,
   type LineRow,
+  type RoutingContext,
   type SessionRow,
   type SupervisorMode,
   type TransferTarget,
@@ -51,7 +54,7 @@ import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
 import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, ownershipRpc, sessionOwnership, withTelephonyDatabaseBudget } from "./ownership";
-import { freezeStartMode, latencyFlagsOf, providerRegionOf } from "./latency-flags";
+import { concurrentDialFor, freezeStartMode, latencyFlagsOf, providerRegionOf, SEQUENTIAL_OWN_LEG_TIMEOUT_SECS } from "./latency-flags";
 import { humansOnly } from "@/server/profile-kind";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { nativeVoiceEnabled } from "@/lib/app-environment";
@@ -612,6 +615,11 @@ async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: {
   const { line, from } = fromLine.value;
   const callerName = caller.status === "fulfilled" ? caller.value?.trim() || null : null;
   const plan = { to: target.value.sipUri, from, sipUri: device.value.sipUri, fromDisplayName: sipDisplayText(callerName) };
+  // Call-speed S6.1: a concurrent start dials the colleague in this same
+  // request, so the TEST destination proof of each endpoint leaves now too.
+  if (sipProof && concurrentDialFor(latencyFlagsOf(deps), "internal", deps.deviceKind ?? "web")) {
+    for (const endpoint of target.value.endpoints) deps.telnyx?.proveSipDestination?.(endpoint.sipUri);
+  }
 
   const session = await createSession(deps, {
     direction: "internal",
@@ -710,18 +718,15 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
         ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) }, linkTo: null, timeoutSecs: 30, autoAnswer: true, fromDisplayName: plan.fromDisplayName,
       ...(requestHeader ? { requestHeader } : {}) };
     if (session.writer_contract === 2) {
-      const next = emptyTransition();
-      next.call = { status: "outbound" };
-      next.notes = ["initial operator dial materialization"];
-      const refused = emptyTransition();
-      refused.session = { state: "failed", ended_at: nowOf(deps).toISOString() };
-      refused.call = { status: "failed", end_reason: "dial_failed" };
-      refused.presence = [{ profileId: actor.profileId, status: "available", sessionId: null,
-        onlyIfSession: session.id, onlyIfToken: reservation.offerToken ?? undefined, reason: "initial dial refused" }];
       const beforeStage = plan.callbackRequestId ? await loadSession(deps, session.id) : session;
-      const staged = await stageEffects(effectsFor(deps), { session: beforeStage, expectedVersion: beforeStage.version,
-        event: { kind: "app", type: "sweep", id: startupEntryId, actorProfileId: actor.profileId, occurredAt: nowOf(deps).toISOString() },
-        result: { next, commands: [dial], compensations: [{ forCommand: id, description: "release refused initial dial", commands: [], next: refused }], guard: null, ignored: null } });
+      const event: AppEvent = { kind: "app", type: "sweep", id: startupEntryId, actorProfileId: actor.profileId, occurredAt: nowOf(deps).toISOString() };
+      // Call-speed S6.1: a session frozen as concurrent dials its far end in
+      // this same entry, right after the own leg; any other keeps one dial.
+      const startup = planInitialCall(beforeStage, startupContext(deps, beforeStage), event, { ownDial: dial, offerToken: reservation.offerToken ?? undefined });
+      // Its customer dial is a callback contact intent like any direct dial;
+      // the leg it links to is bound once the own dial has created it.
+      if (startup.commands.length > 1) attachContactOperations({ session: beforeStage, legs: [] }, startup, event, true);
+      const staged = await stageEffects(effectsFor(deps), { session: beforeStage, expectedVersion: beforeStage.version, event, result: startup });
       // No external dispatch occurred before staging. Any accepted result below
       // is now backed by a cron-visible local materialization obligation.
       // Call-speed S2: only this request's untouched row, staged just now under
@@ -1454,6 +1459,22 @@ function effectsFor(deps: CallActionDeps) {
   return effectsDeps(deps);
 }
 
+/**
+ * What `planInitialCall` reads (call-speed S6.1): the clock, the caller id a
+ * colleague dial uses (in the reducer's order: the configured number, then the
+ * session's own) and the announcements frozen at creation.
+ */
+function startupContext(deps: CallActionDeps, session: SessionRow): RoutingContext {
+  const meta = readMeta(session);
+  const config = deps.config;
+  return { now: nowOf(deps), organizationId: deps.organizationId, environment: deps.environment, line: null, businessHours: null, ivr: null,
+    ringPlan: null, ringPlans: {}, presence: [], devices: [], openOffers: [], activeLegCount: 0, settings: DEFAULT_ROUTING_SETTINGS,
+    fromNumber: (config.configured ? config.defaultFromNumber : null) ?? null,
+    mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
+    announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : undefined,
+    recordingPolicy: meta.recording?.policy, lean: true };
+}
+
 async function createSession(
   deps: CallActionDeps,
   input: {
@@ -1481,7 +1502,11 @@ async function createSession(
       called_number: input.calledNumber,
       started_at: nowOf(deps).toISOString(),
       metadata: toJson({ ...input.metadata, environment: deps.environment,
-        start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: input.direction, origin: deps.deviceKind ?? "web", providerRegion: providerRegionOf(deps.config) }) }),
+        start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: input.direction, origin: deps.deviceKind ?? "web", providerRegion: providerRegionOf(deps.config),
+          // Call-speed S6.1: a callback, or an outgoing call behind start
+          // announcements (and with them any recording), stays sequential.
+          concurrentEligible: !input.metadata.callbackRequestId && (input.direction === "internal" ||
+            readAnnouncementConfig(input.metadata.announcements).outboundStartAnnouncements !== true) }) }),
     })
     .select("*")
     .single();
@@ -1491,7 +1516,21 @@ async function createSession(
   }
   if (inserted.error?.code === "PT409" && inserted.error.message.includes("request identity")) throw new CallActionError("Obnovte aplikáciu pred novým volaním.", 409, "reload_required");
   if (inserted.error) throw new CallActionError(`Hovor sa nepodarilo založiť: ${inserted.error.message}`, 500);
-  return inserted.data;
+  return honestLegacyStartMode(deps, inserted.data);
+}
+
+/**
+ * The concurrent start and the colleague auto-bridge need the staged startup
+ * entry of writer contract 2 (every production start). A legacy-writer session
+ * runs sequentially, so it must not keep a frozen promise it cannot honour.
+ */
+async function honestLegacyStartMode(deps: CallActionDeps, session: SessionRow): Promise<SessionRow> {
+  const mode = readMeta(session).start_mode;
+  if (session.writer_contract === 2 || !mode || !mode.concurrent && !mode.autoBridge) return session;
+  const metadata = toJson({ ...readMeta(session), start_mode: { ...mode, concurrent: false, autoBridge: false, ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS } });
+  const updated = await deps.admin.from("motorist_call_sessions").update({ metadata }).eq("id", session.id).select("*").single();
+  if (updated.error) throw new CallActionError(`Hovor sa nepodarilo založiť: ${updated.error.message}`, 500);
+  return updated.data;
 }
 
 async function markSessionFailed(deps: CallActionDeps, session: SessionRow, reason: string): Promise<void> {

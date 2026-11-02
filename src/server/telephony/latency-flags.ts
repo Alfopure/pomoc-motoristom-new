@@ -239,7 +239,7 @@ export function concurrentDialFor(flags: LatencyFlags, direction: "outbound" | "
  * what it really does, whatever the flags ask, and no later build can mistake
  * an earlier session for one that ran the optimisation.
  */
-const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: true, holdJoinWithHold: true } as const;
+const HONOURED_START_SWITCHES = { concurrent: true, autoBridge: true, apiRegion: true, holdJoinWithHold: true } as const;
 
 /**
  * S7b is implemented, but whether Telnyx plays the hold music to a participant
@@ -292,10 +292,17 @@ export function sessionApiRegion(metadata: unknown): "us" | "eu" {
   return startMode?.apiRegion === "eu" ? "eu" : "us";
 }
 
-/** What a new session keeps for its whole life, whatever the flags say later. */
-export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null; providerRegion: "us" | "eu" }): SessionStartMode {
+/**
+ * What a new session keeps for its whole life, whatever the flags say later.
+ *
+ * `concurrentEligible` (call-speed S6.1) is false for a start that must stay
+ * sequential whatever the switch says: a callback, or an outgoing call that
+ * cannot connect directly (start announcements, and with them recording).
+ */
+export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null; providerRegion: "us" | "eu";
+  concurrentEligible?: boolean }): SessionStartMode {
   const concurrent = HONOURED_START_SWITCHES.concurrent && input.direction !== "inbound" && input.origin !== null &&
-    concurrentDialFor(flags, input.direction, input.origin);
+    input.concurrentEligible !== false && concurrentDialFor(flags, input.direction, input.origin);
   // S7b: the first hold joins the customer already held. Present only when on,
   // so a session started with the switch off records exactly what it did before.
   const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold && joinWithHoldAllowed();

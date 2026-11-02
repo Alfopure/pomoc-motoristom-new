@@ -79,6 +79,28 @@ const BOUND_S2 = {
   },
 } as const;
 
+/**
+ * Call-speed S6 on top of the S2 switches (`start_fast_path`,
+ * `start_early_response`), measured on 2 Nov 2026 on dev 3f52dce + S6: the far
+ * end leaves in the start request (`toFarDial`, waves from the tap) instead of
+ * after the response, the device's answer and that answer's webhook chain.
+ * The own dial and the early response are unchanged; `resolved` and
+ * `leaseHeld` grow by the far dial the tail now carries. Same headroom as S2.
+ */
+const BOUND_S6 = {
+  start: {
+    // The customer dial: settle (1) + checkpoint (1) + prepare (1) after the own dial's answer.
+    outbound: { requests: 37, toOwnDial: 8, toFarDial: 13, toEarly: 11, resolved: 26, leaseHeld: 20 },
+    // A colleague dial also reads the pause and claims the colleague, durably, before it leaves.
+    1: { requests: 45, toOwnDial: 8, toFarDial: 16, toEarly: 11, resolved: 29, leaseHeld: 24 },
+    2: { requests: 57, toOwnDial: 8, toFarDial: 17, toEarly: 11, resolved: 31, leaseHeld: 26 },
+  },
+  // With S1's lean path: the caller's own answer dials nothing; the colleague's
+  // answer reaches `talking` without any bridge (audio was already bridged).
+  ownAnswer: { requests: 23 },
+  calleeAnswer: { requests: 24, toTalking: 7 },
+} as const;
+
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
@@ -522,6 +544,70 @@ describe("contract 2 dependent waves", () => {
       expect(bound.toOwnDial).toBeLessThan(off.toOwnDial);
       expect(bound.early.toEarly).toBeLessThan(bound.fast.resolved);
       expect(bound.fast.resolved).toBeLessThan(off.resolved);
+    });
+  });
+
+  describe("with the S6 switches (concurrent_dial, internal_auto_bridge) on top of S2", () => {
+    type Start = "outbound" | 1 | 2;
+    async function concurrentStart(kind: Start, concurrent: boolean) {
+      const h = kind === 2 ? nativeWorld() : harness();
+      if (kind === 2) h.db.seed("motorist_operator_mobile_devices", [{ organization_id: ORG, profile_id: PROFILES.o2, environment: "development",
+        sip_username: "native-colleague", device_session_id: requestId(9103), device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
+      const all = { web: concurrent, mobile: concurrent };
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), ...BOUND_S2_FLAGS, internal_auto_bridge: concurrent, concurrent_dial: { outbound: all, internal: all } };
+      let early: number | null = null;
+      const hook = () => { early ??= Date.now(); };
+      const run = await metered(h, () => kind === "outbound"
+        ? startOutboundCall(rateLimited(h), actor, { to: NUMBERS.customer, requestId: requestId(9301) }, hook)
+        : callColleague(rateLimited(h), actor, { targetProfileId: PROFILES.o2, requestId: requestId(9302) }, hook));
+      const lease = (table: string) => run.meter.requests.find(row => row.table === table)!.at / WAVE_MS;
+      const dials = run.sent.filter(entry => entry.method === "dial").length;
+      return { h, run, dials, toOwnDial: sendWave(run, "dial"), toFarDial: dials > 1 ? sendWave(run, "dial", 1) : null, toEarly: early === null ? null : run.meter.waves(early),
+        leaseHeld: lease("motorist_session_lease_release_v2") - lease("motorist_session_lease_acquire_v2") };
+    }
+
+    it.each(["outbound", 1, 2] as const)("dials the far end of a %s start inside the start request, a few waves after the own leg", async (kind) => {
+      const bound = BOUND_S6.start[kind];
+      const s6 = await concurrentStart(kind, true);
+      expect(s6.dials).toBe(kind === 2 ? 3 : 2);
+      bounded(s6.toOwnDial, bound.toOwnDial);
+      bounded(s6.toFarDial!, bound.toFarDial);
+      bounded(s6.toEarly!, bound.toEarly);
+      bounded(s6.run.waves, bound.resolved);
+      bounded(s6.leaseHeld, bound.leaseHeld);
+      bounded(s6.run.requests, bound.requests);
+      // The own leg and the early response lose nothing to the far dial behind them.
+      const s2 = BOUND_S2.start[kind];
+      expect(bound.toOwnDial).toBeLessThanOrEqual(s2.toOwnDial);
+      expect(bound.toEarly).toBeLessThanOrEqual(s2.early.toEarly);
+      // Sequentially the far dial waits for the response, the device's answer
+      // and that answer's own webhook chain; concurrently it needs none of them.
+      const sequentialChain = s2.early.toEarly + (kind === "outbound" ? BOUND.outboundOwnAnswer.toCustomerDial : BOUND_S1.internalOwnAnswer[kind].toColleagueDial);
+      expect(bound.toFarDial).toBeLessThan(sequentialChain);
+      const sequential = await concurrentStart(kind, false);
+      expect(sequential.dials).toBe(1);
+    });
+
+    it("connects an auto-bridged colleague with no bridge command: Telnyx bridged at the answer (S6.3)", async () => {
+      const h = harness();
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), internal_lean_path: true, bridged_observation_fast: true, internal_auto_bridge: true,
+        concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } } };
+      const { call } = await colleague(h);
+      h.telnyx.physical.answered(call.operatorLegCallControlId);
+      const own = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.answered"));
+      // The own answer dials nothing now: the colleague already rings.
+      expect(own.sent).toEqual([]);
+      bounded(own.requests, BOUND_S6.ownAnswer.requests);
+      const callee = String(h.openLegFor(call.sessionId, PROFILES.o2)!.telnyx_call_control_id);
+      h.telnyx.physical.answered(callee);
+      expect(h.telnyx.physical.connected(call.operatorLegCallControlId, callee)).toBe(true);
+      const answer = await metered(h, () => h.legEvent(callee, "call.answered"), meter => {
+        meter.watch("talking", () => h.session(call.sessionId).state === "talking");
+      });
+      expect(answer.sent.filter(send => send.method === "bridge")).toEqual([]);
+      bounded(markWave(answer, "talking"), BOUND_S6.calleeAnswer.toTalking);
+      bounded(answer.requests, BOUND_S6.calleeAnswer.requests);
+      expect(BOUND_S6.calleeAnswer.toTalking).toBeLessThanOrEqual(BOUND_S1.internalCalleeAnswer.toTalking);
     });
   });
 

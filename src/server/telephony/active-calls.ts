@@ -108,6 +108,8 @@ export type ActiveCallView = {
   legs: ActiveCallLegView[];
   /** True when the polling operator owns or is being offered this call. */
   mine: boolean;
+  /** Colleague call frozen with the provider auto-bridge (call-speed S6.3, `start_mode.autoBridge`). */
+  autoBridge?: boolean;
 };
 
 export type ActiveCallsSnapshot = {
@@ -487,6 +489,7 @@ function buildActiveCalls(
         operatorProfileId === actor.profileId ||
         offeredProfileIds.includes(actor.profileId) ||
         sessionLegs.some((leg) => leg.profileId === actor.profileId),
+      ...(session.direction === "internal" && meta.start_mode?.autoBridge === true ? { autoBridge: true } : {}),
     } satisfies ActiveCallView;
   });
 

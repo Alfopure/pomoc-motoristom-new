@@ -3,6 +3,7 @@ import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
 import { createRateLimiter, hangupCall, startOutboundCall } from "../call-actions";
 import { readContactHistory } from "../contact-proof";
+import { latencyFlagsOf } from "../latency-flags";
 import { readMeta, type SessionRow } from "./types";
 
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
@@ -167,7 +168,10 @@ describe("direct outgoing provider connection", () => {
   it("ends the call under contract 2 when the own leg drops while the customer dial's outcome is unknown", async () => {
     vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
     const h = createTelephonyHarness({ writerContract: 2 });
-    const call = await startOutboundCall({ ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) }, actor,
+    // The customer dialled at the own leg's answer (sequential); the concurrent start's
+    // lost customer response is `concurrent-start.test.ts`.
+    const sequential = { ...latencyFlagsOf(h.deps), concurrent_dial: { outbound: { web: false, mobile: false }, internal: { web: false, mobile: false } } };
+    const call = await startOutboundCall({ ...h.deps, latencyFlags: sequential, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) }, actor,
       { to: NUMBERS.customer, requestId: "00000000-0000-4000-8000-0000000005a3" });
     const operator = call.operatorLegCallControlId;
     h.telnyx.physical.answered(operator);

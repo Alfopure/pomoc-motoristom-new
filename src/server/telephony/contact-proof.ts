@@ -35,6 +35,12 @@ type BridgeEvent = Pick<TelephonyEvent, "id" | "type" | "callControlId" | "occur
 type PendingDialContact = {
   id: string; scope: ContactScope; startedAt: string; endedAt: string | null;
   operatorLegId: string | null; operatorControlId: string; operatorProfileId: string | null; operatorProviderLegId: string | null;
+  /**
+   * Call-speed S6.1: the customer was dialled together with the operator's own
+   * leg, before that leg existed. `operatorControlId` is then empty and the
+   * own leg is the one this dial created (its row's `dial_command_id`).
+   */
+  operatorDialCommandId?: string;
   bridgeEvents: BridgeEvent[];
 };
 export type ContactHistory = { version: 1; operations: ContactOperation[]; proofs: ContactProof[]; conferenceObservations?: ConferenceObservation[]; pendingDials?: PendingDialContact[] };
@@ -49,6 +55,14 @@ export function readContactHistory(session: Pick<SessionRow, "metadata">): Conta
   const history = readMeta(session).callback_contact as ContactHistory | undefined;
   return history?.version === 1 && Array.isArray(history.operations) && Array.isArray(history.proofs)
     ? structuredClone(history) : { version: 1, operations: [], proofs: [] };
+}
+
+/** The operator leg a pending dial contact belongs to, once it is known. */
+function pendingOperatorControlId(state: ContactSnapshot, pending: PendingDialContact): string | null {
+  if (pending.operatorControlId) return pending.operatorControlId;
+  if (!pending.operatorDialCommandId) return null;
+  return state.legs.find((leg) => leg.role === "operator" && leg.profile_id === pending.operatorProfileId &&
+    (leg.metadata as { dial_command_id?: unknown } | null)?.dial_command_id === pending.operatorDialCommandId)?.telnyx_call_control_id ?? null;
 }
 
 function servesCustomer(state: ContactSnapshot, leg: LegRow): boolean {
@@ -102,6 +116,18 @@ export function collectContactOperation(state: ContactSnapshot, commands: Comman
           operatorProviderLegId: answeringOperator.telnyx_call_leg_id, bridgeEvents: [] });
       }
     }
+    // Call-speed S6.1: the same intent, frozen for a customer dialled together
+    // with the operator's own leg. That leg is bound once its row exists.
+    const ownDial = command.kind === "dial" && command.linkTo !== null && typeof command.linkTo === "object" ? command.linkTo.fromDial : null;
+    if (command.kind === "dial" && ownDial && command.bridgeOnAnswer && command.role === "customer" && state.session.direction === "outbound" &&
+      command.to === state.session.called_number && command.clientState.intent === contactOperationIntent(command.commandId)) {
+      const pending = history.pendingDials ??= [];
+      if (!pending.some((item) => item.id === command.commandId) && !history.operations.some((item) => item.id === command.commandId)) {
+        pending.push({ id: command.commandId, scope: contactScope(state.session), startedAt: at, endedAt: null,
+          operatorLegId: null, operatorControlId: "", operatorDialCommandId: ownDial, operatorProfileId: state.session.answered_by_profile_id ?? null,
+          operatorProviderLegId: null, bridgeEvents: [] });
+      }
+    }
     const affected = "leg" in command ? command.leg.callControlId : "legs" in command
       ? command.legs.find(leg => leg.callControlId === customer?.telnyx_call_control_id || leg.callControlId === operator?.telnyx_call_control_id)?.callControlId ?? null : null;
     const conferenceId = command.conferenceId ?? state.session.conference_id;
@@ -109,7 +135,8 @@ export function collectContactOperation(state: ContactSnapshot, commands: Comman
     if (closes) {
       const ids = command.kind === "bridge" ? [command.leg.callControlId, command.target.callControlId] : "legs" in command ? command.legs.map((leg) => leg.callControlId) : [affected];
       for (const pending of history.pendingDials ?? []) {
-        if (!pending.endedAt && (ids.includes(pending.operatorControlId) || ids.some((id) => pending.bridgeEvents.some((event) => event.callControlId === id)))) pending.endedAt = at;
+        const operatorControlId = pendingOperatorControlId(state, pending);
+        if (!pending.endedAt && (operatorControlId && ids.includes(operatorControlId) || ids.some((id) => pending.bridgeEvents.some((event) => event.callControlId === id)))) pending.endedAt = at;
       }
       for (const operation of history.operations) {
         if (operation.id === command.commandId) continue;
@@ -205,16 +232,17 @@ function bindDialContact(state: ContactSnapshot, history: ContactHistory, event:
   for (const pending of history.pendingDials ?? []) {
     if (pending.scope.organizationId !== state.session.organization_id) continue;
     const intent = contactOperationIntent(pending.id);
+    const operatorControlId = pendingOperatorControlId(state, pending);
     if (event.type === "call.bridged" && event.callControlId &&
-      (event.callControlId === pending.operatorControlId || event.clientState?.sid === state.session.id && event.clientState.role === "customer" && event.clientState.intent === intent) &&
+      (event.callControlId === operatorControlId || event.clientState?.sid === state.session.id && event.clientState.role === "customer" && event.clientState.intent === intent) &&
       !pending.bridgeEvents.some((item) => item.id === event.id) && pending.bridgeEvents.length < 4) {
       pending.bridgeEvents.push({ id: event.id, type: event.type, callControlId: event.callControlId, occurredAt: event.occurredAt, clientState: event.clientState });
     }
     const customers = state.legs.filter((leg) => leg.role === "customer" && leg.to_number === pending.scope.customerNumber &&
       (leg.client_state as { sid?: string; intent?: string } | null)?.sid === state.session.id &&
       (leg.client_state as { intent?: string } | null)?.intent === intent);
-    const operator = state.legs.find((leg) => (!pending.operatorLegId || leg.id === pending.operatorLegId) && leg.telnyx_call_control_id === pending.operatorControlId && leg.profile_id === pending.operatorProfileId &&
-      (!pending.operatorProviderLegId || leg.telnyx_call_leg_id === pending.operatorProviderLegId));
+    const operator = operatorControlId ? state.legs.find((leg) => (!pending.operatorLegId || leg.id === pending.operatorLegId) && leg.telnyx_call_control_id === operatorControlId && leg.profile_id === pending.operatorProfileId &&
+      (!pending.operatorProviderLegId || leg.telnyx_call_leg_id === pending.operatorProviderLegId)) : undefined;
     if (customers.length !== 1 || !operator || !operator.answered_at) continue;
     const customer = customers[0];
     let operation = history.operations.find((item) => item.id === pending.id);
@@ -222,8 +250,8 @@ function bindDialContact(state: ContactSnapshot, history: ContactHistory, event:
       operation = { id: pending.id, scope: pending.scope, startedAt: pending.startedAt, endedAt: pending.endedAt,
         sourceControlId: customer.telnyx_call_control_id, topology: "bridge", customerLegId: customer.id,
         customerControlId: customer.telnyx_call_control_id, customerProviderLegId: customer.telnyx_call_leg_id,
-        operatorLegId: operator.id, operatorControlId: pending.operatorControlId, operatorProfileId: pending.operatorProfileId,
-        operatorProviderLegId: pending.operatorProviderLegId, conferenceId: null, conferenceName: null, observations: {} };
+        operatorLegId: operator.id, operatorControlId: operator.telnyx_call_control_id, operatorProfileId: pending.operatorProfileId,
+        operatorProviderLegId: pending.operatorDialCommandId ? operator.telnyx_call_leg_id : pending.operatorProviderLegId, conferenceId: null, conferenceName: null, observations: {} };
       history.operations.push(operation);
     }
     for (const observed of pending.bridgeEvents) observeBridge(state, operation, observed);
