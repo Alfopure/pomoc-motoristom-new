@@ -93,26 +93,36 @@ function credentialUsable(device: DeviceRow, now: Date): boolean {
 }
 
 const PENDING_DELETIONS = PENDING_CREDENTIAL_DELETIONS;
-/** A failing deletion blocks new tokens and revocations for at most this many failures or this
- * long; after that it stays pending (retried on every pass) and a manager is told in the audit
- * log, so one deletion Telnyx keeps refusing never locks an operator out. */
+/** Minting a token stays blocked by a failing deletion until it failed this often AND has been
+ * failing this long; only then it no longer locks the operator out. It stays pending (retried on
+ * every pass) and a manager is told once in the audit log. Revocations never use this relief. */
 const PENDING_BLOCK_FAILURES = 5;
 const PENDING_BLOCK_MS = 15 * 60 * 1000;
-function pendingBlocks(entry: PendingCredentialDeletion, now: Date): boolean {
+/** Retried at most this long and this many at once (newest first); the rest are abandoned with an
+ * audit row, which stays the record, so a push wake never fans out Telnyx calls. */
+const PENDING_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
+const PENDING_MAX = 20;
+function pendingAge(entry: PendingCredentialDeletion, now: Date): number {
   const since = entry.since ? Date.parse(entry.since) : NaN;
-  return entry.failures < PENDING_BLOCK_FAILURES && !(Number.isFinite(since) && now.getTime() - since >= PENDING_BLOCK_MS);
+  return Number.isFinite(since) ? now.getTime() - since : 0;
+}
+function pendingBlocks(entry: PendingCredentialDeletion, now: Date): boolean {
+  return entry.failures < PENDING_BLOCK_FAILURES || pendingAge(entry, now) < PENDING_BLOCK_MS;
 }
 
 /**
  * Deletes every superseded credential still pending at Telnyx and forgets those that are gone
- * (deleted or 404); a failure is counted on its entry, never dropped. Fail-closed within the
- * retry window: throws while a failing deletion still blocks, so no new token is minted and no
- * revocation is reported done while an old JWT may still register.
+ * (deleted or 404); a failure is counted on its entry, never silently dropped. `strict` (every
+ * revocation: logout, manager disconnect, deactivation, removal) throws whenever a pending
+ * deletion fails, so no revocation is reported done while an old JWT may still register.
+ * Minting throws while a failing deletion still blocks (see PENDING_BLOCK_*).
  */
-async function drainPendingDeletions(deps: DeviceDeps, device: DeviceRow): Promise<DeviceRow> {
-  const pending = pendingCredentialEntries(device.metadata);
-  if (!pending.length) return device;
+async function drainPendingDeletions(deps: DeviceDeps, device: DeviceRow, mode: "mint" | "strict" = "mint"): Promise<DeviceRow> {
+  const listed = pendingCredentialEntries(device.metadata);
+  if (!listed.length) return device;
   const now = nowOf(deps);
+  const pending = listed.filter(entry => pendingAge(entry, now) < PENDING_RETRY_MS).slice(-PENDING_MAX);
+  const abandoned = new Set(listed.filter(entry => !pending.includes(entry)).map(entry => entry.id));
   const results = new Map<string, "gone" | "failed">();
   let failure: unknown = null;
   for (const entry of pending) {
@@ -123,7 +133,7 @@ async function drainPendingDeletions(deps: DeviceDeps, device: DeviceRow): Promi
   }
   const settle = (entry: PendingCredentialDeletion): PendingCredentialDeletion[] => {
     const result = results.get(entry.id);
-    if (result === "gone") return [];
+    if (result === "gone" || abandoned.has(entry.id)) return [];
     if (result !== "failed") return [entry];
     const next = { ...entry, since: entry.since ?? now.toISOString(), failures: entry.failures + 1 };
     return [{ ...next, reported: next.reported || !pendingBlocks(next, now) }];
@@ -138,15 +148,16 @@ async function drainPendingDeletions(deps: DeviceDeps, device: DeviceRow): Promi
   });
   // Contention keeps the deleted IDs listed; the next drain sees their 404 and forgets them.
   const current = updated ?? device;
-  for (const entry of after) {
-    if (!entry.reported || pending.find(previous => previous.id === entry.id)?.reported) continue;
-    console.error(JSON.stringify({ level: "error", scope: "telephony", code: "credential_deletion_stuck", deviceKind: deps.deviceKind ?? "web", failures: entry.failures }));
+  const incidents = [...after.filter(entry => entry.reported && !listed.find(previous => previous.id === entry.id)?.reported).map(entry => ({ entry, abandoned: false })),
+    ...listed.filter(entry => abandoned.has(entry.id)).map(entry => ({ entry, abandoned: true }))];
+  for (const { entry, abandoned: dropped } of incidents) {
+    console.error(JSON.stringify({ level: "error", scope: "telephony", code: "credential_deletion_stuck", deviceKind: deps.deviceKind ?? "web", failures: entry.failures, abandoned: dropped }));
     const audit = await deps.admin.from("motorist_audit_log").insert({ organization_id: device.organization_id, actor_profile_id: null,
       action: "telephony.credential_deletion_stuck", entity_type: "operator_device", entity_id: device.profile_id, source: "telephony",
-      after_payload: toJson({ credentialId: entry.id, deviceKind: deps.deviceKind ?? "web", failures: entry.failures, since: entry.since }) });
+      after_payload: toJson({ credentialId: entry.id, deviceKind: deps.deviceKind ?? "web", failures: entry.failures, since: entry.since, abandoned: dropped }) });
     if (audit.error) console.error("Credential deletion incident could not be audited:", audit.error.message);
   }
-  if (failure && after.some(entry => results.get(entry.id) === "failed" && pendingBlocks(entry, now))) throw failure;
+  if (failure && (mode === "strict" || after.some(entry => results.get(entry.id) === "failed" && pendingBlocks(entry, now)))) throw failure;
   return current;
 }
 
@@ -451,10 +462,12 @@ export async function issueWebphoneToken(
  * deleted directly) and the token is refused.
  */
 export async function refuseIfAccessLost(deps: DeviceDeps, input: { organizationId: string; profileId: string }, issued: Pick<WebphoneToken, "credentialId">): Promise<void> {
-  const { data, error } = await deps.admin.from("motorist_profiles").select("active, access_status")
+  // The same predicate as the routes' own sign-in check: a deactivation always turns `active` off,
+  // while a signed-in user who is still "invited" keeps the phone.
+  const { data, error } = await deps.admin.from("motorist_profiles").select("active")
     .eq("organization_id", input.organizationId).eq("id", input.profileId).maybeSingle();
   if (error) throw new OperatorDeviceError("Oprávnenie sa nepodarilo overiť.", 503);
-  if (data?.active === true && data.access_status === "active") return;
+  if (data?.active === true) return;
   try {
     const revoked = await disconnectDevice(deps, input);
     if (!revoked) await deleteCredentialAtProvider(deps, issued.credentialId, "Prihlasovacie údaje odobratého používateľa sa nepodarilo zrušiť u operátora");
@@ -516,7 +529,8 @@ async function revokeDeviceSession(deps: DeviceDeps, device: DeviceRow): Promise
   return updated;
 }
 
-export type DisconnectResult = { device: DeviceRow; deletedCredentialId: string | null };
+/** `revoked`: whether anything was taken away (a live lease or a credential, current or pending). */
+export type DisconnectResult = { device: DeviceRow; deletedCredentialId: string | null; revoked: boolean };
 
 /**
  * Forces the operator's browser phone off — for good.
@@ -545,8 +559,11 @@ export async function disconnectDevice(
   // A delayed mobile logout may never revoke a newer device's lease.
   if (input.deviceSessionId && device.device_session_id !== input.deviceSessionId) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
   // Superseded credentials still alive at Telnyx go first; while one stays alive the revocation fails.
-  const revoked = await drainPendingDeletions(deps, await revokeDeviceSession(deps, device));
-  if (input.keepCredential || !revoked.telnyx_credential_id) return { device: revoked, deletedCredentialId: null };
+  const revoked = await drainPendingDeletions(deps, await revokeDeviceSession(deps, device), "strict");
+  // Whether this call took anything away: a live lease, a pending credential, or (below) the credential.
+  const tookAway = !device.device_session_id?.startsWith("revoked:")
+    || pendingCredentialEntries(revoked.metadata).length < pendingCredentialEntries(device.metadata).length;
+  if (input.keepCredential || !revoked.telnyx_credential_id) return { device: revoked, deletedCredentialId: null, revoked: tookAway };
 
   const credentialId = revoked.telnyx_credential_id;
   await deleteCredentialAtProvider(deps, credentialId, "Telefón sme odhlásili, ale prihlasovacie údaje sa nepodarilo zrušiť u operátora");
@@ -558,7 +575,7 @@ export async function disconnectDevice(
       metadata: toJson({ ...retainDeviceLastOnline(current, nowOf(deps)), deleted_credential_id: credentialId, deleted_credential_at: nowOf(deps).toISOString() }),
     }));
   if (!cleared) throw new OperatorDeviceError(TOKEN_TAKEOVER_MESSAGE, 409);
-  return { device: cleared, deletedCredentialId: credentialId };
+  return { device: cleared, deletedCredentialId: credentialId, revoked: true };
 }
 
 export function deviceIsLive(device: Pick<DeviceRow, "device_seen_at" | "registration_state"> | null, now: Date): boolean {

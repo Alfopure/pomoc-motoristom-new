@@ -159,11 +159,16 @@ export async function updateAccessUser(actor: MotoristActor, profileId: string, 
     ...(input.role !== undefined ? { role: nextRole } : {}),
   };
 
+  // Deactivating an already disabled user only repeats the phone revocation (S8.1).
+  const repeatedDeactivation = input.active === false && !profile.active && profile.access_status === "disabled";
   if (input.active !== undefined) {
     patch.active = input.active;
     patch.access_status = input.active ? nextEnabledStatus(profile) : "disabled";
-    patch.access_disabled_at = input.active ? null : new Date().toISOString();
-    patch.access_disabled_by = input.active ? null : actor.profileId;
+    // A repeated deactivation keeps who disabled the user and when.
+    if (!repeatedDeactivation) {
+      patch.access_disabled_at = input.active ? null : new Date().toISOString();
+      patch.access_disabled_by = input.active ? null : actor.profileId;
+    }
 
     if (!input.active && profile.user_id) {
       const { error } = await supabase.auth.admin.updateUserById(profile.user_id, { ban_duration: "876000h" });
@@ -192,8 +197,13 @@ export async function updateAccessUser(actor: MotoristActor, profileId: string, 
     throw new MutationError("Používateľa sa nepodarilo uložiť.", 500);
   }
 
-  // After the profile is inactive, so the phone cannot enroll a new credential in between.
-  if (input.active === false) await revokeDeactivatedPhone(supabase, actor.organizationId, profile.id);
+  // After the profile is inactive, so the phone cannot enroll a new credential in between. A
+  // repeated deactivation is the manager asking for exactly that, so it always revokes and says
+  // whether anything was taken away.
+  if (input.active === false) {
+    const phoneRevoked = await revokeDeactivatedPhone(supabase, actor.organizationId, profile.id, repeatedDeactivation);
+    if (repeatedDeactivation) return { ...data, phoneRevoked };
+  }
 
   return data;
 }
@@ -202,23 +212,25 @@ export async function updateAccessUser(actor: MotoristActor, profileId: string, 
  * Call-speed S8.1: the iPhone's lease is revoked and its Telnyx credential deleted, so a JWT the
  * phone cached can no longer register. With `mobile_rotate_on_deactivation`, or fail-closed while
  * a JWT issued for caching may still be in use (or that cannot be read). Reactivation enrolls a
- * new credential. A repeated deactivation repeats the revocation.
+ * new credential. A repeated deactivation (`always`) is an explicit request and always revokes.
+ * Resolves whether anything was taken away.
  */
-async function revokeDeactivatedPhone(supabase: ReturnType<typeof createSupabaseAdminClient>, organizationId: string, profileId: string) {
-  if (!(await readLatencyFlags(supabase, organizationId)).mobile_rotate_on_deactivation) {
+async function revokeDeactivatedPhone(supabase: ReturnType<typeof createSupabaseAdminClient>, organizationId: string, profileId: string, always = false) {
+  if (!always && !(await readLatencyFlags(supabase, organizationId)).mobile_rotate_on_deactivation) {
     const phones = await supabase.from("motorist_operator_mobile_devices").select("metadata").eq("organization_id", organizationId).eq("profile_id", profileId);
-    if (!phones.error && !(phones.data ?? []).some(row => mobileTokenCacheOpen(row.metadata, new Date()))) return;
+    if (!phones.error && !(phones.data ?? []).some(row => mobileTokenCacheOpen(row.metadata, new Date()))) return false;
   }
-  await revokeOperatorPhone(organizationId, profileId, "Používateľ je deaktivovaný, ale prístup jeho iPhonu k ústredni sa nepodarilo zrušiť. Deaktiváciu zopakujte.");
+  return revokeOperatorPhone(organizationId, profileId, "Používateľ je deaktivovaný, ale prístup jeho iPhonu k ústredni sa nepodarilo zrušiť. Deaktiváciu zopakujte.");
 }
 
-/** Revokes the iPhone lease and deletes its credential (and any still pending) at Telnyx; a refusal is a 502 the manager can retry. */
-async function revokeOperatorPhone(organizationId: string, profileId: string, failure: string) {
+/** Revokes the iPhone lease and deletes its credential (and any still pending) at Telnyx; a refusal
+ * is a 502 the manager can retry. Resolves whether anything was taken away. */
+async function revokeOperatorPhone(organizationId: string, profileId: string, failure: string): Promise<boolean> {
   try {
     const { createTelephonyDeps } = await import("@/server/telephony/runtime");
     const { disconnectDevice } = await import("@/server/telephony/operator-devices");
     const deps = await createTelephonyDeps({ organizationId, deviceKind: "mobile" });
-    await disconnectDevice({ ...deps, deviceKind: "mobile" }, { organizationId, profileId });
+    return (await disconnectDevice({ ...deps, deviceKind: "mobile" }, { organizationId, profileId }))?.revoked === true;
   } catch (error) {
     console.error("iPhone credential revocation failed:", error);
     throw new MutationError(failure, 502);

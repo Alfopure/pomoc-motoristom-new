@@ -142,9 +142,10 @@ export function UserAccessSettings({ onDataChange, onNotice, users: initialUsers
     });
   }
 
-  /** Repeats the deactivation of an inactive user: the server revokes the iPhone's access again. */
+  /** Repeats the deactivation of an inactive user: the server revokes the iPhone's access again
+   * and its notice says whether there was anything to take away. */
   async function revokePhoneAgain(user: AccessUser) {
-    await runUserAction(user, "revoke-phone", `/api/users/${user.id}`, "Prístup k telefónu je zrušený.", { method: "PATCH", body: { active: false } });
+    await runUserAction(user, "revoke-phone", `/api/users/${user.id}`, "Deaktivácia je zopakovaná.", { method: "PATCH", body: { active: false } });
   }
 
   /**

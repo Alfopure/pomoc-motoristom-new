@@ -11,10 +11,12 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const actor = await requireDefaultMotoristActor(["manager", "admin"]);
     const { id } = await params;
     const input = (await request.json()) as UpdateAccessUserInput;
-    await updateAccessUser(actor, id, input);
+    const updated = await updateAccessUser(actor, id, input);
     const dispatchData = await loadDispatchData(actor, { access: true });
+    // A repeated deactivation says whether it took the iPhone's access away.
+    const notice = "phoneRevoked" in updated ? updated.phoneRevoked ? "Prístup k telefónu je zrušený." : "Používateľ nemá pripojený telefón." : undefined;
 
-    return Response.json({ dispatchData });
+    return Response.json({ dispatchData, ...(notice ? { notice } : {}) });
   } catch (error) {
     return mutationErrorResponse(error);
   }

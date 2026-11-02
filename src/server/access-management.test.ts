@@ -370,6 +370,18 @@ describe("the iPhone credential on deactivation and removal (call-speed S8.1)", 
     await updateAccessUser(actor, TARGET, { active: false });
     expect(disconnectDevice).toHaveBeenCalledOnce();
   });
+  it("repeats a deactivation without rewriting who disabled the user and when, and says whether the phone lost anything", async () => {
+    const first = await updateAccessUser(actor, TARGET, { active: false });
+    expect("phoneRevoked" in first).toBe(false);
+    fake.db.update("motorist_profiles", { access_disabled_at: "2026-10-01T08:00:00.000Z", access_disabled_by: TARGET }, row => row.id === TARGET);
+    disconnectDevice.mockResolvedValueOnce({ device: {}, deletedCredentialId: "mobile-cred", revoked: true }).mockResolvedValueOnce(null);
+    // An explicit repeat always revokes, switches on or off.
+    expect(await updateAccessUser(actor, TARGET, { active: false })).toMatchObject({ phoneRevoked: true });
+    expect(await updateAccessUser(actor, TARGET, { active: false })).toMatchObject({ phoneRevoked: false });
+    expect(disconnectDevice).toHaveBeenCalledTimes(2);
+    expect(fake.db.find("motorist_profiles", row => row.id === TARGET)).toMatchObject({ active: false, access_status: "disabled",
+      access_disabled_at: "2026-10-01T08:00:00.000Z", access_disabled_by: TARGET });
+  });
   it("says so when Telnyx keeps the iPhone credential, so the manager repeats the deactivation", async () => {
     rotation(); disconnectDevice.mockRejectedValue(new Error("provider down"));
     vi.spyOn(console, "error").mockImplementation(() => undefined);
