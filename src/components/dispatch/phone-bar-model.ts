@@ -229,7 +229,26 @@ export function callElapsedSeconds(call: Pick<PhoneBarCall, "timerSince">, now: 
 
 export type PhoneBarStateLabel = { label: string; tone: "live" | "hold" | "ring" | "wait" };
 
-export function phoneBarStateLabel(call: PhoneBarCall): PhoneBarStateLabel {
+/** Call-speed S6.4: how long an answering colleague's bar trusts its own media before the server confirms. */
+export const LOCAL_FIRST_TALKING_MS = 3_000;
+
+/**
+ * Call-speed S6.4 (`targetLocalFirst`): the colleague who answered an
+ * auto-bridged colleague call (Telnyx bridges it at answer) may show
+ * "Prebieha" from its own browser call being active, before the server's
+ * `talking` arrives. Only while the server still shows that call ringing for
+ * this browser leg; the bar falls back to "Spájam…" after
+ * `LOCAL_FIRST_TALKING_MS` and on anything the server says otherwise.
+ */
+export function localFirstCandidate(call: PhoneBarCall | null, browserCall: WebphoneCallView | null, enabled: boolean): boolean {
+  return Boolean(enabled && call && browserCall?.active && !browserCall.ringing && call.direction === "internal" && call.autoBridge &&
+    call.state === "ringing" && (call.connecting || call.kind === "offer") && phoneBarCallMatchesBrowser(call, browserCall));
+}
+
+export function phoneBarStateLabel(call: PhoneBarCall, options: { localTalking?: boolean } = {}): PhoneBarStateLabel {
+  if (options.localTalking) return { label: "Prebieha", tone: "live" };
+  // S6.2: answered, waiting for the caller's own phone to connect.
+  if (call.connecting) return { label: "Spájam…", tone: "wait" };
   if (call.controlPending) {
     const labels = call.controlPending.failed
       ? { hold: "Podržanie nepotvrdené", unhold: "Obnovenie hovoru nepotvrdené", park: "Presun do čakárne nepotvrdený" }
@@ -268,6 +287,7 @@ export function browserCallStateLabel(call: WebphoneCallView): PhoneBarStateLabe
 }
 
 export function phoneBarTimerLabel(call: PhoneBarCall): string {
+  if (call.connecting) return "Čas pripájania";
   if (call.audioConnection && call.audioConnection.status !== "connected") return "Čas pripájania zvuku";
   if (call.direction === "outbound" && !call.answered) return call.state === "received" ? "Čas pripájania telefónu" : "Čas vytáčania";
   if (call.kind === "offer" || call.kind === "waiting") return "Čas čakania";

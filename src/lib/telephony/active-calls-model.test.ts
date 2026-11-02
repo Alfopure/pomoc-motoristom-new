@@ -581,6 +581,29 @@ describe("colleague calls", () => {
     const row = callCenterCallFromActive(colleagueCall("talking"), { now: NOW, operatorName });
     expect(row).toMatchObject({ direction: "internal", callerName: "Peter Kováč", colleagueName: "Jana Nováková", lineLabel: "Interný hovor" });
   });
+
+  // Call-speed S6.2: in a concurrent start the colleague can answer before the
+  // caller's own phone has; the session still rings until it does.
+  function answeredBeforeCaller(callee = ME, caller = COLLEAGUE): ActiveCallPayload {
+    const ringing = colleagueCall("ringing", callee, caller);
+    return { ...ringing, autoBridge: true, legs: ringing.legs.map(item => item.intent === "internal" ? { ...item, state: "answered", answeredAt: "2026-09-03T08:01:00.000Z" } : item) };
+  }
+
+  it("keeps the colleague who answered first on an active, connecting call, derived from fields every server sends", () => {
+    const model = buildPhoneBarModel(payload({ calls: [answeredBeforeCaller()] }), { operatorName });
+    expect(model.active).toMatchObject({ sessionId: "sess-1", kind: "active", state: "ringing", connecting: true, autoBridge: true, mine: true, callerName: "Peter Kováč" });
+    expect(model.offers).toEqual([]);
+    expect(model.others).toEqual([]);
+    // The caller still dials; onlookers see nothing new.
+    expect(buildPhoneBarModel(payload({ calls: [answeredBeforeCaller(COLLEAGUE, ME)] }), { operatorName }).active).not.toHaveProperty("connecting");
+    expect(buildPhoneBarModel(payload({ calls: [answeredBeforeCaller("profile-third", COLLEAGUE)] }), { operatorName }).active).toBeNull();
+  });
+
+  it("passes the local-first switch from the snapshot tuning, off unless the server sends it", () => {
+    const tuning = { webEarlyAccept: false, webRtcRegion: "auto" as const, webPrefetchIce: false, targetLocalFirst: true };
+    expect(buildPhoneBarModel(payload({ calls: [], tuning })).targetLocalFirst).toBe(true);
+    expect(buildPhoneBarModel(payload({ calls: [] }))).not.toHaveProperty("targetLocalFirst");
+  });
 });
 
 it("shows the directory contact for incoming and operator-originated outgoing calls", () => {

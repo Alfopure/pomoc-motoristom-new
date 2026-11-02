@@ -8,6 +8,8 @@ import {
   callElapsedSeconds,
   formatCallTimer,
   isDtmfKey,
+  LOCAL_FIRST_TALKING_MS,
+  localFirstCandidate,
   partyBusyKey,
   phoneBarCapabilities,
   phoneBarFocusedCall,
@@ -284,5 +286,33 @@ describe("colleague call capabilities", () => {
       answer: false, hangup: true, hold: false, unhold: false, park: false, pickup: false, transfer: false, consult: false,
       completeTransfer: false, cancelConsult: false, addParty: false, leaveConference: false, mute: true, dtmf: true, newCase: false, linkCase: false,
     });
+  });
+
+  // Call-speed S6.2/S6.4: answered before the caller's own phone connected.
+  const connecting = (overrides: Partial<PhoneBarCall> = {}) => colleague({ state: "ringing", connecting: true, autoBridge: true, answered: false, ...overrides });
+  const browser = (overrides: Partial<WebphoneCallView> = {}): WebphoneCallView => ({ id: "sdk-1", state: "active", direction: "inbound", number: "", callerName: null,
+    telnyxCallControlId: "colleague-invite", sessionId: null, muted: false, ringing: false, active: true, ...overrides });
+
+  it("shows \"Spájam…\" while the colleague waits for the caller's phone, and lets them hang up", () => {
+    expect(phoneBarStateLabel(connecting())).toEqual({ label: "Spájam…", tone: "wait" });
+    expect(phoneBarTimerLabel(connecting())).toBe("Čas pripájania");
+    expect(phoneBarCapabilities({ call: connecting(), browserCallActive: true, browserCallRinging: false })).toMatchObject({ hangup: true, mute: true, answer: false });
+  });
+
+  it("trusts its own active media first only for an auto-bridged colleague call this browser answered, with the switch on", () => {
+    const mine = connecting({ browserCallControlIds: ["colleague-invite"] });
+    expect(localFirstCandidate(mine, browser(), true)).toBe(true);
+    expect(phoneBarStateLabel(mine, { localTalking: true })).toEqual({ label: "Prebieha", tone: "live" });
+    // The server's offer row before it sees the answer qualifies too.
+    expect(localFirstCandidate(connecting({ kind: "offer", connecting: undefined, browserCallControlIds: ["colleague-invite"] }), browser(), true)).toBe(true);
+    for (const [call, sdk, enabled] of [
+      [mine, browser(), false],
+      [mine, browser({ active: false, ringing: true }), true],
+      [connecting({ autoBridge: undefined, browserCallControlIds: ["colleague-invite"] }), browser(), true],
+      [mine, browser({ telnyxCallControlId: "another-leg" }), true],
+      [connecting({ state: "talking", connecting: undefined, browserCallControlIds: ["colleague-invite"] }), browser(), true],
+      [colleague({ direction: "outbound", state: "ringing", connecting: true, autoBridge: true, browserCallControlIds: ["colleague-invite"] }), browser(), true],
+    ] as const) expect(localFirstCandidate(call, sdk, enabled)).toBe(false);
+    expect(LOCAL_FIRST_TALKING_MS).toBe(3_000);
   });
 });
