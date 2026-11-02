@@ -237,7 +237,10 @@ export type ActiveCallRows = {
  * cache interval. Realtime also pushes changes between polls.
  */
 export const ACTIVE_CALLS_CACHE_TTL_MS = 1_000;
-type RowsCacheEntry = { at: number; pending: boolean; rows: Promise<ActiveCallRows> };
+/** Shortest gap between a pass and one a fresh read forces after it (S1.4), per organisation and instance. */
+export const ACTIVE_CALLS_FRESH_GAP_MS = 250;
+/** `planned`: a forced pass whose `at` is its start, up to one gap ahead of the request (S1.4). */
+type RowsCacheEntry = { at: number; pending: boolean; rows: Promise<ActiveCallRows>; planned?: true };
 const rowsCache = new Map<string, RowsCacheEntry>();
 
 /** Test seam: drops the per-instance row cache. */
@@ -256,13 +259,29 @@ export function resetActiveCallsCache(): void {
 export async function loadActiveCallsCached(
   deps: ActiveCallsDeps,
   actor: { profileId: string; canManageAssignments: boolean },
+  /**
+   * `fresh_after_write` (call-speed S1.4): only a pass that started at or
+   * after this instant may answer — the console's doorbell or its own control
+   * write happened then, and an earlier pass can predate it. Tabs asking for
+   * the same or an older instant still share one pass.
+   */
+  options: { minStartedAt?: number } = {},
 ): Promise<ActiveCallsSnapshot> {
   const now = (deps.now ?? (() => new Date()))();
   const key = `${deps.organizationId}:${deps.environment}`;
   const at = now.getTime();
   let entry = rowsCache.get(key);
-  if (!entry || !entry.pending && (at - entry.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < entry.at)) {
+  if (!entry || !entry.pending && (at - entry.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < entry.at - (entry.planned ? ACTIVE_CALLS_FRESH_GAP_MS : 0))) {
     entry = { at, pending: true, rows: readActiveCallRows(deps) };
+    rowsCache.set(key, entry);
+  } else if (options.minStartedAt !== undefined && entry.at < options.minStartedAt) {
+    // The cached pass may predate the change. The next one starts no sooner
+    // than `ACTIVE_CALLS_FRESH_GAP_MS` after it, and every tab asking for the
+    // same or an older instant joins it: no client can force a pass per request.
+    const startAt = Math.max(at, entry.at + ACTIVE_CALLS_FRESH_GAP_MS);
+    const delay = startAt - at;
+    entry = { at: startAt, pending: true, planned: true,
+      rows: (delay > 0 ? new Promise<void>(resolve => setTimeout(resolve, delay)) : Promise.resolve()).then(() => readActiveCallRows(deps)) };
     rowsCache.set(key, entry);
   }
   let rows: ActiveCallRows;

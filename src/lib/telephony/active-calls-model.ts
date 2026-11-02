@@ -100,7 +100,8 @@ export type ActiveCallsPayload = {
   checkedAt: string;
   configured: boolean;
   pausedPickupEnabled?: boolean;
-  tuning?: WebCallTuning;
+  /** `freshAfterWrite`: the server honours `?after=` (`fresh_after_write`, call-speed S1.4). */
+  tuning?: WebCallTuning & { freshAfterWrite?: boolean };
   /** Organisation whose Realtime topic carries telephony changes. */
   organizationId: string;
   actorProfileId: string;
@@ -129,6 +130,22 @@ export const EMPTY_ACTIVE_CALLS: ActiveCallsPayload = {
 
 const TALKING_STATES = new Set<ActiveCallSessionState>(["talking", "held", "consulting", "conference"]);
 const WAITING_STATES = new Set<ActiveCallSessionState>(["waiting", "parked"]);
+
+/**
+ * Server minus browser clock, from one snapshot (`fresh_after_write`, S1.4).
+ * `checkedAt` is the server's time when it took the request, which is after
+ * the browser sent it: the estimate errs late, so a change time converted with
+ * it is never earlier than the change itself.
+ */
+export function serverClockOffsetMs(checkedAt: string | null | undefined, sentAt: number): number | null {
+  const server = Date.parse(checkedAt ?? "");
+  return Number.isFinite(server) && Number.isFinite(sentAt) ? server - sentAt : null;
+}
+
+/** `?after=<server epoch ms>` for a refetch after a change, only when the server honours it. */
+export function freshAfterQuery(after: number | undefined, tuning: ActiveCallsPayload["tuning"], offsetMs: number): string {
+  return after !== undefined && Number.isFinite(after) && tuning?.freshAfterWrite === true ? `?after=${Math.ceil(after + offsetMs)}` : "";
+}
 
 export function isTalkingState(state: ActiveCallSessionState): boolean {
   return TALKING_STATES.has(state);

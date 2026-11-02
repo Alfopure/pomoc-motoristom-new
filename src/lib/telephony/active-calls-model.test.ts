@@ -10,14 +10,41 @@ import {
   callCenterCallFromActive,
   callCenterStatusFor,
   counterpartNumber,
+  freshAfterQuery,
   liveCallCenterCalls,
   mergeCallCenterCalls,
   pollActivityInput,
+  serverClockOffsetMs,
   waitingRoomCalls,
   waitingRoomPark,
   type ActiveCallPayload,
   type ActiveCallsPayload,
 } from "./active-calls-model";
+
+describe("fresh read after a change (fresh_after_write, call-speed S1.4)", () => {
+  const on = { webEarlyAccept: false, webRtcRegion: "auto" as const, webPrefetchIce: false, targetLocalFirst: false, freshAfterWrite: true };
+
+  it("never asks for a pass earlier than the change, whatever the browser clock", () => {
+    // The browser sends at its 10:00:00.000; the server takes the request 80 ms
+    // later by its own clock, which runs 3 s behind the browser's.
+    const sentAt = Date.parse("2026-11-02T10:00:00.000Z");
+    const offset = serverClockOffsetMs("2026-11-02T09:59:57.080Z", sentAt)!;
+    // A doorbell rang at browser 10:00:01.000 = server 09:59:58.000 at the latest
+    // (the request took at least zero ms to arrive): the ask is not earlier.
+    const changeOnServer = Date.parse("2026-11-02T09:59:58.000Z");
+    const query = freshAfterQuery(Date.parse("2026-11-02T10:00:01.000Z"), on, offset);
+    expect(Number(query.replace("?after=", ""))).toBeGreaterThanOrEqual(changeOnServer);
+    expect(Number(query.replace("?after=", "")) - changeOnServer).toBe(80);
+  });
+
+  it("is absent until the server honours it, and without a change or a usable offset", () => {
+    expect(freshAfterQuery(1_000, { ...on, freshAfterWrite: false }, 0)).toBe("");
+    expect(freshAfterQuery(1_000, undefined, 0)).toBe("");
+    expect(freshAfterQuery(undefined, on, 0)).toBe("");
+    expect(serverClockOffsetMs("", 1_000)).toBeNull();
+    expect(serverClockOffsetMs(undefined, 1_000)).toBeNull();
+  });
+});
 
 const NOW = Date.parse("2026-09-03T08:05:00.000Z");
 const ME = "profile-me";

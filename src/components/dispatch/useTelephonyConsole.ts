@@ -7,8 +7,10 @@ import type { Operator } from "@/domain/types";
 import {
   buildPhoneBarModel,
   EMPTY_ACTIVE_CALLS,
+  freshAfterQuery,
   liveCallCenterCalls,
   pollActivityInput,
+  serverClockOffsetMs,
   waitingRoomCalls,
   type ActiveCallsPayload,
   type PhoneBarModel,
@@ -176,7 +178,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
   const webphoneRef = useRef<CoordinatedWebphone | null>(null);
   const presenceGenerationRef = useRef(0);
   const incomingPolicyRef = useRef<IncomingOfferPolicy>({ automaticAllowed: false });
-  const refreshRef = useRef<(() => void) | null>(null);
+  /** `after`: when the change being refetched happened (epoch ms; `fresh_after_write`, S1.4). */
+  const refreshRef = useRef<((after?: number) => void) | null>(null);
   const reconciliationGateRef = useRef(new BrowserReconciliationGate());
   const [reconciliationNotice, setReconciliationNotice] = useState<{ legId: string; message: string } | null>(null);
   const endingBrowserLegsRef = useRef(new Set<string>());
@@ -393,22 +396,34 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     // describes a change that answer may predate, so it queues one more read
     // instead of being dropped until the next poll tick.
     let coalesced = false;
+    // The newest change a queued read must not predate.
+    let coalescedAfter: number | undefined;
+    // Server minus browser clock (`serverClockOffsetMs`): `after` is compared
+    // with server time; the estimate errs late, never answering with a pass
+    // that predates the change.
+    let clockOffsetMs = 0;
     let failures = 0;
     let activity: Parameters<typeof activeCallPollDelayMs>[0]["activity"] = "idle";
 
-    async function load() {
+    async function load(after?: number) {
       if (inFlight) {
         coalesced = true;
+        if (after !== undefined) coalescedAfter = Math.max(coalescedAfter ?? after, after);
         return;
       }
       inFlight = true;
       const snapshotRequest = ++snapshotRequestRef.current;
+      // Only a server that honours it is asked for a pass started after the change.
+      const fresh = freshAfterQuery(after, snapshotRef.current.tuning, clockOffsetMs);
       try {
         const presenceGeneration = presenceGenerationRef.current;
-        const result = await telephonyJson<ActiveCallsPayload & { error?: string }>("/api/telephony/calls/active", {
+        const sentAt = Date.now();
+        const result = await telephonyJson<ActiveCallsPayload & { error?: string }>(`/api/telephony/calls/active${fresh}`, {
           label: "aktívne hovory",
           timeoutMs: TELEPHONY_TIMEOUT_MS.snapshot,
         });
+        const offset = result.ok ? serverClockOffsetMs(result.body?.checkedAt, sentAt) : null;
+        if (offset !== null) clockOffsetMs = offset;
         if (cancelled) return;
         if (isTelephonyNotConfigured(result)) {
           setConfigured(false);
@@ -459,7 +474,9 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
         inFlight = false;
         if (coalesced && !cancelled) {
           coalesced = false;
-          void load();
+          const queuedAfter = coalescedAfter;
+          coalescedAfter = undefined;
+          void load(queuedAfter);
         } else schedule();
       }
     }
@@ -478,13 +495,13 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
       }));
     }
 
-    const refresh = () => {
+    const refresh = (after?: number) => {
       if (cancelled) return;
       // A socket/visibility/media transition invalidates the sleeping cadence.
       // The completed read schedules the next tick using the latest status.
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       timeoutId = undefined;
-      void load();
+      void load(after);
     };
     refreshRef.current = refresh;
     refresh();
@@ -521,12 +538,15 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
     // still settles on the latest state.
     let lastRing = 0;
     let ringTimer: number | undefined;
+    // The newest ring: the refetch must not be answered by an older pass.
+    let rungAt = 0;
     const ring = () => {
+      rungAt = Date.now();
       if (ringTimer !== undefined) return;
       const gap = document.visibilityState === "hidden" ? DOORBELL_REFETCH_GAP_MS.hidden : DOORBELL_REFETCH_GAP_MS.visible;
       const wait = lastRing + gap - Date.now();
-      if (wait <= 0) { lastRing = Date.now(); refreshRef.current?.(); return; }
-      ringTimer = window.setTimeout(() => { ringTimer = undefined; lastRing = Date.now(); refreshRef.current?.(); }, wait);
+      if (wait <= 0) { lastRing = Date.now(); refreshRef.current?.(rungAt); return; }
+      ringTimer = window.setTimeout(() => { ringTimer = undefined; lastRing = Date.now(); refreshRef.current?.(rungAt); }, wait);
     };
     const unsubscribe = subscribeTelephonyRealtime({
       organizationId,
@@ -728,7 +748,7 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
               // until a subsequent successful active-calls read retires this UI.
               pendingHangup.awaitingConfirmation = true;
               setHangupNotice({ command, message: "Ukončuje sa…" });
-              refreshRef.current?.();
+              refreshRef.current?.(Date.now());
               return;
             }
             finishPendingHangup(pendingHangup);
@@ -746,7 +766,8 @@ export function useTelephonyConsole(input: { enabled: boolean; operators: Operat
               return next;
             });
           }
-          refreshRef.current?.();
+          // The write committed before this answer: a pass started earlier may not show it.
+          refreshRef.current?.(Date.now());
         };
         if (action === "pickup") await startOutboundRequest(execute, undefined, () => busyCommandRef.current === command);
         else await execute();
