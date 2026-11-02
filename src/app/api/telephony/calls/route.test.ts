@@ -84,4 +84,20 @@ describe("POST /api/telephony/calls (click-to-call)", () => {
     expect(response.status).toBe(503);
     expect(startOutboundCall).not.toHaveBeenCalled();
   });
+
+  it("answers once the own leg is dialled while start_early_response is on", async () => {
+    vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ start_early_response: true }));
+    try {
+      let finish!: (value: unknown) => void;
+      startOutboundCall.mockImplementation((_deps: unknown, _actor: unknown, _input: unknown, early: (result: unknown) => void) => {
+        early({ sessionId: "sess-1", operatorLegCallControlId: "cc-op", telnyxSessionId: "tsess-1", to: "+421905123456", from: "+421232408718" });
+        return new Promise((resolve) => { finish = resolve; });
+      });
+      const response = await POST(request({ to: "0905 123 456" }));
+      expect(response.status).toBe(201);
+      await expect(response.json()).resolves.toMatchObject({ ok: true, sessionId: "sess-1", operatorLegCallControlId: "cc-op" });
+      expect(startOutboundCall.mock.calls[0]).toHaveLength(4);
+      finish({ sessionId: "sess-1", operatorLegCallControlId: "cc-op", telnyxSessionId: "tsess-1", to: "+421905123456", from: "+421232408718" });
+    } finally { vi.unstubAllEnvs(); }
+  });
 });

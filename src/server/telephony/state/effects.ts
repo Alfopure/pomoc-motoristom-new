@@ -137,6 +137,35 @@ export type EffectsDeps = {
   latencyFlags?: LatencyFlags;
 };
 
+/**
+ * Call-speed S2: the startup entry a start request staged a moment ago under
+ * its own lease, for the own leg its reservation token already authorizes
+ * (`initializeOutgoingSession`). Honoured only on that entry's first attempt
+ * under a contract-2 owner; a resume by cron or a webhook never carries it.
+ */
+export type InitialDispatch = {
+  entryId: string;
+  commandId: string;
+  /**
+   * `start_fast_path`: history follows the dial (the call row is still written
+   * before the entry retires), and the dial skips what this invocation has
+   * just established: the replay-adoption leg read, the validity read, the
+   * pause read and the reused offer claim with its checkpoint. `prepare_v2`
+   * still refuses after a termination, which the entry then compensates.
+   */
+  fast: boolean;
+  /**
+   * `start_early_response`: the tail behind the response is compacted. The
+   * leg bookkeeping and the offer-revocation read run together, the
+   * command-done checkpoint folds into the final one (the leg row is the
+   * adoption evidence until then), the audit runs beside that final write and
+   * the incident read moves after the lease (the caller runs it).
+   */
+  compact: boolean;
+  /** Fires once the own leg's dial is settled: journal result, leg row, revoked-offer check. */
+  onSettled?: (settled: { callControlId: string; callSessionId: string | null; legOpen: boolean }) => void;
+};
+
 /** `internal_lean_path` (call-speed S1.1): colleague calls take the recording-frozen-off paths. */
 function leanInternal(deps: Pick<EffectsDeps, "latencyFlags" | "logger">): boolean {
   return latencyFlagsOf(deps).internal_lean_path;
@@ -776,6 +805,10 @@ type ExecutionContext = {
   continuation?: EffectContinuation;
   /** Memoised `motorist_call_legs` rows for this session, loaded at most once. */
   legs?: LegRow[];
+  /** Call-speed S2: this entry is the start request's own first attempt. */
+  initial?: InitialDispatch;
+  /** Set by `settleDial` for `initial`'s command: whether its leg row is open. */
+  initialLegOpen?: boolean;
 };
 
 /**
@@ -1372,6 +1405,15 @@ async function claimOperatorForDial(deps: EffectsDeps, ctx: ExecutionContext, co
 async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { planOnly?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   await assertOwnership();
   const telnyx = requireTelnyx(deps);
+  if (ctx.initial?.fast && ctx.initial.commandId === command.commandId && !options?.planOnly) {
+    // Call-speed S2.2: the first attempt of the entry this invocation staged.
+    // Nothing can have dispatched it (no journal row, no leg to adopt), the
+    // operator is reserved on this session with exactly this token, which the
+    // staged command already holds durably: `claimOperatorForDial` would only
+    // answer `reused`, and an operator cannot pause while `on_call`.
+    const result = await telnyx.dial(dialParams(command));
+    return settleDial(deps, ctx, command, result, true);
+  }
   const adopted = ctx.dialResults.get(command.commandId);
   if (adopted && ctx.dialFingerprints?.get(command.commandId) === payloadFingerprint(command)) {
     return { skipped: false, detail: { callControlId: adopted.callControlId, adopted: true } };
@@ -1455,21 +1497,39 @@ function dialParams(command: DialCommand): DialParams {
 /** The bookkeeping behind one dial, whether it was sent alone or as part of a step. */
 async function settleDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, result: DialResult, stable: boolean): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   ctx.dialResults.set(command.commandId, result);
-  await upsertDialedLeg(deps, ctx.session, command, result);
+  const initial = ctx.initial?.commandId === command.commandId ? ctx.initial : undefined;
   // This read stays fresh deliberately. The plan proposed taking the
   // tombstones from the snapshot when it shows none, to save a round trip per
   // operator rung; `dispatch-pause-boundaries` refuses it. An operator can be
   // paused while their own dial is in flight, and the fresh row is what
   // discovers that tombstone in time to hang the revoked leg up — waiting for
   // the next event lets it be answered first.
-  if (stable && command.profileId) await cancelRevokedOffers(deps, ctx.session, { callControlId: result.callControlId, clientState: command.clientState, dialed: true });
+  const revoked = () => stable && command.profileId
+    ? cancelRevokedOffers(deps, ctx.session, { callControlId: result.callControlId, clientState: command.clientState, dialed: true }) : null;
+  let leg: LegRow | null;
+  if (initial?.compact) {
+    // Call-speed S2.3: the revocation read is still after the dial, so a
+    // tombstone written while it was in flight is found; the arriving leg is
+    // named explicitly, so the check does not need its row.
+    [leg] = await Promise.all([upsertDialedLeg(deps, ctx.session, command, result, { knownNew: true }), revoked()]);
+  } else {
+    leg = await upsertDialedLeg(deps, ctx.session, command, result);
+    await revoked();
+  }
+  if (initial) ctx.initialLegOpen = Boolean(leg && !leg.ended_at);
   return { skipped: false, detail: { callControlId: result.callControlId, to: command.to } };
 }
 
-export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, command: DialCommand, result: DialResult): Promise<LegRow | null> {
+export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, command: DialCommand, result: DialResult,
+  options: { knownNew?: boolean } = {}): Promise<LegRow | null> {
   const { admin } = deps;
   const now = deps.now().toISOString();
-  const prior = await admin.from("motorist_call_legs").select("id, initiated_at, metadata").eq("telnyx_call_control_id", result.callControlId).maybeSingle();
+  // Call-speed S2.3 (`knownNew`): the start's own first dial, settled under the
+  // lease that staged it. Telnyx issued this call control id a moment ago and
+  // every event that could record it waits for that lease, so there is no
+  // earlier row to keep `initiated_at` from or to count usage against.
+  const prior = options.knownNew ? { data: null, error: null }
+    : await admin.from("motorist_call_legs").select("id, initiated_at, metadata").eq("telnyx_call_control_id", result.callControlId).maybeSingle();
   if (prior.error) fail("dialed leg identity unavailable", prior.error);
   const values = {
     organization_id: session.organization_id,
@@ -1484,11 +1544,25 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
     client_state: toJson(command.clientState),
     metadata: toJson({ intent: command.clientState.intent ?? null, attempt: command.attempt ?? null, dial_command_id: command.commandId, dial_command_fingerprint: payloadFingerprint(command), ...(command.monitorInvitationId ? { monitor_invitation_id: command.monitorInvitationId, supervisor_mode: "monitor" } : {}) }),
   };
-  const upserted = await admin.from("motorist_call_legs").upsert(values, { onConflict: "telnyx_call_control_id" }).select("*").single();
-  if (upserted.error) fail("dialed leg upsert failed", upserted.error);
-  const leg = upserted.data;
+  const write = async () => {
+    const upserted = await admin.from("motorist_call_legs").upsert(values, { onConflict: "telnyx_call_control_id" }).select("*").single();
+    if (upserted.error) fail("dialed leg upsert failed", upserted.error);
+    return upserted.data;
+  };
   // Every dial is a billable leg: count it for the daily soft cap (best effort).
-  if (!prior.data) await addTelephonyUsage(admin, { organizationId: session.organization_id, now: deps.now(), legs: 1, logger: deps.logger });
+  const usage = async () => { if (!prior.data) await addTelephonyUsage(admin, { organizationId: session.organization_id, now: deps.now(), legs: 1, logger: deps.logger }); };
+  const sessionIdentity = async () => {
+    if (!session.telnyx_session_id && result.callSessionId) {
+      await admin.from("motorist_call_sessions").update({ telnyx_session_id: result.callSessionId }).eq("id", session.id).is("telnyx_session_id", null);
+    }
+  };
+  // With no earlier row these three writes are independent of each other.
+  if (options.knownNew && !command.attempt) {
+    const [leg] = await Promise.all([write(), usage(), sessionIdentity()]);
+    return leg;
+  }
+  const leg = await write();
+  await usage();
   if (command.attempt) {
     let query = admin
       .from("motorist_ring_attempts")
@@ -1504,9 +1578,7 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
     const linked = await query;
     if (linked.error) fail("attempt link failed", linked.error);
   }
-  if (!session.telnyx_session_id && result.callSessionId) {
-    await admin.from("motorist_call_sessions").update({ telnyx_session_id: result.callSessionId }).eq("id", session.id).is("telnyx_session_id", null);
-  }
+  await sessionIdentity();
   return leg;
 }
 
@@ -1859,9 +1931,13 @@ function compensationWouldReopenCall(next: Transition | null | undefined, curren
 
 async function executeReduceResult(
   deps: EffectsDeps,
-  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean; urgentStamps?: UrgentDispatchStamps; projectionRecovery?: boolean },
+  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean; urgentStamps?: UrgentDispatchStamps; projectionRecovery?: boolean; initialDispatch?: InitialDispatch },
 ): Promise<ApplyResult> {
   const { result } = input;
+  // Call-speed S2: only the start request's own first attempt of its entry.
+  const initial = input.initialDispatch && input.continuation?.id === input.initialDispatch.entryId && input.continuation.attempts === 0 &&
+    !input.databaseOnly && sessionOwnership.getStore()?.contract === 2 && sessionOwnership.getStore()?.sessionId === input.session.id
+    ? input.initialDispatch : undefined;
   let branch: "main" | "rejected" = "main";
   let transition = result.next;
   let commands = result.commands;
@@ -1935,7 +2011,9 @@ async function executeReduceResult(
   const recording = readMeta(input.session).recording;
   const lean = leanInternal(deps);
   // A colleague call never records (S1.1): its history may follow audio too.
-  const deferProjections = Boolean(input.continuation && !input.databaseOnly && (recording || recordingFrozenOff(input.session, lean)));
+  // So may the start's own dial (S2.2): its call row is still written before
+  // the entry retires, which `recoverInitialDial` relies on.
+  const deferProjections = Boolean(input.continuation && !input.databaseOnly && (recording || recordingFrozenOff(input.session, lean) || initial?.fast));
   const owner = sessionOwnership.getStore();
   // These controls already durably staged the session intent under ownership.
   // Their remaining leg patches merely project held/bridged/answered state;
@@ -1962,12 +2040,14 @@ async function executeReduceResult(
   }
   // A transition can clear the persisted conference while its effects still
   // need to leave the old one (park / blind transfer).
-  const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: input.continuation?.previousConferenceId ?? session.conference_id ?? input.session.conference_id, continuation: input.continuation };
+  const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: input.continuation?.previousConferenceId ?? session.conference_id ?? input.session.conference_id, continuation: input.continuation,
+    ...(initial ? { initial } : {}) };
   // Only a continuation that can reference a dial needs the correlation table;
   // a hold, transfer or hangup without one was paying for a read it never used.
+  // Nor does the start's own first attempt (S2.2): no leg can carry its dial yet.
   const needsDialResults = commands.some(referencesDial) ||
     compensations.some((compensation) => compensation.commands.some(referencesDial));
-  if (input.continuation && commands.length && needsDialResults) {
+  if (input.continuation && commands.length && needsDialResults && !initial?.fast) {
     const legs = await sessionLegs(deps, ctx);
     for (const leg of legs) {
       const metadata = leg.metadata as { dial_command_id?: string; dial_command_fingerprint?: string } | null;
@@ -2004,6 +2084,7 @@ async function executeReduceResult(
   // write, the replay re-issues them and `prepare_v2` answers every one from
   // its recorded outcome — zero provider calls, same results.
   let banked = 0;
+  let foldedCheckpoint = false;
   let nextValidity: { session: SessionRow; owner: Ownership } | null = null;
   const rememberCommand = (key: string) => {
     if (!input.continuation) return;
@@ -2092,7 +2173,10 @@ async function executeReduceResult(
         if (checkpointValidity && sessionOwnership.getStore() === checkpointValidity.owner) {
           ctx.session = checkpointValidity.session;
           validitySession = checkpointValidity.session;
-        } else if (!providerReadCanReuseSession(ctx.session, lean)) {
+        } else if (!providerReadCanReuseSession(ctx.session, lean) && !(initial?.fast && "commandId" in command && command.commandId === initial.commandId)) {
+          // The start's own dial (S2.2) is checked against the row it staged
+          // under this lease; a termination committed since is refused by
+          // `prepare_v2` and compensated below, as on the reused-row path.
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
           if (fresh.error) throw new EffectsError("effect validity read failed");
           ctx.session = fresh.data;
@@ -2159,6 +2243,14 @@ async function executeReduceResult(
         throw new CommandPrerequisiteRejectedError(String(executed.detail?.reason ?? "dial no longer authorized"));
       }
       providerExecuted = true;
+      if (initial?.onSettled && command.kind === "dial" && command.commandId === initial.commandId && typeof executed.detail?.callControlId === "string") {
+        // Call-speed S2.3: `settleDial` has returned, so the journal result,
+        // the leg row and the revoked-offer check are all done.
+        try {
+          initial.onSettled({ callControlId: executed.detail.callControlId,
+            callSessionId: ctx.dialResults.get(command.commandId)?.callSessionId ?? null, legOpen: ctx.initialLegOpen === true });
+        } catch { /* The response hook cannot change the call. */ }
+      }
       if (input.continuation) for (const change of transition.presence) {
         if (change.afterCommandId === key) await applyPresenceChange(deps, ctx.session, change);
       }
@@ -2265,7 +2357,12 @@ async function executeReduceResult(
       // all of them. Any other branch below writes immediately, and so does
       // the end of the loop.
       const following = index + 1 < dispatchList.length ? commandKey(dispatchList[index + 1]) : null;
-      if (!following || !overlapped.has(following)) {
+      if (!following && initial?.compact && command.kind === "dial" && command.commandId === initial.commandId) {
+        // Call-speed S2.3: the final checkpoint records this completion. Until
+        // then a resume adopts the dial from its leg row (`dial_command_id`),
+        // which `settleDial` wrote before anything else could observe it.
+        foldedCheckpoint = true;
+      } else if (!following || !overlapped.has(following)) {
         const checkpointed = await writeCheckpoint();
         const owner = sessionOwnership.getStore();
         if (checkpointed?.writer_contract === 2 && owner?.contract === 2 && owner.admin === deps.admin &&
@@ -2471,7 +2568,7 @@ async function executeReduceResult(
     }
   }
   // Anything still banked belongs to a run that ended with the list.
-  await writeCheckpoint();
+  if (!foldedCheckpoint) await writeCheckpoint();
 
   if (mediaBeforeLegProjection && !failure) {
     session = await measureControlStage("state_projection", () => persistTransition(deps, {
@@ -2521,21 +2618,34 @@ async function executeReduceResult(
         ctx.session = session;
       }
     }
+    let besideFinalize: Promise<void> | null = null;
     if (!failure && !projectionError && !input.continuation.auditComplete && input.continuation.commands.every((command) => input.continuation!.completedCommands.includes(commandKey(command)))) {
-      try {
-        const continuation = input.continuation;
-        await project(() => measureControlStage("audit", () => recordCallEvent(deps, { session, event: continuation.event, handledStatus: "processed", stateBefore: continuation.stateBefore, stateAfter: session.state,
-          notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) })));
-        input.continuation.auditComplete = true;
-      } catch (error) {
-        if (!deferProjections || error instanceof SessionLeaseLostError) throw error;
-        projectionError = describeError(error);
+      const continuation = input.continuation;
+      const audit = () => project(() => measureControlStage("audit", () => recordCallEvent(deps, { session, event: continuation.event, handledStatus: "processed", stateBefore: continuation.stateBefore, stateAfter: session.state,
+        notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) })));
+      if (initial?.compact) {
+        // Call-speed S2.3: the start's audit row is written beside the final
+        // checkpoint. It is idempotent by event id and no recovery reads it;
+        // a failed insert is logged instead of keeping the entry alive.
+        besideFinalize = audit().catch(() => {
+          deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "initial_audit_unrecorded" });
+        });
+        continuation.auditComplete = true;
+      } else {
+        try {
+          await audit();
+          continuation.auditComplete = true;
+        } catch (error) {
+          if (!deferProjections || error instanceof SessionLeaseLostError) throw error;
+          projectionError = describeError(error);
+        }
       }
     }
     input.continuation.attempts += 1;
     input.continuation.lastError = projectionError ?? failure?.error ?? (continuationComplete(input.continuation) ? null : "mandatory effects pending");
     const continuation = input.continuation;
-    session = await measureControlStage("finalize", () => checkpointEffects(deps, session.id, continuationComplete(continuation) ? null : continuation, continuation.id, session));
+    try { session = await measureControlStage("finalize", () => checkpointEffects(deps, session.id, continuationComplete(continuation) ? null : continuation, continuation.id, session)); }
+    finally { await besideFinalize; }
     if (!continuationComplete(input.continuation) && !failure && !projectionError) failure = { command: "continuation", error: "mandatory effects pending", callGone: false };
   }
 
@@ -2546,8 +2656,9 @@ async function executeReduceResult(
       const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("id", session.id).maybeSingle();
       if (fresh.data) session = fresh.data;
     }
-    // Clean transition: close the open command incident (throttled per instance).
-    await withTelephonyDatabaseBudget(250, () => recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, deps.now()));
+    // Clean transition: close the open command incident (throttled per
+    // instance). The start's caller does it after the lease (S2.3).
+    if (!initial?.compact) await withTelephonyDatabaseBudget(250, () => recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, deps.now()));
   }
 
   return { session, branch, commands: outcomes, compensations: compensated, failed: failure !== null, failure,
@@ -2618,7 +2729,7 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
   return stamps;
 }
 
-export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps; deferContactChecks?: boolean; contactChecksOnly?: boolean; projectionRecovery?: boolean } = {}): Promise<ApplyResult | null> {
+export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps; deferContactChecks?: boolean; contactChecksOnly?: boolean; projectionRecovery?: boolean; initialDispatch?: InitialDispatch } = {}): Promise<ApplyResult | null> {
   let latest: ApplyResult | null = null;
   let requested: ApplyResult | null = null;
   const stamps: UrgentDispatchStamps = new Map(options.urgentStamps ?? []);
@@ -2709,7 +2820,9 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     try {
       latest = await executeReduceResult(deps, { session: fresh.data, expectedVersion: fresh.data.version, event: current.event,
         result: { next: current.transition, commands: current.commands, compensations: current.compensations, guard: null, ignored: null },
-        continuation: current, databaseOnly: options.databaseOnly, urgentStamps: stamps, projectionRecovery: options.projectionRecovery });
+        continuation: current, databaseOnly: options.databaseOnly, urgentStamps: stamps, projectionRecovery: options.projectionRecovery,
+        // Only the row the caller staged; never an entry read back from the database.
+        ...(index === 0 && reusable && options.initialDispatch?.entryId === current.id ? { initialDispatch: options.initialDispatch } : {}) });
     } catch (error) {
       // The durable entry and provider journal already own recovery. Another
       // checkpoint with an expired owner only hides the original refusal.

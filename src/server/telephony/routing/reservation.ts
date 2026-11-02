@@ -36,8 +36,17 @@ export async function transitionPresence(admin: AdminClient, input: PresenceTran
   return data as PresenceTransitionResult;
 }
 
-/** Ordinary outbound/supervision acquisition; token is returned by the same transaction. */
-export async function reserveOperatorOwnership(admin: AdminClient, input: { organizationId: string; profileId: string; sessionId: string }): Promise<PresenceTransitionResult> {
+/**
+ * Ordinary outbound/supervision acquisition; token is returned by the same transaction.
+ *
+ * `lockedCheck` (call-speed S2.2, `start_fast_path`): on the stable contract
+ * the read below only chooses this RPC and pins its revision. `acquire`
+ * without a revision decides availability on the row it holds `FOR UPDATE`
+ * and returns the token and revision itself, so the read can go.
+ */
+export async function reserveOperatorOwnership(admin: AdminClient, input: { organizationId: string; profileId: string; sessionId: string },
+  options: { lockedCheck?: boolean } = {}): Promise<PresenceTransitionResult> {
+  if (options.lockedCheck && telephonyStabilityEnabled()) return transitionPresence(admin, { ...input, action: "acquire" });
   const current = await admin.from("motorist_operator_presence").select("*").eq("organization_id", input.organizationId).eq("profile_id", input.profileId).maybeSingle();
   if (current.error) throw new ReservationError(`reservation read failed: ${current.error.message}`, current.error);
   if (telephonyStabilityEnabled() || current.data?.presence_revision !== undefined || current.data?.offer_token || current.data?.pause_return) {

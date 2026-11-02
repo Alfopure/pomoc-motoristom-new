@@ -13,7 +13,7 @@ import { taskWorkspaceSystemEnabled } from "../task-system-gate";
 import { telephonyStabilityEnabled } from "./stability";
 import { writeCallAudit } from "./audit";
 import { findInitialCallByRequest, readInitialCallPlan } from "./initial-call-operation";
-import { CallActionError, startOutboundCall, type StartOutboundInput, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
+import { CallActionError, startOutboundCall, type EarlyStart, type StartOutboundInput, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
 import { toJson, type LineRow } from "./state/types";
 
 /**
@@ -409,7 +409,8 @@ async function closeCallbackTask(deps: CallbackQueueDeps, actor: CallActor, case
  * The request stays open: the call being placed is not proof that the caller
  * was reached. The operator closes it with `done` or `cancel`.
  */
-export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id: string, verificationId?: string, operationId?: string): Promise<CallbackCallResult> {
+export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id: string, verificationId?: string, operationId?: string,
+  early?: EarlyStart<CallbackCallResult>): Promise<CallbackCallResult> {
   const queueDeps: CallbackQueueDeps = { admin: deps.admin, organizationId: deps.organizationId, now: deps.now, logger: deps.logger };
   const row = await loadRequest(queueDeps, id);
   if (operationId) {
@@ -430,7 +431,7 @@ export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id
   if (row.claimed_by !== actor.profileId) await claimCallbackRequest(queueDeps, actor, id);
 
   if (alternate) await approveCallbackTarget(deps.admin, deps.organizationId, actor.profileId, id, verificationId!);
-  const call = await startOutboundCall(deps, actor, {
+  const input: StartOutboundInput = {
     ...(operationId ? { requestId: operationId } : {}),
     to: row.caller_number,
     ...(alternate ? { callbackTargetVerificationId: verificationId } : {}),
@@ -440,11 +441,30 @@ export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id
     // they know shows on their phone. A line switched off since then would make
     // `startOutboundCall` refuse the call, so the operator's default is used.
     lineId: await activeLineId(queueDeps, row.line_id),
-  });
-
-  const linked = enhanced || await linkCallToRequest(deps, await loadRequest(queueDeps, id), { sessionId: call.sessionId, actor });
-  const fresh = await loadRequest(queueDeps, id);
-  return { request: await present(queueDeps, fresh), call, linked };
+  };
+  const settle = async (call: StartOutboundResult): Promise<CallbackCallResult> => {
+    const linked = enhanced || await linkCallToRequest(deps, await loadRequest(queueDeps, id), { sessionId: call.sessionId, actor });
+    const fresh = await loadRequest(queueDeps, id);
+    return { request: await present(queueDeps, fresh), call, linked };
+  };
+  if (!early) return settle(await startOutboundCall(deps, actor, input));
+  // Call-speed S2.3: the request row is settled here, outside the call's
+  // lease, as soon as the own leg is dialled; the rest of the start runs on.
+  let dialled!: (call: StartOutboundResult) => void;
+  const proven = new Promise<StartOutboundResult>((resolve) => { dialled = resolve; });
+  const work = startOutboundCall(deps, actor, input, (call) => dialled(call));
+  const first = await Promise.race([proven.then(call => ({ call, early: true })), work.then(call => ({ call, early: false }))]);
+  let result: CallbackCallResult;
+  try { result = await settle(first.call); }
+  catch (error) {
+    // As before the switch: the error answers once the start has finished.
+    if (first.early) await work.catch(() => undefined);
+    throw error;
+  }
+  if (!first.early) return result;
+  early(result);
+  await work;
+  return result;
 }
 
 async function activeLineId(deps: CallbackQueueDeps, lineId: string | null): Promise<string | null> {

@@ -85,6 +85,20 @@ describe("mobile colleague route contracts", () => {
     expect(mocks.telephony).toHaveBeenCalledWith({ organizationId, deviceKind: "mobile" });
     expect(mocks.call).toHaveBeenCalledWith(expect.objectContaining({ organizationId }), expect.objectContaining({ profileId, organizationId, userId }), { requestId, targetProfileId });
   });
+  it("answers with the same body once the own leg is dialled while start_early_response is on", async () => {
+    vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ start_early_response: true }));
+    let finish!: (value: unknown) => void;
+    mocks.call.mockImplementation((_deps: unknown, _actor: unknown, _input: unknown, early: (result: unknown) => void) => {
+      early({ sessionId: requestId, operatorLegCallControlId: "control", to: "sip:private@sip.telnyx.com" });
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const response = await internal.POST(request("POST")); expect(response.status).toBe(200); privateResponse(response);
+    expect(await response.json()).toEqual({ ok: true, apiVersion: 1, environment: "test", profileId, checkedAt: expect.any(String), sessionId: requestId,
+      operatorLegCallControlId: "control", targetProfileId, to: "Colleague" });
+    expect(mocks.after).toHaveBeenCalledTimes(1);
+    finish({ sessionId: requestId, operatorLegCallControlId: "control", to: "sip:private@sip.telnyx.com" });
+    await (mocks.after.mock.calls[0][0] as () => Promise<void>)();
+  });
   it("blocks disabled native creation before parsing body or constructing dependencies", async () => {
     vi.stubEnv("MOTORIST_NATIVE_VOICE_TEST_ENABLED", "false");
     const response = await internal.POST(request("POST", {}, "malformed")); expect(response.status).toBe(503);
