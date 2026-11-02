@@ -236,13 +236,14 @@ export const LOCAL_FIRST_TALKING_MS = 3_000;
  * Call-speed S6.4 (`targetLocalFirst`): the colleague who answered an
  * auto-bridged colleague call (Telnyx bridges it at answer) may show
  * "Prebieha" from its own browser call being active, before the server's
- * `talking` arrives. Only while the server still shows that call ringing for
- * this browser leg; the bar falls back to "Spájam…" after
+ * `talking` arrives. Only once the caller's own phone has answered (before
+ * that no audio is possible) and while the server still shows the call
+ * ringing for this browser leg; the bar falls back to "Spájam…" after
  * `LOCAL_FIRST_TALKING_MS` and on anything the server says otherwise.
  */
 export function localFirstCandidate(call: PhoneBarCall | null, browserCall: WebphoneCallView | null, enabled: boolean): boolean {
   return Boolean(enabled && call && browserCall?.active && !browserCall.ringing && call.direction === "internal" && call.autoBridge &&
-    call.state === "ringing" && (call.connecting || call.kind === "offer") && phoneBarCallMatchesBrowser(call, browserCall));
+    call.callerAnswered && call.state === "ringing" && (call.connecting || call.kind === "offer") && phoneBarCallMatchesBrowser(call, browserCall));
 }
 
 export function phoneBarStateLabel(call: PhoneBarCall, options: { localTalking?: boolean } = {}): PhoneBarStateLabel {

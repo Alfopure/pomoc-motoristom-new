@@ -107,12 +107,12 @@ For `eu` sessions every "already gone" decision (hangup, recording stop, termina
 
 ### S6.0 — Concurrent far-end dial and internal auto-bridge (call-speed S6)
 
-**Why.** A session frozen with `concurrent_dial.<outbound|internal>.<web|mobile>` dials the far end (customer or colleague) in the start request, right after the operator's own leg, with `link_to` the own leg; outbound and auto-bridged colleague dials carry `bridge_on_answer`, `prevent_double_bridge` and `park_after_unbridge: "self"`. What Telnyx does when the far end answers while the own leg still rings is not documented. The code is built to be safe in all three outcomes and decides only on provider evidence (a far leg's `call.bridged`, or the bridge journal), never on event order:
+**Why.** A session frozen with `concurrent_dial.<outbound|internal>.<web|mobile>` dials the far end (customer or colleague) in the start request, right after the operator's own leg, with `link_to` the own leg; outbound and auto-bridged colleague dials carry `bridge_on_answer`, `prevent_double_bridge` and `park_after_unbridge: "self"`. What Telnyx does when the far end answers while the own leg still rings is not documented. The code is built to be safe in all three outcomes and decides only on provider evidence (a leg's `call.bridged`, the bridge journal, and the provider's `occurred_at` of the two answers), never on the order the webhooks are processed in. The colleague auto-bridge applies only to a colleague with a single endpoint; with web and mobile endpoints the server picks the winner and bridges it explicitly, as before:
 
 | Outcome | What the server does |
 |---|---|
-| (A) Telnyx bridges once the own leg answers | Nothing; `talking` follows the bridged evidence. If the own answer is processed first, its explicit bridge gets a 422 "already bridged", which counts as success. |
-| (B) Nothing is bridged, both legs stay up | The own leg's answer sends `bridge(own → far, park_after_unbridge self)`; any refusal other than "already bridged" hangs up both, end reason `bridge_failed`. |
+| (A) Telnyx bridges once the own leg answers | Nothing, if bridged evidence arrives before both answers are processed. Otherwise, because the far end answered first at the provider, the handler of the second answer sends one explicit bridge; its 422 "already bridged" counts as success. |
+| (B) Nothing is bridged, both legs stay up | The handler of the second answer, whichever leg's webhook arrives last, sends `bridge(own → far, park_after_unbridge self)`; any refusal other than "already bridged" hangs up both, end reason `bridge_failed`, without `answered_at`. When the own leg answered first at the provider, Telnyx bridges at the far end's answer (`bridge_on_answer`) and no bridge is sent. Equal or missing provider times count as far end first. |
 | (C) Telnyx hangs up the far leg | The session ends, the own leg is hung up, presence is released once and the history entry is `ended` with `bridge_failed`, never `answered`. |
 
 The customer hears silence until the own leg answers (owner default), at most the frozen own-leg timeout (12 s).
@@ -121,13 +121,15 @@ The customer hears silence until the own leg answers (owner default), at most th
 
 1. Far end answers first. Colleague: `call A <B email> --answer-on B --ring-seconds 0 --caller-answer-delay 4000`. Outbound: `dial A <TEST line> --expect-listener B --answer-after 0 --caller-answer-delay 4000`. The report's `s6` note says which of A/B/C happened and how long after the far end the own leg answered.
 2. Own leg never answers: `--drop-caller-after-post` (both directions). Pass: the far leg ends within about 14 s, both presences are free.
-3. Colleague on web and mobile with `internal_auto_bridge`, both answering within 200 ms: exactly one bridges, the other is hung up.
+3. Colleague on web and mobile with concurrent dialing (`internal_auto_bridge` does not apply to two endpoints), both answering within 200 ms: the server picks one, bridges it once, and hangs up the other.
 4. An explicit bridge sent to an already auto-bridged pair (spike 1 with outcome A and the own answer processed before `call.bridged`): record the code and wording of the 422 and whether audio is disturbed. `isAlreadyBridgedRefusal` (`state/effects.ts`) accepts a 422 whose text says "already … bridg…"; adjust it to the recorded wording if it differs.
 5. What the operator hears while the far end rings, sequential versus concurrent: `--media-probe` on the caller side, plus one manual listen.
 
 **Pass criteria.** Every run passes the harness checks, including `exactlyOneBridge`, `presenceReleasedOnce`, `historyAnsweredOnlyIfTalking` and `legsAndSessionEnded`, with no open `telephony.telnyx.commands` incident.
 
 **If it fails.** Turn the switch off (frozen calls finish in their mode). Outcome C on a customer dial means concurrent outbound must not use `bridge_on_answer`: that is a reviewed code change, not a configuration change.
+
+**Limits until it passes.** Only a non-production deployment freezes a concurrent start or the colleague auto-bridge (`CONCURRENT_START_PROVEN` in `latency-flags.ts`); in production the switches have no effect until a reviewed change records the pass of spikes 1–4.
 
 **Result.** _Not yet run._
 

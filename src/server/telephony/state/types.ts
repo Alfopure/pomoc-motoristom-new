@@ -373,7 +373,13 @@ export type Command = CommandBase &
        * (`bridge_on_answer`), so its 422 "already bridged" refusal is the
        * outcome this bridge asked for, not a failure.
        */
-      alreadyBridgedOk?: true }
+      alreadyBridgedOk?: true;
+      /**
+       * Call-speed S6.2: the customer dial whose connection this bridge
+       * completes. Its contact intent goes on the bridged leg, so the callback
+       * contact proof that dial began survives the explicit bridge.
+       */
+      contactCommandId?: string }
   | { kind: "playback_start"; commandId: string; leg: LegRef; media: MediaRef; loop?: "infinity" | number; clientState?: TelnyxClientState; forceSpeech?: boolean }
   | { kind: "playback_stop"; commandId: string; leg: LegRef }
   | { kind: "recording_start"; commandId: string; leg: LegRef; recorderId: string; epoch: number; maxLength: number }

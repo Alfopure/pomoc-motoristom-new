@@ -300,18 +300,20 @@ describe("colleague call capabilities", () => {
   });
 
   it("trusts its own active media first only for an auto-bridged colleague call this browser answered, with the switch on", () => {
-    const mine = connecting({ browserCallControlIds: ["colleague-invite"] });
+    const mine = connecting({ browserCallControlIds: ["colleague-invite"], callerAnswered: true });
     expect(localFirstCandidate(mine, browser(), true)).toBe(true);
     expect(phoneBarStateLabel(mine, { localTalking: true })).toEqual({ label: "Prebieha", tone: "live" });
     // The server's offer row before it sees the answer qualifies too.
-    expect(localFirstCandidate(connecting({ kind: "offer", connecting: undefined, browserCallControlIds: ["colleague-invite"] }), browser(), true)).toBe(true);
+    expect(localFirstCandidate(connecting({ kind: "offer", connecting: undefined, browserCallControlIds: ["colleague-invite"], callerAnswered: true }), browser(), true)).toBe(true);
     for (const [call, sdk, enabled] of [
+      // The caller's own phone has not answered yet: no audio is possible.
+      [connecting({ browserCallControlIds: ["colleague-invite"] }), browser(), true],
       [mine, browser(), false],
       [mine, browser({ active: false, ringing: true }), true],
-      [connecting({ autoBridge: undefined, browserCallControlIds: ["colleague-invite"] }), browser(), true],
+      [connecting({ autoBridge: undefined, browserCallControlIds: ["colleague-invite"], callerAnswered: true }), browser(), true],
       [mine, browser({ telnyxCallControlId: "another-leg" }), true],
-      [connecting({ state: "talking", connecting: undefined, browserCallControlIds: ["colleague-invite"] }), browser(), true],
-      [colleague({ direction: "outbound", state: "ringing", connecting: true, autoBridge: true, browserCallControlIds: ["colleague-invite"] }), browser(), true],
+      [connecting({ state: "talking", connecting: undefined, browserCallControlIds: ["colleague-invite"], callerAnswered: true }), browser(), true],
+      [colleague({ direction: "outbound", state: "ringing", connecting: true, autoBridge: true, browserCallControlIds: ["colleague-invite"], callerAnswered: true }), browser(), true],
     ] as const) expect(localFirstCandidate(call, sdk, enabled)).toBe(false);
     expect(LOCAL_FIRST_TALKING_MS).toBe(3_000);
   });

@@ -312,6 +312,8 @@ export type PhoneBarCall = {
   connecting?: boolean;
   /** Call-speed S6.3: Telnyx bridges this colleague call at answer. */
   autoBridge?: boolean;
+  /** Colleague call whose caller's own phone has answered (no audio is possible before). */
+  callerAnswered?: boolean;
 };
 
 export type CallParticipantKind = "caller" | "operator" | "party" | "supervisor" | "consult";
@@ -502,6 +504,7 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     participants: callParticipants(call, { actorProfileId, operatorName: options.operatorName }),
     ...(colleagueCallConnecting(call, actorProfileId) ? { connecting: true } : {}),
     ...(call.autoBridge === true ? { autoBridge: true } : {}),
+    ...(call.direction === "internal" && call.legs.some((leg) => leg.intent === "internal_caller" && Boolean(leg.answeredAt)) ? { callerAnswered: true } : {}),
   };
 }
 

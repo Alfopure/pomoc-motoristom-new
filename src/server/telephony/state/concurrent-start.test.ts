@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
-import { createTelephonyHarness, LINES, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
+import { CONNECTION_ID, createTelephonyHarness, LINES, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { callColleague, createRateLimiter, hangupCall, startOutboundCall, type CallActionDeps, type CallActor } from "../call-actions";
 import { readContactHistory } from "../contact-proof";
 import { loadActiveCalls } from "../active-calls";
@@ -9,13 +9,15 @@ import { buildPhoneBarModel, type ActiveCallsPayload } from "@/lib/telephony/act
 import { defaultLatencyFlags, type LatencyFlags } from "../latency-flags";
 import { runPendingEffectRecovery } from "../cron-jobs";
 import { setPresence } from "../presence-service";
-import { effectsDeps } from "../session-runner";
+import { effectsDeps, loadRoutingContext } from "../session-runner";
 import { cancelRevokedOffers } from "./cancelled-offers";
 import { createTelnyxClient, TelnyxCommandError } from "../telnyx/client";
-import { decodeClientState } from "../telnyx/client-state";
+import { decodeClientState, encodeClientState } from "../telnyx/client-state";
 import { readPendingEffects } from "./continuation";
 import { isAlreadyBridgedRefusal } from "./effects";
-import { readMeta, type SessionRow } from "./types";
+import { buildTelnyxEnvelope } from "./events";
+import { planInitialCall } from "./transitions";
+import { readMeta, type AppEvent, type DialCommand, type SessionRow } from "./types";
 
 /**
  * Call-speed S6: the far end is dialled in the startup entry, right after the
@@ -77,11 +79,26 @@ async function colleague(t: World, n = 9002) {
   return { ...call, own: call.operatorLegCallControlId, callees: callees.map(leg => String(leg.telnyx_call_control_id)), far: String(callees[0]?.telnyx_call_control_id ?? "") };
 }
 
-/** Provider answer first (it may connect a pre-armed pair), then its webhook. */
+/**
+ * Provider answer first (it may connect a pre-armed pair), then its webhook.
+ * Each answer happens a moment after the previous one, so the provider's
+ * answer times follow the order a test answers in.
+ */
 async function answer(t: World, id: string, extra: Record<string, unknown> = {}) {
+  t.h.advance(300);
   t.h.telnyx.physical.answered(id);
   return t.h.legEvent(id, "call.answered", extra);
 }
+
+/** A provider event that occurred at `occurredAt` and is delivered now: webhooks do not arrive in provider order. */
+function eventAt(t: World, id: string, type: string, occurredAt: string, extra: Record<string, unknown> = {}) {
+  const leg = t.h.db.find("motorist_call_legs", row => row.telnyx_call_control_id === id)!;
+  const session = t.h.session(String(leg.session_id));
+  return t.h.process(buildTelnyxEnvelope({ id: t.h.nextEventId(), type, occurredAt, payload: { connection_id: CONNECTION_ID, call_control_id: id,
+    call_leg_id: leg.telnyx_call_leg_id ?? `leg-${id}`, call_session_id: session.telnyx_session_id ?? `tsess-${session.id}`,
+    client_state: encodeClientState(t.h.clientStateOf(id)), from: leg.from_number, to: leg.to_number, ...extra } }));
+}
+const later = (t: World, ms: number) => new Date(t.h.now().getTime() + ms).toISOString();
 
 describe("S6.1 the far end is dialled in the startup entry", () => {
   it("dials the customer right after the own leg, linked to it, with the frozen own-leg timeout", async () => {
@@ -167,6 +184,22 @@ describe("S6.1 the far end is dialled in the startup entry", () => {
     expect(meta(s, sequential.sessionId).start_mode).toMatchObject({ concurrent: false });
   });
 
+  it("records the sequential start it runs when a session frozen concurrent cannot dial so", async () => {
+    const t = world();
+    const call = await outbound(t, 9013);
+    const row = t.h.session(call.sessionId) as SessionRow;
+    expect(readMeta(row).start_mode).toMatchObject({ concurrent: true, ownLegTimeoutSecs: 12 });
+    // A callback start never dials concurrently, whatever was frozen.
+    const session = { ...row, metadata: { ...readMeta(row), callbackRequestId: "00000000-0000-4000-8000-000000009013" } } as SessionRow;
+    const ownDial: DialCommand = { kind: "dial", commandId: "initial-own", to: "sip:gencred001@sip.telnyx.com", from: NUMBERS.allianz, role: "operator",
+      profileId: actor.profileId, externalNumber: null, clientState: t.h.clientStateOf(call.own), linkTo: null, timeoutSecs: 30 };
+    const event: AppEvent = { kind: "app", type: "sweep", id: "startup", actorProfileId: actor.profileId, occurredAt: t.h.now().toISOString() };
+    const plan = planInitialCall(session, await loadRoutingContext(t.h.deps, session), event, { ownDial });
+    expect(plan.commands).toEqual([ownDial]);
+    expect(readMeta({ ...session, metadata: plan.next.session.metadata } as SessionRow).start_mode)
+      .toMatchObject({ concurrent: false, ownLegTimeoutSecs: 30 });
+  });
+
   it("uses the 422 rule only for an already-bridged refusal, never for a call that is gone", () => {
     expect(isAlreadyBridgedRefusal(ALREADY_BRIDGED())).toBe(true);
     expect(isAlreadyBridgedRefusal(new TelnyxCommandError({ code: "90034", status: 422, title: "Call already in a bridge" }))).toBe(true);
@@ -221,10 +254,44 @@ describe("S6.2 decision table: outbound", () => {
     // A duplicate own answer sends no second bridge.
     await t.h.legEvent(call.own, "call.answered", {}, "duplicate-own-answer");
     expect(t.h.telnyx.of("bridge")).toHaveLength(1);
-    // Its bridged events prove the contact on the explicit bridge.
-    await t.h.legEvent(call.own, "call.bridged");
+    // Its bridged events, after the bridge and with the client state the bridge
+    // put on the own leg, prove the contact of the customer dial (callbacks).
+    t.h.advance(400);
+    await t.h.legEvent(call.own, "call.bridged", { client_state: t.h.telnyx.of("bridge")[0].params.clientState });
     await t.h.legEvent(call.far, "call.bridged");
-    expect(readContactHistory(t.h.session(call.sessionId) as SessionRow).proofs).toHaveLength(1);
+    const farDial = t.h.telnyx.of("dial")[1].params.commandId;
+    expect(readContactHistory(t.h.session(call.sessionId) as SessionRow).proofs).toMatchObject([{ operationId: farDial, customerControlId: call.far, operatorControlId: call.own }]);
+  });
+
+  it("(B) bridges when the customer answered first at the provider, even if the own answer is processed first", async () => {
+    const t = world();
+    const call = await outbound(t);
+    t.h.telnyx.physical.answered(call.far);
+    t.h.telnyx.physical.answered(call.own);
+    const farAt = later(t, 100), ownAt = later(t, 400);
+    t.h.advance(600);
+    // The own answer's webhook overtakes the customer's.
+    await eventAt(t, call.own, "call.answered", ownAt);
+    expect(t.h.session(call.sessionId).state).toBe("ringing");
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
+    await eventAt(t, call.far, "call.answered", farAt);
+    expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far })]);
+    expect(t.h.session(call.sessionId).state).toBe("talking");
+  });
+
+  it("sends no bridge when the own leg answered first at the provider, whatever order the webhooks arrive in", async () => {
+    const t = world();
+    const call = await outbound(t);
+    t.h.telnyx.physical.answered(call.own);
+    t.h.telnyx.physical.answered(call.far);
+    const ownAt = later(t, 100), farAt = later(t, 400);
+    t.h.advance(600);
+    await eventAt(t, call.far, "call.answered", farAt);
+    expect(t.h.session(call.sessionId).state).toBe("ringing");
+    await eventAt(t, call.own, "call.answered", ownAt);
+    // Telnyx bridged at the customer's answer, the own leg being up (`bridge_on_answer`).
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
+    expect(t.h.session(call.sessionId).state).toBe("talking");
   });
 
   it("(A/B) counts Telnyx's 422 \"already bridged\" as the connection, without compensation or incident", async () => {
@@ -249,8 +316,9 @@ describe("S6.2 decision table: outbound", () => {
     await answer(t, call.own);
     expect(hungUp(t, call.own)).toBe(true);
     expect(hungUp(t, call.far)).toBe(true);
-    expect(t.h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: expect.any(String) });
-    expect(t.h.call(call.sessionId)).toMatchObject({ status: "ended", end_reason: "bridge_failed" });
+    // Never connected: neither the session nor the history says answered.
+    expect(t.h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: expect.any(String), answered_at: null });
+    expect(t.h.call(call.sessionId)).toMatchObject({ status: "ended", end_reason: "bridge_failed", answered_at: null });
     for (const id of [call.own, call.far]) await t.h.legEvent(id, "call.hangup", { hangup_cause: "normal_clearing" });
     expect(t.h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
     expect(released(t, call.sessionId, actor.profileId)).toBe(1);
@@ -527,23 +595,31 @@ describe("S6.2/S6.3 colleague calls", () => {
     for (const profileId of [PROFILES.o1, PROFILES.o2]) expect(t.h.presence(profileId)).toMatchObject({ status: "available", current_session_id: null });
   });
 
-  it("rings both colleague endpoints with the caller's leg: one winner, one bridge, the sibling hung up", async () => {
+  it("rings both colleague endpoints with the caller's leg; the server picks one winner and bridges it, the sibling is hung up", async () => {
     const t = world({ internal_auto_bridge: true }, { native: true });
     const call = await colleague(t);
     expect(call.callees).toHaveLength(2);
     const fanout = t.h.telnyx.of("dial").slice(1);
     expect(fanout.map(dial => dial.params)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ to: "sip:gencred002@sip.telnyx.com", linkTo: call.own, bridgeOnAnswer: true, preventDoubleBridge: true }),
-      expect.objectContaining({ to: "sip:native-colleague@sip.telnyx.com", linkTo: call.own, bridgeOnAnswer: true, preventDoubleBridge: true }),
+      expect.objectContaining({ to: "sip:gencred002@sip.telnyx.com", linkTo: call.own }),
+      expect.objectContaining({ to: "sip:native-colleague@sip.telnyx.com", linkTo: call.own }),
     ]));
-    expect(meta(t, call.sessionId)).toMatchObject({ far_end: { commandId: "ring_fanout:0" }, internal_auto_bridge: { commandIds: fanout.map(dial => dial.params.commandId) } });
+    // With two endpoints Telnyx could bridge one while the server accepts the
+    // other, so no auto-bridge: the server's winner gets the explicit bridge.
+    expect(fanout.every(dial => dial.params.bridgeOnAnswer === undefined)).toBe(true);
+    expect(meta(t, call.sessionId)).toMatchObject({ far_end: { commandId: "ring_fanout:0" }, start_mode: { concurrent: true, autoBridge: false } });
+    expect(meta(t, call.sessionId).internal_auto_bridge).toBeUndefined();
+    // The browser is told what the dial carries, not what the switch asked for.
+    const view = await loadActiveCalls({ ...t.h.deps, configured: true }, { profileId: PROFILES.o1, canManageAssignments: false });
+    expect(view.calls).toEqual([expect.objectContaining({ sessionId: call.sessionId })]);
+    expect(view.calls[0]).not.toHaveProperty("autoBridge");
     const [winner, loser] = call.callees;
     await answer(t, call.own);
     await answer(t, winner);
     expect(hungUp(t, loser)).toBe(true);
     // Both answering within a moment: the loser's late answer is hung up, never bridged.
     await answer(t, loser);
-    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
+    expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: winner })]);
     expect(t.h.session(call.sessionId).state).toBe("talking");
     expect(meta(t, call.sessionId).accepted_device_legs).toMatchObject({ [PROFILES.o2]: winner });
   });
@@ -588,29 +664,43 @@ describe("S6.2 permutations: whatever order the provider events arrive in", () =
   type Step = "own.answered" | "far.answered" | "own.bridged" | "far.bridged";
   const STEPS: Step[] = ["own.answered", "far.answered", "own.bridged", "far.bridged"];
   const orders = permutations(STEPS).map(order => order.join(" → "));
+  const scenarios = ["far end answered first", "own leg answered first"] as const;
+  type Scenario = (typeof scenarios)[number];
+  const cases = scenarios.flatMap(scenario => orders.map(order => [scenario, order] as const));
   /**
-   * The one explicit bridge is sent exactly when the own answer is processed
-   * after the far end's and before any bridged evidence: a 422 would then
-   * tell us Telnyx bridged them already. Otherwise none.
+   * The decision follows the provider's answer times, never the delivery
+   * order. Only when the far end answered first (outcome B: Telnyx could not
+   * bridge to a ringing own leg) does the server send the one explicit bridge,
+   * and only if no bridged evidence was processed before both answers; a 422
+   * "already bridged" would then count as success. When the own leg answered
+   * first Telnyx bridges at the far end's answer (`bridge_on_answer`): none.
    */
-  const explicitBridges = (order: string) => {
+  const explicitBridges = (scenario: Scenario, order: string) => {
+    if (scenario === "own leg answered first") return 0;
     const at = (step: Step) => order.split(" → ").indexOf(step);
-    return at("far.answered") < at("own.answered") && at("own.answered") < Math.min(at("far.bridged"), at("own.bridged")) ? 1 : 0;
+    return Math.max(at("own.answered"), at("far.answered")) < Math.min(at("own.bridged"), at("far.bridged")) ? 1 : 0;
   };
+  /** Delivers the four events in `order`, each stamped with its provider time. */
+  async function deliver(t: World, call: { own: string; far: string }, scenario: Scenario, order: string) {
+    const first = later(t, 100), second = later(t, 400), bridged = later(t, 450);
+    const answeredAt = scenario === "far end answered first" ? { far: first, own: second } : { own: first, far: second };
+    t.h.advance(600);
+    for (const step of order.split(" → ") as Step[]) {
+      const [leg, type] = step.split(".") as ["own" | "far", "answered" | "bridged"];
+      await eventAt(t, call[leg], `call.${type}`, type === "answered" ? answeredAt[leg] : bridged);
+    }
+  }
 
-  it.each(orders)("outbound, both answered at the provider, delivered %s", async (order) => {
+  it.each(cases)("outbound, %s, delivered %s", async (scenario, order) => {
     const t = world();
     const call = await outbound(t, 9100);
     await t.h.legEvent(call.far, "call.initiated");
     t.h.telnyx.physical.answered(call.far);
     t.h.telnyx.physical.answered(call.own);
-    for (const step of order.split(" → ") as Step[]) {
-      const [leg, type] = step.split(".") as ["own" | "far", "answered" | "bridged"];
-      await t.h.legEvent(leg === "own" ? call.own : call.far, `call.${type}`);
-    }
+    await deliver(t, call, scenario, order);
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
     expect(t.h.call(call.sessionId)).toMatchObject({ status: "answered" });
-    expect(t.h.telnyx.of("bridge")).toHaveLength(explicitBridges(order));
+    expect(t.h.telnyx.of("bridge")).toHaveLength(explicitBridges(scenario, order));
     expect(t.h.telnyx.of("hangup")).toEqual([]);
     expect(readContactHistory(t.h.session(call.sessionId) as SessionRow).proofs.length).toBeGreaterThanOrEqual(1);
     expect(readPendingEffects(t.h.session(call.sessionId) as SessionRow).entries).toEqual([]);
@@ -624,17 +714,14 @@ describe("S6.2 permutations: whatever order the provider events arrive in", () =
     expect(released(t, call.sessionId, actor.profileId)).toBeLessThanOrEqual(1);
   });
 
-  it.each(orders)("colleague call (auto-bridge), both answered at the provider, delivered %s", async (order) => {
+  it.each(cases)("colleague call (auto-bridge), %s, delivered %s", async (scenario, order) => {
     const t = world({ internal_auto_bridge: true });
     const call = await colleague(t, 9101);
     t.h.telnyx.physical.answered(call.far);
     t.h.telnyx.physical.answered(call.own);
-    for (const step of order.split(" → ") as Step[]) {
-      const [leg, type] = step.split(".") as ["own" | "far", "answered" | "bridged"];
-      await t.h.legEvent(leg === "own" ? call.own : call.far, `call.${type}`);
-    }
+    await deliver(t, call, scenario, order);
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
-    expect(t.h.telnyx.of("bridge")).toHaveLength(explicitBridges(order));
+    expect(t.h.telnyx.of("bridge")).toHaveLength(explicitBridges(scenario, order));
     expect(t.h.telnyx.of("hangup")).toEqual([]);
     expect(t.h.presence(PROFILES.o2)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
     await t.h.legEvent(call.own, "call.hangup", { hangup_cause: "normal_clearing" });

@@ -21,6 +21,8 @@ async function outboundPickup() {
   const call = await startOutboundCall(deps, caller, { to: NUMBERS.customer, requestId: "00000000-0000-4000-8000-000000000991" });
   await h.legEvent(call.operatorLegCallControlId, "call.answered");
   const customer = h.legs(call.sessionId).find(leg => leg.role === "customer")!;
+  // The customer answers after the operator, as the provider stamps it.
+  h.advance(1000);
   await h.legEvent(String(customer.telnyx_call_control_id), "call.answered");
   expect(h.session(call.sessionId).state).toBe("talking");
   await completeAnnouncedAction(h, holdCall(deps, caller, call.sessionId));

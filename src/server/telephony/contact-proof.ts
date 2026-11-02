@@ -99,6 +99,9 @@ export function collectContactOperation(state: ContactSnapshot, commands: Comman
     : serving.length === 1 ? serving[0] : undefined;
   for (const command of commands) {
     if (command.kind === "ring_fanout") continue;
+    // S6.2: completes the connection the customer dial began, with that dial's
+    // contact intent; the dial's pending contact stays the one operation.
+    if (command.kind === "bridge" && command.contactCommandId) continue;
     const answeringOperator = operator ?? (event.kind === "telnyx" && ["call.answered", "call.bridged"].includes(event.type) &&
       event.callControlId && event.clientState?.sid === state.session.id && event.clientState.role === "operator" &&
       event.clientState.operatorId === state.session.answered_by_profile_id && event.clientState.intent === "outbound"

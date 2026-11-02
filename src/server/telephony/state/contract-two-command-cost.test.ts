@@ -599,6 +599,8 @@ describe("contract 2 dependent waves", () => {
       expect(own.sent).toEqual([]);
       bounded(own.requests, BOUND_S6.ownAnswer.requests);
       const callee = String(h.openLegFor(call.sessionId, PROFILES.o2)!.telnyx_call_control_id);
+      // The colleague answers after the caller's leg: Telnyx bridged at that answer.
+      h.advance(300);
       h.telnyx.physical.answered(callee);
       expect(h.telnyx.physical.connected(call.operatorLegCallControlId, callee)).toBe(true);
       const answer = await metered(h, () => h.legEvent(callee, "call.answered"), meter => {

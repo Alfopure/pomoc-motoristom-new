@@ -1506,7 +1506,9 @@ async function createSession(
           // Call-speed S6.1: a callback, or an outgoing call behind start
           // announcements (and with them any recording), stays sequential.
           concurrentEligible: !input.metadata.callbackRequestId && (input.direction === "internal" ||
-            readAnnouncementConfig(input.metadata.announcements).outboundStartAnnouncements !== true) }) }),
+            readAnnouncementConfig(input.metadata.announcements).outboundStartAnnouncements !== true),
+          // S6.3: one colleague endpoint only; with web and mobile the server picks the winner.
+          autoBridgeEligible: !(input.metadata.internal as { endpoints?: unknown[] } | undefined)?.endpoints?.length }) }),
     })
     .select("*")
     .single();

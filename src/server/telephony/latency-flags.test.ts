@@ -145,6 +145,17 @@ describe("latency flags", () => {
     }
     vi.unstubAllEnvs();
     expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
+    // A colleague with several endpoints keeps the server's explicit bridge: only one endpoint may be auto-bridged.
+    expect(freezeStartMode(flags, { direction: "internal", origin: "mobile", providerRegion: "us", autoBridgeEligible: false }))
+      .toMatchObject({ concurrent: true, autoBridge: false });
+    // Until spikes S6.0 1–5 pass, production cannot freeze concurrent dialing or the auto-bridge by the switches alone; TEST can.
+    vi.stubEnv("MOTORIST_APP_ENV", "production");
+    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" })).toEqual({ concurrent: false, autoBridge: false,
+      ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin: "web" });
+    expect(freezeStartMode(flags, { direction: "internal", origin: "mobile", providerRegion: "us" })).toMatchObject({ concurrent: false, autoBridge: false });
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    expect(freezeStartMode(flags, { direction: "internal", origin: "mobile", providerRegion: "us" })).toMatchObject({ concurrent: true, autoBridge: true });
+    vi.unstubAllEnvs();
     // S7b ships its behaviour: join-with-hold is frozen when asked for, and only then; never for a colleague call.
     const joinHeld = { ...flags, hold_join_with_hold: true };
     expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });

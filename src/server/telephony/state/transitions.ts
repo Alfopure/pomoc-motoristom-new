@@ -1504,15 +1504,25 @@ function offerQueuedCall(b: TransitionBuilder, customer: LegRow): boolean {
 /** Outbound/internal: the far end answered → the bridge command placed at dial time completes. */
 function onFarEndAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
   if (b.session.state !== "ringing") return b.note("far end answered outside ringing").result();
-  // Call-speed S6.2: dialled together with the operator's own leg, the far end
-  // can answer first. Without bridged evidence or an answered own leg nothing
-  // is connected yet, whatever order the events arrive in.
-  if (concurrentStart(b) && !opts.alreadyBridged && !concurrentOwnLeg(b)?.answered_at) return awaitOwnLeg(b, opts.at).result();
+  if (concurrentStart(b)) return onConcurrentFarAnswered(b, leg, opts);
   if (b.meta.outbound_audio_gate && !b.meta.outbound_auto_bridge && !opts.alreadyBridged) {
     const operator = b.answeringLeg();
     if (!operator || b.legEnded(operator)) return b.note("outbound operator no longer available").result();
     b.cmd({ kind: "bridge", commandId: b.cmdId(leg.telnyx_call_control_id, "bridge:outbound:announced"), leg: ref(leg), target: ref(operator), parkAfterUnbridge: "self" });
   }
+  return connectCall(b, opts.at, "far end answered → talking");
+}
+
+/**
+ * Call-speed S6.2, the customer of a concurrent start answered. Dialled with
+ * the operator's own leg, it can answer first; nothing is connected until
+ * there is bridged evidence or both legs have answered, whatever order the
+ * events are processed in (`connectConcurrent` decides the bridge).
+ */
+function onConcurrentFarAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
+  const own = concurrentOwnLeg(b);
+  if (!concurrentBridged(own, leg, opts) && !own?.answered_at) return awaitOwnLeg(b, opts.at).result();
+  if (own) connectConcurrent(b, own, leg, opts, { farAt: opts.at, ownAt: own.answered_at });
   return connectCall(b, opts.at, "far end answered → talking");
 }
 
@@ -1544,6 +1554,61 @@ function concurrentFarLeg(b: TransitionBuilder): LegRow | undefined {
   return b.openLegs().find((leg) => accepted ? leg.telnyx_call_control_id === accepted : legIntent(leg) === "internal" && Boolean(leg.answered_at));
 }
 
+/** Provider evidence that the pair is already bridged: this event, or a `call.bridged` either leg already reported. */
+function concurrentBridged(own: LegRow | undefined, far: LegRow, opts: { alreadyBridged: boolean }): boolean {
+  return opts.alreadyBridged || Boolean(far.bridged_at) || Boolean(own?.bridged_at);
+}
+
+/**
+ * Whether the far end answered before (or with) the own leg, by the
+ * provider's own answer times. Unknown counts as yes: the bridge it leads to
+ * is harmless when Telnyx already bridged the pair (422 "already bridged").
+ */
+function farAnsweredFirst(farAt: string | null, ownAt: string | null): boolean {
+  const far = Date.parse(farAt ?? ""), own = Date.parse(ownAt ?? "");
+  return !Number.isFinite(far) || !Number.isFinite(own) || far <= own;
+}
+
+/** Whether Telnyx itself bridges this far leg to an answered own leg (`bridge_on_answer`). */
+function providerBridgesAtAnswer(b: TransitionBuilder, far: LegRow): boolean {
+  return b.session.direction === "internal" ? autoBridgedColleagueLeg(b, far) : Boolean(b.meta.outbound_auto_bridge);
+}
+
+/**
+ * S6.2, both legs of a concurrent start have answered and this event is the
+ * second answer. Without bridged evidence the pair gets the explicit bridge
+ * when the far end answered first at the provider (Telnyx may or may not
+ * complete that bridge itself: outcomes A and B) or when Telnyx never bridges
+ * this far leg; otherwise Telnyx bridged it at the far end's answer.
+ */
+function connectConcurrent(b: TransitionBuilder, own: LegRow, far: LegRow, opts: { alreadyBridged: boolean }, at: { farAt: string | null; ownAt: string | null }): void {
+  if (concurrentBridged(own, far, opts)) return;
+  if (farAnsweredFirst(at.farAt, at.ownAt) || !providerBridgesAtAnswer(b, far)) bridgeConcurrentPair(b, own, far);
+}
+
+/**
+ * The explicit bridge of S6.2, in today's direction: the operator's leg
+ * bridges to the far end and parks itself if that bridge ends. A 422 "already
+ * bridged" is the connection it asked for; any other refusal hangs up both and
+ * ends the call as never connected. The customer's bridge keeps the contact
+ * intent of the dial that reached them (callback contact proof).
+ */
+function bridgeConcurrentPair(b: TransitionBuilder, own: LegRow, far: LegRow): void {
+  const bridgeId = b.cmdId(own.telnyx_call_control_id, "bridge:concurrent");
+  const contact = b.session.direction === "outbound" ? b.meta.outbound_auto_bridge?.commandId : undefined;
+  b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(own), target: ref(far), parkAfterUnbridge: "self", alreadyBridgedOk: true,
+    ...(contact ? { contactCommandId: contact } : {}) });
+  const failed = b.fork();
+  failed.setState("ended").patchSession({ ended_at: b.nowIso, answered_at: null });
+  failed.call.status = "ended";
+  failed.call.end_reason = "bridge_failed";
+  failed.call.answered_at = null;
+  failed.call.ended_at = b.nowIso;
+  releaseTalkingOperators(failed, false);
+  b.compensate(bridgeId, "concurrent connection failed → hang up both legs",
+    [hangupCmd(failed, far, "bridge_failed"), hangupCmd(failed, own, "bridge_failed")], failed.transition());
+}
+
 /**
  * S6.2, the far end answered before the operator's own leg: nothing is
  * connected yet. Record it and keep ringing — in silence (owner default),
@@ -1561,9 +1626,15 @@ function autoBridgedColleagueLeg(b: TransitionBuilder, leg: LegRow): boolean {
   return typeof dialId === "string" && Boolean(b.meta.internal_auto_bridge?.commandIds?.includes(dialId));
 }
 
-/** Frozen `start_mode.autoBridge`: the colleague dials carry `bridge_on_answer` (stable writers only). */
+/**
+ * Frozen `start_mode.autoBridge`: the colleague dial carries `bridge_on_answer`
+ * (stable writers only). A colleague with web and mobile endpoints keeps the
+ * explicit bridge: the server picks the winner, and with two auto-bridged
+ * endpoints Telnyx could bridge one while the server accepts the other (spike
+ * S6.0/3 decides whether that can be widened).
+ */
 function internalAutoBridge(b: TransitionBuilder): boolean {
-  return b.session.direction === "internal" && b.meta.start_mode?.autoBridge === true &&
+  return b.session.direction === "internal" && b.meta.start_mode?.autoBridge === true && !b.meta.internal?.endpoints?.length &&
     (telephonyStabilityEnabled() || hasStabilityContract(b.session));
 }
 
@@ -1577,10 +1648,9 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   rejected.cmd(hangupCmd(rejected, leg, "operator_busy", false));
   const caller = b.openLegs().find((other) => legIntent(other) === "internal_caller");
   const concurrent = concurrentStart(b);
-  const bridged = opts.alreadyBridged || Boolean(leg.bridged_at);
   // S6.2: a concurrent start connects on bridged evidence or once the caller's
   // own leg has answered; until then the colleague is accepted but waits.
-  const waiting = concurrent && !bridged && !caller?.answered_at;
+  const waiting = concurrent && !concurrentBridged(caller, leg, opts) && !caller?.answered_at;
   if (waiting) awaitOwnLeg(b, opts.at);
   else {
     b.setState("talking").patchSession({ answered_at: b.session.answered_at ?? opts.at });
@@ -1590,13 +1660,15 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   }
   if (telephonyStabilityEnabled() || hasStabilityContract(b.session) || b.meta.internal?.endpoints?.length || (leg.client_state as { autoAnswer?: boolean } | null)?.autoAnswer) {
     if (!caller) throw new CallActionRejected("Volajúci už nie je pripojený.", 409);
-    // S6.3: Telnyx bridges an auto-bridged leg to the answered caller itself;
-    // a concurrent leg already bridged needs nothing either. A leg this call
-    // cannot prove it dialled without auto-bridge may have been bridged anyway.
-    if (!waiting && !autoBridgedColleagueLeg(b, leg) && !(concurrent && bridged)) {
+    if (concurrent) {
+      if (!waiting) connectConcurrent(b, caller, leg, opts, { farAt: opts.at, ownAt: caller.answered_at });
+    } else if (!autoBridgedColleagueLeg(b, leg)) {
+      // S6.3: Telnyx bridges an auto-bridged leg to the answered caller
+      // itself. A leg this call cannot prove it dialled with the auto-bridge
+      // may have been bridged anyway.
       const bridgeId = b.cmdId(leg.telnyx_call_control_id, "bridge:mobile-internal");
       b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(caller), target: ref(leg), parkAfterUnbridge: "self",
-        ...(concurrent || b.meta.internal_auto_bridge ? { alreadyBridgedOk: true as const } : {}) });
+        ...(b.meta.internal_auto_bridge ? { alreadyBridgedOk: true as const } : {}) });
       const failed = b.fork();
       b.compensate(bridgeId, "mobile internal connection failed", [hangupCmd(failed, leg, "mobile_bridge_failed")], failed.transition());
     }
@@ -1783,11 +1855,9 @@ function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string, opt
 
 /**
  * Call-speed S6.2: the own leg of a concurrent start answered. The far end was
- * dialled with it, so nothing is dialled here. The call connects on provider
- * evidence, never on event order: a far leg already bridged needs nothing; a
- * far end that answered without that evidence gets the explicit bridge (if
- * Telnyx bridged the pair meanwhile, its 422 "already bridged" counts as
- * success); a far end still ringing is connected at its own answer.
+ * dialled with it, so nothing is dialled here. A far end still ringing is
+ * connected at its own answer; one that has answered is connected now, with
+ * the explicit bridge only where `connectConcurrent` finds it needed.
  */
 function onConcurrentOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
   if (!["received", "ringing", "talking"].includes(b.session.state)) return b.note("own leg answered outside a concurrent start").result();
@@ -1795,20 +1865,7 @@ function onConcurrentOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: s
   if (b.session.state === "talking") return b.note("own leg answered; the far end is already connected").result();
   const far = concurrentFarLeg(b);
   if (!far?.answered_at) return b.note("own leg answered; the far end still rings").result();
-  if (!opts.alreadyBridged && !far.bridged_at) {
-    // Today's direction: the operator's leg bridges to the far end and parks
-    // itself if that bridge later ends.
-    const bridgeId = b.cmdId(leg.telnyx_call_control_id, "bridge:concurrent");
-    b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(leg), target: ref(far), parkAfterUnbridge: "self", alreadyBridgedOk: true });
-    const failed = b.fork();
-    failed.setState("ended").patchSession({ ended_at: b.nowIso });
-    failed.call.status = "ended";
-    failed.call.end_reason = "bridge_failed";
-    failed.call.ended_at = b.nowIso;
-    releaseTalkingOperators(failed, false);
-    b.compensate(bridgeId, "concurrent connection failed → hang up both legs",
-      [hangupCmd(failed, far, "bridge_failed"), hangupCmd(failed, leg, "bridge_failed")], failed.transition());
-  }
+  connectConcurrent(b, leg, far, opts, { farAt: far.answered_at, ownAt: opts.at });
   return connectCall(b, opts.at, "own leg answered after the far end → talking");
 }
 
@@ -1838,6 +1895,8 @@ export function planInitialCall(session: SessionRow, context: RoutingContext, ev
     const next = emptyTransition();
     next.call = { status: "outbound" };
     next.notes = ["initial operator dial materialization"];
+    // A session frozen concurrent that cannot run so records what it runs.
+    if (meta.start_mode?.concurrent) next.session.metadata = mergeMeta(session, { start_mode: { ...meta.start_mode, concurrent: false, ownLegTimeoutSecs: own.timeoutSecs } });
     return { next, commands: [own], compensations: [release], guard: null, ignored: null };
   }
   const timeout = meta.start_mode?.ownLegTimeoutSecs;

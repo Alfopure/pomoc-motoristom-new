@@ -1084,7 +1084,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         const previous = source.client_state as { offerToken?: string } | null;
         clientState = encodeClientState({ sid: ctx.session.id, role: source.role,
           ...(source.profile_id ? { operatorId: source.profile_id } : {}),
-          ...(previous?.offerToken ? { offerToken: previous.offerToken } : {}), intent: contactOperationIntent(command.commandId) });
+          ...(previous?.offerToken ? { offerToken: previous.offerToken } : {}), intent: contactOperationIntent(command.contactCommandId ?? command.commandId) });
       }
       try {
         await telnyx.bridge({
