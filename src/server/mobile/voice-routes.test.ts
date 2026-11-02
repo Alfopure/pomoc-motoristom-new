@@ -10,11 +10,11 @@ import { POST as status } from "@/app/api/mobile/v1/voice/calls/[id]/status/rout
 import { MutationError } from "@/server/mutation-error";
 
 const mocks = vi.hoisted(() => ({ actor: vi.fn(), deps: vi.fn(), lease: vi.fn(), session: vi.fn(), token: vi.fn(), touch: vi.fn(),
-  dial: vi.fn(), disconnect: vi.fn(), hangup: vi.fn(), continue: vi.fn(), after: vi.fn(), callCase: vi.fn(), handedAway: vi.fn() }));
+  dial: vi.fn(), disconnect: vi.fn(), hangup: vi.fn(), continue: vi.fn(), after: vi.fn(), callCase: vi.fn(), handedAway: vi.fn(), access: vi.fn() }));
 vi.mock("./auth", () => ({ requireMobileActor: mocks.actor, mobileEnvironment: () => "test" }));
 vi.mock("./voice", () => ({ nativeVoiceDeps: mocks.deps, requireNativeLease: mocks.lease, requireNativeSession: mocks.session, requireNativeCallCase: mocks.callCase, nativeHandedAway: mocks.handedAway,
   NativeLeaseError: class extends Error { status = 409; code = "native_lease_stale"; } }));
-vi.mock("@/server/telephony/operator-devices", () => ({ issueWebphoneToken: mocks.token, touchDevice: mocks.touch, disconnectDevice: mocks.disconnect }));
+vi.mock("@/server/telephony/operator-devices", () => ({ issueWebphoneToken: mocks.token, touchDevice: mocks.touch, disconnectDevice: mocks.disconnect, refuseIfAccessLost: mocks.access }));
 vi.mock("@/server/telephony/call-actions", () => ({ startOutboundCall: mocks.dial, hangupCall: mocks.hangup, continueAcceptedHangup: mocks.continue }));
 vi.mock("next/server", () => ({ after: mocks.after }));
 vi.mock("./voice-hold", () => ({ readNativeCallStatus: async (_deps: unknown, _actor: unknown, id: string) => { const session = await mocks.session(); return {sessionId: id, state: session.state, connected: Boolean(session.nativeConnected && session.answered_at && ["talking", "held"].includes(session.state) && !session.ended_at && !session.termination_requested_at), ended: session.nativeEnded, terminationPending: Boolean(session.termination_requested_at && !session.ended_at), media: {version: 1, state: "unavailable", canHold: false, callControlId: null}}; } }));
@@ -58,17 +58,22 @@ describe("mobile voice HTTP contract", () => {
       expect(JSON.stringify(on)).not.toMatch(/private-sip|private-provider/);
     } finally { vi.unstubAllEnvs(); }
   });
-  it("limits token requests per operator, takeovers more tightly, before minting anything", async () => {
+  it("limits token requests per operator before minting anything", async () => {
     mocks.token.mockResolvedValue({ token: "jwt", deviceSessionId: id, expiresAt: "2026-10-12T12:00:00Z", sipUsername: "sip", credentialId: "cred" });
     mocks.actor.mockResolvedValue({ ...actor, profileId: "rate-limited-operator" });
-    for (let index = 0; index < 6; index += 1) expect((await token(request({ deviceSessionId: id, takeover: true }))).status).toBe(200);
-    const takeover = await token(request({ deviceSessionId: id, takeover: true }));
-    expect(takeover.status).toBe(429); expect(mocks.token).toHaveBeenCalledTimes(6);
-    for (let index = 0; index < 23; index += 1) expect((await token(request({ deviceSessionId: id }))).status).toBe(200);
+    for (let index = 0; index < 30; index += 1) expect((await token(request({ deviceSessionId: id, takeover: index % 2 === 0 }))).status).toBe(200);
     expect((await token(request({ deviceSessionId: id }))).status).toBe(429);
-    expect(mocks.token).toHaveBeenCalledTimes(29);
+    expect(mocks.token).toHaveBeenCalledTimes(30);
     mocks.actor.mockResolvedValue({ ...actor, profileId: "another-operator" });
     expect((await token(request({ deviceSessionId: id }))).status).toBe(200);
+  });
+  it("revokes and withholds a token minted while the operator was deactivated or removed", async () => {
+    mocks.token.mockResolvedValue({ token: "jwt", deviceSessionId: id, expiresAt: "2026-10-12T12:00:00Z", sipUsername: "sip", credentialId: "cred" });
+    mocks.access.mockRejectedValue(Object.assign(new MutationError("Prístup k telefónu bol zrušený.", 403), { code: "native_access_revoked" }));
+    const response = await token(request({ deviceSessionId: id }));
+    expect(response.status).toBe(403); expect(await response.json()).not.toHaveProperty("token");
+    expect(mocks.access).toHaveBeenCalledWith(expect.objectContaining({ deviceKind: "mobile" }), { organizationId: actor.organizationId, profileId: actor.profileId },
+      expect.objectContaining({ credentialId: "cred" }));
   });
   it("requires an outbound operation UUID before dialing", async () => {
     expect((await calls(request({ deviceSessionId: id, to: "+421900000001" }))).status).toBe(400); expect(mocks.dial).not.toHaveBeenCalled();

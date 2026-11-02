@@ -72,11 +72,24 @@ export function nativeMobilePushReachable(device: NativeMobileDevice | null | un
  * While it lies ahead, a replaced lease and a deactivation revoke the credential whatever the
  * switches say by then, so turning them off never strands a usable cached JWT. */
 export const MOBILE_TOKEN_CACHE_UNTIL = "token_cache_until";
-/** Device metadata: superseded Telnyx credentials not yet confirmed deleted; append-only until gone. */
+/** Device metadata: superseded Telnyx credentials not yet confirmed deleted; kept until gone. */
 export const PENDING_CREDENTIAL_DELETIONS = "pending_credential_deletions";
-export function pendingCredentialDeletions(metadata: unknown): string[] {
+/** One pending deletion: since when it is pending, how many attempts failed, and whether a
+ * manager was told it no longer blocks new tokens. A bare string is an older entry. */
+export type PendingCredentialDeletion = { id: string; since: string | null; failures: number; reported: boolean };
+export function pendingCredentialEntries(metadata: unknown): PendingCredentialDeletion[] {
   const list = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>)[PENDING_CREDENTIAL_DELETIONS] : null;
-  return Array.isArray(list) ? list.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((entry): PendingCredentialDeletion[] => {
+    if (typeof entry === "string") return entry ? [{ id: entry, since: null, failures: 0, reported: false }] : [];
+    const value = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : null;
+    if (!value || typeof value.id !== "string" || !value.id) return [];
+    return [{ id: value.id, since: typeof value.since === "string" ? value.since : null, failures: Number.isSafeInteger(value.failures) ? value.failures as number : 0,
+      reported: value.reported === true }];
+  });
+}
+export function pendingCredentialDeletions(metadata: unknown): string[] {
+  return pendingCredentialEntries(metadata).map(entry => entry.id);
 }
 /** Past the cached JWT's own expiry: covers clock skew between the server and Telnyx. */
 export const MOBILE_TOKEN_CACHE_MARGIN_MS = 60 * 60 * 1000;

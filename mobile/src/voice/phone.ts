@@ -426,7 +426,8 @@ export class DispatchPhone {
             this.update({ error: api?.message ?? "Telefonovanie sa nepodarilo pripraviť." });
             return;
           }
-          this.update({ registration: "error", takeoverRequired: api?.status === 409 && api.code !== "native_lease_contention" });
+          // A call in progress on another device is no takeover the server would allow.
+          this.update({ registration: "error", takeoverRequired: api?.status === 409 && !["native_lease_contention", "native_lease_on_call"].includes(api.code ?? "") });
           this.fail(error, false, refused && this.cachedInUse);
         }
       } finally {
@@ -1047,7 +1048,8 @@ export class DispatchPhone {
   private fail(error: unknown, preserveOutgoingRequest = false, refusedCachedLogin = false) {
     if (this.stopped) return;
     const message = error instanceof MobileApiError ? error.code === "native_voice_disabled"
-      ? "Telefonovanie v aplikácii ešte nie je aktivované." : error.message : "Telefonovanie sa nepodarilo pripraviť.";
+      ? "Telefonovanie v aplikácii ešte nie je aktivované." : error.code === "native_lease_on_call" ? "Linka má aktívny hovor na inom zariadení."
+        : error.message : "Telefonovanie sa nepodarilo pripraviť.";
     this.update({ error: message });
     const { status, code } = failure(error);
     const revoke = refusedCachedLogin || error instanceof MobileApiError && ([401, 403, 502].includes(error.status) || ["native_lease_stale", "native_voice_disabled"].includes(error.code ?? ""));

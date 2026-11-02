@@ -317,9 +317,10 @@ export async function deleteAccessUser(actor: MotoristActor, profileId: string):
   // The iPhone credential goes before anything irreversible, whatever the switches: the profile's
   // cascade would orphan it at Telnyx, valid for any JWT the phone holds (S8.1). A refusal stops
   // the removal so it can be retried.
-  const phones = await supabase.from("motorist_operator_mobile_devices").select("telnyx_credential_id, metadata").eq("profile_id", profile.id);
+  const phones = await supabase.from("motorist_operator_mobile_devices").select("environment, telnyx_credential_id, metadata").eq("profile_id", profile.id);
   if (phones.error) throw new MutationError("Telefónne prístupy používateľa sa nepodarilo načítať.", 500);
-  if ((phones.data ?? []).some(row => row.telnyx_credential_id || pendingCredentialDeletions(row.metadata).length)) {
+  const { telephonyEnvironment } = await import("@/server/telephony/runtime");
+  if ((phones.data ?? []).some(row => row.environment === telephonyEnvironment() && (row.telnyx_credential_id || pendingCredentialDeletions(row.metadata).length))) {
     await revokeOperatorPhone(actor.organizationId, profile.id, "Prístup iPhonu k ústredni sa nepodarilo zrušiť, používateľ zostáva. Výmaz zopakujte.");
   }
   const accessSnapshot = await loadOperatorAccessSnapshot(supabase, profile);
@@ -536,15 +537,20 @@ function isMissingRelation(error: DatabaseLookupError, relation: string): boolea
  */
 async function loadOperatorAccessSnapshot(supabase: ReturnType<typeof createSupabaseAdminClient>, profile: ProfileRow) {
   const [web, phone] = await Promise.all([
-    supabase.from("motorist_operator_devices").select("id, telnyx_credential_id").eq("profile_id", profile.id),
-    supabase.from("motorist_operator_mobile_devices").select("id, telnyx_credential_id, metadata").eq("profile_id", profile.id),
+    supabase.from("motorist_operator_devices").select("id, environment, telnyx_credential_id, metadata").eq("profile_id", profile.id),
+    supabase.from("motorist_operator_mobile_devices").select("id, environment, telnyx_credential_id, metadata").eq("profile_id", profile.id),
   ]);
   if (web.error || phone.error) {
     throw new MutationError("Telefónne prístupy používateľa sa nepodarilo načítať.", 500);
   }
-  // iPhone rows of other environments, and IDs still pending, go best-effort like the browser's.
+  // Only this deployment's own credentials are deleted at its Telnyx account: rows copied from
+  // another environment (production rows in a TEST database) never cause a deletion there.
+  // Their IDs still pending go too. The rows themselves are removed below in every environment.
+  const { telephonyEnvironment } = await import("@/server/telephony/runtime");
+  const environment = telephonyEnvironment();
   const phones = phone.data ?? [];
-  const devices = [...web.data ?? [], ...phones, ...phones.flatMap(row => pendingCredentialDeletions(row.metadata).map(id => ({ telnyx_credential_id: id })))];
+  const own = [...web.data ?? [], ...phones].filter(row => row.environment === environment);
+  const devices = [...own, ...own.flatMap(row => pendingCredentialDeletions(row.metadata).map(id => ({ telnyx_credential_id: id })))];
 
   const memberships = await supabase.from("motorist_ring_group_members").select("id").eq("profile_id", profile.id);
   if (memberships.error) {

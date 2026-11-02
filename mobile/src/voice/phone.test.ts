@@ -1329,6 +1329,15 @@ describe("call-speed S8 phone switches", () => {
     await unnamed.f.phone.initialise(); await settle();
     expect(unnamed.f.native.disconnect).not.toHaveBeenCalled(); expect(unnamed.tokens.value).not.toBeNull();
   });
+  it("says the line is in a call elsewhere, keeps the cache and offers no takeover the server would refuse", async () => {
+    const s = speedFixture({ mobileTokenCache: true }, cachedEntry());
+    vi.mocked(s.f.api.token).mockRejectedValue(new MobileApiError("Prebiehajúci hovor nemožno presunúť.", 409, "native_lease_on_call"));
+    await s.f.phone.initialise(); await s.f.phone.connect(true); await settle();
+    expect(s.f.phone.state).toMatchObject({ takeoverRequired: false, error: "Linka má aktívny hovor na inom zariadení.", registration: "error" });
+    expect(s.f.native.disconnect).not.toHaveBeenCalled();
+    // Only the takeover's own deliberate wipe ran; no refusal wiped it.
+    expect(s.debug).not.toHaveBeenCalledWith("token.cache", { outcome: "wiped", reason: "refused" });
+  });
   it("never drops an answered call because its token refresh is refused", async () => {
     const s = speedFixture({ mobileTokenCache: true }, cachedEntry()); coldPush(s);
     let refuse!: () => void;

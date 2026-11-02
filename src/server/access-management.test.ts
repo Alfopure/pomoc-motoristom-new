@@ -28,7 +28,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   createSupabaseAdminClient: () => ({ ...fake.client, auth: { admin: { deleteUser: (...args: unknown[]) => deleteUser(...(args as [string])), updateUserById } } }),
 }));
 
-vi.mock("@/server/telephony/runtime", () => ({ createTelephonyDeps: (options: unknown) => createTelephonyDeps(options) }));
+vi.mock("@/server/telephony/runtime", () => ({ createTelephonyDeps: (options: unknown) => createTelephonyDeps(options), telephonyEnvironment: () => "development" }));
 vi.mock("@/server/telephony/operator-devices", () => ({ disconnectDevice: (deps: unknown, input: unknown) => disconnectDevice(deps, input) }));
 
 vi.mock("@/server/telephony/telnyx/env", () => ({
@@ -101,7 +101,7 @@ describe("deleteAccessUser", () => {
     expect(deleteTelephonyCredential).not.toHaveBeenCalled();
   });
 
-  it("removes an unused profile, its login, every phone credential and ring-group membership", async () => {
+  it("removes an unused profile, its login, every phone credential of this environment and ring-group membership", async () => {
     fake.db.seed("motorist_operator_devices", [
       { id: "dev-1", organization_id: ORG, profile_id: TARGET, environment: "production", telnyx_credential_id: "cred-9", sip_username: "gencred009" },
       { id: "dev-2", organization_id: ORG, profile_id: TARGET, environment: "development", telnyx_credential_id: "cred-10", sip_username: "gencred010" },
@@ -123,7 +123,8 @@ describe("deleteAccessUser", () => {
     });
     expect(fake.db.rows("motorist_profiles").map((row) => row.id)).toEqual([ADMIN]);
     expect(deleteUser).toHaveBeenCalledWith("auth-target");
-    expect(deleteTelephonyCredential.mock.calls.map(([id]) => id)).toEqual(["cred-9", "cred-10"]);
+    // A row copied from production never deletes a production credential from this deployment.
+    expect(deleteTelephonyCredential.mock.calls.map(([id]) => id)).toEqual(["cred-10"]);
     expect(fake.db.rows("motorist_operator_devices")).toHaveLength(0);
     expect(fake.db.rows("motorist_operator_presence")).toHaveLength(0);
     expect(fake.db.rows("motorist_ring_group_members")).toHaveLength(0);
@@ -376,8 +377,10 @@ describe("the iPhone credential on deactivation and removal (call-speed S8.1)", 
     expect(fake.db.find("motorist_profiles", row => row.id === TARGET)).toMatchObject({ active: false });
   });
   it("revokes the iPhone credential before removing the account, whatever the switches", async () => {
-    fake.db.seed("motorist_operator_mobile_devices", [mobileDevice, { ...mobileDevice, id: "mobile-2", environment: "production", telnyx_credential_id: "other-env-cred",
-      metadata: { pending_credential_deletions: ["pending-cred"] } }]);
+    fake.db.seed("motorist_operator_mobile_devices", [{ ...mobileDevice, metadata: { pending_credential_deletions: ["pending-cred"] } },
+      { ...mobileDevice, id: "mobile-2", environment: "production", telnyx_credential_id: "other-env-cred", metadata: { pending_credential_deletions: ["other-env-pending"] } }]);
+    fake.db.seed("motorist_operator_devices", [{ id: "web-1", organization_id: ORG, profile_id: TARGET, environment: "development", telnyx_credential_id: "web-cred",
+      metadata: { pending_credential_deletions: [{ id: "web-pending", failures: 2 }] } }]);
     disconnectDevice.mockImplementation(async () => {
       // Nothing irreversible yet: the profile and its login are still there.
       expect(fake.db.find("motorist_profiles", row => row.id === TARGET)).toBeTruthy(); expect(deleteUser).not.toHaveBeenCalled();
@@ -386,8 +389,9 @@ describe("the iPhone credential on deactivation and removal (call-speed S8.1)", 
     });
     await deleteAccessUser(actor, TARGET);
     expect(disconnectDevice).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ deviceKind: "mobile" }), { organizationId: ORG, profileId: TARGET });
-    // Another environment's row and still-pending IDs go best-effort, like the browser's.
-    expect(deleteTelephonyCredential.mock.calls.map(([credential]) => credential)).toEqual(["other-env-cred", "pending-cred"]);
+    // This environment's still-pending IDs (browser and iPhone) go best-effort; another
+    // environment's credentials and pending IDs are never deleted from this deployment.
+    expect(deleteTelephonyCredential.mock.calls.map(([credential]) => credential)).toEqual(["web-cred", "web-pending", "pending-cred"]);
     expect(fake.db.rows("motorist_operator_mobile_devices")).toHaveLength(0);
   });
   it("keeps the account when Telnyx keeps the iPhone credential, so the removal can be repeated", async () => {

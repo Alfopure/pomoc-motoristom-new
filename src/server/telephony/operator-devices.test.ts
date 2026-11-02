@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { pendingCredentialEntries } from "@/lib/telephony/device-liveness";
+import { clearRateLimits } from "@/server/rate-limit";
 
 import { createTelephonyHarness, ORG, PROFILES } from "@/test/telephony-harness";
 
-import { credentialName, decodeJwtExpiry, disconnectDevice, ensureOperatorCredential, getOperatorDevice, issueWebphoneToken, OperatorDeviceError, touchDevice, type DeviceDeps } from "./operator-devices";
+import { credentialName, decodeJwtExpiry, disconnectDevice, ensureOperatorCredential, getOperatorDevice, issueWebphoneToken, OperatorDeviceError, refuseIfAccessLost, touchDevice, type DeviceDeps } from "./operator-devices";
 import { TelnyxCommandError } from "./telnyx/client";
 import { deviceLastOnlineAt } from "./device-online";
 
@@ -412,6 +414,9 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
       telnyx_credential_id: "old-credential", device_session_id: OLD_LEASE, device_seen_at: h.now().toISOString(), registration_state: "registered", ...change }]);
   }
   const deleted = (h: ReturnType<typeof createTelephonyHarness>) => h.telnyx.of("deleteTelephonyCredential").map(call => (call.params as { credentialId: string }).credentialId);
+  const row = async (h: ReturnType<typeof createTelephonyHarness>) => (await getOperatorDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }))!;
+  const pendingOf = async (h: ReturnType<typeof createTelephonyHarness>) => pendingCredentialEntries((await row(h)).metadata);
+  beforeEach(() => clearRateLimits());
 
   it("deletes the old phone's credential when another iPhone takes the lease over, and mints from the new one", async () => {
     const h = createTelephonyHarness(); seedPhone(h);
@@ -469,8 +474,7 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
   });
   it("keeps a credential Telnyx did not delete pending, mints nothing meanwhile and deletes it on the next request", async () => {
     const h = createTelephonyHarness(); seedPhone(h);
-    const pending = async () => ((await getOperatorDevice(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }))?.metadata as Record<string, unknown>)
-      .pending_credential_deletions;
+    const pending = async () => { const list = (await pendingOf(h)).map(entry => entry.id); return list.length ? list : undefined; };
     h.telnyx.failAlways("deleteTelephonyCredential", "provider down");
     await expect(issueWebphoneToken(phone(h), input({ takeover: true }))).rejects.toMatchObject({ status: 502 });
     expect(await pending()).toEqual(["old-credential"]); expect(h.telnyx.of("mintCredentialToken")).toEqual([]);
@@ -525,5 +529,88 @@ describe("mobile credential rotation on a replaced lease (call-speed S8.1)", () 
       return update(table, patch, predicate);
     };
     await expect(issueWebphoneToken(phone(raced), input({ deviceSessionId: OLD_LEASE }))).rejects.toMatchObject({ status: 409, code: "native_lease_contention" });
+  });
+  it("refuses a renewal whose lease another phone replaced while the request was under way", async () => {
+    const h = createTelephonyHarness(); seedPhone(h);
+    const B_LEASE = "00000000-0000-4000-8000-0000000000b1";
+    const select = h.db.select.bind(h.db);
+    let reads = 0;
+    h.db.select = (table, filter) => {
+      // B's takeover lands between the old phone's first read and its credential read.
+      if (table === "motorist_operator_mobile_devices" && ++reads === 2) {
+        h.db.update(table, { device_session_id: B_LEASE, telnyx_credential_id: "b-credential", sip_username: "b-sip", registration_state: "registering", device_seen_at: null,
+          metadata: { revoked_sessions: [{ id: OLD_LEASE, revoked_at: h.now().toISOString() }] } }, () => true);
+      }
+      return select(table, filter);
+    };
+    await expect(issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE }))).rejects.toMatchObject({ status: 409, code: "native_lease_stale" });
+    expect(await row(h)).toMatchObject({ device_session_id: B_LEASE, telnyx_credential_id: "b-credential" });
+    expect(h.telnyx.of("mintCredentialToken")).toEqual([]); expect(deleted(h)).toEqual([]);
+  });
+  it("remembers a replaced iPhone lease by age, not by count, and spends no slot on placeholders", async () => {
+    const h = createTelephonyHarness(); seedPhone(h, { registration_state: "unregistered", device_seen_at: null });
+    const old = new Date(h.now().getTime() - 8 * 24 * 3_600_000).toISOString();
+    h.db.update("motorist_operator_mobile_devices", { metadata: { revoked_sessions: [{ id: "00000000-0000-4000-8000-0000000000c1", revoked_at: old }] } }, () => true);
+    // Twelve phones take the lease over one after another (two slots each before this change).
+    for (let index = 0; index < 12; index += 1) { clearRateLimits(); await issueWebphoneToken(phone(h), input({ takeover: true })); }
+    const remembered = ((await row(h)).metadata as { revoked_sessions: Array<{ id: string }> }).revoked_sessions.map(entry => entry.id);
+    expect(remembered).toContain(OLD_LEASE); expect(remembered).toHaveLength(12);
+    expect(remembered.some(id => id.startsWith("revoked:") || id === "00000000-0000-4000-8000-0000000000c1")).toBe(false);
+    clearRateLimits();
+    await expect(issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE }))).rejects.toMatchObject({ status: 409, code: "native_lease_stale" });
+  });
+  it("lets a replaced lease renew as before while rotation is off", async () => {
+    const h = createTelephonyHarness(); seedPhone(h, { registration_state: "unregistered", device_seen_at: null,
+      metadata: { revoked_sessions: [{ id: "00000000-0000-4000-8000-0000000000d1", revoked_at: new Date().toISOString() }] } });
+    const token = await issueWebphoneToken(phone(h), input({ deviceSessionId: "00000000-0000-4000-8000-0000000000d1", rotateCredential: false }));
+    expect(token.deviceSessionId).not.toBe(OLD_LEASE); expect(deleted(h)).toEqual([]);
+  });
+  it("never rotates under a call in progress, and bounds rotations per operator", async () => {
+    const h = createTelephonyHarness(); seedPhone(h, { registration_state: "unregistered", device_seen_at: null });
+    h.setPresence(PROFILES.o1, { status: "on_call", current_session_id: null });
+    await expect(issueWebphoneToken(phone(h), input())).rejects.toMatchObject({ status: 409, code: "native_lease_on_call" });
+    expect(deleted(h)).toEqual([]); expect(h.telnyx.of("createTelephonyCredential")).toEqual([]);
+    const busy = createTelephonyHarness(); seedPhone(busy);
+    for (let index = 0; index < 6; index += 1) await issueWebphoneToken(phone(busy), input({ takeover: true }));
+    await expect(issueWebphoneToken(phone(busy), input({ takeover: true }))).rejects.toMatchObject({ status: 429 });
+    expect(busy.telnyx.of("createTelephonyCredential")).toHaveLength(6);
+  });
+  it("stops blocking new tokens on a deletion Telnyx keeps refusing, keeps it pending and tells a manager once", async () => {
+    const h = createTelephonyHarness(); seedPhone(h, { metadata: { pending_credential_deletions: ["stuck-credential"] } });
+    h.telnyx.failAlways("deleteTelephonyCredential", "provider down");
+    for (let attempt = 1; attempt < 5; attempt += 1) {
+      await expect(issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE }))).rejects.toMatchObject({ status: 502 });
+    }
+    expect(h.telnyx.of("mintCredentialToken")).toEqual([]);
+    const token = await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE }));
+    expect(token.credentialId).toBe("old-credential");
+    expect(await pendingOf(h)).toEqual([expect.objectContaining({ id: "stuck-credential", failures: 5, reported: true })]);
+    await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE }));
+    expect(await pendingOf(h)).toEqual([expect.objectContaining({ id: "stuck-credential", failures: 6 })]);
+    expect(h.rows("motorist_audit_log").filter(entry => entry.action === "telephony.credential_deletion_stuck")).toEqual([
+      expect.objectContaining({ entity_id: PROFILES.o1, after_payload: expect.objectContaining({ credentialId: "stuck-credential", deviceKind: "mobile", failures: 5 }) })]);
+    // Old enough, a failing deletion no longer blocks even on its first counted failure.
+    const aged = createTelephonyHarness();
+    seedPhone(aged, { metadata: { pending_credential_deletions: [{ id: "stuck-credential", since: new Date(aged.now().getTime() - 16 * 60_000).toISOString(), failures: 1 }] } });
+    aged.telnyx.failAlways("deleteTelephonyCredential", "provider down");
+    expect((await issueWebphoneToken(phone(aged), input({ deviceSessionId: OLD_LEASE }))).credentialId).toBe("old-credential");
+    // Telnyx recovers: the next pass deletes it.
+    h.telnyx.clearFailures(); await issueWebphoneToken(phone(h), input({ deviceSessionId: OLD_LEASE }));
+    expect(await pendingOf(h)).toEqual([]);
+  });
+  it("withholds a token minted for an operator deactivated or removed meanwhile, revoking what it enrolled", async () => {
+    const h = createTelephonyHarness(); seedPhone(h);
+    await refuseIfAccessLost(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }, { credentialId: "old-credential" });
+    expect(deleted(h)).toEqual([]);
+    h.db.update("motorist_profiles", { active: false, access_status: "disabled" }, row => row.id === PROFILES.o1);
+    await expect(refuseIfAccessLost(phone(h), { organizationId: ORG, profileId: PROFILES.o1 }, { credentialId: "old-credential" }))
+      .rejects.toMatchObject({ status: 403, code: "native_access_revoked" });
+    expect(deleted(h)).toEqual(["old-credential"]); expect(await row(h)).toMatchObject({ telnyx_credential_id: null });
+    // Removed: the row went with the profile, so the issued credential is deleted directly.
+    const removed = createTelephonyHarness();
+    removed.db.delete("motorist_profiles", entry => entry.id === PROFILES.o1);
+    await expect(refuseIfAccessLost(phone(removed), { organizationId: ORG, profileId: PROFILES.o1 }, { credentialId: "issued-credential" }))
+      .rejects.toMatchObject({ status: 403 });
+    expect(deleted(removed)).toEqual(["issued-credential"]);
   });
 });
