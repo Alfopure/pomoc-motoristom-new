@@ -1,6 +1,7 @@
 import "server-only";
 import { measureRequestStep, registerTelnyxOrigin } from "@/server/request-metrics";
 import { recordProviderDispatch, sessionOwnership, type Ownership } from "../ownership";
+import { SessionLeaseLostError } from "../service-errors";
 import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../provider-journal";
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
@@ -110,23 +111,30 @@ export function isSessionCallGoneError(error: unknown): error is TelnyxCommandEr
   return error instanceof TelnyxCommandError && TELNYX_CALL_GONE_CODES.has(String(error.code));
 }
 
+/** The status read behind `confirmEuLegEnded` waits at most this long: it runs inside an operator's request. */
+export const EU_LEG_CONFIRM_TIMEOUT_MS = 1_500;
+
 /**
  * Call-speed S5, EU sessions only: a hangup or recording stop that Telnyx
- * refused without a call-gone code is confirmed with `GET /calls/:id` in the
- * session's region before its obligation is given up. `is_alive: false`
- * means the leg has ended; alive, unknown (404/422) or a failed read keeps the
- * obligation. So a wrong region's answer never closes a live leg, and the
- * bookkeeping for a dead one does not stay open for good. A `us` session,
- * work outside a session, a transport failure or a rate limit is never
- * confirmed this way.
+ * refused with 404/422 but without a call-gone code is confirmed with
+ * `GET /calls/:id` in the session's region (at most
+ * `EU_LEG_CONFIRM_TIMEOUT_MS`) before its obligation is given up.
+ * `is_alive: false` means the leg has ended; alive, unknown (404/422) or a
+ * failed or slow read keeps the obligation. So a wrong region's answer never
+ * closes a live leg, and the bookkeeping for a dead one does not stay open
+ * for good. Any other refusal (among them Cloudflare's 1010 and the TEST
+ * boundary's 423, which Telnyx never saw), a transport failure, a rate limit,
+ * a `us` session and work outside a session are never confirmed this way. A
+ * lost lease is not a read failure: it is thrown.
  */
 export async function confirmEuLegEnded(telnyx: Pick<TelnyxClient, "retrieveCall"> | null, callControlId: string, error: unknown): Promise<boolean> {
   if (sessionOwnership.getStore()?.providerRegion !== "eu" || !telnyx || !callControlId || !(error instanceof TelnyxCommandError) ||
-    error.status < 400 || error.status >= 500 || error.status === 408 || error.status === 429) return false;
+    error.status !== 404 && error.status !== 422) return false;
   try {
-    const status = await telnyx.retrieveCall(callControlId);
+    const status = await telnyx.retrieveCall(callControlId, { timeoutMs: EU_LEG_CONFIRM_TIMEOUT_MS });
     return status.known && status.raw?.is_alive === false;
-  } catch {
+  } catch (failure) {
+    if (failure instanceof SessionLeaseLostError) throw failure;
     return false;
   }
 }
@@ -387,7 +395,7 @@ export type TelnyxClient = {
   createConference(params: CreateConferenceParams): Promise<ConferenceResult>;
   conferenceAction(conferenceId: string, action: ConferenceAction, body: Record<string, unknown> & { commandId?: string }): Promise<void>;
   /** Outside an owned session, `region` is the session's frozen `start_mode.apiRegion`. */
-  retrieveCall(callControlId: string, options?: { region?: TelnyxApiRegion }): Promise<TelnyxCallStatus>;
+  retrieveCall(callControlId: string, options?: { region?: TelnyxApiRegion; /** A shorter limit for this read than the operation's. */ timeoutMs?: number }): Promise<TelnyxCallStatus>;
   switchSupervisorRole(params: { callControlId: string; role: SupervisorRole; commandId: string }): Promise<void>;
   listPhoneNumbers(params?: { pageSize?: number; phoneNumber?: string }): Promise<TelnyxPhoneNumber[]>;
   createTelephonyCredential(params: CreateTelephonyCredentialParams): Promise<TelephonyCredential>;
@@ -1252,7 +1260,8 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     async retrieveCall(callControlId: string, retrieveOptions = {}) {
       if (!callControlId) throw new TelnyxCommandError({ code: "invalid_call_control_id", status: 400, detail: "retrieveCall: callControlId is required" });
       try {
-        const response = await request<unknown>("GET", `/calls/${encodeURIComponent(callControlId)}`, { region: retrieveOptions.region });
+        const response = await request<unknown>("GET", `/calls/${encodeURIComponent(callControlId)}`, { region: retrieveOptions.region },
+          retrieveOptions.timeoutMs === undefined ? Infinity : now() + retrieveOptions.timeoutMs);
         const raw = asRecord(asRecord(response).data);
         return { callControlId, known: true, alive: raw.is_alive === true, callSessionId: str(raw.call_session_id), raw };
       } catch (error) {

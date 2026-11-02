@@ -102,11 +102,10 @@ export async function reconcileTermination(deps: SessionOwnershipDeps & { telnyx
   // the provider. Contract 1 has no journal to fence it, so it stops instead.
   if (sessionOwnership.getStore()?.contract === 2) {
     const settled = await Promise.allSettled(outstanding.map(hangup));
-    for (const [index, result] of settled.entries()) {
-      if (result.status === "fulfilled") { await settle(outstanding[index], null); continue; }
-      if (result.reason instanceof SessionLeaseLostError) throw result.reason;
-      await settle(outstanding[index], result.reason);
-    }
+    const lost = settled.find(result => result.status === "rejected" && result.reason instanceof SessionLeaseLostError);
+    if (lost?.status === "rejected") throw lost.reason;
+    // Refused legs are confirmed together, not one after another (S5).
+    await Promise.all(settled.map((result, index) => settle(outstanding[index], result.status === "fulfilled" ? null : result.reason)));
   } else {
     for (const leg of outstanding) {
       try { await hangup(leg); await settle(leg, null); }
