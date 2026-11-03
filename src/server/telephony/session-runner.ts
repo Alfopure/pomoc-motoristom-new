@@ -54,6 +54,7 @@ import type { TelnyxClient } from "./telnyx/client";
 import type { TelnyxClientState } from "./telnyx/client-state";
 import type { TelnyxConfig } from "./telnyx/env";
 import { latencyFlagsOf, sessionApiRegion, type LatencyFlags } from "./latency-flags";
+import { CONCURRENT_BRIDGE_WITHOUT_EVIDENCE } from "./state/types";
 
 /**
  * Runs one event through the per-session pipeline shared by the webhook
@@ -1236,6 +1237,10 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
             // A notification scheduler cannot change the result of a SIP command.
             deps.logger?.({ level: "warn", scope: "call-push", sessionId, message: "notification scheduling unavailable" });
           }
+        }
+        if (apply.notes.includes(CONCURRENT_BRIDGE_WITHOUT_EVIDENCE)) {
+          // Call-speed S6.2 (N5): connected on Telnyx's 2xx alone; no leg ever reported `call.bridged`.
+          deps.logger?.({ level: "warn", scope: "session", sessionId, eventId: event.id, code: CONCURRENT_BRIDGE_WITHOUT_EVIDENCE });
         }
         deps.logger?.({
           scope: "session",

@@ -201,7 +201,7 @@ function PhoneBarControls(props: PhoneBarProps) {
     // A candidate that comes back later starts its own moment again.
     return () => { window.clearTimeout(timer); setLocalFirstExpired(null); };
   }, [localFirstId, onRefresh]);
-  const localTalking = localFirstTalking(localFirstId, localFirstExpired, phone.audioBlocked);
+  const localTalking = localFirstTalking(localFirstId, localFirstExpired, phone.remoteAudioPlaying);
 
   const capabilities = useMemo(
     () =>

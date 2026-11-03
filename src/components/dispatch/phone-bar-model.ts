@@ -249,12 +249,12 @@ export function localFirstCandidate(call: PhoneBarCall | null, browserCall: Webp
 /**
  * Call-speed S6.4: whether the bar shows its own "Prebieha" for the local-first
  * candidate `candidateId`. Only for `LOCAL_FIRST_TALKING_MS` (`expiredId` is
- * the candidate whose time ran out), unless its remote audio is already
- * playing (`audioBlocked === false` after a successful play): then the bar
- * does not flip back to "Spájam…" and only the server's next state changes it.
+ * the candidate whose time ran out), unless this call's remote audio is
+ * playing (`remoteAudioPlaying`, N4): then the bar does not flip back to
+ * "Spájam…" and only the server's next state changes it.
  */
-export function localFirstTalking(candidateId: string | null, expiredId: string | null, audioBlocked: boolean | undefined): boolean {
-  return Boolean(candidateId && (expiredId !== candidateId || audioBlocked === false));
+export function localFirstTalking(candidateId: string | null, expiredId: string | null, remoteAudioPlaying: boolean | undefined): boolean {
+  return Boolean(candidateId && (expiredId !== candidateId || remoteAudioPlaying === true));
 }
 
 export function phoneBarStateLabel(call: PhoneBarCall, options: { localTalking?: boolean } = {}): PhoneBarStateLabel {

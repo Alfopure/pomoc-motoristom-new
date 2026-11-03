@@ -7,7 +7,7 @@ import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { isArchivedLine } from "../line-archive";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
-import { sweepOverdueRingSteps } from "../routing/ring-plan";
+import { enforceConcurrentBridgeDeadline, sweepOverdueRingSteps } from "../routing/ring-plan";
 import { effectsDeps, observationOnlyAllowed, ownedSessionWork, runSessionEvent, SessionEventDeferredError, WEBHOOK_LEASE_WAIT_MS, type SessionRunnerDeps } from "../session-runner";
 import { assertOwnership, sessionOwnership } from "../ownership";
 import { describeServiceError, SessionLeaseBusyError, SessionLeaseLostError } from "../service-errors";
@@ -15,11 +15,11 @@ import { recordCallEvent, resumePendingEffects, type CommandOutcome } from "../s
 import { readPendingEffects } from "../state/continuation";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { DUPLICATE_BRIDGE, lineInboundMode, toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
-import { readMeta } from "../state/types";
+import { concurrentBridgeDueAt, readMeta } from "../state/types";
 import { loadParticipantManifest, observeParticipants } from "../state/participants";
 import { enqueueSavedRecording } from "../recording-jobs";
 import { recordingIntent } from "../state/recording";
-import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, WEBHOOK_CLAIM_STALE_AFTER_MS, type WebhookClaim } from "./webhook-ledger";
+import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, pendingLedgerControlIds, WEBHOOK_CLAIM_STALE_AFTER_MS, type WebhookClaim } from "./webhook-ledger";
 import { acceptsTestProviderEvent, getTestProviderSafety, hasTestCallProvenance } from "./test-safety";
 import { decodeClientState } from "./client-state";
 import { freezeStartMode, latencyFlagsOf, providerRegionOf, sessionApiRegion } from "../latency-flags";
@@ -671,6 +671,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     let failedOwnerReplayEligible = false;
     let setupRecovery: SessionRow | null = null;
     let observationAudit: (() => Promise<void>) | undefined;
+    // Call-speed S6.2 (N2): a concurrent bridge this event left waiting for its evidence.
+    let pendingBridge: SessionRow | null = null;
     // A held claim has just seen the lease free; if it is taken again, the
     // drain goes back to waiting read-only instead of polling the acquire RPC.
     const result = await ownedSessionWork({ ...deps, leaseWaitMs: held ? 0 : WEBHOOK_LEASE_WAIT_MS }, ownedSession.id, async () => {
@@ -704,7 +706,14 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", notes: ["bookkeeping"] });
       }
 
-      const run = await runSessionEvent(deps, ownedSession.id, event, { deferObservationAudit: true });
+      // Call-speed S6.2 (N3): a concurrent far leg's hangup whose own
+      // `call.answered` still waits in the ledger was answered: it left (or was
+      // cleared) before the connection, it did not decline.
+      const answeredPending = event.type === "call.hangup" && event.callControlId && ownedSession.state === "ringing" &&
+        readMeta(ownedSession).far_end?.mode === "concurrent" &&
+        (await pendingLedgerControlIds(deps.admin, deps.organizationId, "call.answered", [event.callControlId])).has(event.callControlId);
+      const run = await runSessionEvent(deps, ownedSession.id, answeredPending ? { ...event, answeredPending: true } : event, { deferObservationAudit: true });
+      if (run.session.state === "ringing" && readMeta(run.session).far_end?.bridge) pendingBridge = run.session;
       observationAudit = run.afterRelease;
       if (["call.bridged", "call.hangup", "conference.participant.joined", "conference.participant.left"].includes(event.type)) {
         try { await observeParticipants(deps.admin, run.session, event.id, event.occurredAt ?? now().toISOString(), event.type === "call.bridged", undefined, latencyFlagsOf(deps).internal_lean_path); }
@@ -775,6 +784,10 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       if (now().getTime() - started < 35_000) {
         await maybeSweep(deps, now().getTime(), ["call.hangup", "call.bridged"].includes(event.type));
       }
+      // N2: the request that left a concurrent bridge waiting enforces its
+      // retry and deadline itself, after the response (only an HTTP host that
+      // retains this work; a direct cron/recovery caller never waits here).
+      if (pendingBridge && deps.deferMaintenance) await awaitConcurrentBridge(deps, pendingBridge, started);
     };
     if (deps.deferMaintenance) {
       try { deps.deferMaintenance(maintenance); }
@@ -1085,6 +1098,42 @@ async function runHeldClaimDrain(deps: ProcessorDeps, sessionId: string, drain: 
   }
   for (const waiter of [...drain.waiters]) await release(waiter, "rounds");
 }
+
+/** The latest a concurrent bridge's timer may still act, from the webhook's start (`maxDuration` is 60 s). */
+export const CONCURRENT_BRIDGE_TIMER_BUDGET_MS = 45_000;
+
+/**
+ * Call-speed S6.2 (N2): wait for this session's concurrent bridge to fall due
+ * (its 422 retry, its deadline, an extension) and enforce it with the
+ * overdue sweep's evidence, until the call connects, ends or the budget runs
+ * out. A mobile-origin call with no console open would otherwise wait for
+ * another webhook or the five-minute cron.
+ */
+async function awaitConcurrentBridge(deps: ProcessorDeps, session: SessionRow, startedAt: number): Promise<void> {
+  const now = nowOf(deps);
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  let meta = readMeta(session);
+  for (let round = 0; round < 4; round += 1) {
+    const due = concurrentBridgeDueAt(meta);
+    if (due === null) return;
+    const wait = Math.max(0, due - now().getTime()) + CONCURRENT_BRIDGE_TIMER_MARGIN_MS;
+    if (now().getTime() + wait - startedAt > CONCURRENT_BRIDGE_TIMER_BUDGET_MS) return;
+    await sleep(wait);
+    try {
+      await enforceConcurrentBridgeDeadline({ admin: deps.admin, organizationId: deps.organizationId, now,
+        runSessionEvent: (sessionId, event, options) => runSessionEvent(deps, sessionId, event, options) }, session.id);
+    } catch (error) {
+      deps.logger?.({ level: "warn", scope: "sweep", sessionId: session.id, code: "concurrent_bridge_timer_failed", error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
+    if (fresh.error || !fresh.data || fresh.data.state !== "ringing") return;
+    meta = readMeta(fresh.data);
+  }
+}
+
+/** A little after the due time, so the provider's own `call.bridged` usually wins the race. */
+const CONCURRENT_BRIDGE_TIMER_MARGIN_MS = 250;
 
 async function maybeSweep(deps: ProcessorDeps, startedAt: number, waitingFirst = false): Promise<void> {
   if (deps.sweepAfterEvent === false) return;

@@ -14,6 +14,8 @@ import { reduceRecording } from "./recording";
 import { readPendingEffects } from "./continuation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { contactOperationIntent } from "../contact-proof";
+import { CONCURRENT_BRIDGE_DEADLINE_MS, CONCURRENT_BRIDGE_EXTENSION_MS, CONCURRENT_BRIDGE_RETRY_AFTER_MS, CONCURRENT_BRIDGE_RETRY_WAIT_MS,
+  CONCURRENT_BRIDGE_WITHOUT_EVIDENCE, concurrentBridgeDueAt } from "./types";
 import {
   appendJourneyEvidence,
   type JourneyEvidenceEntry,
@@ -1593,8 +1595,7 @@ function connectConcurrent(b: TransitionBuilder, own: LegRow, far: LegRow, opts:
   return true;
 }
 
-/** S6.2: how long an explicit concurrent bridge waits for its `call.bridged` evidence before the sweep ends both legs. */
-export const CONCURRENT_BRIDGE_DEADLINE_MS = 8_000;
+export { CONCURRENT_BRIDGE_DEADLINE_MS } from "./types";
 
 /**
  * The explicit bridge of S6.2, in today's direction: the operator's leg
@@ -1609,29 +1610,62 @@ export const CONCURRENT_BRIDGE_DEADLINE_MS = 8_000;
  */
 function bridgeConcurrentPair(b: TransitionBuilder, own: LegRow, far: LegRow, farAt: string | null): void {
   const bridgeId = b.cmdId(own.telnyx_call_control_id, "bridge:concurrent");
-  const contact = b.session.direction === "outbound" ? b.meta.outbound_auto_bridge?.commandId : undefined;
-  b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(own), target: ref(far), parkAfterUnbridge: "self", concurrentBridge: true, bestEffort: true,
-    ...(contact ? { contactCommandId: contact } : {}) });
+  b.cmd(concurrentBridgeCommand(b, own, far, bridgeId));
   const farEnd = b.meta.far_end!;
   b.patchMeta({ far_end: { ...farEnd, answeredAt: farEnd.answeredAt ?? farAt ?? b.nowIso,
     bridge: { commandId: bridgeId, sentAt: b.nowIso, deadlineAt: new Date(b.ctx.now.getTime() + CONCURRENT_BRIDGE_DEADLINE_MS).toISOString() } } });
   b.note("explicit concurrent bridge sent → waiting for its call.bridged");
 }
 
+/** The explicit concurrent bridge command (first send or the one retry), with the customer dial's contact intent. */
+function concurrentBridgeCommand(b: TransitionBuilder, own: LegRow, far: LegRow, commandId: string): Command {
+  const contact = b.session.direction === "outbound" ? b.meta.outbound_auto_bridge?.commandId : undefined;
+  return { kind: "bridge", commandId, leg: ref(own), target: ref(far), parkAfterUnbridge: "self", concurrentBridge: true, bestEffort: true,
+    ...(contact ? { contactCommandId: contact } : {}) };
+}
+
 /**
- * S6.2, the sweep after an explicit concurrent bridge's deadline. A bridge
- * Telnyx accepted (2xx), or a leg that reported itself bridged, connects the
- * call; anything else (refused, unknown, no `call.bridged`) was never a
- * conversation: both legs end as `bridge_failed`, presence is released once
- * and the history keeps no answer.
+ * S6.2, the overdue sweep for an explicit concurrent bridge (`ring-plan.ts`
+ * decides when, and yields to a `call.bridged` still waiting in the webhook
+ * ledger). Only its own event, which carries the bridge's journal outcome,
+ * acts here:
+ *  - a leg that reported itself bridged connects the call;
+ *  - a bridge Telnyx accepted (2xx) connects it without that evidence, noted
+ *    as `concurrent_bridge_connected_without_evidence` (N5);
+ *  - a non-call-gone 422 is retried once, about 2 s after it (N1);
+ *  - at the deadline, an outcome still unknown (lost response, 5xx) gets one
+ *    extension (N1);
+ *  - anything else was never a conversation: both legs end as
+ *    `bridge_failed`, presence is released once and the history keeps no answer.
  */
 function onConcurrentBridgeDeadline(b: TransitionBuilder): ReduceResult | null {
   const bridge = b.meta.far_end?.bridge;
   if (b.session.state !== "ringing" || !concurrentStart(b) || !bridge) return null;
-  const deadline = Date.parse(bridge.deadlineAt);
-  if (!Number.isFinite(deadline) || deadline > b.ctx.now.getTime()) return null;
+  const now = b.ctx.now.getTime();
+  const due = concurrentBridgeDueAt(b.meta);
+  if (due === null || due > now) return null;
+  const evidence = b.event.kind === "app" && b.event.type === "sweep" ? b.event.concurrentBridge : undefined;
+  if (!evidence) return null;
   const own = concurrentOwnLeg(b), far = concurrentFarLeg(b);
-  if (bridge.acceptedAt || own?.bridged_at || far?.bridged_at) return connectCall(b, bridge.acceptedAt ?? b.nowIso, "concurrent bridge accepted → talking");
+  if (own?.bridged_at || far?.bridged_at) return connectCall(b, b.nowIso, "concurrent pair bridged → talking");
+  if (bridge.acceptedAt || evidence.journal === "accepted") {
+    b.note(CONCURRENT_BRIDGE_WITHOUT_EVIDENCE);
+    return connectCall(b, bridge.acceptedAt ?? b.nowIso, "concurrent bridge accepted (2xx) without call.bridged → talking");
+  }
+  const farEnd = b.meta.far_end!;
+  const deadline = Date.parse(bridge.deadlineAt);
+  if (bridge.refusedAt && !bridge.retried && Date.parse(bridge.refusedAt) + CONCURRENT_BRIDGE_RETRY_AFTER_MS <= now && own && far) {
+    const retryId = b.cmdId(own.telnyx_call_control_id, "bridge:concurrent:retry");
+    b.cmd(concurrentBridgeCommand(b, own, far, retryId));
+    b.patchMeta({ far_end: { ...farEnd, bridge: { ...bridge, commandId: retryId, retried: true,
+      deadlineAt: new Date(Math.max(deadline, now + CONCURRENT_BRIDGE_RETRY_WAIT_MS)).toISOString() } } });
+    return b.note("concurrent bridge refused (422) → retried once").result();
+  }
+  if (deadline > now) return null;
+  if (!bridge.extended && evidence.journal === "unknown") {
+    b.patchMeta({ far_end: { ...farEnd, bridge: { ...bridge, extended: true, deadlineAt: new Date(now + CONCURRENT_BRIDGE_EXTENSION_MS).toISOString() } } });
+    return b.note("concurrent bridge outcome unknown at its deadline → extended once").result();
+  }
   b.setState("ended").patchSession({ ended_at: b.nowIso, answered_at: null });
   b.call.status = "ended";
   b.call.end_reason = "bridge_failed";
@@ -1645,16 +1679,17 @@ function onConcurrentBridgeDeadline(b: TransitionBuilder): ReduceResult | null {
 /**
  * Call-speed S6.2: why a concurrent start that never connected ended with its
  * far leg. A colleague whose answer was refused because they had become busy
- * is `colleague_busy`. A far end that answered — its row says so, or Telnyx
- * cleared it normally before its `call.answered` was processed — and hung up
- * itself (`hangup_source: callee`) left before the connection; one the
- * provider (outcome C) or we cleared is `bridge_failed`. Anything else is an
- * ordinary unanswered ring (null).
+ * is `colleague_busy`. A far end that answered — its row says so, or its own
+ * `call.answered` is still waiting in the webhook ledger (`answeredPending`,
+ * N3; a hangup cause alone proves nothing: a declined invite also clears
+ * normally) — and hung up itself (`hangup_source: callee`) left before the
+ * connection; one the provider (outcome C) or we cleared is `bridge_failed`.
+ * Anything else is an ordinary unanswered ring (null).
  */
 function concurrentFarEndReason(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent): string | null {
   if (!concurrentStart(b)) return null;
   if (b.meta.far_end?.busyControlId === leg.telnyx_call_control_id) return "colleague_busy";
-  const answered = Boolean(leg.answered_at) || (event.hangupCause ?? "").toLowerCase() === "normal_clearing";
+  const answered = Boolean(leg.answered_at) || event.answeredPending === true;
   if (!answered) return null;
   if (event.hangupSource === "callee") return b.session.direction === "internal" ? "colleague_left_before_connect" : "customer_left_before_connect";
   return "bridge_failed";
