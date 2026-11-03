@@ -27,7 +27,8 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); vi.restoreAllMocks(); 
 describe("latency flags", () => {
   it("defaults every switch to today's behaviour", () => {
     const flags = defaultLatencyFlags();
-    expect(Object.entries(flags).filter(([, value]) => typeof value === "boolean" && value)).toEqual([]);
+    // The one switch whose today is `true`: the concurrent far dial links to the own leg (S6 B′ turns it off).
+    expect(Object.entries(flags).filter(([, value]) => typeof value === "boolean" && value)).toEqual([["concurrent_far_link_to", true]]);
     expect(flags).toMatchObject({ concurrent_dial: { outbound: { web: false, mobile: false }, internal: { web: false, mobile: false } },
       own_leg_timeout_secs_concurrent: 12, api_region: "us", http_keepalive_ms: 0 });
     expect(Object.values(flags.client).every(value => value === false || value === "auto")).toBe(true);
@@ -169,6 +170,47 @@ describe("latency flags", () => {
     expect(providerRegionOf(production)).toBe("us");
     expect(freezeStartMode(flags, { direction: "inbound", origin: null, providerRegion: providerRegionOf(production) }).apiRegion).toBe("us");
     errors.mockRestore();
+  });
+
+  it("freezes the S6 B′ experiment (no link_to on the concurrent far dial) only on TEST and only for a concurrent start", () => {
+    const all = { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } };
+    const asked: LatencyFlags = { ...defaultLatencyFlags(), concurrent_dial: all, internal_auto_bridge: true, concurrent_far_link_to: false };
+    expect(envLatencyFlags({ TELEPHONY_LATENCY_FLAGS: JSON.stringify({ concurrent_far_link_to: false }) }).concurrent_far_link_to).toBe(false);
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    // No link, so no auto-bridge for that start either: Telnyx has nothing to bridge to.
+    expect(freezeStartMode(asked, { direction: "internal", origin: "web", providerRegion: "us" })).toMatchObject({ concurrent: true, autoBridge: false, farLinkTo: false });
+    expect(freezeStartMode(asked, { direction: "outbound", origin: "mobile", providerRegion: "us" })).toMatchObject({ concurrent: true, farLinkTo: false });
+    // The default (true) is today's start, field and all.
+    const linked = freezeStartMode({ ...asked, concurrent_far_link_to: true }, { direction: "internal", origin: "web", providerRegion: "us" });
+    expect(linked).toMatchObject({ concurrent: true, autoBridge: true });
+    expect(linked).not.toHaveProperty("farLinkTo");
+    // A sequential start links its far dial to the answered own leg, as before.
+    const sequential = freezeStartMode({ ...asked, concurrent_dial: { outbound: { web: false, mobile: false }, internal: { web: false, mobile: false } } },
+      { direction: "internal", origin: "web", providerRegion: "us" });
+    expect(sequential).toMatchObject({ concurrent: false, autoBridge: true });
+    expect(sequential).not.toHaveProperty("farLinkTo");
+    for (const environment of ["production", "development", "staging"]) {
+      vi.stubEnv("MOTORIST_APP_ENV", environment);
+      expect(freezeStartMode(asked, { direction: "internal", origin: "web", providerRegion: "us" })).not.toHaveProperty("farLinkTo");
+    }
+  });
+
+  it("passes targetLocalFirst to the console only on TEST until it is proven (S6.4)", () => {
+    const asked: LatencyFlags = { ...defaultLatencyFlags(), client: { ...defaultLatencyFlags().client, targetLocalFirst: true } };
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    expect(webCallTuning(asked).targetLocalFirst).toBe(true);
+    expect(webCallTuning(defaultLatencyFlags()).targetLocalFirst).toBe(false);
+    const environments: Array<Record<string, string>> = [
+      { MOTORIST_APP_ENV: "production" }, { MOTORIST_APP_ENV: "", VERCEL_ENV: "production" }, { MOTORIST_APP_ENV: "development" },
+      { MOTORIST_APP_ENV: "", VERCEL_ENV: "" }, { MOTORIST_APP_ENV: "staging" },
+    ];
+    for (const env of environments) {
+      vi.unstubAllEnvs();
+      for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+      expect(webCallTuning(asked).targetLocalFirst, JSON.stringify(env)).toBe(false);
+      // The other web tuning is not gated.
+      expect(webCallTuning({ ...asked, client: { ...asked.client, webPrefetchIce: true } }).webPrefetchIce).toBe(true);
+    }
   });
 
   it("freezes the unproven switches only on TEST: production, a local run, development and an unreadable environment run without them", () => {

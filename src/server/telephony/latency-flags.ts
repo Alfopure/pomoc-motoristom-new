@@ -37,6 +37,9 @@ const BOOLEAN_KEYS = [
   "internal_auto_bridge", "hold_fast_web", "hold_join_with_hold", "test_conference_self_proof",
   // S7a.4 (lean routing context for hold/unhold) and S7a.2 (one read wave for the phone's hold).
   "hold_lean_context", "hold_mobile_dedupe",
+  // S6 B′ (TEST experiment, default true = today): false sends the concurrent far dial without
+  // `link_to`/`bridge_on_answer`; the server bridges it explicitly.
+  "concurrent_far_link_to",
   // S8.1: a new iPhone lease that replaces another phone's lease, and an operator's deactivation,
   // delete the mobile Telnyx credential, so a JWT cached on the old phone can no longer register.
   "mobile_rotate_on_takeover", "mobile_rotate_on_deactivation",
@@ -70,6 +73,8 @@ const MAX_KEEPALIVE_MS = 600_000;
 export function defaultLatencyFlags(): LatencyFlags {
   return {
     ...Object.fromEntries(BOOLEAN_KEYS.map(key => [key, false])) as Record<typeof BOOLEAN_KEYS[number], boolean>,
+    // Today's concurrent far dial links to the own leg; only `false` changes anything.
+    concurrent_far_link_to: true,
     concurrent_dial: { outbound: { web: false, mobile: false }, internal: { web: false, mobile: false } },
     own_leg_timeout_secs_concurrent: 12,
     api_region: "us",
@@ -333,10 +338,16 @@ export function freezeStartMode(flags: LatencyFlags, input: { direction: "inboun
     input.concurrentEligible !== false && concurrentDialFor(flags, input.direction, input.origin) && concurrentStartAllowed();
   const autoBridge = HONOURED_START_SWITCHES.autoBridge && input.direction === "internal" && input.autoBridgeEligible !== false &&
     flags.internal_auto_bridge && concurrentStartAllowed();
+  // S6 B′ (TEST experiment): a concurrent far dial without `link_to` (and so
+  // without `bridge_on_answer`, which needs it); the server bridges explicitly.
+  // Only TEST may freeze it, like the other unproven switches; present only
+  // when on, so every other start records exactly what it did before. It also
+  // means no auto-bridge for that start: Telnyx has nothing to bridge to.
+  const unlinkedFarDial = concurrent && !flags.concurrent_far_link_to && concurrentStartAllowed();
   // S7b: the first hold joins the customer already held. Present only when on,
   // so a session started with the switch off records exactly what it did before.
   const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold && joinWithHoldAllowed();
-  return { concurrent, autoBridge,
+  return { concurrent, autoBridge: autoBridge && !unlinkedFarDial,
     ownLegTimeoutSecs: concurrent ? flags.own_leg_timeout_secs_concurrent : SEQUENTIAL_OWN_LEG_TIMEOUT_SECS,
     // S5: a session we create is created and controlled in `eu` when the flag
     // asks for it and this deployment may (`euApiRegionAllowed`). Otherwise,
@@ -346,12 +357,26 @@ export function freezeStartMode(flags: LatencyFlags, input: { direction: "inboun
     // calls, so the frozen and logged region always match the host.
     apiRegion: HONOURED_START_SWITCHES.apiRegion && input.direction !== "inbound" && flags.api_region === "eu" && euApiRegionAllowed()
       ? "eu" : input.providerRegion, origin: input.origin,
-    ...(holdJoinWithHold ? { holdJoinWithHold: true as const } : {}) };
+    ...(holdJoinWithHold ? { holdJoinWithHold: true as const } : {}),
+    ...(unlinkedFarDial ? { farLinkTo: false as const } : {}) };
+}
+
+/**
+ * `targetLocalFirst` (S6.4) is unproven, like the switches above: the browser
+ * has no far-party audio signal yet. Until a reviewed change records a proof,
+ * only a deployment whose application environment is exactly `test` passes it
+ * to the console; everywhere else it is off whatever the flag says.
+ */
+const TARGET_LOCAL_FIRST_PROVEN = false;
+function targetLocalFirstAllowed(): boolean {
+  if (TARGET_LOCAL_FIRST_PROVEN) return true;
+  try { return resolveAppEnvironment() === "test"; }
+  catch { return false; }
 }
 
 export function webCallTuning(flags: LatencyFlags): WebCallTuning {
   const { webEarlyAccept, webRtcRegion, webPrefetchIce, targetLocalFirst } = flags.client;
-  return { webEarlyAccept, webRtcRegion, webPrefetchIce, targetLocalFirst };
+  return { webEarlyAccept, webRtcRegion, webPrefetchIce, targetLocalFirst: targetLocalFirst && targetLocalFirstAllowed() };
 }
 
 export function mobileVoiceTuning(flags: LatencyFlags): MobileVoiceTuning {

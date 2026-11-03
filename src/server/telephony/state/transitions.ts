@@ -1576,7 +1576,7 @@ function farAnsweredFirst(farAt: string | null, ownAt: string | null): boolean {
 
 /** Whether Telnyx itself bridges this far leg to an answered own leg (`bridge_on_answer`). */
 function providerBridgesAtAnswer(b: TransitionBuilder, far: LegRow): boolean {
-  return b.session.direction === "internal" ? autoBridgedColleagueLeg(b, far) : Boolean(b.meta.outbound_auto_bridge);
+  return b.session.direction === "internal" ? autoBridgedColleagueLeg(b, far) : Boolean(b.meta.outbound_auto_bridge) && !b.meta.outbound_auto_bridge?.serverBridged;
 }
 
 /**
@@ -1844,6 +1844,24 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
  */
 type OwnLegRef = LegRow | { fromDial: string };
 
+/**
+ * S6 B′ (TEST experiment, frozen `start_mode.farLinkTo: false`): a concurrent
+ * start's far dial is not linked to the own leg at the provider — no
+ * `link_to`, so no shared provider call session and no `bridge_on_answer` —
+ * and the server bridges the pair explicitly. Our own state still ties the
+ * legs to the session: every dial carries the session's client state, its leg
+ * row is written from its own dial result, and `ownDialCommandId` keeps the
+ * relation the callback contact proof needs. Sequential far dials (the own leg
+ * already exists) always link.
+ */
+function farEndLinked(b: TransitionBuilder, own: OwnLegRef): boolean {
+  return !("fromDial" in own && b.meta.start_mode?.farLinkTo === false);
+}
+
+function farEndOwnDial(own: OwnLegRef, linked: boolean): { ownDialCommandId?: string } {
+  return !linked && "fromDial" in own ? { ownDialCommandId: own.fromDial } : {};
+}
+
 function ownLegLink(own: OwnLegRef): string | { fromDial: string } {
   return "telnyx_call_control_id" in own ? own.telnyx_call_control_id : { fromDial: own.fromDial };
 }
@@ -1864,7 +1882,8 @@ function fanoutInternalColleague(b: TransitionBuilder, caller: OwnLegRef, caller
   const internal = b.meta.internal!;
   const endpoints = internal.endpoints!;
   const step = 0;
-  const autoBridge = internalAutoBridge(b);
+  const linked = farEndLinked(b, caller);
+  const autoBridge = linked && internalAutoBridge(b);
   const attempts: RingFanout["attempts"] = endpoints.map((endpoint, position) => ({
     stepIndex: step, ringGroupId: null, memberKind: "operator", profileId: internal.target_profile_id,
     externalNumber: null, position, ringSecs: INTERNAL_TIMEOUT_SECS, application: true, applicationDevice: endpoint.device,
@@ -1874,7 +1893,7 @@ function fanoutInternalColleague(b: TransitionBuilder, caller: OwnLegRef, caller
     to: endpoint.sipUri, from: b.ctx.fromNumber ?? b.session.caller_number ?? "", role: "operator",
     profileId: internal.target_profile_id, externalNumber: null,
     clientState: { sid: b.session.id, role: "operator", operatorId: internal.target_profile_id, intent: "internal", step, ...(endpoint.device === "mobile" ? { applicationDevice: "mobile" as const } : {}) },
-    linkTo: ownLegLink(caller), timeoutSecs: INTERNAL_TIMEOUT_SECS, colleagueCall: true,
+    linkTo: linked ? ownLegLink(caller) : null, ...farEndOwnDial(caller, linked), timeoutSecs: INTERNAL_TIMEOUT_SECS, colleagueCall: true,
     ...(internal.caller_display ? { fromDisplayName: internal.caller_display } : {}),
     ...(autoBridge ? AUTO_BRIDGE_DIAL : {}),
     attempt: { stepIndex: step, profileId: internal.target_profile_id, externalNumber: null, applicationDevice: endpoint.device },
@@ -1915,6 +1934,7 @@ function canDirectConnectOutbound(b: TransitionBuilder): boolean {
  */
 function dialFarEnd(b: TransitionBuilder, own: OwnLegRef, intent: string): DialCommand | null {
   const meta = b.meta;
+  const linked = farEndLinked(b, own);
   if (intent === "outbound") {
     const outbound = meta.outbound;
     if (!outbound) return null;
@@ -1927,21 +1947,25 @@ function dialFarEnd(b: TransitionBuilder, own: OwnLegRef, intent: string): DialC
       profileId: null,
       externalNumber: outbound.to,
       clientState: customerState(b.session.id, "outbound"),
-      linkTo: ownLegLink(own),
+      linkTo: linked ? ownLegLink(own) : null,
+      ...farEndOwnDial(own, linked),
       timeoutSecs: OUTBOUND_TIMEOUT_SECS,
     };
     if (canDirectConnectOutbound(b)) {
-      dial.bridgeOnAnswer = true;
-      dial.preventDoubleBridge = true;
-      dial.parkAfterUnbridge = "self";
+      if (linked) {
+        dial.bridgeOnAnswer = true;
+        dial.preventDoubleBridge = true;
+        dial.parkAfterUnbridge = "self";
+      }
       dial.clientState.intent = contactOperationIntent(dial.commandId);
-      b.patchMeta({ outbound_auto_bridge: { commandId: dial.commandId, operatorControlId: "telnyx_call_control_id" in own ? own.telnyx_call_control_id : null, startedAt: b.nowIso } });
+      b.patchMeta({ outbound_auto_bridge: { commandId: dial.commandId, operatorControlId: "telnyx_call_control_id" in own ? own.telnyx_call_control_id : null, startedAt: b.nowIso,
+        ...(linked ? {} : { serverBridged: true as const }) } });
     }
     return dial;
   }
   const internal = meta.internal;
   if (!internal) return null;
-  const autoBridge = internalAutoBridge(b);
+  const autoBridge = linked && internalAutoBridge(b);
   const dial: DialCommand = {
     kind: "dial",
     commandId: b.cmdId(internal.target_profile_id, "dial:internal"),
@@ -1951,7 +1975,8 @@ function dialFarEnd(b: TransitionBuilder, own: OwnLegRef, intent: string): DialC
     profileId: internal.target_profile_id,
     externalNumber: null,
     clientState: { sid: b.session.id, role: "operator", operatorId: internal.target_profile_id, intent: "internal" },
-    linkTo: ownLegLink(own),
+    linkTo: linked ? ownLegLink(own) : null,
+    ...farEndOwnDial(own, linked),
     timeoutSecs: INTERNAL_TIMEOUT_SECS,
     colleagueCall: true,
     // The colleague's phone shows who is calling instead of the company line.

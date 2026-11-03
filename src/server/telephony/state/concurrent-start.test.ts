@@ -3,7 +3,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
 import { CONNECTION_ID, createTelephonyHarness, LINES, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { callColleague, createRateLimiter, hangupCall, startOutboundCall, type CallActionDeps, type CallActor } from "../call-actions";
-import { readContactHistory } from "../contact-proof";
+import { contactOperationIntent, readContactHistory } from "../contact-proof";
 import { loadActiveCalls } from "../active-calls";
 import { buildPhoneBarModel, type ActiveCallsPayload } from "@/lib/telephony/active-calls-model";
 import { defaultLatencyFlags, type LatencyFlags } from "../latency-flags";
@@ -1385,6 +1385,14 @@ describe("S6.2 permutations with hangups: a call ends well wherever it is cut, a
     const call = await colleague(t, 9401);
     await run(t, call, order, cut, at, [PROFILES.o1, PROFILES.o2]);
   });
+
+  // S6 B′: the unlinked far dial, bridged by the server, ends as well wherever it is cut.
+  it.each(cases)("outbound without link_to (B′), delivered %s, cut by %s at step %i", async (order, cut, at) => {
+    const t = world({ concurrent_far_link_to: false });
+    const call = await outbound(t, 9402);
+    await t.h.legEvent(call.far, "call.initiated");
+    await run(t, call, order, cut, at, [actor.profileId]);
+  });
 });
 
 /**
@@ -1461,6 +1469,127 @@ describe("S6 pause boundaries of a concurrent colleague dial", () => {
  * `start_mode`. The far-end dial of a concurrent start, the explicit bridge
  * and the hangups belong to the same session, so they go to the same region.
  */
+/**
+ * S6 B′ (TEST experiment, `concurrent_far_link_to: false`, frozen as
+ * `start_mode.farLinkTo: false`): the concurrent far dial goes without
+ * `link_to` and so without `bridge_on_answer`; the server bridges every pair
+ * explicitly. Round 2 on TEST heard one-way audio at first with the far dial
+ * linked to an unanswered own leg; this isolates that.
+ */
+describe("S6 B′: the concurrent far dial without link_to", () => {
+  const UNLINKED = { concurrent_far_link_to: false, internal_auto_bridge: true } as const;
+  const farDial = (t: World) => t.h.telnyx.of("dial")[1].params;
+
+  it("dials the customer unlinked, frozen so, and bridges explicitly whichever answers first; its 2xx connects", async () => {
+    for (const farFirst of [false, true]) {
+      const t = world(UNLINKED);
+      const call = await outbound(t, farFirst ? 9501 : 9500);
+      expect(meta(t, call.sessionId).start_mode).toMatchObject({ concurrent: true, autoBridge: false, farLinkTo: false });
+      const params = farDial(t);
+      expect(params).not.toHaveProperty("linkTo");
+      for (const key of ["bridgeOnAnswer", "preventDoubleBridge"]) expect(params[key]).toBeUndefined();
+      expect((params.extra as Record<string, unknown> | undefined)?.park_after_unbridge).toBeUndefined();
+      // The callback contact intent stays; only the provider link is gone.
+      expect(decodeClientState(params.clientState)?.intent).toBe(contactOperationIntent(String(params.commandId)));
+      expect(meta(t, call.sessionId).outbound_auto_bridge).toMatchObject({ commandId: params.commandId, serverBridged: true });
+      await answer(t, farFirst ? call.far : call.own);
+      await answer(t, farFirst ? call.own : call.far);
+      // No wait for a provider bridge that cannot come: ours goes at the second answer.
+      expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far, parkAfterUnbridge: "self" })]);
+      expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
+      await bridged(t, call);
+      // The bridge carried the customer dial's intent: the callback contact proof is that dial's.
+      expect(readContactHistory(t.h.session(call.sessionId) as SessionRow).proofs).toMatchObject([{ operationId: params.commandId, customerControlId: call.far, operatorControlId: call.own }]);
+    }
+  });
+
+  it("dials the colleague unlinked even with the auto-bridge switch on, and bridges explicitly", async () => {
+    const t = world(UNLINKED);
+    const call = await colleague(t, 9502);
+    expect(meta(t, call.sessionId).start_mode).toMatchObject({ concurrent: true, autoBridge: false, farLinkTo: false });
+    expect(meta(t, call.sessionId).internal_auto_bridge).toBeUndefined();
+    expect(farDial(t)).not.toHaveProperty("linkTo");
+    expect(farDial(t).bridgeOnAnswer).toBeUndefined();
+    await answer(t, call.far);
+    await answer(t, call.own);
+    expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far })]);
+    expect(t.h.session(call.sessionId).state).toBe("talking");
+  });
+
+  it("dials both colleague endpoints unlinked and bridges the server's winner", async () => {
+    const t = world(UNLINKED, { native: true });
+    const call = await colleague(t, 9503);
+    const fanout = t.h.telnyx.of("dial").slice(1);
+    expect(fanout).toHaveLength(2);
+    expect(fanout.every(dial => dial.params.linkTo === undefined && dial.params.bridgeOnAnswer === undefined)).toBe(true);
+    const [winner, loser] = call.callees;
+    await answer(t, call.own);
+    await answer(t, winner);
+    expect(hungUp(t, loser)).toBe(true);
+    expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: winner })]);
+    expect(t.h.session(call.sessionId).state).toBe("talking");
+  });
+
+  it.each(["outbound", "colleague"] as const)("ends the unlinked far leg itself when the %s caller's own leg times out (no provider link to tear it down)", async (kind) => {
+    const t = world(UNLINKED);
+    const call = kind === "outbound" ? await outbound(t, 9504) : await colleague(t, 9505);
+    if (kind === "outbound") await answer(t, call.far);
+    t.h.advance(12_000);
+    await t.h.legEvent(call.own, "call.hangup", { hangup_cause: "timeout", sip_hangup_cause: "487" });
+    expect(hungUp(t, call.far)).toBe(true);
+    expect(t.h.call(call.sessionId)).toMatchObject({ status: "ended", end_reason: "operator_leg_unavailable", answered_at: null });
+    await t.h.legEvent(call.far, "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(t.h.session(call.sessionId).state).toBe("ended");
+    expect(released(t, call.sessionId, actor.profileId)).toBe(1);
+  });
+
+  it("correlates the unlinked far leg through our own state: its events, and its credential-side browser mirror", async () => {
+    const t = world(UNLINKED);
+    const call = await colleague(t, 9506);
+    const session = t.h.session(call.sessionId);
+    const far = t.h.db.find("motorist_call_legs", row => row.telnyx_call_control_id === call.far)!;
+    // No shared provider session: the colleague's call has its own.
+    const farSession = `tsess-${call.far}`;
+    expect(session.telnyx_session_id).not.toBe(farSession);
+    // Its own events correlate by its client state and leg row.
+    expect(await answer(t, call.far)).toMatchObject({ status: 200, sessionId: call.sessionId });
+    // The browser's credential-side counterpart of that dial carries the far call's session and no client state.
+    if (!t.h.deps.config.configured) throw new Error("configured fixture required");
+    t.h.db.insert("motorist_provider_commands", {
+      session_id: call.sessionId, command_id: "unlinked-far-proof", method: "POST", path: "/calls", outcome: "accepted", http_status: 200,
+      first_dispatched_at: t.h.now().toISOString(),
+      request_payload: { connection_id: t.h.deps.config.callControlAppId, to: far.to_number, from: far.from_number,
+        client_state: encodeClientState({ sid: call.sessionId, role: "operator", operatorId: PROFILES.o2 }) },
+      result: { data: { call_control_id: call.far, call_leg_id: far.telnyx_call_leg_id, call_session_id: farSession } },
+    });
+    const mirror = (type: string, extra: Record<string, unknown> = {}) => t.h.envelope(type, {
+      connection_id: t.h.deps.config.configured ? t.h.deps.config.credentialConnectionId : "", call_session_id: farSession,
+      call_control_id: "colleague-browser-counterpart", call_leg_id: "colleague-browser-counterpart-leg", to: "gencred002", from: far.from_number,
+      client_state: null, ...(type === "call.initiated" ? { direction: "incoming", state: "bridging" } : {}), ...extra,
+    }, `unlinked-mirror-${type}`);
+    for (const type of ["call.initiated", "call.answered", "call.hangup"]) {
+      expect(await t.h.process(mirror(type))).toMatchObject({ status: 200, outcome: "ignored", sessionId: call.sessionId, notes: ["verified credential browser mirror"] });
+    }
+    // A foreign provider session is still no mirror.
+    expect((await t.h.process(mirror("call.answered", { call_session_id: "another-call" }))).notes).not.toContain("verified credential browser mirror");
+    expect(t.h.rows("motorist_job_incidents").filter(row => row.status === "open")).toEqual([]);
+  });
+
+  it("changes nothing when the switch is off outside TEST, or for a sequential start", async () => {
+    const off = world(UNLINKED);
+    vi.stubEnv("MOTORIST_APP_ENV", "development");
+    const call = await outbound(off, 9507);
+    expect(meta(off, call.sessionId).start_mode).not.toHaveProperty("farLinkTo");
+    expect(meta(off, call.sessionId).start_mode).toMatchObject({ concurrent: false });
+    const s = world({ ...UNLINKED, concurrent_dial: NONE });
+    const sequential = await colleague(s, 9508);
+    expect(meta(s, sequential.sessionId).start_mode).not.toHaveProperty("farLinkTo");
+    await answer(s, sequential.own);
+    // The sequential far dial links to the answered own leg, auto-bridged as before.
+    expect(s.h.telnyx.of("dial")[1].params).toMatchObject({ linkTo: sequential.own, bridgeOnAnswer: true });
+  });
+});
+
 describe("S6 with S5: both legs in the session's frozen API region", () => {
   const callRoutes = (t: World) => t.h.telnyx.routes.filter(route => route.path.startsWith("/calls"));
   const notEu = (t: World) => callRoutes(t).filter(route => route.region !== "eu" || route.baseUrl !== "https://api.telnyx.eu/v2");
