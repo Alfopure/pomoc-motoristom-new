@@ -1,5 +1,6 @@
 import "server-only";
 import { measureRequestStep, registerTelnyxOrigin } from "@/server/request-metrics";
+import { isReusedSocketReset } from "@/server/http/keepalive";
 import { recordProviderDispatch, sessionOwnership, type Ownership } from "../ownership";
 import { SessionLeaseLostError } from "../service-errors";
 import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../provider-journal";
@@ -159,6 +160,8 @@ export type TelnyxHttpAttempt = {
   headersMs: number | null;
   ms: number;
   status: number | null;
+  /** Call-speed S4: the request failed on a kept-alive socket the far end had reset. Never retried. */
+  reusedSocketReset?: true;
 };
 
 export type TelnyxRequestLog = {
@@ -662,6 +665,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       const parsed = await readBody(response);
       return { response, parsed };
     } catch (error) {
+      if (isReusedSocketReset(error)) timing.reusedSocketReset = true;
       if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
         throw new TelnyxCommandError({ code: "timeout", status: 504, detail: `No response within ${timeoutMs} ms`, retryable: true, commandId });
       }

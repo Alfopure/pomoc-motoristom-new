@@ -163,6 +163,24 @@ To run it on TEST, add `"concurrent_far_link_to": false` to the TEST `latency_fl
 
 **Result.** _Not yet run._
 
+### S4 — Keep-alive sockets to the Telnyx API (call-speed S4)
+
+**Why.** Node's fetch drops an idle socket after 4 s (Telnyx's Cloudflare edge sends no `Keep-Alive` hint), while one call's webhooks arrive 0.3–10 s apart. S4.0 on TEST: 65 of 79 requests with Telnyx calls (82 %) opened new Telnyx connections (`telnyxConnects` in `request-performance`); a start opened 2–3, a webhook 1–2, a hangup 2. On 2026-11-03 both `api.telnyx.com` and `api.telnyx.eu` kept an idle socket for 16, 31 and 61 s (unauthenticated GET, from the sandbox).
+
+**What it changes.** `http_keepalive_ms` > 0 in `latency_flags` gives the Telnyx client built by `createTelephonyDeps` (call control, webhooks, cron) one shared undici `Agent` (`src/server/http/keepalive.ts`): idle sockets kept that long, `keepAliveMaxTimeout` 60 s, 32 connections per host, a 3 s connect timeout. It applies to new requests within the flags' 5 s cache and is not frozen per call. `0` (the default) keeps the global fetch and never loads undici. The database (`telephonyDatabaseFetch`), the SMS client, access management and the AI demo keep the global fetch.
+
+**Stale sockets.** A request that fails on a kept-alive socket the far end has reset is never resent, by undici or by us. A POST therefore keeps today's outcome: the journal entry stays `unknown`, and `observe_dial_v2` and the reconcile job settle it. The `telnyx-http` line marks such an attempt with `reusedSocketReset: true`. A GET fails as before with a retryable `network` error.
+
+**How.** On stable TEST only: set `"http_keepalive_ms": 15000`, then make ordinary calls (start, hold, hangup, an inbound call). Compare `telnyxConnects` per request and Telnyx `headersMs` of the first attempt with the S4.0 baseline, and count `reusedSocketReset` lines and `unknown` journal outcomes.
+
+**Pass criteria (S4.2).** Fewer `telnyxConnects`, no more `unknown` journal outcomes than the baseline, T1/T3 no worse.
+
+**Stop criterion.** Any rise in `unknown` journal outcomes against the baseline: set the switch back to `0`.
+
+**Rollback.** `"http_keepalive_ms": 0`. New requests use the global fetch within 5 s; requests in flight finish on the Agent.
+
+**Result.** _Not yet run._
+
 ### S2 — Slovak TTS availability (secondary)
 
 Pre-recorded Slovak prompts in `public/telephony/` are primary and are served from `TELNYX_MEDIA_BASE_URL`. TTS (`Azure.sk-SK-ViktoriaNeural`) is used only when that variable is unset. If TTS quality or availability is unacceptable, the answer is to fix the media base URL, not to change the code path.

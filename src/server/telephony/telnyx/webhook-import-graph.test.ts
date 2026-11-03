@@ -100,7 +100,11 @@ const FORBIDDEN: Array<{ pattern: RegExp; why: string }> = [
 // Reviewed increase 60 → 61: command-settlement.ts (call-speed S7a.5) is one
 // AsyncLocalStorage and two functions, imported by effects for the web hold's
 // early answer; a webhook never installs an observer. No import-time I/O.
-const MAX_MODULES = 61;
+// Reviewed increase 61 → 62: src/server/http/keepalive.ts (call-speed S4) is
+// the Telnyx client's keep-alive fetch. It imports only diagnostics_channel and
+// a type from undici; undici itself is loaded with `await import()` and only
+// while `http_keepalive_ms` > 0. No import-time I/O or channel subscription.
+const MAX_MODULES = 62;
 
 describe("telnyx webhook cold path", () => {
   const graph = importGraph(ENTRY);
