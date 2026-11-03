@@ -11,7 +11,14 @@ Tento plán nahrádza [návrh z 28. 10.](production-release-2026-10-28.md). Súh
 - **Partneri:** prípady a poistné udalosti pre partnerov, partnerský portál, konzultácie, vyúčtovanie s auditom.
 - **Výjazdy, odvozy a odťahy:** spoločný prehľad, návraty vozidiel, poškodenia s fotkami, odťahové zákazky s PDF.
 - **Mobilná aplikácia:** serverová časť pre iPhone a Android, teda prípady, úlohy, pristavovač s polohou a push upozornenia.
-- **Hovory:** stabilnejšie ukončenie a obnova hovorov. Navyše zrýchlenie: na TESTe klesol čas od ťuknutia po zvonenie kolegovi z 5,6 s na 3,3 s. Server posiela príkazy Telnyxu do Európy, každý príkaz je o 150 až 200 ms rýchlejší.
+- **Hovory:** stabilnejšie ukončenie a obnova hovorov a zrýchlenie. Treba ho čítať podľa druhu hovoru, lebo v produkcii je za 30 dní 275 z 278 hovorov prichádzajúcich:
+  - **Prichádzajúce hovory zákazníkov** zrýchlia tieto zmeny:
+    - webový telefón sa pripája na európsky server Telnyxu vo Frankfurte (S5a);
+    - rýchlejšie podržanie a vrátenie hovoru (S7);
+    - server si drží otvorené spojenie s Telnyxom (S4). Na TESTe od tretieho hovoru nevzniklo ani jedno nové spojenie a udalosť prepojenia trvala 311 až 345 ms namiesto 385 až 460 ms;
+    - štíhlejšie spracovanie udalostí hovoru (S1).
+  - **Posielanie príkazov do Európy (S5)** zrýchli každý príkaz o 150 až 200 ms. Týka sa však iba odchádzajúcich, spätných a interných hovorov, a tých bolo v produkcii za 30 dní 3.
+  - Číslo z TESTu 5,6 s → 3,3 s je čas po zvonenie kolegovi pri internom hovore. Nie je to čas prichádzajúceho hovoru zákazníka.
 
 **Čo musíš rozhodnúť alebo urobiť ty.**
 1. Otestovať TEST s touto verziou a napísať „test OK, vydaj“ pre presne určený `dev` commit.
@@ -22,20 +29,20 @@ Tento plán nahrádza [návrh z 28. 10.](production-release-2026-10-28.md). Súh
    - presunúť `TELNYX_MEDIA_BASE_URL` na vlastnú doménu.
 5. Schváliť nastavenie produkčných prepínačov rýchlosti hovorov (časť 3). Zapínajú sa po etapách, každá sa dá do 5 s vypnúť.
 6. Schváliť bezpečnostnú zmenu v Telnyxe (časť 5). Webové a iPhone telefóny dostanú vlastný vypnutý odchádzajúci profil, aby sa z nich nedalo volať von mimo aplikácie.
-7. Byť k dispozícii v tichom okne (návrh: večer po 20:30) na skúšobné hovory.
+7. Byť k dispozícii v tichom okne na skúšobné hovory. Návrh: ráno 5:30 až 7:00. Od polnoci do 7:00 nebol za 30 dní ani jeden hovor, večer od 20:00 do 24:00 ich bolo 17.
 
 **Čo zostáva mimo tohto vydania.** Hovory na iPhone v produkcii potrebujú produkčnú iOS aplikáciu. Je to samostatná cesta cez App Store: produkčné App ID, VoIP certifikát, produkčný Telnyx iOS push a TestFlight s reálnym hovorom. Testovacia appka s produkciou nevolá. Nahrávanie hovorov zostáva vypnuté. Súbežné vytáčanie (S6), európska SIP doména a ďalšie neoverené zrýchlenia zostávajú vypnuté.
 
 **Riziká jednoducho.**
 - Migrácie sú prevažne pridávajúce. Jediná mení živé dáta: zmení 8 odovzdaní na výjazdy.
-- Krátke zámky tabuliek sú pri hovoroch. Preto tiché okno: v produkcii za posledných 30 dní nebol medzi 23:00 a 7:00 ani jeden hovor.
-- Kód sa vracia revert PR. Databáza sa nevracia, migrácie zostávajú. Pred vrátením kódu treba prepnúť hovory späť na `us` a počkať, kým skončia európske hovory.
+- Niektoré migrácie na chvíľu zamknú tabuľky, ktoré používajú hovory. Preto idú v tichom okne a len vtedy, keď neprebieha žiadny hovor. Za posledných 30 dní nebol medzi 0:00 a 7:00 ani jeden hovor. Večer bolo od 20:00 do 21:00 3 hovory, od 21:00 do 22:00 6, od 22:00 do 23:00 6 a od 23:00 do 24:00 2; posledný 17. 10. o 23:28.
+- Najrýchlejšie vrátenie je vypnúť prepínače (do 5 sekúnd). Pri chybe v kóde je lepšia rýchla oprava dopredu ako revert celého vydania. Revert má pasce: musí prejsť aj do `dev`, potrebuje celý build, a pred ním nesmie prebiehať žiadny hovor. Databáza sa nevracia, migrácie zostávajú.
 
 ---
 
 ## 1. Scope (`git log --oneline origin/main..origin/dev --merges`)
 
-154 merge commits, PRs #420–#557 plus this PR. #437 and #439 are `main` → `dev` syncs. #421 and #422 already reached production in another form through #438. Grouped by area:
+154 merge commits (155 with this PR), PRs #420–#557 plus this PR. #437 and #439 are `main` → `dev` syncs. #421 and #422 already reached production in another form through #438. Grouped by area:
 
 | Area | What changes, in plain words | PRs |
 |---|---|---|
@@ -60,7 +67,7 @@ Source: `supabase_migrations.schema_migrations` and catalog/count selects on pro
 
 | Migration | Production state | If re-run |
 |---|---|---|
-| `20260926100000_assistance_line_labels` | 7 lines exist; labels/partner names edited since | **Breaks data.** It overwrites the labels of the lines ending 718/732/770/771 and **reactivates the inactive lines 770 and 774**. |
+| `20260926100000_assistance_line_labels` | Production has 8 lines; the migration touches 7 of them, which exist with its ids; labels and partner names were edited since | **Breaks data.** It overwrites the labels of the lines ending 718, 732, 770 and 771 and the `partner_name` of 718, 732 and 771, and it **reactivates the inactive lines 770 and 774**. |
 | `20261002100000_queue_escalation_setting` | column, default 120 and check present | harmless |
 | `20261003100000_provider_journal_batch` | functions and grants identical | harmless |
 | `20261004100000_apply_critical_rows` | identical | harmless |
@@ -78,14 +85,14 @@ Source: `supabase_migrations.schema_migrations` and catalog/count selects on pro
   These two migrations also close a real production exposure: today any organisation member can read call sessions. `true` only *allows* S3; a flag still has to switch it on.
 - **`20261031090000_telephony_latency_flags` seeds nothing.** It adds the column with default `{}` on 1 row, so behaviour is unchanged.
 - **Compatibility with the running `main`.** Migrations go first, so `main` runs on the new schema for a short time. Everything is additive or keeps `main`'s paths:
-  - `main` reads `motorist_call_sessions` only through the service role (after #32);
-  - its browser ignores the Realtime payload (after #31);
-  - the patched `motorist_case_handoff` keeps its signature (#14).
+  - `main` reads `motorist_call_sessions` only through the service role (after #25);
+  - its browser ignores the Realtime payload (after #24);
+  - the patched `motorist_case_handoff` keeps its signature (#7).
 - **No object clashes** for the 26 to apply. The one existing index (`motorist_profiles_organization_id_id_push_idx`) is created `if not exists`. Three existing functions get replaced:
   - `app_private.motorist_handoff_dto`;
   - `public.motorist_case_handoff`;
   - `app_private.motorist_broadcast_telephony_change`.
-- **No transaction wrapper in the file** for `20261013120000`, `20261020210000`, `20261026190404`, `20261031100000`, `20261031100100` and `20261031100200`. Wrap each one in `begin; … commit;`. The others carry their own.
+- **Transaction wrappers differ.** 20 of the 26 files carry their own top-level `begin;`/`commit;`. Six don't: `20261013120000`, `20261020210000`, `20261026190404`, `20261031100000`, `20261031100100` and `20261031100200`. Part 2.3 applies every file as exactly one transaction together with its ledger row.
 
 Production row counts (3 Nov):
 
@@ -110,12 +117,12 @@ Timestamp order. Every migration's prerequisites exist in production or in an ea
 | # | Migration | What it does | Additive / alters existing | Backfill / seed | Rollback stance | Risk |
 |---|---|---|---|---|---|---|
 | 1 | `20261012183000_case_owner_assignment` | Two service-role functions to assign a case owner | additive | none | drop both functions | low |
-| 2 | `20261013120000_towing_work_orders` | Towing module: 17 `motorist_towing_*` tables, ~25 functions, private bucket `towing-documents`; FKs to organizations, profiles, cases, `auth.users` | additive; brief FK locks on small tables | none (first membership is a separate reviewed insert) | drop new objects while empty | low–med |
-| 3 | `20261020210000_mobile_push_devices` | Mobile push device table (its index already exists from `20260906081818`) | additive | none | drop table | low |
+| 2 | `20261013120000_towing_work_orders` | Towing module: 17 `motorist_towing_*` tables, ~25 functions, private bucket `towing-documents`; FKs to organizations, profiles, cases, `auth.users` | **RLS change on `storage.objects`**: the restrictive policy `towing_documents_proxy_only` for `anon` and `authenticated`, which every storage request of those roles now also evaluates. Locks: ACCESS EXCLUSIVE on `storage.objects`; SHARE ROW EXCLUSIVE on `auth.users`, `motorist_cases`, `motorist_profiles` and `motorist_organizations` (FKs) | none (first membership is a separate reviewed insert) | manual down while empty: drop the new tables and functions, the policy `towing_documents_proxy_only` and the bucket `towing-documents` | low–med |
+| 3 | `20261020210000_mobile_push_devices` | Mobile push device table (its index already exists from `20260906081818`) | additive. `create unique index if not exists` still takes a SHARE lock on `motorist_profiles` although the index exists, and the FK takes SHARE ROW EXCLUSIVE on it | none | drop table | low |
 | 4 | `20261022100000_mobile_delivery_handoffs` | Delivery role on handoffs: `recipient_member_id` with FK and index on `motorist_case_handoffs` (8 rows), `actor_member_id` on `motorist_handoff_events` (25); replaces `motorist_handoff_dto` (adds the "Pristavovač" label); new `motorist_case_handoff_app` | **alters 2 existing tables**, nullable columns | none | manual: drop columns, restore the dto from `20261009100000` | low–med |
 | 5 | `20261022180000_mobile_delivery_background` | Background trackers for the delivery driver | additive | none | drop new objects | low |
-| 6 | `20261026190404_partner_consultations_and_portal` | 9 partner tables, private bucket `motorist-partner-documents`, append-only grants | additive | none | drop new objects | low |
-| 7 | `20261026190600_shared_dispatch_operations` | Shared operations model (cycles, operations, executions, evidence, commands, events); bucket `motorist-operation-evidence`; patches `motorist_case_handoff` by `replace()`; sync trigger on handoffs; swaps the handoff unique index for two partial ones | **alters `motorist_case_handoffs`** (column, index swap, BEFORE trigger) and a live function | **Backfill: 8 handoffs → 8 operations + 8 executions.** All 8 are past `expires_at`: 3 accepted, 1 arrived, 1 completed, 3 offered. They become 3 accepted, 1 arrived, 3 draft open operations and 1 completed. Owner decision (summary item 3) | in practice forward-only (manual down: drop triggers/tables, restore the function from `20261009100000`) | **med** |
+| 6 | `20261026190404_partner_consultations_and_portal` | 9 partner tables, private bucket `motorist-partner-documents`, append-only grants | **call-path**: additive, but its FKs take SHARE ROW EXCLUSIVE on `motorist_call_sessions` and `motorist_telephony_lines` | none | drop new objects and the bucket (empty) | low–med |
+| 7 | `20261026190600_shared_dispatch_operations` | Shared operations model (cycles, operations, executions, evidence, commands, events); bucket `motorist-operation-evidence`; patches `motorist_case_handoff` by `replace()`; sync trigger on handoffs; swaps the handoff unique index for two partial ones | **alters `motorist_case_handoffs`** (column, index swap, BEFORE trigger) and a live function; **RLS change on `storage.objects`** (restrictive `motorist_operation_evidence_proxy_only` for `anon` and `authenticated`). Locks: ACCESS EXCLUSIVE on `storage.objects` and `motorist_case_handoffs` | **Backfill: 8 handoffs → 8 operations + 8 executions.** All 8 are past `expires_at`: 3 accepted, 1 arrived, 1 completed, 3 offered. They become 3 accepted, 1 arrived, 3 draft open operations and 1 completed. Owner decision (summary item 3) | in practice forward-only. Manual down: drop the new triggers and tables; restore `motorist_case_handoff` from `20261009100000`; drop the two partial indexes and recreate `create unique index motorist_case_handoff_active on public.motorist_case_handoffs(organization_id,case_id) where status in ('offered','accepted','en_route','arrived')`; drop the columns `operation_id` and `legacy_slot`; drop the policy `motorist_operation_evidence_proxy_only` and the bucket `motorist-operation-evidence` (empty) | **med** |
 | 8 | `20261026192423_operations_workspace_customer_contact` | Patches a #7 function (guarded by anchor checks) | new objects only | none | re-apply previous body | low |
 | 9 | `20261026192813_towing_cycle_return_owner` | Return owner on cycles | new objects only | backfill from a new table, 0 rows | drop | low |
 | 10 | `20261026195725_operations_actor_locking_auth` | Locking and definer fixes on new functions | new objects only | none | re-apply | low |
@@ -123,7 +130,7 @@ Timestamp order. Every migration's prerequisites exist in production or in an ea
 | 12 | `20261026211724_operation_access_links` | 3 grant tables and a BEFORE trigger on `motorist_case_handoffs`; it raises only when an active operation handoff collides with a grant | adds a trigger on an existing table | none | drop trigger/tables | low–med |
 | 13 | `20261026211731_operations_returns_damage_evidence` | Damage evidence for returns | new tables only | update on a new table, 0 rows | drop | low |
 | 14 | `20261026211759_atomic_case_partner_origin` | Atomic case creation with partner origin | additive | none | drop | low |
-| 15 | `20261026213118_partner_settlement_audit` | Audit trigger on `motorist_audit_log` (545 rows, no triggers today), partner-settlement entries only | adds a trigger on an existing table | none | drop trigger | low |
+| 15 | `20261026213118_partner_settlement_audit` | Audit trigger on `motorist_audit_log` (545 rows, no triggers today), partner-settlement entries only | **call-path**: the new trigger takes SHARE ROW EXCLUSIVE on `motorist_audit_log`, which a call-session trigger writes | none | drop trigger | low–med |
 | 16 | `20261028100000_branch_work_groups` | Branches and work groups | additive | none | drop | low |
 | 17 | `20261028110000_branch_work_groups_review` | Branch review fixes | additive | none | drop | low |
 | 18 | `20261028120000_partner_case_followups` | Partner case follow-ups | additive | none | drop | low |
@@ -131,9 +138,9 @@ Timestamp order. Every migration's prerequisites exist in production or in an ea
 | 20 | `20261028140000_operation_positions` | Operation positions | additive | none | drop | low |
 | 21 | `20261028150000_operation_background_tracking` | Background tracking for operations | additive | none | drop | low |
 | 22 | `20261028170000_rental_draft_source` | Rental draft function | additive | none | drop | low |
-| 23 | `20261031090000_telephony_latency_flags` | `latency_flags jsonb not null default '{}'` on `motorist_telephony_settings` (1 row) | adds a column to an existing table | **no seed**; `{}` is today's behaviour | drop column (the app then reads env) | low |
+| 23 | `20261031090000_telephony_latency_flags` | `latency_flags jsonb not null default '{}'` on `motorist_telephony_settings` (1 row) | **call-path**: adds a column; ACCESS EXCLUSIVE on `motorist_telephony_settings`, which every call reads (live gate) | **no seed**; `{}` is today's behaviour | drop column (the app then reads env) | low |
 | 24 | `20261031100000_telephony_realtime_doorbell` | Broadcast function behind 4 triggers on sessions, legs and presence sends a content-free doorbell instead of full rows | replaces a function on hot triggers | none | re-apply the `20260915100000` body (not recommended: privacy) | low |
-| 25 | `20261031100100_call_sessions_service_only` | Drops `motorist_call_sessions_member_select`, revokes all from `anon` and `authenticated` | **revokes access and drops a policy** on the hot `motorist_call_sessions` (715 rows); brief exclusive lock | none | re-grant and recreate the policy (not recommended: privacy) | low–med |
+| 25 | `20261031100100_call_sessions_service_only` | Drops `motorist_call_sessions_member_select`, revokes all from `anon` and `authenticated` | **call-path: revokes access and drops a policy** on the hot `motorist_call_sessions` (715 rows); ACCESS EXCLUSIVE lock | none | re-grant and recreate the policy (not recommended: privacy) | low–med |
 | 26 | `20261031100200_telephony_start_privacy_check` | Read-only `motorist_telephony_start_privacy_v1()`, service role only | additive | none | drop | low |
 
 Realtime messages that the old broadcast stored before #24 hold full rows and can be replayed for up to 3 days (see [release workflow](release-workflow.md)). Deleting them is a data change and needs separate authorization.
@@ -141,10 +148,42 @@ Realtime messages that the old broadcast stored before #24 hold full rows and ca
 ### 2.3 How to apply (technical checklist)
 
 - Target `ifpaeegaesdmljfkdvcn` only, after the owner approves this list and project. Do not touch TEST or `sjcsrygkkmersoczpunh`.
-- One file per request, in the order above. Prefix each request with `set lock_timeout = '5s'; set statement_timeout = '120s';`. Wrap the six files without `begin`/`commit` in a transaction. Record each one in `supabase_migrations.schema_migrations` with its repo version and name.
-- Before #1, check for live calls: `select count(*) from public.motorist_call_sessions where ended_at is null and started_at > now() - interval '2 hours'` must be 0. Repeat before #24 and #25.
-- After each file, check its main object with `to_regclass` or `pg_proc`. After #26, `select public.motorist_telephony_start_privacy_v1()` must return `true`.
-- If a statement hits the lock timeout, the transaction rolls back. Retry after the call ends; never raise the timeout during calls.
+- **Method.** One transaction per file, in the order of part 2.2, with its ledger row inside the same transaction. Apply either with `psql "<production connection string>" -v ON_ERROR_STOP=1 -f <wrapped file>`, or with the Management API `POST /v1/projects/ifpaeegaesdmljfkdvcn/database/query` whose single `query` string carries the explicit `begin; … commit;`. Do not use `/database/migrations` (`apply_migration`): it records its own version number, which is how the ledger drifted. Each wrapped file:
+
+  ```sql
+  begin;
+  set local lock_timeout = '1s';
+  set local transaction_timeout = '30s';  -- PostgreSQL 17 (production runs 17.6)
+  -- the migration file, without its own top-level begin; and commit; (20 of the 26 have them)
+  insert into supabase_migrations.schema_migrations (version, name, statements)
+  values ('<repo version>', '<repo name>', array['<file text>']);
+  commit;
+  ```
+
+  There is no `statement_timeout`: `transaction_timeout` already bounds the whole file.
+- **Precedent.** Production `20261001071403 operations_diagnostics_index_bounded_20261001` ran after a recorded preflight with `lock_timeout` 50 ms, `statement_timeout` 100 ms and `transaction_timeout` 250 ms, for a single index. These files are larger DDL, hence 1 s and 30 s.
+- **Preflight** before every file. It must be **run immediately before** the call-path and storage files #2, #6, #7, #15, #23 and #25 (their locks are in part 2.2). Every value must be 0:
+
+  ```sql
+  select
+    (select count(*) from public.motorist_call_sessions where ended_at is null and started_at > now() - interval '2 hours') as live_calls,
+    (select count(*) from pg_stat_activity where wait_event_type = 'Lock') as lock_waiters,
+    (select count(*) from pg_stat_activity where backend_type = 'client backend' and pid <> pg_backend_pid()
+       and xact_start < now() - interval '30 seconds') as old_transactions
+  ```
+
+  The role needs `pg_read_all_stats` to see other sessions' `xact_start`. The read-only role has it, so the preflight can also run through `prod_ro.py`.
+- **Retries.** A lock or transaction timeout (`55P03`, `25P04`) rolls back the whole file, ledger row included. Wait 30 s, rerun the preflight, and retry. Stop after 3 attempts and report. Never raise the limits, and never retry while a call is live.
+- **After each file**, check its main object with `to_regclass` or `pg_proc`.
+- **After #7**, `legacy_slot and status in` must appear exactly twice in the patched function:
+
+  ```sql
+  select (length(prosrc) - length(replace(prosrc, 'legacy_slot and status in', ''))) / length('legacy_slot and status in') as patched
+  from pg_proc where pronamespace = 'public'::regnamespace and proname = 'motorist_case_handoff'
+  ```
+
+  This must return one row with `2`. Any other result: stop and report before #8.
+- **After #26**, `select public.motorist_telephony_start_privacy_v1()` must return `true`.
 
 ## 3. Production latency flags (after migration #23)
 
@@ -198,7 +237,7 @@ where organization_id = '00000000-0000-4000-8000-000000000001';
 | | | `hold_lean_context` | S7a.4: lean routing context for hold/unhold |
 | | | `client.webRtcRegion: "eu"` | S5a: browsers register on the EU RTC edge |
 | | S4 | `http_keepalive_ms: 60000` | The Telnyx client keeps idle sockets for up to 60 s, so a call stops opening new connections per command. TEST evidence below. |
-| B | S5 (this PR) | `api_region: "eu"` | Outbound, callback and colleague calls that will not be recorded are created and controlled through `api.telnyx.eu`; inbound stays `us`. Production recording env switches are all `true` and the policy is off, so each outbound start reads one policy row in parallel; calls stay `eu` while recording is off. |
+| B | S5 (this PR) | `api_region: "eu"` | Outbound, callback and colleague calls that will not be recorded are created and controlled through `api.telnyx.eu`; inbound stays `us`. Production recording env switches are all `true`, so each outbound start reads one policy row in parallel with its line. A call stays `eu` while the policy does not record outgoing calls, or when its line has no start announcements. Today the policy is off, so every outbound call is `eu`. |
 | C | S3 | `own_leg_request_header` | Server-side only while `motorist_telephony_start_privacy_v1()` is `true` (after #24–#26) |
 | | | `client.webEarlyAccept` | The browser accepts its own leg early |
 
@@ -235,13 +274,18 @@ All were tested on TEST builds. They do nothing in production until native voice
 
 **Rollback.** `latency_flags = '{}'::jsonb` reaches new calls within 5 s. Calls already started keep their frozen mode.
 
-**Check after stage B.** After a web call to a mobile and a colleague call:
+**Check after stage A.** Answer an inbound call to a production line on the web, then hold and unhold it. This is the path of 99 % of production calls, and stage A changes it through S1, S7a, S4 and the EU RTC edge. Then run the S4 `unknown` check above.
 
-```sql
-select direction, metadata->'start_mode' from public.motorist_call_sessions order by started_at desc limit 3
-```
+**Check after stage B.**
+- Make a web call to a mobile, with a **consult or transfer** to a colleague during that outbound call. Consult, transfer, add-party, supervise, park and a callback start have not yet been run live on an `eu` session (see the S5.0 result in the [runbook](telnyx-runbook.md)).
+- Make a colleague call.
+- Then:
 
-The outbound and internal calls must show `apiRegion: "eu"` and an inbound call `"us"`.
+  ```sql
+  select direction, metadata->'start_mode' from public.motorist_call_sessions order by started_at desc limit 4
+  ```
+
+  The outbound and internal calls must show `apiRegion: "eu"` and an inbound call `"us"`. If the consult or transfer fails, set `api_region` back to `"us"` (new calls within 5 s) and keep the other stages.
 
 ## 4. Environment checks (Vercel API, read-only, values not printed)
 
@@ -253,7 +297,7 @@ Production project `pomoc-motoristom-dispatching` (`prj_DN3smSO1EbGowAmw3nHLQUYo
 | `TELNYX_EU_API_BASE_URL` | unset | OK |
 | `TELEPHONY_LATENCY_FLAGS` | unset | Keep unset; use the database flags. |
 | `MOTORIST_APP_ENV`, `APP_BASE_URL`, `SUPABASE_URL` | match `production`, `https://dispecing.linkapomoci.sk`, the production ref | OK (`euApiRegionAllowed` and `isProductionLiveDeployment` need them) |
-| `TELNYX_RECORDING_ENABLED`, `TELNYX_RECORDING_CONTRACT_VERIFIED`, `RECORDING_PROCESSING_ENABLED` | all `true` | The S5 start reads the recording policy row, which is off (`recording_enabled = false`), so calls stay unrecorded and `eu`. Enabling recording later moves outbound calls back to `us`. |
+| `TELNYX_RECORDING_ENABLED`, `TELNYX_RECORDING_CONTRACT_VERIFIED`, `RECORDING_PROCESSING_ENABLED` | all `true` | The S5 start reads the recording policy row, which is off (`recording_enabled = false`), so calls stay unrecorded and `eu`. Enabling outbound recording later moves outbound calls on lines with start announcements back to `us`. |
 | `TELNYX_MEDIA_BASE_URL` | differs from `https://dispecing.linkapomoci.sk/telephony` | Move it with this release (planned in [telnyx-setup](telnyx-setup.md)). |
 | `NEXT_PUBLIC_APP_URL` | differs from `https://dispecing.linkapomoci.sk` | Owner checks it in the dashboard. |
 
@@ -297,13 +341,26 @@ The owner's production authorization covers exactly these steps. Use the product
    - **Colleague call:** web to web.
    - Check the runtime logs: `telnyx-http` `POST /calls` must be 2xx.
    - **Optional negative check:** a direct SDK call to a PSTN number with a production login is refused. Run it only with the owner's explicit approval, and only to his own mobile.
+   - Re-read the shared profile and the call control app. `GET /outbound_voice_profiles/$OVP_SHARED` must now show `connections_count: 1` and `enabled: true`. `GET /call_control_applications/3040091293100279025` must still show `outbound.outbound_voice_profile_id` = `OVP_SHARED`.
 4. **Rollback.** `PATCH /credential_connections/3040092094321394986` with the saved `before` `outbound` object, which puts back `OVP_SHARED`, then `GET` to confirm. Keep `OVP_BLOCKED`, disabled and unused, until a later explicit cleanup (`DELETE /outbound_voice_profiles/$OVP_BLOCKED`).
 
-This step is independent of the code release. Do it after the release smoke test passes, in the same quiet window or a separate one.
+**Later connections.** Any credential connection added later, for example one for production native voice on the iPhone, must get `OVP_BLOCKED` (or its own disabled profile), never `OVP_SHARED`.
+
+**Timing.** The owner was told this happens at the release, so the plan keeps it there: after the release smoke test passes, in the same quiet window. It does not depend on the code. As an option, the owner may approve it earlier as a separate step.
 
 ## 6. Release procedure
 
-**Quiet window.** In the last 30 days production had 279 call sessions, none between 00:00 and 06:59 Europe/Bratislava, 2 at 23:00, and about 1 per day between 18:00 and 22:59. Proposal: start at 20:30 so the owner can make test calls. Migrations run only with 0 live calls.
+**Quiet window.** Production call sessions in the last 30 days, by local (Europe/Bratislava) hour:
+- 18:00–18:59: 4; 19:00–19:59: 10;
+- 20:00–20:59: 3; 21:00–21:59: 6; 22:00–22:59: 6;
+- 23:00–23:59: 2 (both on 17 Oct, at 23:26 and 23:28);
+- 00:00–06:59: 0.
+
+The evening is therefore not empty. **Proposal: run the migrations after midnight, starting 05:30.** Then:
+- merge and deploy at about 06:00;
+- the owner's smoke tests and flag stages A–C at 06:15–06:55, before the first calls, which usually start after 07:00.
+
+Alternative: migrations and deploy right after midnight with `latency_flags` left at `{}`, then flags and smoke tests in the morning before 07:00. Every migration still waits for a 0 preflight (part 2.3).
 
 **Order.**
 1. **Approval.** Merge this PR into `dev` and verify TEST. Recording is off on TEST, so behaviour there is unchanged: `eu` keeps applying to unrecorded calls. The owner tests TEST and gives explicit approval for the identified `dev` SHA, the 26 migrations (with the handoff decision), the env changes, flag stages A–C and, separately, the Telnyx step.
@@ -315,7 +372,11 @@ This step is independent of the code release. Do it after the release smoke test
 3. **Backup / PITR check (Supabase Pro).** In the Dashboard → Database → Backups, confirm that the latest daily backup is from today, and whether PITR is enabled. Note the exact UTC time just before migration #1 as the restore point. If PITR is not enabled, the restore point is the last daily backup; say so to the owner before starting.
 4. **Env.** Set the approved variables: towing, delivery and push switches, `TELNYX_MEDIA_BASE_URL`, and `TELNYX_API_BASE_URL` confirmed or deleted.
 5. **Migrations.** Apply the 26 per part 2.3. Then quickly smoke-test the still-running `main`: open a case, an inbound or outbound call.
-6. **Merge the release PR `dev → main`** (body in part 7). The required `Vercel – pomoc-motoristom-dispatching` check must pass. Never use `vercel redeploy` of an older deployment.
+6. **Merge the release PR `dev → main`** (body in part 7). Immediately before merging:
+   - repeat the [AGENTS.md](../../AGENTS.md) head comparison: the PR head must equal the tested and approved `dev` SHA;
+   - review the full `dev → main` diff again.
+
+   If `dev` moved, verify the added changes on TEST and get the owner's approval for the expanded scope before merging. The required `Vercel – pomoc-motoristom-dispatching` check must pass. Never use `vercel redeploy` of an older deployment.
 7. **Deploy verification.**
    - `https://dispecing.linkapomoci.sk/api/health/live` returns 200, with the deployment version whose Git SHA in the Vercel metadata is the merge commit.
    - `/api/health/ready` returns 200.
@@ -323,7 +384,7 @@ This step is independent of the code release. Do it after the release smoke test
    - The runtime logs show no `api_base_url_override_ignored`.
 8. **Flags**, stage A, then B, then C (part 3). Make a test call after each stage.
 9. **Smoke tests.**
-   - **Web:** a call to the owner's mobile (talk, hold and unhold twice, hangup), an inbound call answered on the web, a colleague call, then the `start_mode` query.
+   - **Web:** an inbound call answered on the web with hold and unhold (after stage A); a call to the owner's mobile (talk, hold and unhold twice, a consult or transfer to a colleague, hangup); a colleague call; then the `start_mode` query (after stage B).
    - **Branches:** open Pobočky, hand over a test case, check the report.
    - **Partners:** the partner list and a partner case. The portal login only uses a test partner account if one exists; never contact real partners.
    - **Towing:** if enabled, the order list and a draft. The first membership is a separate reviewed insert.
@@ -334,10 +395,28 @@ This step is independent of the code release. Do it after the release smoke test
 11. **TEST sync check.** `main` and `dev` point at the same content, and the release handoff names both commits.
 
 **Rollback.**
-- **Flags:** `latency_flags = '{}'`.
-- **Code:** revert PR on `main`, which makes a fresh deploy. **S5 rule:** before deploying a build without S5, set `api_region: "us"` and wait until `select count(*) from public.motorist_call_sessions where ended_at is null and metadata->'start_mode'->>'apiRegion' = 'eu'` returns 0. An older build would control an EU conference through `.com`. Never redeploy an old deployment.
+- **Flags first, the fast lever:** `latency_flags = '{}'`. New calls are back to today's behaviour within 5 s, with no build. Most call problems after this release are behind a flag.
+- **Code: prefer a forward fix.** Use a `hotfix/*` branch from `main` through the normal PR and required check, then the `main` → `dev` sync.
+- **Never revert the `dev → main` merge commit without a plan.** The required `main` → `dev` sync would carry that revert into `dev` and remove the whole release from TEST too. Releasing it again later would need a "revert of the revert", which is easy to get wrong. If a revert is unavoidable, write the sync plan first: either keep `dev` as it is, by merging the revert to `dev` and immediately reverting it there, or release forward.
+- **Before deploying any code that lacks S5** (a revert or an older base), all of the following must hold:
+  - set `api_region: "us"`;
+  - **zero live sessions of any kind**: `select count(*) from public.motorist_call_sessions where ended_at is null` must return 0, not only the `eu` ones;
+  - **no stored recordings of EU sessions**:
+
+    ```sql
+    select count(*) from public.motorist_call_recordings r join public.motorist_call_sessions s on s.id = r.session_id
+    where s.metadata->'start_mode'->>'apiRegion' = 'eu' and r.status <> 'deleted'
+    ```
+
+    This must return 0. An older build would read or delete such a recording through `.com`, where a 404 reads as "already removed".
+- **A revert is a normal release.** It goes through a PR to `main`, a full build and the required `Vercel – pomoc-motoristom-dispatching` check. It takes minutes, not seconds; never shortcut it with `vercel redeploy` of an old deployment.
 - **Database: forward-only.** All 26 stay. They are compatible with `main`; the manual downs in part 2.2 are for emergencies only and each needs its own authorization.
 - **Telnyx:** step 4 of part 5.
+
+**Open questions to settle on release day:**
+- **Production recording env values.** On 3 Nov the three recording switches were only compared in memory as equal to `true`; no value was displayed. Confirm them in the dashboard. They decide whether the S5 start reads the policy row.
+- **Rehearsal database version.** The earlier full-set rehearsal ran on a local PostgreSQL 15 copy, while production runs PostgreSQL 17.6. Either rehearse the 26 files on PostgreSQL 17, or accept the difference explicitly. `transaction_timeout` exists only from 17.
+- **PITR / backup status** (step 3): not read yet.
 
 **What the owner must do:** see "Čo musíš rozhodnúť alebo urobiť ty" above. In addition:
 - read `TELNYX_API_BASE_URL` in the Vercel dashboard, or allow deleting it;
@@ -351,11 +430,13 @@ This step is independent of the code release. Do it after the release smoke test
 ## Release: dev → main (2026-11)
 
 Owner approval: <quote the owner's message, date and time; tested dev SHA>
+Head check immediately before merge: PR head = <SHA> = tested dev SHA; full dev → main diff reviewed at <time>
 Tested on TEST: https://test.dispecing.linkapomoci.sk, dev <SHA>, /api/health/live <version>
 Scope: PRs #420–#557 and #<this PR> (see docs/operations/release-plan-2026-11.md, part 1)
 
 ### Database (production ifpaeegaesdmljfkdvcn, applied before merge)
-- 26 migrations in the order of part 2.2: <applied at UTC, by whom>
+- 26 migrations in the order of part 2.2, one transaction each with its ledger row: <applied at UTC, by whom, retries>
+- After #7: `legacy_slot and status in` appears twice in motorist_case_handoff: <checked>
 - Skipped (already present): the 7 listed in part 2.1
 - motorist_telephony_start_privacy_v1() = true: <checked at>
 - Restore point (PITR/backup): <UTC>
@@ -367,9 +448,9 @@ Scope: PRs #420–#557 and #<this PR> (see docs/operations/release-plan-2026-11.
 ### After deploy
 - /api/health/live: <version>, Git SHA <merge SHA>; /api/health/ready 200; cron gate 401
 - latency_flags stages A/B/C: <times>; start_mode check: outbound eu, inbound us; provider commands `unknown` after S4: <count>
-- Smoke: web call, hold×2, inbound, colleague, Pobočky, Partneri, Výjazdy, odťahy
+- Smoke: inbound on web with hold/unhold, outbound with hold×2 and consult/transfer, colleague, Pobočky, Partneri, Výjazdy, odťahy
 - Not in scope: native iPhone calling (production iOS build, App Store track); recording; S6, S7b, sip_domain
 
 ### Rollback
-latency_flags '{}' → revert PR (after api_region us and no live eu sessions); DB forward-only.
+latency_flags '{}' first; code by a forward hotfix. A revert of this merge needs a written main → dev sync plan, api_region us, zero live sessions and no stored EU recordings. DB forward-only.
 ```
