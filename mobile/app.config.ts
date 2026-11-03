@@ -48,10 +48,11 @@ const config: ExpoConfig = {
     bundleIdentifier: "sk.linkapomoci.dispecing" + suffix, supportsTablet: false,
     privacyManifests: { NSPrivacyTracking: false, NSPrivacyTrackingDomains: [], NSPrivacyCollectedDataTypes: collected, NSPrivacyAccessedAPITypes: accessed },
     infoPlist: {
-      // Calls are encrypted by the bundled WebRTC (DTLS-SRTP, BoringSSL), not only by iOS, so the
-      // App Store build declares encryption and its answers are given in App Store Connect
-      // (standard algorithms, France not offered). TEST TestFlight builds keep the earlier answer.
-      ITSAppUsesNonExemptEncryption: variant === "production",
+      // Calls use standard encryption in the bundled WebRTC (DTLS-SRTP, BoringSSL) besides iOS HTTPS.
+      // Apple requires export documentation only for proprietary cryptography or standard
+      // cryptography sold in France (App Store Connect refuses a declaration otherwise, 3. 11. 2026);
+      // France is not offered, so no documentation is required and the key stays false.
+      ITSAppUsesNonExemptEncryption: false,
       // The interface is Slovak only.
       CFBundleDevelopmentRegion: "sk", CFBundleLocalizations: ["sk"],
       ...(variant === "production" ? { CFBundleDisplayName: "Dispečing" } : {}),
