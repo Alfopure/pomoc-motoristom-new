@@ -54,8 +54,9 @@ export function createTelnyxRequestLogger(logger: (entry: Record<string, unknown
           startedAtMs: Number.isSafeInteger(attempt.startedAtMs) && attempt.startedAtMs > 0 ? attempt.startedAtMs : null,
           dispatchAfterMs: duration(attempt.dispatchAfterMs), headersMs: duration(attempt.headersMs),
           ms: duration(attempt.ms), status: status(attempt.status),
-          // S4 stop criterion: a reset of a kept-alive socket, beside the journal's `unknown`.
+          // S4 stop criterion: a reset or timeout on a kept-alive socket, beside the journal's `unknown`.
           ...(attempt.reusedSocketReset === true ? { reusedSocketReset: true } : {}),
+          ...(attempt.reusedSocketTimeout === true ? { reusedSocketTimeout: true } : {}),
         })) };
       // Logging is outside the call's success contract, including injected
       // asynchronous loggers that reject after the provider response returns.
