@@ -3,6 +3,7 @@ import type { IncomingWaitPolicy } from "@/lib/telephony/incoming-flow";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
+import { resolveAppEnvironment } from "@/lib/app-environment";
 import type { BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import { ANNOUNCEMENT_DEFINITIONS, readAnnouncementConfig, resolveAnnouncement, type AnnouncementConfig, type AnnouncementKey } from "@/lib/telephony/announcements";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
@@ -653,11 +654,70 @@ export const CAPACITY_RETRY_SECS = 5;
  * leg we never learn the id of; this guarantees it cannot run forever.
  */
 export const LEG_TIME_LIMIT_SECS = 4 * 60 * 60;
-export const TELNYX_SIP_DOMAIN = "sip.telnyx.com";
+/**
+ * The Telnyx SIP host a session dials its operators' credentials on. `com`
+ * (anycast `sip.telnyx.com`) is today's; `eu` (`sip.telnyx.eu`) is the
+ * call-speed S5 SIP-domain spike, frozen per session (`sessionSipDomain`).
+ */
+export type TelnyxSipDomain = "com" | "eu";
+const TELNYX_SIP_HOSTS: Record<TelnyxSipDomain, string> = { com: "sip.telnyx.com", eu: "sip.telnyx.eu" };
 
-/** SIP URI of an operator's WebRTC credential (SRTP is requested via `media_encryption`). */
-export function telnyxSipUri(sipUsername: string): string {
-  return `sip:${sipUsername}@${TELNYX_SIP_DOMAIN}`;
+/**
+ * SIP URI of an operator's WebRTC credential (SRTP is requested via
+ * `media_encryption`). The only place one is built: every dial of a session
+ * passes that session's `sessionSipDomain`.
+ */
+export function telnyxSipUri(sipUsername: string, domain: TelnyxSipDomain): string {
+  return `sip:${sipUsername}@${TELNYX_SIP_HOSTS[domain]}`;
+}
+
+/**
+ * Whether `uri` is exactly this credential's SIP URI on either Telnyx domain.
+ * The username is the identity; the domain only says which Telnyx SIP host
+ * the session's dial went through.
+ */
+export function isTelnyxSipUriOf(uri: unknown, sipUsername: string): boolean {
+  return uri === telnyxSipUri(sipUsername, "com") || uri === telnyxSipUri(sipUsername, "eu");
+}
+
+/** Both addresses a credential may have been dialled on, for an exact database match. */
+export function telnyxSipUris(sipUsername: string): string[] {
+  return [telnyxSipUri(sipUsername, "com"), telnyxSipUri(sipUsername, "eu")];
+}
+
+/**
+ * The credential username of a `sip:<user>@sip.telnyx.com` or `…@sip.telnyx.eu`
+ * destination; null for any other host, a port, URI parameters or escapes.
+ */
+export function telnyxSipUsername(uri: unknown): string | null {
+  return typeof uri === "string" ? /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.(?:com|eu)$/.exec(uri)?.[1] ?? null : null;
+}
+
+/**
+ * Whether this deployment may dial `sip.telnyx.eu` at all (call-speed S5
+ * SIP-domain spike, docs/operations/telnyx-runbook.md). Telnyx does not
+ * document it, so until the runbook records a pass only a deployment whose
+ * application environment is exactly `test` freezes it (`startSipDomain`) or
+ * honours a frozen one (`sessionSipDomain`): production, a local run
+ * (`development`, which may point at the TEST database) and an unreadable
+ * environment dial `sip.telnyx.com` whatever a row says. Production needs a
+ * reviewed change here.
+ */
+const EU_SIP_DOMAIN_PROVEN = false;
+export function euSipDomainAllowed(): boolean {
+  if (EU_SIP_DOMAIN_PROVEN) return true;
+  try { return resolveAppEnvironment() === "test"; }
+  catch { return false; }
+}
+
+/**
+ * The SIP domain a session dials its credentials on: the frozen
+ * `start_mode.sipDomain` where this deployment may (`euSipDomainAllowed`). A
+ * session without it dials `sip.telnyx.com` for good.
+ */
+export function sessionSipDomain(metadata: unknown): TelnyxSipDomain {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return "com";
+  return (metadata as SessionMeta).start_mode?.sipDomain === "eu" && euSipDomainAllowed() ? "eu" : "com";
 }
 
 export type RoutingContext = {
@@ -727,7 +787,9 @@ export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" 
  */
 export type SessionStartMode = { concurrent: boolean; autoBridge: boolean; ownLegTimeoutSecs: number; apiRegion: "us" | "eu"; origin: "web" | "mobile" | null; holdJoinWithHold?: true;
   /** S6 B′ (TEST experiment): the concurrent far dial carries no `link_to`/`bridge_on_answer`; the server bridges it. */
-  farLinkTo?: false };
+  farLinkTo?: false;
+  /** S5 SIP-domain spike (TEST experiment): every SIP-credential dial of the session goes to `sip.telnyx.eu`. Only with `apiRegion: "eu"`. */
+  sipDomain?: "eu" };
 
 export type SessionMeta = {
   holdControl?: { commandId: string; held: boolean; customerControlId: string } | null;

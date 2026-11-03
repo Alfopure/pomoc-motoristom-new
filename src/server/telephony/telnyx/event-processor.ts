@@ -15,7 +15,7 @@ import { recordCallEvent, resumePendingEffects, type CommandOutcome } from "../s
 import { readPendingEffects } from "../state/continuation";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { DUPLICATE_BRIDGE, lineInboundMode, toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
-import { concurrentBridgeSessionDueAt, readMeta } from "../state/types";
+import { concurrentBridgeSessionDueAt, readMeta, sessionSipDomain, telnyxSipUri, telnyxSipUris, telnyxSipUsername } from "../state/types";
 import { loadParticipantManifest, observeParticipants } from "../state/participants";
 import { enqueueSavedRecording } from "../recording-jobs";
 import { recordingIntent } from "../state/recording";
@@ -219,39 +219,47 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
       event.direction !== null && event.direction !== "incoming" ||
       event.type === "call.initiated" && (event.direction !== "incoming" || event.state !== "bridging")) return null;
   // Telnyx credential callbacks use the bare username; admit its exact SIP URI
-  // as well, never arbitrary domains, phone numbers, URI parameters or escapes.
+  // on either Telnyx SIP domain as well (S5 SIP-domain spike: what Telnyx sends
+  // for a dial to `@sip.telnyx.eu` is unobserved), never other domains, phone
+  // numbers, URI parameters or escapes.
   const destination = event.to ?? "";
-  const username = /^([a-zA-Z0-9_-]{1,128})$/.exec(destination)?.[1] ??
-    /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.com$/.exec(destination)?.[1];
+  const username = /^([a-zA-Z0-9_-]{1,128})$/.exec(destination)?.[1] ?? telnyxSipUsername(destination);
   const occurredAt = Date.parse(event.occurredAt ?? "");
   if (!username || !Number.isFinite(occurredAt)) return null;
-  const sip = `sip:${username}@sip.telnyx.com`;
   const sipUser: string = username, callControlAppId = config.callControlAppId;
+  // The proof reads the address the session really dialled: its frozen SIP domain.
+  const proven = async (row: { id: string; metadata: unknown }) => {
+    if (!await provenMirror(row.id, telnyxSipUri(sipUser, sessionSipDomain(row.metadata)))) return null;
+    if (sessionSipDomain(row.metadata) === "eu") logSipDomainSpike(deps, event, row.id, "mirror");
+    return row.id;
+  };
   const signal = AbortSignal.timeout(1_500);
   try {
     const candidate = await deps.admin.from("motorist_call_sessions").select("id, metadata")
       .eq("organization_id", deps.organizationId).eq("telnyx_session_id", event.callSessionId)
       .contains("metadata", { environment: deps.environment }).abortSignal(signal).maybeSingle();
     if (candidate.error) return null;
-    if (candidate.data) return await provenMirror(candidate.data.id) ? candidate.data.id : null;
+    if (candidate.data) return await proven(candidate.data);
     // S6 B′ (`start_mode.farLinkTo: false`): the far dial shares no provider
     // session with the own leg, so its mirror's session is ours only through
     // our own state — the operator leg dialled to this SIP address, then the
     // same exact journal proof (that dial's own `call_session_id`).
     const recent = await deps.admin.from("motorist_call_legs").select("session_id").eq("organization_id", deps.organizationId)
-      .eq("role", "operator").eq("to_number", sip).gte("initiated_at", new Date(occurredAt - MIRROR_UNLINKED_WINDOW_MS).toISOString())
+      .eq("role", "operator").in("to_number", telnyxSipUris(sipUser)).gte("initiated_at", new Date(occurredAt - MIRROR_UNLINKED_WINDOW_MS).toISOString())
       .order("initiated_at", { ascending: false }).limit(MIRROR_PROOF_LIMIT).abortSignal(signal);
     if (recent.error || !recent.data?.length) return null;
     const unlinked = await deps.admin.from("motorist_call_sessions").select("id, metadata").eq("organization_id", deps.organizationId)
       .in("id", [...new Set(recent.data.map((leg) => leg.session_id))]).contains("metadata", { environment: deps.environment }).abortSignal(signal);
     if (unlinked.error) return null;
     for (const row of unlinked.data ?? []) {
-      if (readMeta(row).start_mode?.farLinkTo === false && await provenMirror(row.id)) return row.id;
+      if (readMeta(row).start_mode?.farLinkTo !== false) continue;
+      const id = await proven(row);
+      if (id) return id;
     }
     return null;
   } catch { return null; }
 
-  async function provenMirror(sessionId: string): Promise<boolean> {
+  async function provenMirror(sessionId: string, sip: string): Promise<boolean> {
     const [legs, commands, browsers, mobiles] = await Promise.all([
       deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, telnyx_call_leg_id, profile_id, from_number")
         .eq("organization_id", deps.organizationId).eq("session_id", sessionId).eq("role", "operator").eq("to_number", sip)
@@ -297,6 +305,46 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
  * and after 60 s it becomes the ordinary correlation incident.
  */
 const MIRROR_UNLINKED_WINDOW_MS = 15 * 60_000;
+
+/** A credential's bare username, as Telnyx names it on the credential connection; it has a letter, so a phone number never is one. */
+const BARE_CREDENTIAL = /^(?=.*[a-zA-Z])[a-zA-Z0-9_-]{1,128}$/;
+type SpikeShape = { shape: "number" | "address" | "other"; scheme?: string | null; host?: string | null; hasUser?: boolean; hasParams?: boolean };
+
+/**
+ * What the spike line may show of an address: a credential's own name (its
+ * bare username, or its exact SIP URI on either Telnyx domain) as it is;
+ * anything else only by its shape — scheme, host, whether it has a user part
+ * and parameters — never the user part itself (a customer's number, another
+ * identity).
+ */
+function spikeAddress(value: unknown): string | SpikeShape | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") return { shape: "other" };
+  if (telnyxSipUsername(value) || BARE_CREDENTIAL.test(value)) return value;
+  if (/^\+?[\d\s().-]+$/.test(value)) return { shape: "number" };
+  const parts = /^(?:([a-z][a-z0-9+.-]*):)?(?:[^@]*@)?([^;?]*)([;?].*)?$/i.exec(value);
+  const hasUser = value.includes("@"), host = parts?.[2] ?? "";
+  return { shape: "address", scheme: parts?.[1]?.toLowerCase().slice(0, 16) ?? null,
+    host: hasUser ? /^[a-z0-9.-]{1,253}(:\d{1,5})?$/i.test(host) ? host.toLowerCase() : "other" : null, hasUser, hasParams: Boolean(parts?.[3]) };
+}
+
+/**
+ * S5 SIP-domain spike (TEST): what Telnyx reports as `to` (and as `sip_to`, if
+ * a payload carries one) for the legs of a session that dials its operators on
+ * `sip.telnyx.eu` has not been observed. Every matcher accepts both domains;
+ * this line records the real values, on the session's own events and on its
+ * proven credential mirrors, through `spikeAddress`. An event naming only
+ * phone numbers (a customer's leg) logs nothing.
+ */
+function logSipDomainSpike(deps: ProcessorDeps, event: TelephonyEvent, sessionId: string, source: "session" | "mirror"): void {
+  const to = spikeAddress(event.to), sipTo = spikeAddress(event.payload.sip_to);
+  const telling = (value: string | SpikeShape | null) => value !== null && (typeof value === "string" || value.shape !== "number");
+  if (!telling(to) && !telling(sipTo)) return;
+  try {
+    deps.logger?.({ scope: "sip-domain-spike", eventId: event.id, type: event.type, sessionId, source, connectionId: event.connectionId,
+      direction: event.direction, to, sipTo, payloadKeys: Object.keys(event.payload).sort() });
+  } catch { /* Diagnostic only. */ }
+}
 
 /**
  * A gather/playback/speak completion for a customer leg that has already
@@ -629,6 +677,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     }
 
     const ownedSession = session;
+    if (sessionSipDomain(ownedSession.metadata) === "eu") logSipDomainSpike(deps, event, ownedSession.id, "session");
 
     // Bookkeeping that writes nothing fenced does not take the session lease.
     //

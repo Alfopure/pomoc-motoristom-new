@@ -14,7 +14,7 @@ import type { TelephonyRuntimeDeps } from "@/server/telephony/runtime";
 import { ownedSessionWork } from "@/server/telephony/session-runner";
 import { readPendingEffects } from "@/server/telephony/state/continuation";
 import { summarizeSessionRecording } from "@/server/telephony/state/recording-types";
-import { commandKey, readMeta, telnyxSipUri, toJson, type SessionRow } from "@/server/telephony/state/types";
+import { commandKey, isTelnyxSipUriOf, readMeta, telnyxSipUris, toJson, type SessionRow } from "@/server/telephony/state/types";
 import { commandId, uuidV5 } from "@/server/telephony/telnyx/command-id";
 import { nativeHandedAway, nativeSessionQuery, requireNativeLease, requireNativeSession, type NativeKnownRows } from "./voice";
 export type NativeHoldInput = MobileVoiceHoldInput;
@@ -98,7 +98,7 @@ async function directInternalMedia(deps: TelephonyRuntimeDeps, actor: MotoristAc
     const callerLeg = matches(caller, callerControl, "internal_caller");
     const calleeLeg = matches(callee, calleeControl, "internal");
     const own = actor.profileId === caller ? callerLeg : calleeLeg;
-    if (!callerLeg || !calleeLeg || own?.to_number !== telnyxSipUri(device.sip_username)) return unavailable;
+    if (!callerLeg || !calleeLeg || !own || !isTelnyxSipUriOf(own.to_number, device.sip_username)) return unavailable;
     const path = `/calls/${encodeURIComponent(callerControl)}/actions/bridge`;
     const proof = await deps.admin.from("motorist_provider_commands").select("*").eq("session_id", session.id).eq("method", "POST")
         .eq("path", path).contains("request_payload", { call_control_id: calleeControl }).limit(2);
@@ -242,13 +242,13 @@ async function scopedRequestSession(deps: TelephonyRuntimeDeps, actor: MotoristA
     const accepted = meta.accepted_device_legs?.[actor.profileId] ?? meta.answered_leg_call_control_id;
     if (!device.sip_username || accepted !== input.callControlId)
         throw new MutationError("Pokus nepatrí tomuto telefónu.", 403);
-    const sip = telnyxSipUri(device.sip_username);
+    const sipUsername = device.sip_username;
     const own = known?.legs.data?.filter(leg => leg.organization_id === actor.organizationId && leg.session_id === sessionId && leg.profile_id === actor.profileId &&
-        leg.role === "operator" && leg.to_number === sip && leg.telnyx_call_control_id === input.callControlId) ?? [];
+        leg.role === "operator" && isTelnyxSipUriOf(leg.to_number, sipUsername) && leg.telnyx_call_control_id === input.callControlId) ?? [];
     // As `maybeSingle`: more than one row is an error, not a match.
     const { data, error } = known ? { data: own.length === 1 ? own[0] : null, error: known.legs.error ?? (own.length > 1 ? "ambiguous" : null) }
         : await deps.admin.from("motorist_call_legs").select("id").eq("organization_id", actor.organizationId).eq("session_id", sessionId)
-            .eq("profile_id", actor.profileId).eq("role", "operator").eq("to_number", sip).eq("telnyx_call_control_id", input.callControlId).maybeSingle();
+            .eq("profile_id", actor.profileId).eq("role", "operator").in("to_number", telnyxSipUris(sipUsername)).eq("telnyx_call_control_id", input.callControlId).maybeSingle();
     if (error)
         throw new MutationError("Účastníka hovoru sa nepodarilo overiť.", 503);
     if (!data)

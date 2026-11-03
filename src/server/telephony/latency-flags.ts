@@ -6,7 +6,7 @@ import { resolveAppEnvironment } from "@/lib/app-environment";
 import type { Database } from "@/lib/supabase/database.types";
 import type { MobileVoiceTuning } from "@/lib/mobile-api";
 import type { WebCallTuning } from "@/lib/telephony/active-calls-model";
-import type { SessionStartMode } from "./state/types";
+import { euSipDomainAllowed, type SessionStartMode, type TelnyxSipDomain } from "./state/types";
 import type { TelnyxConfig } from "./telnyx/env";
 
 /**
@@ -58,6 +58,13 @@ export type LatencyFlags = Record<typeof BOOLEAN_KEYS[number], boolean> & {
   /** 8–30 s; only for sessions frozen as concurrent. Sequential sessions keep `SEQUENTIAL_OWN_LEG_TIMEOUT_SECS`. */
   own_leg_timeout_secs_concurrent: number;
   api_region: "us" | "eu";
+  /**
+   * S5 SIP-domain spike (TEST experiment): the Telnyx SIP host every
+   * SIP-credential dial of a new session uses. Frozen only for a session we
+   * create that `api_region: "eu"` puts in the `eu` API region, and only on
+   * TEST (`startSipDomain`, `euSipDomainAllowed` in `state/types.ts`).
+   */
+  sip_domain: TelnyxSipDomain;
   /** 0 keeps undici's default. */
   http_keepalive_ms: number;
   /** Passed to the clients: `tuning` on the web, `voiceTuning` on the phone. */
@@ -78,6 +85,7 @@ export function defaultLatencyFlags(): LatencyFlags {
     concurrent_dial: { outbound: { web: false, mobile: false }, internal: { web: false, mobile: false } },
     own_leg_timeout_secs_concurrent: 12,
     api_region: "us",
+    sip_domain: "com",
     http_keepalive_ms: 0,
     client: { webEarlyAccept: false, webRtcRegion: "auto", webPrefetchIce: false, targetLocalFirst: false,
       mobileTokenCache: false, mobileRtcRegion: "auto", mobileTrickleIce: false, mobileRealtimeStatus: false,
@@ -140,6 +148,9 @@ function overrides(base: LatencyFlags, raw: unknown, source: "env" | "database",
       else ignore(key);
     } else if (key === "api_region") {
       if (value === "us" || value === "eu") next.api_region = value;
+      else ignore(key);
+    } else if (key === "sip_domain") {
+      if (value === "com" || value === "eu") next.sip_domain = value;
       else ignore(key);
     } else if (key === "http_keepalive_ms") {
       if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_KEEPALIVE_MS) next.http_keepalive_ms = value;
@@ -319,6 +330,36 @@ export function sessionApiRegion(metadata: unknown): "us" | "eu" {
   return startMode?.apiRegion === "eu" ? "eu" : "us";
 }
 
+type StartRegionInput = { direction: "inbound" | "outbound" | "internal"; providerRegion: "us" | "eu" };
+
+/**
+ * S5: a session we create is created and controlled in `eu` when the flag asks
+ * for it and this deployment may (`euApiRegionAllowed`). Otherwise, and always
+ * for an inbound call (Telnyx created it, in a region we have no evidence for
+ * on this account; a separate inbound switch would need the S5.0 inbound
+ * spike), it is the region of the host it really calls, so the frozen and
+ * logged region always match the host.
+ */
+function startApiRegion(flags: LatencyFlags, input: StartRegionInput): "us" | "eu" {
+  return HONOURED_START_SWITCHES.apiRegion && input.direction !== "inbound" && flags.api_region === "eu" && euApiRegionAllowed()
+    ? "eu" : input.providerRegion;
+}
+
+/**
+ * The SIP domain a new session freezes (S5 SIP-domain spike): `eu` only for a
+ * session we create (never an inbound call) that `api_region` itself puts in
+ * the `eu` API region, when `sip_domain` asks for it and this deployment may
+ * (`euSipDomainAllowed`). A region that merely names the deployment's host (a
+ * test or local `TELNYX_API_BASE_URL` on `.eu`) is not enough. A start builds
+ * its SIP URIs with this before the session row exists; `freezeStartMode`
+ * records the same value from the same flags, and the start refuses to create
+ * a session whose frozen domain differs from the one its URIs carry.
+ */
+export function startSipDomain(flags: LatencyFlags, input: StartRegionInput): TelnyxSipDomain {
+  return input.direction !== "inbound" && flags.api_region === "eu" && flags.sip_domain === "eu" &&
+    startApiRegion(flags, input) === "eu" && euSipDomainAllowed() ? "eu" : "com";
+}
+
 /**
  * What a new session keeps for its whole life, whatever the flags say later.
  *
@@ -350,16 +391,11 @@ export function freezeStartMode(flags: LatencyFlags, input: { direction: "inboun
   const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold && joinWithHoldAllowed();
   return { concurrent, autoBridge: autoBridge && !unlinkedFarDial,
     ownLegTimeoutSecs: concurrent ? flags.own_leg_timeout_secs_concurrent : SEQUENTIAL_OWN_LEG_TIMEOUT_SECS,
-    // S5: a session we create is created and controlled in `eu` when the flag
-    // asks for it and this deployment may (`euApiRegionAllowed`). Otherwise,
-    // and always for an inbound call (Telnyx created it, in a region we have
-    // no evidence for on this account; a separate inbound switch would need
-    // the S5.0 inbound spike), it records the region of the host it really
-    // calls, so the frozen and logged region always match the host.
-    apiRegion: HONOURED_START_SWITCHES.apiRegion && input.direction !== "inbound" && flags.api_region === "eu" && euApiRegionAllowed()
-      ? "eu" : input.providerRegion, origin: input.origin,
+    apiRegion: startApiRegion(flags, input), origin: input.origin,
     ...(holdJoinWithHold ? { holdJoinWithHold: true as const } : {}),
-    ...(unlinkedFarDial ? { farLinkTo: false as const } : {}) };
+    ...(unlinkedFarDial ? { farLinkTo: false as const } : {}),
+    // S5 SIP-domain spike: present only when `eu`, so every other start records exactly what it did before.
+    ...(startSipDomain(flags, input) === "eu" ? { sipDomain: "eu" as const } : {}) };
 }
 
 /**

@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { isUuid } from "@/lib/telephony/uuid";
 import { CallActionError } from "./service-errors";
-import { readMeta, telnyxSipUri, type TelephonyEnvironment } from "./state/types";
+import { isTelnyxSipUriOf, readMeta, type TelephonyEnvironment } from "./state/types";
 
 type Input = { deviceSessionId: string; callControlId: string };
 export type WebphoneOfferStatus = {
@@ -40,7 +40,7 @@ export async function getWebphoneOfferStatus(
   if (leg.error) throw new CallActionError("Hovor sa nepodarilo overiť.", 503);
   // A provider INVITE may arrive before the dial response is persisted.
   if (!leg.data) return result;
-  if (leg.data.role !== "operator" || leg.data.to_number !== telnyxSipUri(device.data.sip_username)) {
+  if (leg.data.role !== "operator" || !isTelnyxSipUriOf(leg.data.to_number, device.data.sip_username)) {
     throw new CallActionError("Hovor nepatrí tomuto telefónu.", 403);
   }
   const session = await admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId)
