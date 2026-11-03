@@ -849,6 +849,16 @@ function onBridged(b: TransitionBuilder, event: TelephonyEvent): ReduceResult {
   if (firstSignal && isCustomer(leg) && (b.session.direction === "outbound" || b.session.direction === "internal")) {
     return onLegAnswered(b, leg, { alreadyBridged: true, at: event.occurredAt ?? b.nowIso });
   }
+  // Call-speed S6.2: a leg of a concurrent start's pair reports itself
+  // bridged. That is the provider's evidence that the pair is connected,
+  // whichever leg answered first, whatever the other row says yet, and
+  // whether the bridge was Telnyx's own or our pending explicit one.
+  if (concurrentStart(b) && b.session.state === "ringing" && leg.answered_at) {
+    const far = concurrentFarLeg(b);
+    const isFar = far?.telnyx_call_control_id === leg.telnyx_call_control_id;
+    const isOwn = Boolean(far?.answered_at) && concurrentOwnLeg(b)?.telnyx_call_control_id === leg.telnyx_call_control_id;
+    if (isFar || isOwn) return connectCall(b, event.occurredAt ?? b.nowIso, `${isFar ? "far end" : "own leg"} bridged → talking`);
+  }
   return b.note("bridged").result();
 }
 
@@ -911,7 +921,7 @@ function onLegAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged
   if (leg.role === "supervisor") return onSupervisorAnswered(b, leg);
   if (intent === PARTY_INTENT) return onAddedPartyAnswered(b, leg);
 
-  if (intent === "outbound" || intent === "internal_caller") return onOwnLegAnswered(b, leg, intent);
+  if (intent === "outbound" || intent === "internal_caller") return onOwnLegAnswered(b, leg, intent, opts);
   if (intent === "internal") return onInternalCalleeAnswered(b, leg, opts);
   return onOfferAnswered(b, leg, opts);
 }
@@ -1497,17 +1507,187 @@ function offerQueuedCall(b: TransitionBuilder, customer: LegRow): boolean {
 /** Outbound/internal: the far end answered → the bridge command placed at dial time completes. */
 function onFarEndAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
   if (b.session.state !== "ringing") return b.note("far end answered outside ringing").result();
+  if (concurrentStart(b)) return onConcurrentFarAnswered(b, leg, opts);
   if (b.meta.outbound_audio_gate && !b.meta.outbound_auto_bridge && !opts.alreadyBridged) {
     const operator = b.answeringLeg();
     if (!operator || b.legEnded(operator)) return b.note("outbound operator no longer available").result();
     b.cmd({ kind: "bridge", commandId: b.cmdId(leg.telnyx_call_control_id, "bridge:outbound:announced"), leg: ref(leg), target: ref(operator), parkAfterUnbridge: "self" });
   }
-  b.setState("talking").patchSession({ answered_at: b.session.answered_at ?? opts.at });
+  return connectCall(b, opts.at, "far end answered → talking");
+}
+
+/**
+ * Call-speed S6.2, the customer of a concurrent start answered. Dialled with
+ * the operator's own leg, it can answer first; nothing is connected until
+ * there is bridged evidence or both legs have answered, whatever order the
+ * events are processed in (`connectConcurrent` decides the bridge).
+ */
+function onConcurrentFarAnswered(b: TransitionBuilder, leg: LegRow, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
+  const own = concurrentOwnLeg(b);
+  if (!concurrentBridged(own, leg, opts) && !own?.answered_at) return awaitOwnLeg(b, opts.at).result();
+  if (own && connectConcurrent(b, own, leg, opts, { farAt: opts.at, ownAt: own.answered_at })) return b.result();
+  return connectCall(b, opts.at, "far end answered → talking");
+}
+
+/** The conversation starts: both parties are, or are being, connected. */
+function connectCall(b: TransitionBuilder, at: string, note: string): ReduceResult {
+  b.setState("talking").patchSession({ answered_at: b.session.answered_at ?? at });
   b.call.status = "answered";
-  b.call.answered_at = b.session.answered_at ?? opts.at;
-  b.call.ring_seconds = secondsBetween(b.session.started_at, opts.at);
-  b.note("far end answered → talking");
-  return b.result();
+  b.call.answered_at = b.session.answered_at ?? at;
+  b.call.ring_seconds = secondsBetween(b.session.started_at, at);
+  return b.note(note).result();
+}
+
+/** Call-speed S6.1: the far end was dialled in the startup entry, next to the own leg. */
+function concurrentStart(b: TransitionBuilder): boolean {
+  return b.meta.far_end?.mode === "concurrent";
+}
+
+/** The operator's own leg of an outgoing or colleague call, while it is open. */
+function concurrentOwnLeg(b: TransitionBuilder): LegRow | undefined {
+  const intent = b.session.direction === "internal" ? "internal_caller" : "outbound";
+  return b.openLegs().find((leg) => leg.role === "operator" && legIntent(leg) === intent && leg.profile_id === b.session.answered_by_profile_id);
+}
+
+/** The open far leg of a concurrent start: the customer, or the colleague's accepted endpoint. */
+function concurrentFarLeg(b: TransitionBuilder): LegRow | undefined {
+  if (b.session.direction !== "internal") return b.openLegs().find(isCustomer);
+  const target = b.meta.internal?.target_profile_id;
+  const accepted = target ? b.meta.accepted_device_legs?.[target] : undefined;
+  return b.openLegs().find((leg) => accepted ? leg.telnyx_call_control_id === accepted : legIntent(leg) === "internal" && Boolean(leg.answered_at));
+}
+
+/** Provider evidence that the pair is already bridged: this event, or a `call.bridged` either leg already reported. */
+function concurrentBridged(own: LegRow | undefined, far: LegRow, opts: { alreadyBridged: boolean }): boolean {
+  return opts.alreadyBridged || Boolean(far.bridged_at) || Boolean(own?.bridged_at);
+}
+
+/**
+ * Whether the far end answered before (or with) the own leg, by the
+ * provider's own answer times. Unknown counts as yes: the bridge it leads to
+ * is harmless when Telnyx already bridged the pair (422 "already bridged").
+ */
+function farAnsweredFirst(farAt: string | null, ownAt: string | null): boolean {
+  const far = Date.parse(farAt ?? ""), own = Date.parse(ownAt ?? "");
+  return !Number.isFinite(far) || !Number.isFinite(own) || far <= own;
+}
+
+/** Whether Telnyx itself bridges this far leg to an answered own leg (`bridge_on_answer`). */
+function providerBridgesAtAnswer(b: TransitionBuilder, far: LegRow): boolean {
+  return b.session.direction === "internal" ? autoBridgedColleagueLeg(b, far) : Boolean(b.meta.outbound_auto_bridge);
+}
+
+/**
+ * S6.2, both legs of a concurrent start have answered and this event is the
+ * second answer. Without bridged evidence the pair gets the explicit bridge
+ * when the far end answered first at the provider (Telnyx may or may not
+ * complete that bridge itself: outcomes A and B) or when Telnyx never bridges
+ * this far leg; otherwise Telnyx bridged it at the far end's answer. Returns
+ * true while that explicit bridge waits for its evidence: the call stays
+ * `ringing` until then (a duplicate answer sends no second bridge).
+ */
+function connectConcurrent(b: TransitionBuilder, own: LegRow, far: LegRow, opts: { alreadyBridged: boolean }, at: { farAt: string | null; ownAt: string | null }): boolean {
+  if (concurrentBridged(own, far, opts)) return false;
+  if (!farAnsweredFirst(at.farAt, at.ownAt) && providerBridgesAtAnswer(b, far)) return false;
+  if (!b.meta.far_end?.bridge) bridgeConcurrentPair(b, own, far, at.farAt);
+  return true;
+}
+
+/** S6.2: how long an explicit concurrent bridge waits for its `call.bridged` evidence before the sweep ends both legs. */
+export const CONCURRENT_BRIDGE_DEADLINE_MS = 8_000;
+
+/**
+ * The explicit bridge of S6.2, in today's direction: the operator's leg
+ * bridges to the far end and parks itself if that bridge ends. It is not the
+ * connection: `call.bridged` is. A refusal of any wording (Telnyx may have
+ * bridged the pair itself), a 5xx or a lost response therefore neither
+ * connects the call nor tears it down; the call stays `ringing` until the
+ * evidence arrives, and the sweep at `deadlineAt` ends a pair that never
+ * proved itself connected (`onConcurrentBridgeDeadline`). The customer's
+ * bridge keeps the contact intent of the dial that reached them (callback
+ * contact proof).
+ */
+function bridgeConcurrentPair(b: TransitionBuilder, own: LegRow, far: LegRow, farAt: string | null): void {
+  const bridgeId = b.cmdId(own.telnyx_call_control_id, "bridge:concurrent");
+  const contact = b.session.direction === "outbound" ? b.meta.outbound_auto_bridge?.commandId : undefined;
+  b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(own), target: ref(far), parkAfterUnbridge: "self", concurrentBridge: true, bestEffort: true,
+    ...(contact ? { contactCommandId: contact } : {}) });
+  const farEnd = b.meta.far_end!;
+  b.patchMeta({ far_end: { ...farEnd, answeredAt: farEnd.answeredAt ?? farAt ?? b.nowIso,
+    bridge: { commandId: bridgeId, sentAt: b.nowIso, deadlineAt: new Date(b.ctx.now.getTime() + CONCURRENT_BRIDGE_DEADLINE_MS).toISOString() } } });
+  b.note("explicit concurrent bridge sent → waiting for its call.bridged");
+}
+
+/**
+ * S6.2, the sweep after an explicit concurrent bridge's deadline. A bridge
+ * Telnyx accepted (2xx), or a leg that reported itself bridged, connects the
+ * call; anything else (refused, unknown, no `call.bridged`) was never a
+ * conversation: both legs end as `bridge_failed`, presence is released once
+ * and the history keeps no answer.
+ */
+function onConcurrentBridgeDeadline(b: TransitionBuilder): ReduceResult | null {
+  const bridge = b.meta.far_end?.bridge;
+  if (b.session.state !== "ringing" || !concurrentStart(b) || !bridge) return null;
+  const deadline = Date.parse(bridge.deadlineAt);
+  if (!Number.isFinite(deadline) || deadline > b.ctx.now.getTime()) return null;
+  const own = concurrentOwnLeg(b), far = concurrentFarLeg(b);
+  if (bridge.acceptedAt || own?.bridged_at || far?.bridged_at) return connectCall(b, bridge.acceptedAt ?? b.nowIso, "concurrent bridge accepted → talking");
+  b.setState("ended").patchSession({ ended_at: b.nowIso, answered_at: null });
+  b.call.status = "ended";
+  b.call.end_reason = "bridge_failed";
+  b.call.answered_at = null;
+  b.call.ended_at = b.nowIso;
+  for (const leg of b.openLegs()) b.cmd(hangupCmd(b, leg, "bridge_failed"));
+  releaseTalkingOperators(b, false);
+  return b.note("concurrent bridge unproven at its deadline → both legs ended").result();
+}
+
+/**
+ * Call-speed S6.2: why a concurrent start that never connected ended with its
+ * far leg. A colleague whose answer was refused because they had become busy
+ * is `colleague_busy`. A far end that answered — its row says so, or Telnyx
+ * cleared it normally before its `call.answered` was processed — and hung up
+ * itself (`hangup_source: callee`) left before the connection; one the
+ * provider (outcome C) or we cleared is `bridge_failed`. Anything else is an
+ * ordinary unanswered ring (null).
+ */
+function concurrentFarEndReason(b: TransitionBuilder, leg: LegRow, event: TelephonyEvent): string | null {
+  if (!concurrentStart(b)) return null;
+  if (b.meta.far_end?.busyControlId === leg.telnyx_call_control_id) return "colleague_busy";
+  const answered = Boolean(leg.answered_at) || (event.hangupCause ?? "").toLowerCase() === "normal_clearing";
+  if (!answered) return null;
+  if (event.hangupSource === "callee") return b.session.direction === "internal" ? "colleague_left_before_connect" : "customer_left_before_connect";
+  return "bridge_failed";
+}
+
+/**
+ * S6.2, the far end answered before the operator's own leg: nothing is
+ * connected yet. Record it and keep ringing — in silence (owner default),
+ * bounded by the own leg's frozen timeout, whose hangup ends both.
+ */
+function awaitOwnLeg(b: TransitionBuilder, at: string): TransitionBuilder {
+  const farEnd = b.meta.far_end;
+  if (farEnd && !farEnd.answeredAt) b.patchMeta({ far_end: { ...farEnd, answeredAt: at } });
+  return b.note("far end answered before the own leg → waiting for the own leg");
+}
+
+/** Call-speed S6.3: a colleague leg that Telnyx bridges to the caller itself at answer (frozen marker). */
+function autoBridgedColleagueLeg(b: TransitionBuilder, leg: LegRow): boolean {
+  const dialId = (leg.metadata as { dial_command_id?: unknown } | null)?.dial_command_id;
+  return typeof dialId === "string" && Boolean(b.meta.internal_auto_bridge?.commandIds?.includes(dialId));
+}
+
+/**
+ * Frozen `start_mode.autoBridge`: the colleague dial carries `bridge_on_answer`
+ * (writer contract 2 only, like the concurrent start; a legacy writer keeps
+ * the explicit bridge). A colleague with web and mobile endpoints keeps the
+ * explicit bridge too: the server picks the winner, and with two auto-bridged
+ * endpoints Telnyx could bridge one while the server accepts the other (spike
+ * S6.0/3 decides whether that can be widened).
+ */
+function internalAutoBridge(b: TransitionBuilder): boolean {
+  return b.session.direction === "internal" && b.meta.start_mode?.autoBridge === true && !b.meta.internal?.endpoints?.length &&
+    b.session.writer_contract === 2 && (telephonyStabilityEnabled() || hasStabilityContract(b.session));
 }
 
 /** Internal call: the colleague answered → reserve them, the bridge placed at dial time completes. */
@@ -1518,17 +1698,35 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
   }
   const rejected = b.fork();
   rejected.cmd(hangupCmd(rejected, leg, "operator_busy", false));
-  b.setState("talking").patchSession({ answered_at: b.session.answered_at ?? opts.at });
-  b.call.status = "answered";
-  b.call.answered_at = b.session.answered_at ?? opts.at;
-  b.call.ring_seconds = secondsBetween(b.session.started_at, opts.at);
+  // S6.2: the hangup of this refused leg then ends the call as `colleague_busy`.
+  const farEnd = b.meta.far_end;
+  if (farEnd) rejected.patchMeta({ far_end: { ...farEnd, busyControlId: leg.telnyx_call_control_id } });
+  const caller = b.openLegs().find((other) => legIntent(other) === "internal_caller");
+  const concurrent = concurrentStart(b);
+  // S6.2: a concurrent start connects on bridged evidence or once the caller's
+  // own leg has answered; until then the colleague is accepted but waits. An
+  // explicit bridge also waits, for its own `call.bridged`.
+  const waiting = concurrent && !concurrentBridged(caller, leg, opts) && !caller?.answered_at;
+  const bridgePending = concurrent && !waiting && caller ? connectConcurrent(b, caller, leg, opts, { farAt: opts.at, ownAt: caller.answered_at }) : false;
+  if (waiting) awaitOwnLeg(b, opts.at);
+  else if (!bridgePending) {
+    b.setState("talking").patchSession({ answered_at: b.session.answered_at ?? opts.at });
+    b.call.status = "answered";
+    b.call.answered_at = b.session.answered_at ?? opts.at;
+    b.call.ring_seconds = secondsBetween(b.session.started_at, opts.at);
+  }
   if (telephonyStabilityEnabled() || hasStabilityContract(b.session) || b.meta.internal?.endpoints?.length || (leg.client_state as { autoAnswer?: boolean } | null)?.autoAnswer) {
-    const caller = b.openLegs().find((other) => legIntent(other) === "internal_caller");
     if (!caller) throw new CallActionRejected("Volajúci už nie je pripojený.", 409);
-    const bridgeId = b.cmdId(leg.telnyx_call_control_id, "bridge:mobile-internal");
-    b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(caller), target: ref(leg), parkAfterUnbridge: "self" });
-    const failed = b.fork();
-    b.compensate(bridgeId, "mobile internal connection failed", [hangupCmd(failed, leg, "mobile_bridge_failed")], failed.transition());
+    if (!concurrent && !autoBridgedColleagueLeg(b, leg)) {
+      // S6.3: Telnyx bridges an auto-bridged leg to the answered caller
+      // itself. A leg this call cannot prove it dialled with the auto-bridge
+      // may have been bridged anyway.
+      const bridgeId = b.cmdId(leg.telnyx_call_control_id, "bridge:mobile-internal");
+      b.cmd({ kind: "bridge", commandId: bridgeId, leg: ref(caller), target: ref(leg), parkAfterUnbridge: "self",
+        ...(b.meta.internal_auto_bridge ? { alreadyBridgedOk: true as const } : {}) });
+      const failed = b.fork();
+      b.compensate(bridgeId, "mobile internal connection failed", [hangupCmd(failed, leg, "mobile_bridge_failed")], failed.transition());
+    }
   }
   acceptDeviceLeg(b, leg);
   const winningAttempt = b.attemptForLeg(leg);
@@ -1539,17 +1737,39 @@ function onInternalCalleeAnswered(b: TransitionBuilder, leg: LegRow, opts: { alr
         : { result: "cancelled", ended_at: opts.at });
     }
   }
-  b.note("colleague answered → talking");
+  if (!waiting && !bridgePending) b.note("colleague answered → talking");
   if (leg.profile_id) b.guard = { profileId: leg.profile_id, offerToken: (leg.client_state as TelnyxClientState | null)?.offerToken,
     allowPaused: true, onRejected: { next: rejected.transition(), commands: rejected.commands } };
   return b.result();
 }
 
-/** Reuse durable endpoint dispatch; one refused endpoint cannot end its sibling. */
-function fanoutInternalColleague(b: TransitionBuilder, caller: LegRow): ReduceResult {
+/**
+ * The operator's own leg as a dial target: its row once it exists, or (S6.1)
+ * the dial of the same startup entry that creates it.
+ */
+type OwnLegRef = LegRow | { fromDial: string };
+
+function ownLegLink(own: OwnLegRef): string | { fromDial: string } {
+  return "telnyx_call_control_id" in own ? own.telnyx_call_control_id : { fromDial: own.fromDial };
+}
+
+function ownLegHangup(b: TransitionBuilder, own: OwnLegRef, reason: string): Command {
+  if ("telnyx_call_control_id" in own) return hangupCmd(b, own, reason);
+  return { kind: "hangup", commandId: b.cmdId(own.fromDial, `hangup:${reason}`), leg: { fromDial: own.fromDial }, reason, bestEffort: true };
+}
+
+/** Telnyx connects an auto-bridged colleague to the caller at answer (S6.3). */
+const AUTO_BRIDGE_DIAL = { bridgeOnAnswer: true, preventDoubleBridge: true, parkAfterUnbridge: "self" } as const;
+
+/**
+ * Reuse durable endpoint dispatch; one refused endpoint cannot end its sibling.
+ * `callerToken` is the caller's reservation while its leg does not exist yet.
+ */
+function fanoutInternalColleague(b: TransitionBuilder, caller: OwnLegRef, callerToken?: string): RingFanout {
   const internal = b.meta.internal!;
   const endpoints = internal.endpoints!;
   const step = 0;
+  const autoBridge = internalAutoBridge(b);
   const attempts: RingFanout["attempts"] = endpoints.map((endpoint, position) => ({
     stepIndex: step, ringGroupId: null, memberKind: "operator", profileId: internal.target_profile_id,
     externalNumber: null, position, ringSecs: INTERNAL_TIMEOUT_SECS, application: true, applicationDevice: endpoint.device,
@@ -1559,22 +1779,26 @@ function fanoutInternalColleague(b: TransitionBuilder, caller: LegRow): ReduceRe
     to: endpoint.sipUri, from: b.ctx.fromNumber ?? b.session.caller_number ?? "", role: "operator",
     profileId: internal.target_profile_id, externalNumber: null,
     clientState: { sid: b.session.id, role: "operator", operatorId: internal.target_profile_id, intent: "internal", step, ...(endpoint.device === "mobile" ? { applicationDevice: "mobile" as const } : {}) },
-    linkTo: caller.telnyx_call_control_id, timeoutSecs: INTERNAL_TIMEOUT_SECS, colleagueCall: true,
+    linkTo: ownLegLink(caller), timeoutSecs: INTERNAL_TIMEOUT_SECS, colleagueCall: true,
     ...(internal.caller_display ? { fromDisplayName: internal.caller_display } : {}),
+    ...(autoBridge ? AUTO_BRIDGE_DIAL : {}),
     attempt: { stepIndex: step, profileId: internal.target_profile_id, externalNumber: null, applicationDevice: endpoint.device },
   }));
+  if (autoBridge) b.patchMeta({ internal_auto_bridge: { commandIds: dials.map(dial => dial.commandId) } });
   b.setState("ringing").patchMeta({ ring: { ...(b.meta.ring ?? {}), mode: "internal", active_step: null } });
-  b.cmd({ kind: "ring_fanout", internal: true, step, guard: null, attempts, dials,
-    ringingProfileIds: [internal.target_profile_id], deadlineAt: stepDeadline(b.ctx.now, INTERNAL_TIMEOUT_SECS) });
+  const fanout: RingFanout = { kind: "ring_fanout", internal: true, step, guard: null, attempts, dials,
+    ringingProfileIds: [internal.target_profile_id], deadlineAt: stepDeadline(b.ctx.now, INTERNAL_TIMEOUT_SECS) };
+  b.cmd(fanout);
   const failed = b.fork();
   failed.setState("failed").patchSession({ ended_at: b.nowIso });
   failed.call.status = "failed";
   failed.call.end_reason = "dial_failed";
   for (const profileId of [internal.by, internal.target_profile_id]) {
-    failed.presenceChange({ profileId, status: "available", sessionId: null, onlyIfSession: b.session.id, reason: "all colleague endpoints failed" });
+    failed.presenceChange({ profileId, status: "available", sessionId: null, onlyIfSession: b.session.id,
+      ...(profileId === internal.by && callerToken ? { onlyIfToken: callerToken } : {}), reason: "all colleague endpoints failed" });
   }
-  b.compensate(`ring_fanout:${step}`, "all colleague endpoints failed → hang up caller", [hangupCmd(b, caller, "dial_failed")], failed.transition());
-  return b.note("own leg answered → dialing colleague application endpoints").result();
+  b.compensate(`ring_fanout:${step}`, "all colleague endpoints failed → hang up caller", [ownLegHangup(b, caller, "dial_failed")], failed.transition());
+  return fanout;
 }
 
 /** The operator's own WebRTC leg answered (click-to-call / internal call) → dial the far end and bridge with ringback. */
@@ -1589,22 +1813,17 @@ function canDirectConnectOutbound(b: TransitionBuilder): boolean {
     !recording?.pendingAudio && !recording?.barrier && !recording?.recorders.some((recorder) => recorder.observed !== "stopped");
 }
 
-function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): ReduceResult {
-  if (b.session.state !== "received") return b.note("own leg answered outside received").result();
+/**
+ * The far end of an outgoing call — the customer, or the colleague's single
+ * endpoint — linked to the operator's own leg. Shared by the sequential start
+ * (`onOwnLegAnswered`) and the concurrent one (`planInitialCall`, S6.1).
+ */
+function dialFarEnd(b: TransitionBuilder, own: OwnLegRef, intent: string): DialCommand | null {
   const meta = b.meta;
-  // The caller's own leg is the accepted endpoint of the call it placed; hold
-  // authority and the other-device protections need its exact control ID.
-  if (leg.role === "operator" && leg.profile_id && b.session.answered_by_profile_id === leg.profile_id &&
-      (b.session.direction === "internal" && intent === "internal_caller" && meta.internal?.by === leg.profile_id ||
-       b.session.direction === "outbound" && intent === "outbound" && meta.outbound?.by === leg.profile_id)) {
-    rememberAcceptedDeviceLeg(b, leg);
-  }
-  if (intent !== "outbound" && meta.internal?.endpoints?.length) return fanoutInternalColleague(b, leg);
-  let dial: DialCommand;
   if (intent === "outbound") {
     const outbound = meta.outbound;
-    if (!outbound) return ignoredResult("outbound session without target");
-    dial = {
+    if (!outbound) return null;
+    const dial: DialCommand = {
       kind: "dial",
       commandId: b.cmdId("customer", "dial:outbound"),
       to: outbound.to,
@@ -1613,7 +1832,7 @@ function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): Re
       profileId: null,
       externalNumber: outbound.to,
       clientState: customerState(b.session.id, "outbound"),
-      linkTo: leg.telnyx_call_control_id,
+      linkTo: ownLegLink(own),
       timeoutSecs: OUTBOUND_TIMEOUT_SECS,
     };
     if (canDirectConnectOutbound(b)) {
@@ -1621,27 +1840,54 @@ function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): Re
       dial.preventDoubleBridge = true;
       dial.parkAfterUnbridge = "self";
       dial.clientState.intent = contactOperationIntent(dial.commandId);
-      b.patchMeta({ outbound_auto_bridge: { commandId: dial.commandId, operatorControlId: leg.telnyx_call_control_id, startedAt: b.nowIso } });
+      b.patchMeta({ outbound_auto_bridge: { commandId: dial.commandId, operatorControlId: "telnyx_call_control_id" in own ? own.telnyx_call_control_id : null, startedAt: b.nowIso } });
     }
-  } else {
-    const internal = meta.internal;
-    if (!internal) return ignoredResult("internal session without target");
-    dial = {
-      kind: "dial",
-      commandId: b.cmdId(internal.target_profile_id, "dial:internal"),
-      to: internal.target_sip,
-      from: b.ctx.fromNumber ?? b.session.caller_number ?? "",
-      role: "operator",
-      profileId: internal.target_profile_id,
-      externalNumber: null,
-      clientState: { sid: b.session.id, role: "operator", operatorId: internal.target_profile_id, intent: "internal" },
-      linkTo: leg.telnyx_call_control_id,
-      timeoutSecs: INTERNAL_TIMEOUT_SECS,
-      colleagueCall: true,
-      // The colleague's phone shows who is calling instead of the company line.
-      ...(internal.caller_display ? { fromDisplayName: internal.caller_display } : {}),
-    };
+    return dial;
   }
+  const internal = meta.internal;
+  if (!internal) return null;
+  const autoBridge = internalAutoBridge(b);
+  const dial: DialCommand = {
+    kind: "dial",
+    commandId: b.cmdId(internal.target_profile_id, "dial:internal"),
+    to: internal.target_sip,
+    from: b.ctx.fromNumber ?? b.session.caller_number ?? "",
+    role: "operator",
+    profileId: internal.target_profile_id,
+    externalNumber: null,
+    clientState: { sid: b.session.id, role: "operator", operatorId: internal.target_profile_id, intent: "internal" },
+    linkTo: ownLegLink(own),
+    timeoutSecs: INTERNAL_TIMEOUT_SECS,
+    colleagueCall: true,
+    // The colleague's phone shows who is calling instead of the company line.
+    ...(internal.caller_display ? { fromDisplayName: internal.caller_display } : {}),
+    ...(autoBridge ? AUTO_BRIDGE_DIAL : {}),
+  };
+  if (autoBridge) b.patchMeta({ internal_auto_bridge: { commandIds: [dial.commandId] } });
+  return dial;
+}
+
+/** The caller's own leg is the accepted endpoint of the call it placed; hold authority and the other-device protections need its exact control ID. */
+function rememberOwnLeg(b: TransitionBuilder, leg: LegRow, intent: string): void {
+  const meta = b.meta;
+  if (leg.role === "operator" && leg.profile_id && b.session.answered_by_profile_id === leg.profile_id &&
+      (b.session.direction === "internal" && intent === "internal_caller" && meta.internal?.by === leg.profile_id ||
+       b.session.direction === "outbound" && intent === "outbound" && meta.outbound?.by === leg.profile_id)) {
+    rememberAcceptedDeviceLeg(b, leg);
+  }
+}
+
+function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
+  if (concurrentStart(b)) return onConcurrentOwnLegAnswered(b, leg, intent, opts);
+  if (b.session.state !== "received") return b.note("own leg answered outside received").result();
+  const meta = b.meta;
+  rememberOwnLeg(b, leg, intent);
+  if (intent !== "outbound" && meta.internal?.endpoints?.length) {
+    fanoutInternalColleague(b, leg);
+    return b.note("own leg answered → dialing colleague application endpoints").result();
+  }
+  const dial = dialFarEnd(b, leg, intent);
+  if (!dial) return ignoredResult(intent === "outbound" ? "outbound session without target" : "internal session without target");
   b.cmd(dial);
   if (intent !== "outbound" && !telephonyStabilityEnabled() && !hasStabilityContract(b.session)) b.cmd({
     kind: "bridge",
@@ -1660,6 +1906,80 @@ function onOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string): Re
   b.compensate(dial.commandId, "far-end dial failed → hang up the operator leg", [hangupCmd(b, leg, "dial_failed")], failed.transition());
   b.note(`own leg answered → dialing ${intent === "outbound" ? "customer" : "colleague"}`);
   return b.result();
+}
+
+/**
+ * Call-speed S6.2: the own leg of a concurrent start answered. The far end was
+ * dialled with it, so nothing is dialled here. A far end still ringing is
+ * connected at its own answer; one that has answered is connected now, with
+ * the explicit bridge only where `connectConcurrent` finds it needed.
+ */
+function onConcurrentOwnLegAnswered(b: TransitionBuilder, leg: LegRow, intent: string, opts: { alreadyBridged: boolean; at: string }): ReduceResult {
+  if (!["received", "ringing", "talking"].includes(b.session.state)) return b.note("own leg answered outside a concurrent start").result();
+  rememberOwnLeg(b, leg, intent);
+  if (b.session.state === "talking") return b.note("own leg answered; the far end is already connected").result();
+  const far = concurrentFarLeg(b);
+  if (!far?.answered_at) return b.note("own leg answered; the far end still rings").result();
+  if (connectConcurrent(b, leg, far, opts, { farAt: far.answered_at, ownAt: opts.at })) return b.result();
+  return connectCall(b, opts.at, "own leg answered after the far end → talking");
+}
+
+/**
+ * Call-speed S6.1: the startup entry of an outgoing or colleague call. Command
+ * 1 is the operator's own-leg dial. A session frozen as concurrent dials the
+ * far end in the same entry right after it (command 2, linked to command 1's
+ * leg), so it no longer waits for the own leg to answer: outbound only when it
+ * can connect directly (no announcement, no recording), never a callback.
+ * Everything else keeps today's single dial, unchanged.
+ */
+export function planInitialCall(session: SessionRow, context: RoutingContext, event: AppEvent,
+  input: { ownDial: DialCommand; offerToken?: string }): ReduceResult {
+  const own = input.ownDial;
+  const operatorId = own.profileId ?? "";
+  const meta = readMeta(session);
+  const refused = emptyTransition();
+  refused.session = { state: "failed", ended_at: context.now.toISOString() };
+  refused.call = { status: "failed", end_reason: "dial_failed" };
+  refused.presence = [{ profileId: operatorId, status: "available", sessionId: null,
+    onlyIfSession: session.id, onlyIfToken: input.offerToken, reason: "initial dial refused" }];
+  const release = { forCommand: own.commandId, description: "release refused initial dial", commands: [], next: refused };
+  const b = new TransitionBuilder(session, [], [], event, context);
+  const concurrent = meta.start_mode?.concurrent === true && !meta.callbackRequestId &&
+    (session.direction === "internal" ? Boolean(meta.internal) : Boolean(meta.outbound) && canDirectConnectOutbound(b));
+  if (!concurrent) {
+    const next = emptyTransition();
+    next.call = { status: "outbound" };
+    next.notes = ["initial operator dial materialization"];
+    // `start_mode` is written once, at creation (S5 pins its API region); a
+    // start that runs sequentially is recorded by the missing `far_end`.
+    return { next, commands: [own], compensations: [release], guard: null, ignored: null };
+  }
+  const timeout = meta.start_mode?.ownLegTimeoutSecs;
+  const ownRef = { fromDial: own.commandId };
+  b.cmd({ ...own, timeoutSecs: typeof timeout === "number" && Number.isInteger(timeout) && timeout >= 8 && timeout <= 30 ? timeout : 12 });
+  b.compensate(own.commandId, release.description, [], refused);
+  let farCommandId: string;
+  if (session.direction === "internal" && meta.internal?.endpoints?.length) {
+    fanoutInternalColleague(b, ownRef, input.offerToken);
+    farCommandId = "ring_fanout:0";
+  } else {
+    const intent = session.direction === "internal" ? "internal_caller" : "outbound";
+    const dial = dialFarEnd(b, ownRef, intent)!;
+    b.cmd(dial);
+    farCommandId = dial.commandId;
+    if (intent === "outbound") b.patchMeta({ outbound_audio_gate: true, announcements: meta.announcements ?? context.announcements ?? announcementConfigFromMetadata(context.line?.metadata) });
+    b.setState("ringing").patchMeta({ ring: { ...(meta.ring ?? {}), mode: intent === "outbound" ? "outbound" : "internal", active_step: null } });
+    const failed = b.fork();
+    failed.setState("failed").patchSession({ ended_at: b.nowIso });
+    failed.call.status = "failed";
+    failed.call.end_reason = "dial_failed";
+    failed.presenceChange({ profileId: operatorId, status: "available", sessionId: null, onlyIfSession: session.id, onlyIfToken: input.offerToken, reason: "dial failed" });
+    b.compensate(dial.commandId, "far-end dial failed → hang up the operator leg", [ownLegHangup(b, ownRef, "dial_failed")], failed.transition());
+  }
+  b.patchMeta({ far_end: { commandId: farCommandId, mode: "concurrent", dialedAt: b.nowIso } });
+  b.call.status = "outbound";
+  b.note("initial operator dial materialization");
+  return b.note("far end dialled together with the own leg (concurrent start)").result();
 }
 
 /** A ring/transfer/pickup/internal offer leg answered. */
@@ -1964,9 +2284,12 @@ function onInternalPartyHangup(b: TransitionBuilder, leg: LegRow, event: Telepho
     } else {
       b.setState("ended").patchSession({ ended_at: at });
       b.call.status = "ended";
+      // S6.2: in a concurrent start the colleague can answer before the
+      // caller's own leg (and leave, or be busy), and the caller's leg can
+      // time out unanswered.
       b.call.end_reason = intent === "internal"
-        ? classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause })
-        : "operator_cancel";
+        ? concurrentFarEndReason(b, leg, event) ?? classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause })
+        : concurrentStart(b) && !leg.answered_at ? "operator_leg_unavailable" : "operator_cancel";
       b.call.ended_at = at;
       releaseTalkingOperators(b, false);
       b.note(intent === "internal" ? "colleague did not answer → call ended" : "caller cancelled before the colleague answered");
@@ -2060,7 +2383,10 @@ function onCustomerHangup(b: TransitionBuilder, leg: LegRow, event: TelephonyEve
     const answered = Boolean(b.session.answered_at);
     b.setState(answered ? "wrap_up" : "ended");
     b.call.status = answered ? "ended" : b.session.direction === "inbound" ? "missed" : "ended";
-    b.call.end_reason = answered ? cause : classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause });
+    // S6.2: a far end that answered a concurrent start and left (or was hung
+    // up by the provider) before the call connected was never a conversation.
+    b.call.end_reason = answered ? cause : concurrentFarEndReason(b, leg, event)
+      ?? classifyRingHangup({ hangupCause: event.hangupCause, sipHangupCause: event.sipHangupCause });
     b.call.ended_at = at;
     if (!answered && b.session.direction === "inbound") {
       b.callback({ source: "missed", callerNumber: b.session.caller_number ?? "", createTask: Boolean(b.session.case_id) });
@@ -3550,6 +3876,8 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   if (ACTIVE_SESSION_STATES.has(state) && customer && b.legEnded(customer) && b.openLegs().length === 0) {
     return finaliseAlreadyEndedCall(b);
   }
+  const concurrentBridgeDue = onConcurrentBridgeDeadline(b);
+  if (concurrentBridgeDue) return concurrentBridgeDue;
   const pickup = b.session.presence_pickup as { v?: number; profileId?: string; offerToken?: string; expiresAt?: string } | null;
   // A colleague who accepted a colleague call in the mobile app talks on it
   // without owning the session (the caller does); their claim is not stale.

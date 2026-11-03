@@ -47,6 +47,12 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 async function talking(fastWeb: boolean, more: Partial<LatencyFlags> = {}) {
+  // Until spike S7.0 passes only a TEST deployment freezes join-with-hold: the stable TEST project's identity.
+  if (more.hold_join_with_hold) {
+    for (const [key, value] of Object.entries({ MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev",
+      VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk", SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co",
+      APP_BASE_URL: "https://test.dispecing.linkapomoci.sk" })) vi.stubEnv(key, value);
+  }
   h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
   h.deps.latencyFlags = { ...defaultLatencyFlags(), hold_fast_web: fastWeb, ...more };
   const call = await h.inbound({ to: NUMBERS.allianz });

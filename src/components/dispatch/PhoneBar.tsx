@@ -46,6 +46,9 @@ import {
   callElapsedSeconds,
   DTMF_KEYS,
   formatCallTimer,
+  LOCAL_FIRST_TALKING_MS,
+  localFirstCandidate,
+  localFirstTalking,
   partyBusyKey,
   phoneBarCapabilities,
   phoneBarCallMatchesBrowser,
@@ -85,6 +88,8 @@ export type PhoneBarProps = {
   onOpenCase: (caseId: string) => void;
   onResumeAudio?: () => void;
   outboundPending?: boolean;
+  /** Fresh snapshot, when the local-first state times out (call-speed S6.4). */
+  onRefresh?: () => void;
 };
 
 const STATE_TONES: Record<"live" | "hold" | "ring" | "wait", string> = {
@@ -185,6 +190,18 @@ function PhoneBarControls(props: PhoneBarProps) {
   const focus = phoneBarFocusedCall(model, phone.call);
   const degraded = focus ? props.degradedSessionIds.has(focus.sessionId) : false;
   const recordingCallId = focus?.kind === "active" && focus.mine ? focus.callId : null;
+  // Call-speed S6.4: an answering colleague's own media is trusted for a
+  // moment; then the server decides again, and the bar asks it right away.
+  const localFirstId = localFirstCandidate(focus, phone.call, model.targetLocalFirst === true) ? phone.call?.id ?? null : null;
+  const [localFirstExpired, setLocalFirstExpired] = useState<string | null>(null);
+  const onRefresh = props.onRefresh;
+  useEffect(() => {
+    if (!localFirstId) return;
+    const timer = window.setTimeout(() => { setLocalFirstExpired(localFirstId); onRefresh?.(); }, LOCAL_FIRST_TALKING_MS);
+    // A candidate that comes back later starts its own moment again.
+    return () => { window.clearTimeout(timer); setLocalFirstExpired(null); };
+  }, [localFirstId, onRefresh]);
+  const localTalking = localFirstTalking(localFirstId, localFirstExpired, phone.audioBlocked);
 
   const capabilities = useMemo(
     () =>
@@ -262,7 +279,7 @@ function PhoneBarControls(props: PhoneBarProps) {
       className="relative z-40 flex min-h-12 shrink-0 flex-wrap items-center gap-1.5 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5 text-white sm:px-4 lg:gap-2"
     >
       {focus ? (
-        <CallSummary call={focus} degraded={degraded} now={now} onOpenCase={props.onOpenCase}
+        <CallSummary call={focus} degraded={degraded} localTalking={localTalking} now={now} onOpenCase={props.onOpenCase}
           recordingIndicator={recordingCallId && <CallRecordingIndicator key={recordingCallId} callId={recordingCallId}
             buttonRef={recordingTriggerRef} expanded={recordingOpen} controls={recordingId}
             onClick={() => {
@@ -727,17 +744,19 @@ function SupervisePanel({
 function CallSummary({
   call,
   degraded,
+  localTalking = false,
   now,
   onOpenCase,
   recordingIndicator,
 }: {
   call: PhoneBarCall;
   degraded: boolean;
+  localTalking?: boolean;
   now: number;
   onOpenCase: (caseId: string) => void;
   recordingIndicator?: React.ReactNode;
 }) {
-  const state = phoneBarStateLabel(call);
+  const state = phoneBarStateLabel(call, { localTalking });
   const elapsed = formatCallTimer(callElapsedSeconds(call, now));
   // A colleague call is identified by the colleague's name alone.
   const number = formatPhoneNumberForDisplay(call.number) || call.number || (call.direction === "internal" ? "" : "Neznáme číslo");

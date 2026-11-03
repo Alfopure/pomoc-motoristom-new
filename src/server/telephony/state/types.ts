@@ -287,7 +287,11 @@ export type DialCommand = CommandBase & {
   profileId: string | null;
   externalNumber: string | null;
   clientState: TelnyxClientState;
-  linkTo: string | null;
+  /**
+   * `link_to`: a known leg, or (call-speed S6.1) the leg an earlier `dial` of
+   * the same entry creates, resolved from that dial's result at dispatch.
+   */
+  linkTo: string | { fromDial: string } | null;
   timeoutSecs: number;
   /** Provider connects this explicitly linked recipient as soon as they answer. */
   bridgeOnAnswer?: boolean;
@@ -363,7 +367,28 @@ export type Command = CommandBase &
   (
   | { kind: "answer"; commandId: string; leg: LegRef; clientState: TelnyxClientState }
   | { kind: "hangup"; commandId: string; leg: LegRef; reason: string }
-  | { kind: "bridge"; commandId: string; leg: LegRef; target: LegRef; parkAfterUnbridge?: "self"; playRingtone?: boolean; recordingConferenceName?: string }
+  | { kind: "bridge"; commandId: string; leg: LegRef; target: LegRef; parkAfterUnbridge?: "self"; playRingtone?: boolean; recordingConferenceName?: string;
+      /**
+       * Call-speed S6.3: Telnyx may already have bridged this pair itself
+       * (`bridge_on_answer`). A 422 counts as the connection this bridge asked
+       * for only with `call.bridged` evidence on the target leg; whatever its
+       * wording, a refusal alone proves nothing.
+       */
+      alreadyBridgedOk?: true;
+      /**
+       * Call-speed S6.2: the explicit bridge of a concurrent start. The call
+       * connects on `call.bridged` evidence (its 2xx is recorded as
+       * `far_end.bridge.acceptedAt`), never on its answer: a 422, an unknown
+       * outcome or another refusal leaves the pair to that evidence until
+       * `far_end.bridge.deadlineAt`, when the sweep ends both legs.
+       */
+      concurrentBridge?: true;
+      /**
+       * Call-speed S6.2: the customer dial whose connection this bridge
+       * completes. Its contact intent goes on the bridged leg, so the callback
+       * contact proof that dial began survives the explicit bridge.
+       */
+      contactCommandId?: string }
   | { kind: "playback_start"; commandId: string; leg: LegRef; media: MediaRef; loop?: "infinity" | number; clientState?: TelnyxClientState; forceSpeech?: boolean }
   | { kind: "playback_stop"; commandId: string; leg: LegRef }
   | { kind: "recording_start"; commandId: string; leg: LegRef; recorderId: string; epoch: number; maxLength: number }
@@ -715,7 +740,31 @@ export type SessionMeta = {
     capacity_wait_since?: string | null;
   } | null;
   outbound?: { to: string; by: string; from: string; case_id?: string | null } | null;
-  outbound_auto_bridge?: { commandId: string; operatorControlId: string; startedAt: string } | null;
+  /** `operatorControlId` is null for a concurrent start (S6.1): the own leg did not exist yet. */
+  outbound_auto_bridge?: { commandId: string; operatorControlId: string | null; startedAt: string } | null;
+  /**
+   * Call-speed S6.1, the record of a start that really ran concurrently
+   * (`start_mode` only says what was frozen at creation): the far end was
+   * dialled in the startup entry, next to the operator's own leg (`commandId`
+   * is its dial, or `ring_fanout:0` for several colleague endpoints).
+   * `answeredAt` records a far end that answered before the own leg did; the
+   * call becomes `talking` only on bridged evidence or once both legs have
+   * answered (S6.2). `bridge` is the explicit bridge sent when the far end
+   * answered first: until its `call.bridged` evidence the call stays
+   * `ringing`, and at `deadlineAt` the sweep connects an `acceptedAt` (2xx)
+   * bridge or ends both legs as `bridge_failed`. `busyControlId` is a
+   * colleague leg whose answer was refused because they had become busy: its
+   * hangup ends the call as `colleague_busy`.
+   */
+  far_end?: { commandId: string; mode: "concurrent"; dialedAt: string; answeredAt?: string | null;
+    bridge?: { commandId: string; sentAt: string; deadlineAt: string; acceptedAt?: string | null } | null; busyControlId?: string | null } | null;
+  /**
+   * Call-speed S6.3, the record of the colleague dials that really carried the
+   * auto-bridge (`bridge_on_answer`, Telnyx bridges them to the caller at
+   * answer; `start_mode.autoBridge` only says what was frozen). Only a leg of
+   * one of these dials skips the explicit bridge.
+   */
+  internal_auto_bridge?: { commandIds: string[] } | null;
   /**
    * Latency switches frozen at creation (`latency-flags.ts`): flipping a flag
    * never changes a call already in progress. Older sessions have none and

@@ -239,20 +239,21 @@ export function concurrentDialFor(flags: LatencyFlags, direction: "outbound" | "
  * what it really does, whatever the flags ask, and no later build can mistake
  * an earlier session for one that ran the optimisation.
  */
-const HONOURED_START_SWITCHES = { concurrent: false, autoBridge: false, apiRegion: true, holdJoinWithHold: true } as const;
+const HONOURED_START_SWITCHES = { concurrent: true, autoBridge: true, apiRegion: true, holdJoinWithHold: true } as const;
 
 /**
  * S7b is implemented, but whether Telnyx plays the hold music to a participant
  * joining held into a conference that started on create is TEST spike S7.0
  * (docs/operations/telnyx-runbook.md). Until the runbook records a pass, only
- * a non-production deployment may freeze it: the spike runs on TEST with the
- * switch alone, while production cannot reach it without a reviewed change
- * here. An unreadable environment counts as production.
+ * a deployment whose application environment is exactly `test` may freeze it:
+ * the spike runs on TEST with the switch alone, while production, a local run
+ * (`development`, which may point at production data) and an unreadable
+ * environment cannot reach it without a reviewed change here.
  */
 const JOIN_WITH_HOLD_PROVEN = false;
 function joinWithHoldAllowed(): boolean {
   if (JOIN_WITH_HOLD_PROVEN) return true;
-  try { return resolveAppEnvironment() !== "production"; }
+  try { return resolveAppEnvironment() === "test"; }
   catch { return false; }
 }
 
@@ -268,6 +269,23 @@ function joinWithHoldAllowed(): boolean {
 const EU_API_PROVEN = false;
 export function euApiRegionAllowed(): boolean {
   if (EU_API_PROVEN) return true;
+  try { return resolveAppEnvironment() === "test"; }
+  catch { return false; }
+}
+
+/**
+ * S6 is implemented, but what Telnyx does when the far end answers while the
+ * operator's own leg still rings (outcome A, B or C), two auto-bridged
+ * endpoints answering together, and the wording of its "already bridged"
+ * refusal are TEST spikes S6.0/1–4 (docs/operations/telnyx-runbook.md). Until
+ * the runbook records a pass, only a deployment whose application environment
+ * is exactly `test` freezes a concurrent start or the colleague auto-bridge,
+ * as for S5 and S7b: production, a local run (`development`, which may point
+ * at production data) and an unreadable environment keep the sequential start.
+ */
+const CONCURRENT_START_PROVEN = false;
+function concurrentStartAllowed(): boolean {
+  if (CONCURRENT_START_PROVEN) return true;
   try { return resolveAppEnvironment() === "test"; }
   catch { return false; }
 }
@@ -292,14 +310,29 @@ export function sessionApiRegion(metadata: unknown): "us" | "eu" {
   return startMode?.apiRegion === "eu" ? "eu" : "us";
 }
 
-/** What a new session keeps for its whole life, whatever the flags say later. */
-export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null; providerRegion: "us" | "eu" }): SessionStartMode {
+/**
+ * What a new session keeps for its whole life, whatever the flags say later.
+ *
+ * `concurrentEligible` (call-speed S6.1) is false for a start that must stay
+ * sequential whatever the switch says: a callback, or an outgoing call that
+ * cannot connect directly (start announcements, and with them recording).
+ * `autoBridgeEligible` (S6.3) is false for a colleague with web and mobile
+ * endpoints, whose winner the server keeps choosing with an explicit bridge.
+ * Written once, at creation (S5 pins the API region in it), so a writer that
+ * cannot run S6 (a legacy contract-1 session) keeps what was frozen: the
+ * concurrent start that really ran is `meta.far_end`, the colleague dial that
+ * really carried the auto-bridge `meta.internal_auto_bridge`.
+ */
+export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null; providerRegion: "us" | "eu";
+  concurrentEligible?: boolean; autoBridgeEligible?: boolean }): SessionStartMode {
   const concurrent = HONOURED_START_SWITCHES.concurrent && input.direction !== "inbound" && input.origin !== null &&
-    concurrentDialFor(flags, input.direction, input.origin);
+    input.concurrentEligible !== false && concurrentDialFor(flags, input.direction, input.origin) && concurrentStartAllowed();
+  const autoBridge = HONOURED_START_SWITCHES.autoBridge && input.direction === "internal" && input.autoBridgeEligible !== false &&
+    flags.internal_auto_bridge && concurrentStartAllowed();
   // S7b: the first hold joins the customer already held. Present only when on,
   // so a session started with the switch off records exactly what it did before.
   const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold && joinWithHoldAllowed();
-  return { concurrent, autoBridge: HONOURED_START_SWITCHES.autoBridge && input.direction === "internal" && flags.internal_auto_bridge,
+  return { concurrent, autoBridge,
     ownLegTimeoutSecs: concurrent ? flags.own_leg_timeout_secs_concurrent : SEQUENTIAL_OWN_LEG_TIMEOUT_SECS,
     // S5: a session we create is created and controlled in `eu` when the flag
     // asks for it and this deployment may (`euApiRegionAllowed`). Otherwise,

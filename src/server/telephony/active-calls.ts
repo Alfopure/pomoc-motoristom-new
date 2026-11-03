@@ -108,6 +108,8 @@ export type ActiveCallView = {
   legs: ActiveCallLegView[];
   /** True when the polling operator owns or is being offered this call. */
   mine: boolean;
+  /** Colleague call dialled with the provider auto-bridge (call-speed S6.3, `meta.internal_auto_bridge`). */
+  autoBridge?: boolean;
 };
 
 export type ActiveCallsSnapshot = {
@@ -487,6 +489,8 @@ function buildActiveCalls(
         operatorProfileId === actor.profileId ||
         offeredProfileIds.includes(actor.profileId) ||
         sessionLegs.some((leg) => leg.profileId === actor.profileId),
+      // What the colleague dial really carries, not only what was asked for.
+      ...(session.direction === "internal" && meta.internal_auto_bridge?.commandIds?.length ? { autoBridge: true } : {}),
     } satisfies ActiveCallView;
   });
 

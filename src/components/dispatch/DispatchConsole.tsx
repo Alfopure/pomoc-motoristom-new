@@ -2449,6 +2449,7 @@ function DispatchConsoleContent({
             onOpenCase={openCase}
             onResumeAudio={telephony.resumeAudio}
             outboundPending={telephony.outboundPending}
+            onRefresh={telephony.refresh}
           />
         )}
 

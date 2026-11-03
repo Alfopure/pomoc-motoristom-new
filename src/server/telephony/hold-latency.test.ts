@@ -26,6 +26,8 @@ afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 function harness(flags: Partial<LatencyFlags> = {}) {
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+  // Until spike S7.0 passes only a TEST deployment freezes join-with-hold.
+  if (flags.hold_join_with_hold) vi.stubEnv("MOTORIST_APP_ENV", "test");
   const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
   h.deps.latencyFlags = { ...defaultLatencyFlags(), ...flags };
   return h;

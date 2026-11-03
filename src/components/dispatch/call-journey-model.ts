@@ -60,6 +60,8 @@ const REASONS: Record<string, string> = {
   caller_hangup: "Volajúci ukončil hovor", answered: "Hovor bol prijatý", skipped_offline: "Operátor alebo aplikácia neboli dostupní",
   wait_timeout: "Uplynul čas čakania", customer_hangup: "Volajúci ukončil hovor", completed: "Pokračovanie ďalším krokom", exhausted: "Postup zvonenia sa skončil",
   bridge_failed: "Hovor sa nepodarilo spojiť", operator_deferred: "Operátor posunul hovor do čakárne", transfer_failed: "Hovor sa nepodarilo prepojiť",
+  operator_leg_unavailable: "Telefón operátora neprijal hovor", customer_left_before_connect: "Zákazník zložil pred spojením",
+  colleague_left_before_connect: "Kolega zložil pred spojením", colleague_busy: "Kolega bol medzitým obsadený",
 };
 export function journeyReason(reason: string | null | undefined): string | null {
   return reason ? REASONS[reason] ?? "Dôvod nebol zaznamenaný" : null;

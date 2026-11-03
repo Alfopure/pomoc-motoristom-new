@@ -118,12 +118,34 @@ describe("latency flags", () => {
       own_leg_timeout_secs_concurrent: 9, internal_auto_bridge: true, api_region: "eu" };
     expect([concurrentDialFor(flags, "outbound", "web"), concurrentDialFor(flags, "outbound", "mobile"),
       concurrentDialFor(flags, "internal", "web"), concurrentDialFor(flags, "internal", "mobile")]).toEqual([true, false, false, true]);
-    // S6 is not implemented: the session records the sequential 30 s dial. S5 is: on TEST a session we
-    // create takes the flag's API region, while an inbound call keeps the region its client calls.
+    // S6 ships concurrent dialing with its own-leg timeout and the colleague auto-bridge, frozen on TEST
+    // only until its spikes pass (gate below); the API region (S5) is checked separately, below.
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    const s6: LatencyFlags = { ...flags, api_region: "us" };
+    expect(freezeStartMode(s6, { direction: "outbound", origin: "web", providerRegion: "us" })).toEqual({ concurrent: true, autoBridge: false,
+      ownLegTimeoutSecs: 9, apiRegion: "us", origin: "web" });
+    expect(freezeStartMode(s6, { direction: "internal", origin: "mobile", providerRegion: "us" })).toEqual({ concurrent: true, autoBridge: true,
+      ownLegTimeoutSecs: 9, apiRegion: "us", origin: "mobile" });
+    // Per origin: the switch for outbound web says nothing about a colleague call from the web or a call from the phone.
+    for (const [direction, origin] of [["outbound", "mobile"], ["internal", "web"], ["inbound", null]] as const) {
+      expect(freezeStartMode(s6, { direction, origin, providerRegion: "us" })).toEqual({ concurrent: false, autoBridge: direction === "internal",
+        ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin });
+    }
+    // A start that cannot run concurrently (a callback, start announcements) freezes the sequential dial.
+    expect(freezeStartMode(s6, { direction: "outbound", origin: "web", providerRegion: "us", concurrentEligible: false }))
+      .toMatchObject({ concurrent: false, ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS });
+    // A colleague with several endpoints keeps the server's explicit bridge: only one endpoint may be auto-bridged.
+    expect(freezeStartMode(s6, { direction: "internal", origin: "mobile", providerRegion: "us", autoBridgeEligible: false }))
+      .toMatchObject({ concurrent: true, autoBridge: false });
+    // S7b ships its behaviour: join-with-hold is frozen when asked for, and only then; never for a colleague call.
+    const joinHeld = { ...s6, hold_join_with_hold: true };
+    expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
+    expect(freezeStartMode(joinHeld, { direction: "outbound", origin: "mobile", providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
+    expect(freezeStartMode(joinHeld, { direction: "internal", origin: "web", providerRegion: "us" })).not.toHaveProperty("holdJoinWithHold");
+    // S5: on TEST a session we create takes the flag's API region, while an inbound call keeps the region its client calls.
     vi.stubEnv("MOTORIST_APP_ENV", "test");
     for (const [direction, origin, apiRegion] of [["outbound", "web", "eu"], ["internal", "mobile", "eu"], ["inbound", null, "us"]] as const) {
-      expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" })).toEqual({ concurrent: false, autoBridge: false,
-        ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion, origin });
+      expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" }).apiRegion).toBe(apiRegion);
     }
     expect(freezeStartMode({ ...flags, api_region: "us" }, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
     // Until spike S5.0 passes, only an application environment of exactly `test` may freeze `eu`:
@@ -134,17 +156,6 @@ describe("latency flags", () => {
     }
     vi.unstubAllEnvs();
     expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
-    // S7b ships its behaviour: join-with-hold is frozen when asked for, and only then; never for a colleague call.
-    const joinHeld = { ...flags, hold_join_with_hold: true };
-    expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
-    expect(freezeStartMode(joinHeld, { direction: "outbound", origin: "mobile", providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
-    expect(freezeStartMode(joinHeld, { direction: "internal", origin: "web", providerRegion: "us" })).not.toHaveProperty("holdJoinWithHold");
-    // Until spike S7.0 passes, production cannot freeze it by the switch alone; TEST can.
-    vi.stubEnv("MOTORIST_APP_ENV", "production");
-    expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).not.toHaveProperty("holdJoinWithHold");
-    vi.stubEnv("MOTORIST_APP_ENV", "test");
-    expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
-    vi.unstubAllEnvs();
     expect(envLatencyFlags({ TELEPHONY_LATENCY_FLAGS: JSON.stringify({ hold_lean_context: true, hold_mobile_dedupe: true, hold_join_with_hold: "yes" }) }))
       .toMatchObject({ hold_lean_context: true, hold_mobile_dedupe: true, hold_join_with_hold: false });
     // A test or local override of the `us` base is honoured, and the region names its real host...
@@ -160,7 +171,40 @@ describe("latency flags", () => {
     errors.mockRestore();
   });
 
-  it("freezes the start mode into every new session as the call really runs, whatever the flags ask", async () => {
+  it("freezes the unproven switches only on TEST: production, a local run, development and an unreadable environment run without them", () => {
+    const asked: LatencyFlags = { ...defaultLatencyFlags(), concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } },
+      internal_auto_bridge: true, hold_join_with_hold: true, api_region: "eu" };
+    const freeze = () => [
+      freezeStartMode(asked, { direction: "outbound", origin: "web", providerRegion: "us" }),
+      freezeStartMode(asked, { direction: "internal", origin: "mobile", providerRegion: "us" }),
+    ];
+    // S5 (`eu`), S6 (concurrent, auto-bridge) and S7b (join-with-hold) until their spikes pass.
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    expect(freeze()).toEqual([
+      { concurrent: true, autoBridge: false, ownLegTimeoutSecs: 12, apiRegion: "eu", origin: "web", holdJoinWithHold: true },
+      { concurrent: true, autoBridge: true, ownLegTimeoutSecs: 12, apiRegion: "eu", origin: "mobile" },
+    ]);
+    const sequential = [
+      { concurrent: false, autoBridge: false, ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin: "web" },
+      { concurrent: false, autoBridge: false, ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin: "mobile" },
+    ];
+    const environments: Array<[string, Record<string, string>]> = [
+      ["production", { MOTORIST_APP_ENV: "production" }],
+      // A Vercel production deployment without the explicit variable is production too.
+      ["Vercel production", { MOTORIST_APP_ENV: "", VERCEL_ENV: "production" }],
+      ["development", { MOTORIST_APP_ENV: "development" }],
+      // `next dev` or a script on a laptop: nothing set resolves to development, which may point at production data.
+      ["a local run", { MOTORIST_APP_ENV: "", VERCEL_ENV: "" }],
+      ["an unreadable environment", { MOTORIST_APP_ENV: "staging" }],
+    ];
+    for (const [name, env] of environments) {
+      vi.unstubAllEnvs();
+      for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+      expect(freeze(), name).toEqual(sequential);
+    }
+  });
+
+  it("freezes the start mode once, at creation; a legacy writer runs the sequential start and records no far end", async () => {
     vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
     vi.stubEnv("MOTORIST_APP_ENV", "test");
     const h = createTelephonyHarness();
@@ -168,21 +212,31 @@ describe("latency flags", () => {
       internal_auto_bridge: true, api_region: "eu" };
     const deps = { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }), latencyFlags: asked };
     const first = await startOutboundCall(deps, { profileId: PROFILES.o1, role: "dispatcher" }, { to: NUMBERS.customer });
-    const startMode = (sessionId: string) => readMeta(h.session(sessionId) as SessionRow).start_mode;
-    const sequential = { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "eu" };
-    expect(startMode(first.sessionId)).toEqual({ ...sequential, origin: "web" });
-    // ...which is what happened: a 30 s own-leg dial, and the customer only after it answered.
+    const meta = (sessionId: string) => readMeta(h.session(sessionId) as SessionRow);
+    const frozen = { concurrent: true, autoBridge: false, ownLegTimeoutSecs: 12, apiRegion: "eu", origin: "web" };
+    expect(meta(first.sessionId).start_mode).toEqual(frozen);
+    // A legacy writer has no staged startup entry to carry a far-end dial (S6): a 30 s own-leg dial,
+    // the customer only after it answered, and no `far_end`, which is what records the sequential run.
     expect(h.telnyx.of("dial").map(dial => dial.params.timeoutSecs)).toEqual([30]);
     h.telnyx.physical.answered(first.operatorLegCallControlId);
     await h.legEvent(first.operatorLegCallControlId, "call.answered");
     expect(h.telnyx.of("dial")).toHaveLength(2);
-    expect(startMode(first.sessionId)).toEqual({ ...sequential, origin: "web" });
+    expect(meta(first.sessionId).far_end).toBeUndefined();
+    // Never rewritten after creation: the API region stays pinned (S5).
+    expect(meta(first.sessionId).start_mode).toEqual(frozen);
 
     const second = await callColleague(deps, { profileId: PROFILES.o2, role: "dispatcher" }, { targetProfileId: PROFILES.o5 });
-    expect(startMode(second.sessionId)).toEqual({ ...sequential, origin: "web" });
+    expect(meta(second.sessionId).start_mode).toEqual({ ...frozen, autoBridge: true });
+    // Nor does a legacy writer auto-bridge: the colleague, dialled at the caller's answer, gets the explicit bridge.
+    const dials = h.telnyx.of("dial").length;
+    h.telnyx.physical.answered(second.operatorLegCallControlId);
+    await h.legEvent(second.operatorLegCallControlId, "call.answered");
+    expect(h.telnyx.of("dial").slice(dials)).toEqual([expect.objectContaining({ params: expect.not.objectContaining({ bridgeOnAnswer: true }) })]);
+    expect(meta(second.sessionId).far_end).toBeUndefined();
+    expect(meta(second.sessionId).internal_auto_bridge).toBeUndefined();
     // S5: Telnyx created the inbound call; it keeps the region the deployment calls.
     const inbound = await h.inbound({ to: NUMBERS.allianz, answer: false });
-    expect(startMode(inbound.sessionId)).toEqual({ ...sequential, apiRegion: "us", origin: null });
+    expect(meta(inbound.sessionId).start_mode).toEqual({ concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, apiRegion: "us", origin: null });
   });
 });
 
