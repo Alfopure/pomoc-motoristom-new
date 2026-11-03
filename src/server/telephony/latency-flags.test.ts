@@ -143,20 +143,30 @@ describe("latency flags", () => {
     expect(freezeStartMode(joinHeld, { direction: "inbound", origin: null, providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
     expect(freezeStartMode(joinHeld, { direction: "outbound", origin: "mobile", providerRegion: "us" })).toMatchObject({ holdJoinWithHold: true });
     expect(freezeStartMode(joinHeld, { direction: "internal", origin: "web", providerRegion: "us" })).not.toHaveProperty("holdJoinWithHold");
-    // S5: on TEST a session we create takes the flag's API region, while an inbound call keeps the region its client calls.
-    vi.stubEnv("MOTORIST_APP_ENV", "test");
-    for (const [direction, origin, apiRegion] of [["outbound", "web", "eu"], ["internal", "mobile", "eu"], ["inbound", null, "us"]] as const) {
-      expect(freezeStartMode(flags, { direction, origin, providerRegion: "us" }).apiRegion).toBe(apiRegion);
-    }
-    expect(freezeStartMode({ ...flags, api_region: "us" }, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
-    // Until spike S5.0 passes, only an application environment of exactly `test` may freeze `eu`:
-    // production, a local run (development) and an unreadable environment keep `us`.
-    for (const environment of ["production", "development", "staging"]) {
+    // S5 (spike S5.0 passed): on TEST and in production a session we create takes the flag's API region when the
+    // start knows it will not be recorded (recording through the EU API is unproven); an inbound call keeps the
+    // region its client calls whatever it is told.
+    for (const environment of ["test", "production"]) {
       vi.stubEnv("MOTORIST_APP_ENV", environment);
-      expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
+      for (const [direction, origin, apiRegion] of [["outbound", "web", "eu"], ["internal", "mobile", "eu"], ["inbound", null, "us"]] as const) {
+        expect(freezeStartMode(flags, { direction, origin, providerRegion: "us", unrecorded: true }).apiRegion, environment).toBe(apiRegion);
+        // A call that may be recorded, and a start that did not say, keep `us`.
+        for (const unrecorded of [false, undefined]) {
+          expect(freezeStartMode(flags, { direction, origin, providerRegion: "us", unrecorded }).apiRegion, `${environment} ${unrecorded}`).toBe("us");
+        }
+      }
+      expect(freezeStartMode({ ...flags, api_region: "us" }, { direction: "outbound", origin: "web", providerRegion: "us", unrecorded: true }).apiRegion).toBe("us");
+    }
+    // A local run (development, which may point at production data) and an unreadable environment keep `us`.
+    for (const environment of ["development", "staging"]) {
+      vi.stubEnv("MOTORIST_APP_ENV", environment);
+      expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us", unrecorded: true }).apiRegion, environment).toBe("us");
     }
     vi.unstubAllEnvs();
-    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us" }).apiRegion).toBe("us");
+    vi.stubEnv("MOTORIST_APP_ENV", "");
+    vi.stubEnv("VERCEL_ENV", "");
+    expect(freezeStartMode(flags, { direction: "outbound", origin: "web", providerRegion: "us", unrecorded: true }).apiRegion).toBe("us");
+    vi.unstubAllEnvs();
     expect(envLatencyFlags({ TELEPHONY_LATENCY_FLAGS: JSON.stringify({ hold_lean_context: true, hold_mobile_dedupe: true, hold_join_with_hold: "yes" }) }))
       .toMatchObject({ hold_lean_context: true, hold_mobile_dedupe: true, hold_join_with_hold: false });
     // A test or local override of the `us` base is honoured, and the region names its real host...
@@ -223,10 +233,10 @@ describe("latency flags", () => {
     const asked: LatencyFlags = { ...defaultLatencyFlags(), concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } },
       internal_auto_bridge: true, hold_join_with_hold: true, api_region: "eu" };
     const freeze = () => [
-      freezeStartMode(asked, { direction: "outbound", origin: "web", providerRegion: "us" }),
-      freezeStartMode(asked, { direction: "internal", origin: "mobile", providerRegion: "us" }),
+      freezeStartMode(asked, { direction: "outbound", origin: "web", providerRegion: "us", unrecorded: true }),
+      freezeStartMode(asked, { direction: "internal", origin: "mobile", providerRegion: "us", unrecorded: true }),
     ];
-    // S5 (`eu`), S6 (concurrent, auto-bridge) and S7b (join-with-hold) until their spikes pass.
+    // S6 (concurrent, auto-bridge) and S7b (join-with-hold) until their spikes pass; S5 (`eu`) passed S5.0.
     vi.stubEnv("MOTORIST_APP_ENV", "test");
     expect(freeze()).toEqual([
       { concurrent: true, autoBridge: false, ownLegTimeoutSecs: 12, apiRegion: "eu", origin: "web", holdJoinWithHold: true },
@@ -236,19 +246,20 @@ describe("latency flags", () => {
       { concurrent: false, autoBridge: false, ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin: "web" },
       { concurrent: false, autoBridge: false, ownLegTimeoutSecs: SEQUENTIAL_OWN_LEG_TIMEOUT_SECS, apiRegion: "us", origin: "mobile" },
     ];
-    const environments: Array<[string, Record<string, string>]> = [
-      ["production", { MOTORIST_APP_ENV: "production" }],
+    // Production freezes the proven `eu` (S5) with everything else sequential.
+    const environments: Array<[string, Record<string, string>, "us" | "eu"]> = [
+      ["production", { MOTORIST_APP_ENV: "production" }, "eu"],
       // A Vercel production deployment without the explicit variable is production too.
-      ["Vercel production", { MOTORIST_APP_ENV: "", VERCEL_ENV: "production" }],
-      ["development", { MOTORIST_APP_ENV: "development" }],
+      ["Vercel production", { MOTORIST_APP_ENV: "", VERCEL_ENV: "production" }, "eu"],
+      ["development", { MOTORIST_APP_ENV: "development" }, "us"],
       // `next dev` or a script on a laptop: nothing set resolves to development, which may point at production data.
-      ["a local run", { MOTORIST_APP_ENV: "", VERCEL_ENV: "" }],
-      ["an unreadable environment", { MOTORIST_APP_ENV: "staging" }],
+      ["a local run", { MOTORIST_APP_ENV: "", VERCEL_ENV: "" }, "us"],
+      ["an unreadable environment", { MOTORIST_APP_ENV: "staging" }, "us"],
     ];
-    for (const [name, env] of environments) {
+    for (const [name, env, apiRegion] of environments) {
       vi.unstubAllEnvs();
       for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
-      expect(freeze(), name).toEqual(sequential);
+      expect(freeze(), name).toEqual(sequential.map(mode => ({ ...mode, apiRegion })));
     }
   });
 

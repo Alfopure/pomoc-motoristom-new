@@ -323,7 +323,7 @@ describe("session pinning (ownership)", () => {
   });
 });
 
-/** A contract-2 world on a TEST deployment, the only kind that may freeze `eu` until spike S5.0 passes. */
+/** A contract-2 world on a TEST deployment, which may freeze `eu` (as production may since spike S5.0 passed). */
 function harness(flags: Partial<LatencyFlags> = {}) {
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
   vi.stubEnv("MOTORIST_APP_ENV", "test");
@@ -514,14 +514,25 @@ describe("recording provider host", () => {
     expect(unbound.db.log).toEqual([]);
   });
 
-  it.each([["production", production], ["an unreadable environment", () => { vi.stubEnv("TELNYX_API_KEY", "synthetic"); vi.stubEnv("MOTORIST_APP_ENV", "bogus"); }]])("adds no read and no failure mode in %s, where no session can be frozen to eu", async (_case, environment) => {
-    environment();
+  it("adds no read and no failure mode in an unreadable environment, where no session can be frozen to eu", async () => {
+    vi.stubEnv("TELNYX_API_KEY", "synthetic");
+    vi.stubEnv("MOTORIST_APP_ENV", "bogus");
     const fetch = stubFetch();
     const { db, ctx } = context({ start_mode: { apiRegion: "eu" } });
     db.failNext("motorist_call_sessions", "select", "must not be read");
     await fetchTelnyxRecording(ctx, "recording", { method: "DELETE" });
     expect(urls(fetch)).toEqual(["DELETE https://api.telnyx.com/v2/recordings/recording"]);
     expect(db.log).toEqual([]);
+  });
+
+  it("follows the recording's session region in production too, which may freeze eu since spike S5.0 passed", async () => {
+    production();
+    const fetch = stubFetch();
+    for (const metadata of [{ start_mode: { apiRegion: "eu" } }, { start_mode: { apiRegion: "us" } }, {}]) {
+      await fetchTelnyxRecording(context(metadata).ctx, "recording", { method: "DELETE" });
+    }
+    expect(urls(fetch)).toEqual(["DELETE https://api.telnyx.eu/v2/recordings/recording", "DELETE https://api.telnyx.com/v2/recordings/recording",
+      "DELETE https://api.telnyx.com/v2/recordings/recording"]);
   });
 
   it("follows an EU session's recording to .eu on a local run too (it may use the TEST database), though it cannot freeze eu itself", async () => {
@@ -572,7 +583,7 @@ describe("recording provider host", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     for (const body of [{ error_code: 1010, error_name: "browser_signature_banned" }, { errors: [{ code: "10010", title: "Forbidden" }] }]) {
       stubFetch(() => json(403, body));
-      await expect(refreshRecordingSource(context({ start_mode: { apiRegion: "eu" } }).ctx)).rejects.toMatchObject({ code: "recording_refresh_failed" });
+      await expect(refreshRecordingSource(context({ start_mode: { apiRegion: "us" } }).ctx)).rejects.toMatchObject({ code: "recording_refresh_failed" });
     }
     expect(errors).not.toHaveBeenCalled();
   });
@@ -598,10 +609,12 @@ describe("an EU session's supervision, recording, termination clean-up and cance
     const { h, deps } = harness({ api_region: "eu" });
     for (const key of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED", "TELNYX_RECORDING_CONFERENCE_VERIFIED",
       "TELNYX_RECORDING_TRANSFER_VERIFIED", "TELNYX_RECORDING_CHANNELS_VERIFIED"]) vi.stubEnv(key, "true");
-    h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(),
-      inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
     h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), outboundStartAnnouncements: true } } }, () => true);
     const call = await startOutboundCall(deps(), o1, { to: NUMBERS.customer, requestId: requestId() });
+    // A start freezes `eu` only for a call it knows will not be recorded: this policy is switched on after the
+    // start, the window in which an EU call can still record, which its region must then carry.
+    h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(),
+      inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
     h.telnyx.physical.answered(call.operatorLegCallControlId);
     await h.legEvent(call.operatorLegCallControlId, "call.answered");
     const customer = String(h.legs(call.sessionId).find(leg => leg.role === "customer")!.telnyx_call_control_id);
@@ -832,10 +845,12 @@ describe("an EU session's supervision, recording, termination clean-up and cance
     const { h, deps } = harness({ api_region: "eu" });
     for (const key of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED", "TELNYX_RECORDING_CONFERENCE_VERIFIED",
       "TELNYX_RECORDING_TRANSFER_VERIFIED", "TELNYX_RECORDING_CHANNELS_VERIFIED"]) vi.stubEnv(key, "true");
-    h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(),
-      inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
     h.db.update("motorist_telephony_lines", { metadata: { announcements: { ...defaultAnnouncementConfig(), outboundStartAnnouncements: true } } }, () => true);
     const call = await startOutboundCall(deps(), o1, { to: NUMBERS.customer, requestId: requestId() });
+    // A start freezes `eu` only for a call it knows will not be recorded: this policy is switched on after the
+    // start, the window in which an EU call can still record, which its region must then carry.
+    h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: true, approved_at: h.now().toISOString(),
+      inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
     h.telnyx.physical.answered(call.operatorLegCallControlId);
     await h.legEvent(call.operatorLegCallControlId, "call.answered");
     const customer = String(h.legs(call.sessionId).find(leg => leg.role === "customer")!.telnyx_call_control_id);
@@ -856,24 +871,62 @@ describe("an EU session's supervision, recording, termination clean-up and cance
 });
 
 describe("the EU switch end to end from the database flags (production guard)", () => {
-  async function startWith(environment: string) {
+  /**
+   * `recording`: the deployment's recording switches stay off (`switches off`), or are on, as on TEST and in
+   * production today, with the organisation's policy off (`off`), on for outgoing calls (`on`) or unreadable.
+   */
+  async function deploymentWith(environment: Record<string, string>, recording: "switches off" | "off" | "on" | "unreadable" = "switches off") {
     vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
-    vi.stubEnv("MOTORIST_APP_ENV", environment);
+    for (const [key, value] of Object.entries(environment)) vi.stubEnv(key, value);
     clearLatencyFlagsCache();
     const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
     h.db.update("motorist_telephony_settings", { latency_flags: { api_region: "eu" } }, () => true);
+    if (recording !== "switches off") {
+      for (const key of ["TELNYX_RECORDING_ENABLED", "TELNYX_RECORDING_CONTRACT_VERIFIED", "RECORDING_PROCESSING_ENABLED"]) vi.stubEnv(key, "true");
+      h.db.insert("motorist_call_recording_policies", { organization_id: ORG, revision: 1, recording_enabled: recording !== "off", approved_at: h.now().toISOString(),
+        inbound_enabled: true, outbound_enabled: true, max_segment_seconds: 1800 });
+      if (recording === "unreadable") h.db.failNext("motorist_call_recording_policies", "select", "connection reset");
+    }
     const latencyFlags = await readLatencyFlags(h.admin, ORG, { logger: () => undefined, env: {} });
     expect(latencyFlags.api_region).toBe("eu");
-    const deps = { ...h.deps, latencyFlags, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) };
-    const call = await startOutboundCall(deps, o1, { to: NUMBERS.customer, requestId: requestId() });
+    h.deps.latencyFlags = latencyFlags;
     clearLatencyFlagsCache();
-    return { h, call };
+    return { h, deps: { ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) } };
   }
+  const local = { MOTORIST_APP_ENV: "", VERCEL_ENV: "" };
 
-  it.each([["test", "eu"], ["production", "us"], ["development", "us"]] as const)("an outbound call started on a %s deployment freezes %s", async (environment, region) => {
-    const { h, call } = await startWith(environment);
+  it.each([
+    ["a test", { MOTORIST_APP_ENV: "test" }, "switches off", "eu"],
+    ["a production", { MOTORIST_APP_ENV: "production" }, "switches off", "eu"],
+    // Production today: recording switches on, the organisation's policy off.
+    ["a production", { MOTORIST_APP_ENV: "production" }, "off", "eu"],
+    ["a Vercel production", { MOTORIST_APP_ENV: "", VERCEL_ENV: "production" }, "off", "eu"],
+    // Recording through the EU API is unproven: a call that may be recorded stays `us`, on TEST too.
+    ["a production", { MOTORIST_APP_ENV: "production" }, "on", "us"],
+    ["a production", { MOTORIST_APP_ENV: "production" }, "unreadable", "us"],
+    ["a test", { MOTORIST_APP_ENV: "test" }, "on", "us"],
+    ["a development", { MOTORIST_APP_ENV: "development" }, "off", "us"],
+    // `next dev` or a script on a laptop, which may point at production data.
+    ["a local (no environment)", local, "off", "us"],
+  ] as const)("an outbound call started on %s deployment (%j) with recording %s freezes %s", async (_name, environment, recording, region) => {
+    const { h, deps } = await deploymentWith(environment, recording);
+    const call = await startOutboundCall(deps, o1, { to: NUMBERS.customer, requestId: requestId() });
     expect(regionOf(h, call.sessionId)).toBe(region);
     expect(routesOf(h, call.sessionId).map(route => route.region)).toEqual([region]);
+  });
+
+  it.each([["a production", { MOTORIST_APP_ENV: "production" }], ["a local (no environment)", local]] as const)(
+    "a colleague call started on %s deployment, never recorded, freezes eu only where S5 is proven", async (name, environment) => {
+    const { h, deps } = await deploymentWith(environment, "on");
+    const call = await callColleague(deps, o1, { targetProfileId: PROFILES.o2, requestId: requestId() });
+    expect(regionOf(h, call.sessionId)).toBe(name === "a production" ? "eu" : "us");
+  });
+
+  it("keeps an inbound call `us` in production, recording off and the switch on", async () => {
+    const { h } = await deploymentWith({ MOTORIST_APP_ENV: "production" }, "off");
+    const call = await h.inbound();
+    expect(regionOf(h, call.sessionId)).toBe("us");
+    expect(h.telnyx.routes.filter(route => route.sessionId === call.sessionId).every(route => route.region === "us")).toBe(true);
   });
 });
 
