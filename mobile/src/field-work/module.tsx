@@ -174,7 +174,7 @@ function OperationDetail({ session, id, active }: { session: FieldWorkSession; i
     {open && sharesOperationPosition(operation) && <Text style={s.note}>{positionNote(location, session.tracker.mode)}</Text>}
     {open && sharesOperationPosition(operation) && (location.status === "off" || location.status === "error") && <View style={formLayout.actions}>
       <Button secondary label="Zdieľať polohu s dispečerom" onPress={() => { void session.tracker.follow(operation.id, true); }} /></View>}
-    {open && sharesOperationPosition(operation) && (location.status === "denied" || location.status === "sharing" && location.background === "whenInUse") && <View style={formLayout.actions}>
+    {open && sharesOperationPosition(operation) && location.status === "denied" && <View style={formLayout.actions}>
       <Button secondary label="Otvoriť nastavenia telefónu" onPress={() => { void Linking.openSettings().catch(() => undefined); }} /></View>}
     {evidenceOpen && open && <EvidenceForm session={session} operation={operation} disabled={blocked}
       onSubmit={payload => run("evidence", "Doklad: " + stageLabels[payload.stage], payload)} onClose={() => setEvidenceOpen(false)} />}
@@ -209,7 +209,7 @@ function positionNote(location: SharingState, mode: LocationSharing["mode"]): st
   if (location.status !== "sharing") return "Poloha sa počas tejto jazdy zatiaľ neposiela.";
   if (mode === "foreground") return "Vaša poloha sa posiela dispečingu počas tejto jazdy, kým je aplikácia otvorená.";
   return location.background === "always" ? "Vaša poloha sa posiela dispečingu aj na pozadí a pri zamknutom telefóne, kým je jazda otvorená."
-    : "Poloha sa posiela, aj keď je aplikácia na pozadí, ale po jej zatvorení sa zastaví. V nastaveniach telefónu povoľte polohu „Vždy“.";
+    : "Vaša poloha sa posiela dispečingu aj na pozadí a pri zamknutom telefóne, kým je jazda otvorená. Ak aplikáciu úplne zatvoríte, posielanie pokračuje po jej otvorení.";
 }
 
 function EvidenceForm({ session, operation, disabled, onSubmit, onClose }: {

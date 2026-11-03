@@ -1,6 +1,7 @@
 # Dispatching v App Store – podklady
 
-Podklady pre App Store Connect pripravené 20. 10. 2026. Vypĺňa ich vydavateľ
+Podklady pre App Store Connect pripravené 20. 10. 2026, doplnené rozhodnutiami
+majiteľa z 3. 11. 2026 (App Store Connect `6830148973`, SKU `dispatching-prod`). Vypĺňa ich vydavateľ
 **MICT, s. r. o.** po schválení Apple Developer Program. Texty a právne
 formulácie má pred odoslaním skontrolovať majiteľ.
 
@@ -8,15 +9,17 @@ formulácie má pred odoslaním skontrolovať majiteľ.
 
 | Pole | Hodnota |
 |---|---|
-| Názov | **Dispatching** (musí byť v App Store jedinečný; náhradne „Dispatching – Linka pomoci“) |
+| Názov | **Dispečing – Linka pomoci** v obchode; na ploche „Dispečing“ (`name` v `app.config.ts`) |
 | Podnadpis (do 30 znakov) | Mobilný dispečing asistencie |
 | Bundle ID | `sk.linkapomoci.dispecing` (produkcia), `.test` pre TEST |
 | Kategória | Business; vedľajšia Productivity |
 | Vek | 4+ |
-| Distribúcia | nezaradená (unlisted) – žiadosť cez formulár Apple po prvom schválení |
+| Distribúcia | nezaradená (Unlisted) – žiadosť hneď pri prvom podaní, manuálne vydanie; Apple Business (Custom App) len ako záloha |
+| Krajiny | Slovensko, Česko, Maďarsko, Poľsko (nie Čína kvôli CallKit, nie Francúzsko kvôli šifrovaciemu vyhláseniu) |
+| Jazyk | slovenčina (`CFBundleDevelopmentRegion = sk`) |
 | Podpora | https://dispecing.linkapomoci.sk/aplikacia/podpora |
 | Ochrana súkromia | https://dispecing.linkapomoci.sk/aplikacia/sukromie |
-| Verzia | pred prvým buildom pre App Store nastaviť `version` na `1.0.0`; build čísluje EAS |
+| Verzia | `1.0.0` (`app.config.ts`); build čísluje EAS |
 
 ## Texty
 
@@ -26,7 +29,7 @@ pracoviska.
 
 **Popis:**
 
-> Dispatching je aplikácia pre dispečerov Linky pomoci motoristom. Je určená
+> Dispečing je aplikácia pre dispečerov Linky pomoci motoristom. Je určená
 > výhradne pracovníkom dispečingu; účet zakladá organizácia.
 >
 > • Prehľad: hovory na vašom účte, spätné volania, prípady a úlohy na jednom mieste.
@@ -57,27 +60,35 @@ s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť apli
 - Obsah používateľa: fotografie, zvuk (hovory), iný obsah (poznámky).
 - Identifikátory: ID používateľa, ID zariadenia (pripojenie k ústredni,
   identifikátor pre notifikácie a inštalácie).
-- Diagnostika: údaje o pádoch (maskované hlásenia chýb).
+- Diagnostika: údaje o pádoch a iné diagnostické údaje (maskované hlásenia chýb
+  aplikácie, ktoré nie sú pádom).
 
 ## Ďalšie odpovede
 
-- **Šifrovanie:** `ITSAppUsesNonExemptEncryption = false` – HTTPS a pri hovoroch
-  štandardné šifrovanie WebRTC (DTLS-SRTP knižnice Telnyx), teda bežne dostupné
-  šifrovanie bez vlastného algoritmu. Odpovede na exportné otázky (vrátane
-  francúzskeho vyhlásenia) potvrdí majiteľ v App Store Connect.
+- **Šifrovanie:** HTTPS ide cez systém, hovory však šifruje knižnica WebRTC
+  v aplikácii (DTLS-SRTP, BoringSSL). V App Store Connect preto odpovedať:
+  šifrovanie **áno**, typ „štandardné algoritmy namiesto alebo popri šifrovaní
+  systému Apple“, nie vlastné; Francúzsko je z krajín vynechané. Kľúč
+  `ITSAppUsesNonExemptEncryption` v builde sa upraví podľa výsledku tohto
+  dotazníka (ak App Store Connect vydá kód, pribudne `ITSEncryptionExportComplianceCode`).
 - **Prihlásenie pre kontrolu Apple (Guideline 2.1):** rozhodnutie majiteľa
-  z 20. 10. 2026: žiadna demo organizácia; kontrolór dostane účet v organizácii
-  majiteľa (jeho firma je organizátor, s firmou klienta). Pred odoslaním: samostatný
-  účet len pre kontrolu (nie osobný účet dispečera) s rolou Dispečer, ktorý sa po
-  schválení deaktivuje. Kontrolór uvidí to, čo dispečer tejto organizácie.
-- **Poloha na pozadí (2.5.4, 5.1.1):** iba pre rolu pristavovač a iba počas
-  pristavenia náhradného vozidla, ktoré prijal; účel je v texte povolenia,
-  iOS ukazuje modrý ukazovateľ a posielanie končí so skončením pristavenia
-  alebo odhlásením. Do poznámky pre kontrolu: „Background location is used only
-  by replacement-car drivers during a delivery they accepted, so the dispatcher
-  sees where the car is; it stops when the delivery ends or the driver logs out.“
+  z 3. 11. 2026: samostatný účet len pre kontrolu, **natrvalo aktívny** (Apple
+  ho vyžaduje aj pri ďalších verziách), bez MFA, iba v testovacej pobočke
+  „Kontrola Apple“ (miestny dispečer + pristavovač) s ukážkovými dátami, aby
+  nevidel skutočných zákazníkov.
+- **Poloha na pozadí (2.5.4, 5.1.1):** iba pre pristavovača a vykonávateľa
+  jazdy a iba počas práce, ktorú prijal. Od 3. 11. 2026 aplikácia žiada **iba
+  „Pri používaní“**, nikdy „Vždy“: sledovanie sa spustí pri otvorenej aplikácii
+  a pokračuje na pozadí s modrým ukazovateľom. Ak iOS aplikáciu ukončí, poloha
+  sa obnoví po jej otvorení. Text pre „Vždy“ v Info.plist ostáva iba preto, že
+  ho vyžaduje prilinkovaný kód expo-location (ITMS-90683). Do poznámky pre
+  kontrolu: „Location is requested only as While Using, after the driver accepts
+  a job. It keeps updating in the background with the blue indicator so the
+  dispatcher sees the driver on the way; it stops when the job ends or the
+  driver logs out. The app never asks for Always.“
 - **Zrušenie účtu (5.1.1(v)):** aplikácia nedovoľuje registráciu; účty zakladá
-  a ruší organizácia. Postup je na stránke Ochrana súkromia.
+  a ruší organizácia. V Účte je pre každú rolu riadok **Zrušenie účtu**, ktorý
+  otvorí postup na stránke Ochrana súkromia (`#rights`).
 - **Poznámka pre kontrolu:** „Interná aplikácia pre dispečerov asistenčnej
   služby Linka pomoci. Prístup len pre zamestnancov, distribúcia ako unlisted.
   Účet pre kontrolu: … Telefonovanie vyžaduje pripojenie k ústredni v module Hovory.“

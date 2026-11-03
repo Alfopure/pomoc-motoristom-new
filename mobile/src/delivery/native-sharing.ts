@@ -50,7 +50,6 @@ function channel(task: string, stateKey: string, queueName: string, path: string
     permission: async () => status(await Location.getForegroundPermissionsAsync()),
     request: async () => status(await Location.requestForegroundPermissionsAsync()),
     backgroundPermission: async () => status(await Location.getBackgroundPermissionsAsync()),
-    requestBackground: async () => status(await Location.requestBackgroundPermissionsAsync()),
     running,
     // Driving: precise, every 50 m, sent at most every 20 s; the blue indicator shows it.
     start: () => Location.startLocationUpdatesAsync(task, {

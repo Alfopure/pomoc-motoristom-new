@@ -31,7 +31,9 @@ describe("resolved location permissions: foreground, and background only for a p
     const plist = resolved.ios?.infoPlist;
     expect(plist?.NSLocationWhenInUseUsageDescription).toContain("na váš pokyn");
     expect(plist?.NSLocationWhenInUseUsageDescription).toContain("počas pristavenia");
-    // Always only for the work the field member accepted, with the reason in plain words.
+    // While Using is all the app asks for; its text names the background sharing during accepted work.
+    expect(plist?.NSLocationWhenInUseUsageDescription).toContain("aj na pozadí a pri zamknutom telefóne");
+    // Never requested, but linked by expo-location (ITMS-90683): only the work the member accepted.
     expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Počas pristavenia, jazdy, odvozu či presunu, ktoré ste prijali");
     expect(plist?.NSLocationAlwaysAndWhenInUseUsageDescription).toContain("Po skončení práce prestane");
     expect(plist).not.toHaveProperty("NSLocationAlwaysUsageDescription");
