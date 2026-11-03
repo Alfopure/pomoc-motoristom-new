@@ -6,7 +6,7 @@ import { resolveAppEnvironment } from "@/lib/app-environment";
 import type { Database } from "@/lib/supabase/database.types";
 import type { MobileVoiceTuning } from "@/lib/mobile-api";
 import type { WebCallTuning } from "@/lib/telephony/active-calls-model";
-import type { SessionStartMode, TelnyxSipDomain } from "./state/types";
+import { euSipDomainAllowed, type SessionStartMode, type TelnyxSipDomain } from "./state/types";
 import type { TelnyxConfig } from "./telnyx/env";
 
 /**
@@ -60,8 +60,9 @@ export type LatencyFlags = Record<typeof BOOLEAN_KEYS[number], boolean> & {
   api_region: "us" | "eu";
   /**
    * S5 SIP-domain spike (TEST experiment): the Telnyx SIP host every
-   * SIP-credential dial of a new session uses. Frozen only together with
-   * `apiRegion: "eu"`, and only on TEST (`startSipDomain`).
+   * SIP-credential dial of a new session uses. Frozen only for a session we
+   * create that `api_region: "eu"` puts in the `eu` API region, and only on
+   * TEST (`startSipDomain`, `euSipDomainAllowed` in `state/types.ts`).
    */
   sip_domain: TelnyxSipDomain;
   /** 0 keeps undici's default. */
@@ -293,21 +294,6 @@ export function euApiRegionAllowed(): boolean {
 }
 
 /**
- * The SIP-domain spike (S5.0, docs/operations/telnyx-runbook.md) asks whether
- * dialling an operator's credential as `sip:<user>@sip.telnyx.eu` delivers the
- * invite faster than the anycast `sip.telnyx.com`. Telnyx does not document
- * it, so until the runbook records a pass only a deployment whose application
- * environment is exactly `test` may freeze it, as for `eu` itself: production,
- * a local run (`development`) and an unreadable environment keep `com`.
- */
-const EU_SIP_DOMAIN_PROVEN = false;
-function euSipDomainAllowed(): boolean {
-  if (EU_SIP_DOMAIN_PROVEN) return true;
-  try { return resolveAppEnvironment() === "test"; }
-  catch { return false; }
-}
-
-/**
  * S6 is implemented, but what Telnyx does when the far end answers while the
  * operator's own leg still rings (outcome A, B or C), two auto-bridged
  * endpoints answering together, and the wording of its "already bridged"
@@ -360,15 +346,18 @@ function startApiRegion(flags: LatencyFlags, input: StartRegionInput): "us" | "e
 }
 
 /**
- * The SIP domain a new session freezes (S5 SIP-domain spike): `eu` only when
- * `sip_domain` asks for it, the session is itself frozen to the `eu` API
- * region, and this deployment may (`euSipDomainAllowed`). A start builds its
- * SIP URIs with this before the session row exists; `freezeStartMode` records
- * the same value from the same flags, and the start refuses to create a
- * session whose frozen domain differs from the one its URIs carry.
+ * The SIP domain a new session freezes (S5 SIP-domain spike): `eu` only for a
+ * session we create (never an inbound call) that `api_region` itself puts in
+ * the `eu` API region, when `sip_domain` asks for it and this deployment may
+ * (`euSipDomainAllowed`). A region that merely names the deployment's host (a
+ * test or local `TELNYX_API_BASE_URL` on `.eu`) is not enough. A start builds
+ * its SIP URIs with this before the session row exists; `freezeStartMode`
+ * records the same value from the same flags, and the start refuses to create
+ * a session whose frozen domain differs from the one its URIs carry.
  */
 export function startSipDomain(flags: LatencyFlags, input: StartRegionInput): TelnyxSipDomain {
-  return flags.sip_domain === "eu" && startApiRegion(flags, input) === "eu" && euSipDomainAllowed() ? "eu" : "com";
+  return input.direction !== "inbound" && flags.api_region === "eu" && flags.sip_domain === "eu" &&
+    startApiRegion(flags, input) === "eu" && euSipDomainAllowed() ? "eu" : "com";
 }
 
 /**

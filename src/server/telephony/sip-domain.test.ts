@@ -97,10 +97,19 @@ describe("Telnyx SIP addresses", () => {
     }
   });
 
-  it("follow the session's frozen domain; a session without one is `com` for good", () => {
-    expect(sessionSipDomain({ start_mode: { apiRegion: "eu", sipDomain: "eu" } })).toBe("eu");
+  it("follow the session's frozen domain on TEST; a session without one is `com` for good", () => {
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    const frozen = { start_mode: { apiRegion: "eu", sipDomain: "eu" } };
+    expect(sessionSipDomain(frozen)).toBe("eu");
     for (const metadata of [null, undefined, {}, [], "eu", { start_mode: null }, { start_mode: { apiRegion: "eu" } },
       { start_mode: { sipDomain: "com" } }, { start_mode: { sipDomain: "EU" } }]) expect(sessionSipDomain(metadata), JSON.stringify(metadata)).toBe("com");
+    // Until the spike passes, nothing but TEST dials `eu`, even for a row frozen to it (a local run on the TEST database, a copied row).
+    for (const env of [{ MOTORIST_APP_ENV: "production" }, { MOTORIST_APP_ENV: "", VERCEL_ENV: "production" }, { MOTORIST_APP_ENV: "development" },
+      { MOTORIST_APP_ENV: "", VERCEL_ENV: "" }, { MOTORIST_APP_ENV: "staging" }]) {
+      vi.unstubAllEnvs();
+      for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+      expect(sessionSipDomain(frozen), JSON.stringify(env)).toBe("com");
+    }
   });
 
   it("are built only by the shared builder (static)", () => {
@@ -154,6 +163,24 @@ describe("the sip_domain switch", () => {
     // The default, with or without `eu`, records exactly what it did before: no field at all.
     expect(start({}, "outbound")).toEqual({ ...sequential, apiRegion: "us" });
     expect(start({ api_region: "eu" }, "internal")).toEqual({ ...sequential, apiRegion: "eu" });
+  });
+
+  it("never freezes `eu` from a deployment whose own host is `.eu`: not for an inbound call, nor without `api_region: \"eu\"`", () => {
+    vi.stubEnv("MOTORIST_APP_ENV", "test");
+    const start = (flags: Partial<LatencyFlags>, direction: "inbound" | "outbound" | "internal") =>
+      freezeStartMode({ ...defaultLatencyFlags(), ...flags }, { direction, origin: direction === "inbound" ? null : "web", providerRegion: "eu" });
+    // A test or local `TELNYX_API_BASE_URL` on `.eu` makes every session's region `eu`; the SIP domain still needs both switches and a call we create.
+    for (const flags of [{ sip_domain: "eu" }, EU] as const) {
+      const inbound = start(flags, "inbound");
+      expect(inbound.apiRegion).toBe("eu");
+      expect(inbound).not.toHaveProperty("sipDomain");
+      expect(startSipDomain({ ...defaultLatencyFlags(), ...flags }, { direction: "inbound", providerRegion: "eu" })).toBe("com");
+    }
+    for (const direction of ["outbound", "internal"] as const) {
+      expect(start({ sip_domain: "eu" }, direction)).toMatchObject({ apiRegion: "eu" });
+      expect(start({ sip_domain: "eu" }, direction)).not.toHaveProperty("sipDomain");
+      expect(start(EU, direction)).toMatchObject({ apiRegion: "eu", sipDomain: "eu" });
+    }
   });
 
   it("never freezes `eu` in production, a local run, development or an unreadable environment", () => {
@@ -267,6 +294,18 @@ describe("the SIP dials of a session", () => {
     await completeAnnouncedAction(h, startConsult(deps(), o1, call.sessionId, { profileId: PROFILES.o2 }));
     expect(sipDestinations(h, from)).toEqual([`dial:consult ${sip("gencred002", domain)}`]);
     expect(sessionSipDomain(h.session(call.sessionId).metadata)).toBe(domain);
+  });
+
+  it("rings an inbound call's operators on sip.telnyx.com, even on a deployment whose own host is `.eu` with both switches on", async () => {
+    const { h } = harness(EU);
+    if (!h.deps.config.configured) throw new Error("configured fixture required");
+    h.deps.config = { ...h.deps.config, apiBaseUrl: "https://api.telnyx.eu/v2" };
+    const call = await h.inbound({ to: NUMBERS.allianz });
+    expect(meta(h, call.sessionId).start_mode).toMatchObject({ apiRegion: "eu" });
+    expect(meta(h, call.sessionId).start_mode).not.toHaveProperty("sipDomain");
+    const ring = sipDestinations(h).filter(entry => entry.startsWith("dial:ring "));
+    expect(ring.length).toBeGreaterThan(0);
+    expect(ring.every(entry => entry.endsWith("@sip.telnyx.com")), ring.join(", ")).toBe(true);
   });
 
   it("dials exactly as before with the default switch", async () => {
@@ -421,5 +460,31 @@ describe("reading SIP addresses back", () => {
       expect(spike.map(entry => entry.to)).toContain(EU_SIP);
       expect(JSON.stringify(spike)).not.toContain(NUMBERS.customer);
     }
+  });
+
+  it("logs only a credential's own name as it is, anything else by its shape without its user part", async () => {
+    const { h, deps } = harness(EU);
+    const call = await outboundTalking(h, deps());
+    const logged: unknown[] = [];
+    const shapes = async (to: unknown, sipTo?: unknown) => {
+      h.logs.length = 0;
+      await h.legEvent(call.operatorLegCallControlId, "call.answered", { to, ...(sipTo === undefined ? {} : { sip_to: sipTo }) }, `spike-${h.nextEventId()}`);
+      const spike = h.logs.filter(entry => entry.scope === "sip-domain-spike");
+      logged.push(...spike);
+      return spike.map(entry => ({ to: entry.to, sipTo: entry.sipTo }));
+    };
+    expect(await shapes("gencred001", COM_SIP)).toEqual([{ to: "gencred001", sipTo: COM_SIP }]);
+    expect(await shapes(EU_SIP)).toEqual([{ to: EU_SIP, sipTo: null }]);
+    expect(await shapes("sip:secret-user@sip.telnyx.eu;transport=tls", "secret-user@Example.Test:5061")).toEqual([{
+      to: { shape: "address", scheme: "sip", host: "sip.telnyx.eu", hasUser: true, hasParams: true },
+      sipTo: { shape: "address", scheme: null, host: "example.test:5061", hasUser: true, hasParams: false } }]);
+    expect(await shapes("sip:+421905123456@sip.telnyx.eu", NUMBERS.customer)).toEqual([{
+      to: { shape: "address", scheme: "sip", host: "sip.telnyx.eu", hasUser: true, hasParams: false }, sipTo: { shape: "number" } }]);
+    expect(await shapes("secret.dotted-user", "tel:+421905123456")).toEqual([{
+      to: { shape: "address", scheme: null, host: null, hasUser: false, hasParams: false },
+      sipTo: { shape: "address", scheme: "tel", host: null, hasUser: false, hasParams: false } }]);
+    // Phone numbers only (a customer's leg): nothing at all.
+    expect(await shapes(NUMBERS.customer, "421905123456")).toEqual([]);
+    expect(JSON.stringify(logged)).not.toMatch(/secret|905123456/);
   });
 });

@@ -3,6 +3,7 @@ import type { IncomingWaitPolicy } from "@/lib/telephony/incoming-flow";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
+import { resolveAppEnvironment } from "@/lib/app-environment";
 import type { BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import { ANNOUNCEMENT_DEFINITIONS, readAnnouncementConfig, resolveAnnouncement, type AnnouncementConfig, type AnnouncementKey } from "@/lib/telephony/announcements";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
@@ -693,12 +694,30 @@ export function telnyxSipUsername(uri: unknown): string | null {
 }
 
 /**
- * The SIP domain a session was frozen to (`start_mode.sipDomain`, call-speed
- * S5 SIP-domain spike). A session without it dials `sip.telnyx.com` for good.
+ * Whether this deployment may dial `sip.telnyx.eu` at all (call-speed S5
+ * SIP-domain spike, docs/operations/telnyx-runbook.md). Telnyx does not
+ * document it, so until the runbook records a pass only a deployment whose
+ * application environment is exactly `test` freezes it (`startSipDomain`) or
+ * honours a frozen one (`sessionSipDomain`): production, a local run
+ * (`development`, which may point at the TEST database) and an unreadable
+ * environment dial `sip.telnyx.com` whatever a row says. Production needs a
+ * reviewed change here.
+ */
+const EU_SIP_DOMAIN_PROVEN = false;
+export function euSipDomainAllowed(): boolean {
+  if (EU_SIP_DOMAIN_PROVEN) return true;
+  try { return resolveAppEnvironment() === "test"; }
+  catch { return false; }
+}
+
+/**
+ * The SIP domain a session dials its credentials on: the frozen
+ * `start_mode.sipDomain` where this deployment may (`euSipDomainAllowed`). A
+ * session without it dials `sip.telnyx.com` for good.
  */
 export function sessionSipDomain(metadata: unknown): TelnyxSipDomain {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return "com";
-  return (metadata as SessionMeta).start_mode?.sipDomain === "eu" ? "eu" : "com";
+  return (metadata as SessionMeta).start_mode?.sipDomain === "eu" && euSipDomainAllowed() ? "eu" : "com";
 }
 
 export type RoutingContext = {

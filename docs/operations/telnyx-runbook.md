@@ -109,9 +109,9 @@ For `eu` sessions every "already gone" decision (hangup, recording stop, termina
 
 **Why.** In an EU session (`apiRegion: "eu"`) Telnyx takes about 1.17 s from "far dial dispatched" to the target browser's SDK invite when the server dials a SIP credential (`to: sip:<username>@sip.telnyx.com`: a colleague, or the operator's own leg). About 0.3 s of that is the `POST /calls` response; the rest is Telnyx delivering the INVITE. The browsers register on the EU RTC edge (`eu.rtc.telnyx.com`). `sip.telnyx.com` is anycast (192.76.120.10, SRV `sip-anycast{1,2}.telnyx.com`); `sip.telnyx.eu` exists too (185.246.41.140, SRV `sip-anycast{1,2}.telnyx.eu`). Hypothesis, plausible but not documented by Telnyx: dialling `@sip.telnyx.eu` keeps the INVITE inside Telnyx's EU SIP infrastructure and delivers it sooner.
 
-**What it changes.** `"sip_domain": "eu"` in `latency_flags` freezes `start_mode.sipDomain = "eu"` into a new session only when that session is also frozen to `apiRegion: "eu"` (so `api_region: "eu"` must be set as well, and an inbound call never gets it), and only where the application environment is exactly `test` (`EU_SIP_DOMAIN_PROVEN` in `latency-flags.ts`). Every SIP-credential dial of such a session then goes to `sip:<username>@sip.telnyx.eu`: the operator's own leg, the colleague's web and mobile endpoints, ring fan-out, pickup, a transfer, consult or added party to a colleague, and supervision. The leg rows, the colleague call's `called_number`, `internal.target_sip` and `internal.endpoints`, the start's `initial_operation` and the provider journal record that address. A session without the field (every session created before this build, and every production session) dials `sip.telnyx.com` for good; the default `"com"` changes nothing.
+**What it changes.** `"sip_domain": "eu"` in `latency_flags` freezes `start_mode.sipDomain = "eu"` into a new outbound, colleague or callback session only when `api_region: "eu"` itself puts that session in the `eu` API region (a test or local `TELNYX_API_BASE_URL` on `.eu` is not enough), and only where the application environment is exactly `test` (`EU_SIP_DOMAIN_PROVEN` in `state/types.ts`). An inbound call never gets it, so ring fan-out (which dials only for inbound calls) stays on `sip.telnyx.com`. Every SIP-credential dial of such a session then goes to `sip:<username>@sip.telnyx.eu`: the operator's own leg, the colleague's web and mobile endpoints, pickup, a transfer, consult or added party to a colleague, and supervision. Only a `test` deployment honours a frozen `eu`; production and local runs dial `sip.telnyx.com` whatever a row says. The leg rows, the colleague call's `called_number`, `internal.target_sip` and `internal.endpoints`, the start's `initial_operation` and the provider journal record that address. A session without the field (every session created before this build, and every production session) dials `sip.telnyx.com` for good; the default `"com"` changes nothing.
 
-**Reading addresses back.** What Telnyx reports in a webhook's `to` (or a `sip_to`) for a dial to `@sip.telnyx.eu` has not been observed. Every check that recognises a credential by its address accepts the exact address on either domain, and the bare username where Telnyx has used it so far: the TEST guard (`testSipUsername`), the credential-mirror proof (which then requires the address the session itself dialled, in both the leg and the journal), the iPhone's offer and delivered-offer checks, the native session and native hold checks, the browser's offer status and a native callee's own hangup. Any other host, a port or URI parameters are refused as before. For every webhook of an `eu` session, and every proven mirror of one, a `sip-domain-spike` log line records `to`, `sipTo` and the payload's key names (operator addresses only; a phone number is never logged).
+**Reading addresses back.** What Telnyx reports in a webhook's `to` (or a `sip_to`) for a dial to `@sip.telnyx.eu` has not been observed. Every check that recognises a credential by its address accepts the exact address on either domain, and the bare username where Telnyx has used it so far: the TEST guard (`testSipUsername`), the credential-mirror proof (which then requires the address the session itself dialled, in both the leg and the journal), the iPhone's offer and delivered-offer checks, the native session and native hold checks, the browser's offer status and a native callee's own hangup. Any other host, a port or URI parameters are refused as before. For every webhook of an `eu` session, and every proven mirror of one, a `sip-domain-spike` log line records `to`, `sipTo` and the payload's key names. A credential's own name (its bare username or its exact address on either domain) is logged as it is; any other value only by its shape (`number`, or scheme, host and whether it has a user part and parameters), never its user part. An event naming only phone numbers logs nothing.
 
 **Enable on TEST.** Supabase `nzpnqdstvkfncflgqlny` only, as an explicitly requested operation. It applies to new calls within the flags' 5 s cache:
 
@@ -120,7 +120,7 @@ For `eu` sessions every "already gone" decision (hangup, recording stop, termina
 select organization_id, latency_flags from public.motorist_telephony_settings;
 
 update public.motorist_telephony_settings
-set latency_flags = latency_flags || '{"sip_domain":"eu"}'
+set latency_flags = coalesce(latency_flags, '{}'::jsonb) || '{"sip_domain":"eu"}'::jsonb
 where organization_id = '<TEST organization id>';
 ```
 
@@ -132,13 +132,13 @@ where organization_id = '<TEST organization id>';
 
 ```sql
 update public.motorist_telephony_settings
-set latency_flags = latency_flags - 'sip_domain'
+set latency_flags = coalesce(latency_flags, '{}'::jsonb) - 'sip_domain'
 where organization_id = '<TEST organization id>';
 ```
 
 This affects only new sessions: a session already frozen to `eu` keeps dialling `sip.telnyx.eu` until it ends. Do not roll TEST back to a build without this change while such a session is live: an older build would dial its transfers, consults and supervisors on `sip.telnyx.com`, and would not recognise its legs' `.eu` addresses (iPhone offers, native hold, credential mirrors).
 
-**Limits until it passes.** Production, a local run (`development`) and an unreadable environment never freeze it, whatever the flags say. Production needs S5 itself first, then a reviewed change of `EU_SIP_DOMAIN_PROVEN` recording this pass.
+**Limits until it passes.** Production, a local run (`development`) and an unreadable environment never freeze it, whatever the flags say, and dial `sip.telnyx.com` even for a row frozen to `eu` (a local run on the TEST database, for example). Production needs S5 itself first, then a reviewed change of `EU_SIP_DOMAIN_PROVEN` recording this pass.
 
 **Result.** _Not yet run._
 

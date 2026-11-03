@@ -306,18 +306,40 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
  */
 const MIRROR_UNLINKED_WINDOW_MS = 15 * 60_000;
 
+/** A credential's bare username, as Telnyx names it on the credential connection; it has a letter, so a phone number never is one. */
+const BARE_CREDENTIAL = /^(?=.*[a-zA-Z])[a-zA-Z0-9_-]{1,128}$/;
+type SpikeShape = { shape: "number" | "address" | "other"; scheme?: string | null; host?: string | null; hasUser?: boolean; hasParams?: boolean };
+
+/**
+ * What the spike line may show of an address: a credential's own name (its
+ * bare username, or its exact SIP URI on either Telnyx domain) as it is;
+ * anything else only by its shape — scheme, host, whether it has a user part
+ * and parameters — never the user part itself (a customer's number, another
+ * identity).
+ */
+function spikeAddress(value: unknown): string | SpikeShape | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") return { shape: "other" };
+  if (telnyxSipUsername(value) || BARE_CREDENTIAL.test(value)) return value;
+  if (/^\+?[\d\s().-]+$/.test(value)) return { shape: "number" };
+  const parts = /^(?:([a-z][a-z0-9+.-]*):)?(?:[^@]*@)?([^;?]*)([;?].*)?$/i.exec(value);
+  const hasUser = value.includes("@"), host = parts?.[2] ?? "";
+  return { shape: "address", scheme: parts?.[1]?.toLowerCase().slice(0, 16) ?? null,
+    host: hasUser ? /^[a-z0-9.-]{1,253}(:\d{1,5})?$/i.test(host) ? host.toLowerCase() : "other" : null, hasUser, hasParams: Boolean(parts?.[3]) };
+}
+
 /**
  * S5 SIP-domain spike (TEST): what Telnyx reports as `to` (and as `sip_to`, if
  * a payload carries one) for the legs of a session that dials its operators on
  * `sip.telnyx.eu` has not been observed. Every matcher accepts both domains;
  * this line records the real values, on the session's own events and on its
- * proven credential mirrors. Operator addresses only: a phone number (the
- * customer's) is never logged.
+ * proven credential mirrors, through `spikeAddress`. An event naming only
+ * phone numbers (a customer's leg) logs nothing.
  */
 function logSipDomainSpike(deps: ProcessorDeps, event: TelephonyEvent, sessionId: string, source: "session" | "mirror"): void {
-  const address = (value: unknown) => typeof value === "string" && value && !/^\+?\d+$/.test(value) ? value.slice(0, 256) : null;
-  const to = address(event.to), sipTo = address(event.payload.sip_to);
-  if (!to && !sipTo) return;
+  const to = spikeAddress(event.to), sipTo = spikeAddress(event.payload.sip_to);
+  const telling = (value: string | SpikeShape | null) => value !== null && (typeof value === "string" || value.shape !== "number");
+  if (!telling(to) && !telling(sipTo)) return;
   try {
     deps.logger?.({ scope: "sip-domain-spike", eventId: event.id, type: event.type, sessionId, source, connectionId: event.connectionId,
       direction: event.direction, to, sipTo, payloadKeys: Object.keys(event.payload).sort() });
