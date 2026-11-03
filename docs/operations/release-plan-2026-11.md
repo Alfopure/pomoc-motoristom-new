@@ -46,7 +46,7 @@ Tento plán nahrádza [návrh z 28. 10.](production-release-2026-10-28.md). Súh
 | Notifications | Notices to the right person, mobile identity, mobile push (Expo/APNs) | #480, #481, #517 |
 | Mobile app (iPhone/Android, server side and app) | Native dispatch app: cases, tasks, maps, fleet, callbacks, after-call work, delivery driver with background location and privacy, modules, Android/Play prep, TestFlight builds, native iPhone calling behind its own production switches (off) | #420, #423–#434, #440, #443, #451, #455, #457, #459, #461, #462, #464, #465, #467–#479, #482–#497, #507, #508, #519, #520, #523, #528–#530, #532, #533, #535–#537 |
 | Calls: stability | Call recovery and incident diagnostics, caller loopback, unified web/iPhone calls, waiting-room controls, ended calls, duplicate events, realtime auth, polling | #450, #452–#454, #456, #458, #460, #522, #536 |
-| Calls: speed (call-speed S0–S8) | Switches and metrics (S0), lean internal path (S1), faster start (S2), early own-leg accept (S3, plus the Realtime/session privacy fixes), keep-alive (S4, off), EU API (S5, unlocked by this PR for unrecorded calls), browser EU region (S5a), concurrent dial (S6, off), faster hold (S7), iPhone tuning (S8), EU SIP domain (TEST only) | #538–#557 |
+| Calls: speed (call-speed S0–S8) | Switches and metrics (S0), lean internal path (S1), faster start (S2), early own-leg accept (S3, plus the Realtime/session privacy fixes), keep-alive (S4, tested on TEST 3 Nov), EU API (S5, unlocked by this PR for unrecorded calls), browser EU region (S5a), concurrent dial (S6, off), faster hold (S7), iPhone tuning (S8), EU SIP domain (TEST only) | #538–#557 |
 | Docs, QA, TEST-only | Live-delivery QA harness, TEST Supabase on Pro, build records, plans | #466, #474, #483, #485–#488, #493, #495, #497, #499–#506, #516, #524, #525, #527, #533, #534 |
 
 ## 2. Database migrations
@@ -172,6 +172,7 @@ Current TEST value (`nzpnqdstvkfncflgqlny`, read-only, `updated_at` 2026-11-03 0
   "start_early_response": true,
   "hold_fast_web": true,
   "hold_lean_context": true,
+  "http_keepalive_ms": 60000,
   "api_region": "eu",
   "own_leg_request_header": true,
   "client": { "webRtcRegion": "eu", "webEarlyAccept": true }
@@ -196,9 +197,24 @@ where organization_id = '00000000-0000-4000-8000-000000000001';
 | | | `hold_fast_web` | S7a.5: the web hold answers on confirmation |
 | | | `hold_lean_context` | S7a.4: lean routing context for hold/unhold |
 | | | `client.webRtcRegion: "eu"` | S5a: browsers register on the EU RTC edge |
+| | S4 | `http_keepalive_ms: 60000` | The Telnyx client keeps idle sockets for up to 60 s, so a call stops opening new connections per command. TEST evidence below. |
 | B | S5 (this PR) | `api_region: "eu"` | Outbound, callback and colleague calls that will not be recorded are created and controlled through `api.telnyx.eu`; inbound stays `us`. Production recording env switches are all `true` and the policy is off, so each outbound start reads one policy row in parallel; calls stay `eu` while recording is off. |
 | C | S3 | `own_leg_request_header` | Server-side only while `motorist_telephony_start_privacy_v1()` is `true` (after #24–#26) |
 | | | `client.webEarlyAccept` | The browser accepts its own leg early |
+
+**S4 evidence (stable TEST, `dev` `575949eb`, 3 Nov ~03:33–03:45 UTC).** `http_keepalive_ms` was 15000, then 60000; TEST still runs 60000.
+- 10 harness calls; all correctness checks passed.
+- `motorist_provider_commands` with outcome `unknown`: 0 of 50 after enabling, against a baseline of 0 of 509 in the previous 24 h. This is the S4 stop criterion.
+- From the third call at 60000, `telnyxConnects` was 0 on the start, the webhooks and the hangup.
+- Provider time of the bridge webhook went from 385–460 ms to 311–345 ms.
+
+In production, watch the same stop criterion for the first hour after stage A:
+
+```sql
+select outcome, count(*) from public.motorist_provider_commands where first_dispatched_at > now() - interval '1 hour' group by 1
+```
+
+Any `unknown` that is not explained by a live call means setting `http_keepalive_ms` back to `0` (new requests use the global fetch within 5 s).
 
 Prerequisite for stage C: the read-only check from the [release workflow](release-workflow.md). `GET /v2/credential_connections/<prod credential connection>` must return `sip_uri_calling_preference: "internal"`. A read-only note of 2 Nov recorded `internal` for `pomoc-motoristom-webrtc`; re-read it on release day.
 
@@ -211,11 +227,10 @@ All were tested on TEST builds. They do nothing in production until native voice
 
 **Excluded, with reason:**
 - `start_test_proof_prefetch` and `test_conference_self_proof`: TEST provider guards. Production runs no guard.
-- `sip_domain`: `EU_SIP_DOMAIN_PROVEN` is false. Production ignores the key, and it waits for the owner's iPhone test.
+- `sip_domain`: `EU_SIP_DOMAIN_PROVEN` is false, so production ignores the key. TEST now runs `sip_domain: "eu"`, and the owner is doing the iPhone check. If it passes, flipping `EU_SIP_DOMAIN_PROVEN` (`src/server/telephony/state/types.ts`) is a one-line reviewed follow-up that records the pass. After that it can join production as `"sip_domain": "eu"` next to `api_region`.
 - `concurrent_dial`, `internal_auto_bridge`, `own_leg_timeout_secs_concurrent` and `concurrent_far_link_to`: S6 is gated by `CONCURRENT_START_PROVEN`. On TEST it measured no net gain: the caller hears the colleague later.
 - `hold_join_with_hold`: S7b is gated by `JOIN_WITH_HOLD_PROVEN`, and spike S7.0 has not been run.
 - `client.targetLocalFirst`: gated by `TARGET_LOCAL_FIRST_PROVEN`. There is no far-party audio signal.
-- `http_keepalive_ms`: the S4 runbook result is "not yet run". It stays `0` until S4.2 passes on TEST.
 - `client.webPrefetchIce`: not on in TEST either.
 
 **Rollback.** `latency_flags = '{}'::jsonb` reaches new calls within 5 s. Calls already started keep their frozen mode.
@@ -259,14 +274,20 @@ The `dev` code also reads `ACK`, but that is a false match on a comment. Older g
 
 ## 5. Telnyx security step: blocked outbound profile for the phones (not executed)
 
-**Finding (read-only, 2 Nov).** The production credential connection `pomoc-motoristom-webrtc` (`3040092094321394986`) uses the shared, enabled outbound voice profile `pomoc-motoristom-test`. A logged-in web or iPhone client could therefore originate PSTN calls through the SDK, bypassing the application. On TEST, the connection has its own disabled profile: `dispatch-isolated-test-browser-blocked-20260930`.
+**Finding (read-only, 2 Nov).** A detailed `GET /call_control_applications/{id}` showed the following. (The earlier "CCA shows no OVP" note came from a list call, which does not return the `outbound` object.)
+- The production call control app (named `pomoc-motoristom-test`, webhook `dispecing.linkapomoci.sk`) has `outbound.outbound_voice_profile_id` = the OVP `pomoc-motoristom-test`, with `enabled: true`.
+- That OVP has `connections_count: 2`: the call control app and the credential connection `pomoc-motoristom-webrtc` (`3040092094321394986`).
+- A logged-in web or iPhone client could therefore originate PSTN calls through the SDK, bypassing the application.
+- On TEST the call control app `dispatch-isolated-test-callcontrol-20260930` has its own enabled OVP, and the browser connection has the disabled `dispatch-isolated-test-browser-blocked-20260930`.
+
+The fix gives `pomoc-motoristom-webrtc` its own disabled OVP. **Never disable or edit the shared OVP `pomoc-motoristom-test`**: the server's PSTN legs go through it.
 
 The owner's production authorization covers exactly these steps. Use the production `TELNYX_API_KEY` (`H='Authorization: Bearer …'`, base `https://api.telnyx.com/v2`). The Portal equivalent is noted after each step.
 
 0. **Read-only pre-checks; stop if any differs.**
    - `GET /credential_connections/3040092094321394986`. Save the whole response as `before-credential-connection.json`. Check that `active` is `true` and `sip_uri_calling_preference` is `"internal"`. Note `outbound.outbound_voice_profile_id` as `OVP_SHARED`.
    - `GET /outbound_voice_profiles/$OVP_SHARED`. Expect `name` `pomoc-motoristom-test` and `enabled: true`.
-   - `GET /call_control_applications/3040091293100279025`. Note `outbound.outbound_voice_profile_id`; expected `OVP_SHARED`, because the server dials PSTN through this app. **If it is empty, stop.** A 2 Nov note recorded "CCA shows no OVP", so first establish how production authorizes the server's PSTN legs; otherwise moving the phones' connection could be confused with the server's path.
+   - `GET /call_control_applications/3040091293100279025` (the detailed call, not the list). Expect `outbound.outbound_voice_profile_id` = `OVP_SHARED`, as read on 2 Nov: the server dials PSTN through this app. Also expect `connections_count: 2` on `OVP_SHARED`. If either differs, stop and re-establish which connections use the profile before changing anything.
    - `GET /outbound_voice_profiles?filter[name][contains]=dispatch-isolated-test-browser-blocked`. Use the TEST template's settings for step 1.
 1. **Create the blocked profile.** `POST /outbound_voice_profiles` with `{"name":"pomoc-motoristom-webrtc-blocked","enabled":false,"traffic_type":"conversational","service_plan":"global","whitelisted_destinations":["SK"],"daily_spend_limit_enabled":true,"daily_spend_limit":"1.00"}`. Mirror the TEST template's other non-identifying fields; `enabled: false` is the part that matters. Note `data.id` as `OVP_BLOCKED`, then `GET` it and confirm `enabled: false`. (Portal: Voice → Outbound Voice Profiles → Add.)
 2. **Assign it to the phones' connection only.** `PATCH /credential_connections/3040092094321394986` with `{"outbound": <the saved outbound object, with outbound_voice_profile_id = OVP_BLOCKED>}`. Send the full saved `outbound` object, because a partial nested object may reset other outbound settings. Then `GET` and diff against the saved file: only `outbound_voice_profile_id` may differ, `sip_uri_calling_preference` stays `"internal"`, and `active` stays `true`. Re-read the call control app: it must still have `OVP_SHARED`. (Portal: SIP Connections → `pomoc-motoristom-webrtc` → Outbound → Outbound Voice Profile.)
@@ -345,9 +366,9 @@ Scope: PRs #420–#557 and #<this PR> (see docs/operations/release-plan-2026-11.
 
 ### After deploy
 - /api/health/live: <version>, Git SHA <merge SHA>; /api/health/ready 200; cron gate 401
-- latency_flags stages A/B/C: <times>; start_mode check: outbound eu, inbound us
+- latency_flags stages A/B/C: <times>; start_mode check: outbound eu, inbound us; provider commands `unknown` after S4: <count>
 - Smoke: web call, hold×2, inbound, colleague, Pobočky, Partneri, Výjazdy, odťahy
-- Not in scope: native iPhone calling (production iOS build, App Store track); recording; S4, S6, S7b, sip_domain
+- Not in scope: native iPhone calling (production iOS build, App Store track); recording; S6, S7b, sip_domain
 
 ### Rollback
 latency_flags '{}' → revert PR (after api_region us and no live eu sessions); DB forward-only.

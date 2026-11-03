@@ -230,7 +230,12 @@ To run it on TEST, add `"concurrent_far_link_to": false` to the TEST `latency_fl
 
 **Rollback.** `"http_keepalive_ms": 0`. New requests use the global fetch within 5 s; requests in flight finish on the Agent.
 
-**Result.** _Not yet run._
+**Result (2026-11-03, stable TEST, `dev` `575949eb`, ~03:33–03:45 UTC): pass.**
+- `http_keepalive_ms` was 15000, then 60000; TEST keeps 60000.
+- 10 harness calls, all correctness checks passed.
+- `motorist_provider_commands` outcome `unknown`: 0 of 50 after enabling, against 0 of 509 in the previous 24 h.
+- From the third call at 60000, `telnyxConnects` was 0 on the start, the webhooks and the hangup.
+- Provider time of the bridge webhook: 311–345 ms, against 385–460 ms before.
 
 ### S2 — Slovak TTS availability (secondary)
 
