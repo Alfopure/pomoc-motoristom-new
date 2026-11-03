@@ -7,7 +7,8 @@ import { OfflineTransportError, synchronize, type DriverAccess } from './sync';
 const identity: OfflineIdentity = { userId: 'user-a', organizationId: 'org-a', membershipId: 'driver-a', environment: 'https://test.example' };
 const actor: TowingMember = { id: identity.membershipId, userId: identity.userId, organizationId: identity.organizationId, roles: ['driver'], capabilities: ['drive'], active: true, version: 1, displayName: 'Vodič A' };
 const order: TowingOrder = { id: 'order-a', number: 'Z-1', sourceCaseId: 'private-case', revision: 1, assignmentGeneration: 2, driverId: actor.id, workStatus: 'assigned', billingStatus: 'not_ready', paymentStatus: 'unpaid', fields: { serviceType: 'tow', subjectType: 'vehicle', subjectDescription: 'Auto', pickup: 'Súkromná adresa', contact: 'Súkromný kontakt' }, officeNotes: 'Secret office note', lines: [], attachments: [], receivedCents: 0, dueCents: 10000, authorizedCollectionCents: 10000, reconciliationRequired: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-const lease = () => ({ issuedAt: Date.now(), expiresAt: Date.now() + LEASE_MS });
+// One clock read: two reads a millisecond apart made the window longer than LEASE_MS and the store refused it.
+const lease = () => { const now = Date.now(); return { issuedAt: now, expiresAt: now + LEASE_MS }; };
 function entry(phase: OfflineEntry['phase'], type: TowingCommand['type'], payload: Record<string, unknown> = {}): OfflineEntry {
   const id = crypto.randomUUID(); return { id, phase, state: 'pending', sealed: false, command: { commandId: id, type, targetId: order.id, assignmentGeneration: 2, expectedRevision: 1, payload } };
 }
