@@ -4,6 +4,7 @@ import type { FormEvent } from "react";
 import { useState } from "react";
 import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { isExpectedLoginRejection } from "@/lib/diagnostics/auth-error";
 import { captureDiagnosticError } from "@/lib/diagnostics/errors";
 import { loginDestination } from "./login-destination";
 import { AppReleaseBadge } from "@/components/pwa/AppReleaseBadge";
@@ -32,16 +33,20 @@ export function MotoristLogin({ message, returnTo, appRelease }: { message: stri
     setStatus("working");
     setError(null);
 
-    const supabase = createSupabaseBrowserClient();
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: normalizedEmail,
-      password,
-    });
-
-    if (signInError) {
-      captureDiagnosticError(signInError);
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const { error: signInError } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
+      if (signInError) {
+        const expected = isExpectedLoginRejection(signInError);
+        if (!expected) captureDiagnosticError(signInError);
+        setStatus("error");
+        setError(expected ? "Prihlásenie zlyhalo. Skontroluj email a heslo." : "Prihlásenie sa nepodarilo dokončiť. Skús to znova o chvíľu.");
+        return;
+      }
+    } catch (error) {
+      captureDiagnosticError(error);
       setStatus("error");
-      setError("Prihlásenie zlyhalo. Skontroluj email a heslo.");
+      setError("Prihlásenie sa nepodarilo dokončiť. Skús to znova o chvíľu.");
       return;
     }
 
@@ -49,7 +54,12 @@ export function MotoristLogin({ message, returnTo, appRelease }: { message: stri
   }
 
   const isWorking = status === "working";
-  const forgotPasswordHref = email.trim() ? `/auth/forgot-password?email=${encodeURIComponent(email.trim().toLowerCase())}` : "/auth/forgot-password";
+  const towing = returnTo === "/vodic" || returnTo === "/zakazky";
+  const resetParams = new URLSearchParams();
+  if (email.trim()) resetParams.set("email", email.trim().toLowerCase());
+  if (towing) resetParams.set("module", "towing");
+  if (returnTo === "/partner") resetParams.set("module", "partner");
+  const forgotPasswordHref = `/auth/forgot-password${resetParams.size ? `?${resetParams}` : ""}`;
 
   return (
     <main className="auth-app-shell flex min-h-screen items-center justify-center bg-zinc-100 px-4 py-10 text-zinc-950">
@@ -61,7 +71,7 @@ export function MotoristLogin({ message, returnTo, appRelease }: { message: stri
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-base font-black text-zinc-950">PM</div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Pomoc motoristom</p>
-                <p className="text-sm font-semibold text-zinc-950">Dispečing</p>
+                <p className="text-sm font-semibold text-zinc-950">{towing ? "Zákazky odťahovej služby" : "Dispečing"}</p>
               </div>
             </div>
             <h1 className="text-2xl font-semibold text-zinc-950">Prihlásenie</h1>

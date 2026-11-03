@@ -1,12 +1,14 @@
 import "server-only";
-import { measureRequestStep } from "@/server/request-metrics";
+import { measureRequestStep, registerTelnyxOrigin } from "@/server/request-metrics";
+import { isReusedSocketReset, isReusedSocketTimeout } from "@/server/http/keepalive";
 import { recordProviderDispatch, sessionOwnership, type Ownership } from "../ownership";
+import { SessionLeaseLostError } from "../service-errors";
 import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../provider-journal";
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
 
-import { getTelnyxConfig, type TelnyxConfig } from "./env";
-import { checkTestProviderRequest, getTestProviderSafety, hasTestCallProvenance, resolveTestSipCredential, TestProviderSafetyError, type TestProviderContext } from "./test-safety";
+import { apiBaseUrlFor, getTelnyxConfig, type TelnyxApiRegion, type TelnyxConfig } from "./env";
+import { checkTestProviderRequest, getTestProviderSafety, hasTestCallProvenance, resolveTestSipCredential, TestProviderSafetyError, testSipUsername, type TestProviderContext } from "./test-safety";
 
 /**
  * Thin Telnyx REST client over `fetch`.
@@ -80,6 +82,9 @@ export class TelnyxCommandError extends Error {
  */
 export const TELNYX_CALL_GONE_CODES = new Set(["90018", "90003"]);
 
+/** "This call is no longer active": the one call-gone code observed on dead legs in production. */
+export const TELNYX_CALL_ENDED_CODE = "90018";
+
 /**
  * True when Telnyx refused a command because the call is over.
  *
@@ -92,6 +97,47 @@ export function isCallGoneError(error: unknown): error is TelnyxCommandError {
   if (TELNYX_CALL_GONE_CODES.has(String(error.code))) return true;
   // Some responses carry the reason only in prose.
   return /no longer active|call (has )?(already )?ended|does not exist/i.test(`${error.detail ?? ""} ${error.title ?? ""} ${error.message}`);
+}
+
+/**
+ * `isCallGoneError` for the session whose ownership is current (call-speed
+ * S5). In an EU session only Telnyx's own call-gone codes count: the prose
+ * match ("does not exist", ...) could be the answer of a region that never
+ * knew the call (an older build, a changed host) while the customer is still
+ * connected. A `us` session, and work outside a session, keep
+ * `isCallGoneError` unchanged.
+ */
+export function isSessionCallGoneError(error: unknown): error is TelnyxCommandError {
+  if (sessionOwnership.getStore()?.providerRegion !== "eu") return isCallGoneError(error);
+  return error instanceof TelnyxCommandError && TELNYX_CALL_GONE_CODES.has(String(error.code));
+}
+
+/** The status read behind `confirmEuLegEnded` waits at most this long: it runs inside an operator's request. */
+export const EU_LEG_CONFIRM_TIMEOUT_MS = 1_500;
+
+/**
+ * Call-speed S5, EU sessions only: a hangup or recording stop that Telnyx
+ * refused with 404/422 but without a call-gone code is confirmed with
+ * `GET /calls/:id` in the session's region (at most
+ * `EU_LEG_CONFIRM_TIMEOUT_MS`) before its obligation is given up.
+ * `is_alive: false` means the leg has ended; alive, unknown (404/422) or a
+ * failed or slow read keeps the obligation. So a wrong region's answer never
+ * closes a live leg, and the bookkeeping for a dead one does not stay open
+ * for good. Any other refusal (among them Cloudflare's 1010 and the TEST
+ * boundary's 423, which Telnyx never saw), a transport failure, a rate limit,
+ * a `us` session and work outside a session are never confirmed this way. A
+ * lost lease is not a read failure: it is thrown.
+ */
+export async function confirmEuLegEnded(telnyx: Pick<TelnyxClient, "retrieveCall"> | null, callControlId: string, error: unknown): Promise<boolean> {
+  if (sessionOwnership.getStore()?.providerRegion !== "eu" || !telnyx || !callControlId || !(error instanceof TelnyxCommandError) ||
+    error.status !== 404 && error.status !== 422) return false;
+  try {
+    const status = await telnyx.retrieveCall(callControlId, { timeoutMs: EU_LEG_CONFIRM_TIMEOUT_MS });
+    return status.known && status.raw?.is_alive === false;
+  } catch (failure) {
+    if (failure instanceof SessionLeaseLostError) throw failure;
+    return false;
+  }
 }
 
 export class TelnyxLiveCallsDisabledError extends TelnyxCommandError {
@@ -114,11 +160,17 @@ export type TelnyxHttpAttempt = {
   headersMs: number | null;
   ms: number;
   status: number | null;
+  /** Call-speed S4: the request failed, before any response, on a kept-alive socket the far end had reset. Never retried. */
+  reusedSocketReset?: true;
+  /** Call-speed S4: the request timed out, before any response, on a kept-alive socket (a possible silent drop). Never retried. */
+  reusedSocketTimeout?: true;
 };
 
 export type TelnyxRequestLog = {
   method: string;
   path: string;
+  /** Call-speed S5: the API region the request went to. */
+  region: TelnyxApiRegion;
   status: number | null;
   ms: number;
   commandId: string | null;
@@ -140,6 +192,12 @@ export type TelnyxClientOptions = {
   maxRetryAfterMs?: number;
   onRequest?: (entry: TelnyxRequestLog) => void;
   now?: () => number;
+  /**
+   * `test_conference_self_proof` (call-speed S7a.3): a conference this client
+   * created with `POST /conferences` under the current session ownership
+   * needs no `GET /conferences/:id` before the next action on it.
+   */
+  testConferenceSelfProof?: boolean;
 };
 
 // --- command parameter types ---------------------------------------------
@@ -341,7 +399,8 @@ export type TelnyxClient = {
   sendDtmf(params: SendDtmfParams): Promise<void>;
   createConference(params: CreateConferenceParams): Promise<ConferenceResult>;
   conferenceAction(conferenceId: string, action: ConferenceAction, body: Record<string, unknown> & { commandId?: string }): Promise<void>;
-  retrieveCall(callControlId: string): Promise<TelnyxCallStatus>;
+  /** Outside an owned session, `region` is the session's frozen `start_mode.apiRegion`. */
+  retrieveCall(callControlId: string, options?: { region?: TelnyxApiRegion; /** A shorter limit for this read than the operation's. */ timeoutMs?: number }): Promise<TelnyxCallStatus>;
   switchSupervisorRole(params: { callControlId: string; role: SupervisorRole; commandId: string }): Promise<void>;
   listPhoneNumbers(params?: { pageSize?: number; phoneNumber?: string }): Promise<TelnyxPhoneNumber[]>;
   createTelephonyCredential(params: CreateTelephonyCredentialParams): Promise<TelephonyCredential>;
@@ -351,7 +410,19 @@ export type TelnyxClient = {
   sendMessage(params: SendMessageParams): Promise<SendMessageResult>;
   /** Escape hatch used by later stages for endpoints not wrapped above. */
   request<T = unknown>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, options?: RequestOptions): Promise<T>;
+  /**
+   * Call-speed S2 (`start_test_proof_prefetch`): proves the TEST SIP
+   * destination of this client's next dial to `to` ahead of that dial, with
+   * the same enrollment and credential checks. The proof is used once, by this
+   * client only (one request); null where no TEST guard runs. It rejects only
+   * with the boundary's refusal; an `inconclusive` check leaves the dial to
+   * prove the destination itself.
+   */
+  proveSipDestination?(to: string): Promise<SipDestinationProof> | null;
 };
+
+/** `proven`: the dial may skip its own TEST destination check; `inconclusive`: it may not. */
+export type SipDestinationProof = "proven" | "inconclusive";
 
 export type RequestOptions = {
   /** Internal identity for endpoints whose wire schema omits command_id. */
@@ -367,7 +438,55 @@ export type RequestOptions = {
   skipJournal?: boolean;
   /** What the provider answered, handed back before any error is thrown. */
   observe?: (sent: { status: number; result: unknown; retryAfterMs?: number }) => void;
+  /**
+   * Call-speed S5: for a caller outside an owned session (cron, reconcile,
+   * the TEST guard before correlation), the session's frozen
+   * `start_mode.apiRegion`. An owned session's own region always wins.
+   */
+  region?: TelnyxApiRegion;
 };
+
+/** Calls, conferences and recordings live in the region whose API created them. */
+const REGIONAL_PATH = /^\/(calls|conferences|recordings)(\/|$)/;
+
+/**
+ * Call-speed S5: the API region of one request. Telnyx processes a call or
+ * conference in the region whose API created it, and a call created through
+ * `.eu` must be controlled through `.eu`; conferences cannot span regions. So
+ * inside an owned session its frozen region wins, then a region the caller
+ * passes, then `us`. Account-level resources (credentials, credential
+ * connections, outbound profiles, numbers, messages) are global and stay on
+ * `us` whatever the session.
+ */
+export function resolveApiRegion(path: string, explicit?: TelnyxApiRegion): TelnyxApiRegion {
+  if (!REGIONAL_PATH.test(path.startsWith("/") ? path : `/${path}`)) return "us";
+  return sessionOwnership.getStore()?.providerRegion ?? explicit ?? "us";
+}
+
+/** The TEST boundary's refusal, as the guard and the S2 prefetch report it. */
+const TEST_PROVIDER_BOUNDARY_CODE: TestProviderSafetyError["code"] = "test_provider_boundary";
+
+/** A Cloudflare edge refusal, not a Telnyx answer (see `cloudflareSignatureBanned`). */
+export const CLOUDFLARE_SIGNATURE_BANNED_CODE = "cloudflare_1010";
+
+/**
+ * Cloudflare in front of `api.telnyx.eu` refuses some client signatures (for
+ * example `Python-urllib`) with 403 and error 1010 "browser_signature_banned"
+ * before the request reaches Telnyx: as JSON (we ask for it), as plain text
+ * ("error code: 1010") or as its HTML page. That is our configuration, never
+ * the provider's verdict on the command. Checked only for the EU host, so the
+ * default `.com` path keeps today's handling of every 403.
+ */
+export function cloudflareSignatureBanned(status: number, body: unknown): boolean {
+  if (status !== 403) return false;
+  if (typeof body === "string") {
+    return /error code:?\s*1010\b|browser_signature_banned/i.test(body) ||
+      /<title>[^<]*\b1010\b[^<]*<\/title>/i.test(body) ||
+      /used Cloudflare to restrict access/i.test(body) && /\b1010\b/.test(body);
+  }
+  const record = asRecord(body);
+  return record.error_code === 1010 || record.error_code === "1010" || record.error_name === "browser_signature_banned";
+}
 
 // --- helpers ---------------------------------------------------------------
 
@@ -423,6 +542,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     throw new TelephonyNotConfiguredError();
   }
   const configured: TelnyxConfigured = config;
+  // New provider sockets are counted next to the database's (`telnyxConnects`).
+  registerTelnyxOrigin(configured.apiBaseUrl);
+  registerTelnyxOrigin(configured.euApiBaseUrl);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? TELNYX_COMMAND_TIMEOUT_MS;
   const sleep = options.sleep ?? defaultSleep;
@@ -438,6 +560,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
   // admin, organization and provider boundary; later actions prove it again.
   // Mutable enrollment, credential validity and all dispatch fences stay fresh.
   const ownedTestCallProofs = new WeakMap<Ownership, Map<string, Promise<void>>>();
+  // Conferences this client created under one fenced ownership (S7a.3). The
+  // create itself passed the guard on its call; its id comes from Telnyx.
+  const createdTestConferences = new WeakMap<Ownership, Set<string>>();
 
   async function verifyTestCall(callId: string, safety: ReturnType<typeof getTestProviderSafety>, deadline: number): Promise<void> {
     if (now() >= deadline) throw new TestProviderSafetyError();
@@ -462,6 +587,46 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       if (proofs.get(key) === pending) proofs.delete(key);
       throw error;
     }
+  }
+
+  // Call-speed S2 (`start_test_proof_prefetch`): destination proofs made
+  // earlier in this same request, each consumed by the next dial to it. The
+  // client lives for one request, so this never outlasts it.
+  const prefetchedSipProofs = new Map<string, Promise<SipDestinationProof>>();
+
+  function resolveSipCredential(username: string): Promise<string> {
+    return options.testProvenanceContext ? resolveTestSipCredential(username, options.testProvenanceContext) : resolveTestSipCredential(username);
+  }
+
+  async function assertTestCredential(credentialId: string, username: string | undefined, method: string, deadline: number): Promise<void> {
+    const response = await request<unknown>("GET", `/telephony_credentials/${encodeURIComponent(credentialId)}`, {}, deadline);
+    const credential = asRecord(asRecord(response).data);
+    // Telnyx GET credentials returns resource_id="connection:<id>", not
+    // the connection_id field used in the create request.
+    if (credential.resource_id !== `connection:${configured.credentialConnectionId}` || (credential.expired === true && method !== "DELETE") ||
+      (username && credential.sip_username !== username)) throw new TestProviderSafetyError();
+  }
+
+  function proveSipDestination(to: string): Promise<SipDestinationProof> | null {
+    const safety = configured.testSafety ?? getTestProviderSafety();
+    const username = safety.restricted ? testSipUsername(to) : null;
+    if (!username) return null;
+    const deadline = now() + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS);
+    const proof = (async (): Promise<SipDestinationProof> => {
+      try {
+        await assertTestCredential(await resolveSipCredential(username), username, "POST", deadline);
+        return "proven";
+      } catch (error) {
+        // Only the boundary's own refusal is final. Anything else (a provider
+        // timeout, a 5xx) proves nothing either way: the dial checks the
+        // destination itself, exactly as without the prefetch.
+        if (error instanceof TestProviderSafetyError) throw new TelnyxCommandError({ code: error.code, status: error.status, message: error.message, commandId: null });
+        return "inconclusive";
+      }
+    })();
+    proof.catch(() => undefined);
+    prefetchedSipProofs.set(username, proof);
+    return proof;
   }
 
   async function attempt(
@@ -502,6 +667,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       const parsed = await readBody(response);
       return { response, parsed };
     } catch (error) {
+      // Only before any response: a body cut off after the status line is not the S4 stale-socket case.
+      if (timing.status === null && isReusedSocketReset(error)) timing.reusedSocketReset = true;
+      else if (timing.status === null && isReusedSocketTimeout(error)) timing.reusedSocketTimeout = true;
       if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
         throw new TelnyxCommandError({ code: "timeout", status: 504, detail: `No response within ${timeoutMs} ms`, retryable: true, commandId });
       }
@@ -537,7 +705,8 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const requestDeadline = Math.min(requestStarted + (options.operationTimeoutMs ?? TELNYX_OPERATION_TIMEOUT_MS), boundaryDeadline, sessionOwnership.getStore()?.deadline ?? Infinity);
     const commandId = requestOptions.journalCommandId ?? requestOptions.commandId ?? null;
     const wireCommandId = requestOptions.commandId ?? null;
-    const url = new URL(`${configured.apiBaseUrl}${path.startsWith("/") ? path : `/${path}`}`);
+    const region = resolveApiRegion(path, requestOptions.region);
+    const url = new URL(`${apiBaseUrlFor(configured, region)}${path.startsWith("/") ? path : `/${path}`}`);
     for (const [key, value] of Object.entries(requestOptions.query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
@@ -545,43 +714,76 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const safety = configured.testSafety ?? getTestProviderSafety();
     try {
       const checked = checkTestProviderRequest({ ...configured, safety }, method, path, payload);
-      // Independent local proofs run together, but retain the boundary that
-      // rejects a foreign call before even reading its conference at Telnyx.
-      // Every check still precedes journal preparation and provider mutation.
-      await Promise.all([...new Set(checked.callIds)].map(callId => verifyTestCall(callId, safety, requestDeadline)));
-      await Promise.all([...new Set(checked.conferenceIds)].map(async conferenceId => {
-        const response = await request<unknown>("GET", `/conferences/${encodeURIComponent(conferenceId)}`, {}, requestDeadline);
-        if (asRecord(asRecord(response).data).connection_id !== configured.callControlAppId) throw new TestProviderSafetyError();
-      }));
-      // Tokens and SIP targets must belong to the dedicated TEST connection,
-      // including credentials restored from a copied or stale device row.
-      const credentials = new Map<string, string | undefined>();
-      if (checked.credentialId) credentials.set(checked.credentialId, undefined);
-      for (const username of new Set(checked.sipUsernames)) {
-        if (now() >= requestDeadline) throw new TestProviderSafetyError();
-        credentials.set(await (options.testProvenanceContext
-          ? resolveTestSipCredential(username, options.testProvenanceContext)
-          : resolveTestSipCredential(username)), username);
-      }
-      for (const [credentialId, username] of credentials) {
-        const response = await request<unknown>("GET", `/telephony_credentials/${encodeURIComponent(credentialId)}`, {}, requestDeadline);
-        const credential = asRecord(asRecord(response).data);
-        // Telnyx GET credentials returns resource_id="connection:<id>", not
-        // the connection_id field used in the create request.
-        if (credential.resource_id !== `connection:${configured.credentialConnectionId}` || (credential.expired === true && method !== "DELETE") ||
-          (username && credential.sip_username !== username)) throw new TestProviderSafetyError();
-      }
-      if (checked.credentialId && method === "POST") {
-        // A browser possessing the JWT can dial without our REST client. Its
-        // dedicated SIP connection must therefore have provider-side PSTN off.
-        const response = await request<unknown>("GET", `/credential_connections/${encodeURIComponent(configured.credentialConnectionId!)}`, {}, requestDeadline);
-        const connection = asRecord(asRecord(response).data);
-        const outboundProfile = str(asRecord(connection.outbound).outbound_voice_profile_id);
-        if (connection.active !== true || connection.sip_uri_calling_preference !== "internal" || !outboundProfile || !configured.outboundVoiceProfileId ||
-          outboundProfile === configured.outboundVoiceProfileId) throw new TestProviderSafetyError();
-        const profileResponse = await request<unknown>("GET", `/outbound_voice_profiles/${encodeURIComponent(outboundProfile)}`, {}, requestDeadline);
-        if (asRecord(asRecord(profileResponse).data).enabled !== false) throw new TestProviderSafetyError();
-      }
+      const owner = sessionOwnership.getStore();
+      // Three independent chains run together (call-speed S5): the referenced
+      // calls and then their conferences; the SIP destinations and their
+      // credentials; for a token, the SIP connection and then its profile.
+      // Each stays fail-closed and every check still precedes journal
+      // preparation and provider mutation. Once a check has refused, the
+      // others start nothing new. A transient read failure stops nothing, so
+      // every refusal still runs to completion, and a boundary refusal is
+      // always reported ahead of it, as when the chains ran one after another.
+      let refused = false;
+      const stopped = new Error("TEST guard stopped after another check refused");
+      const stop = () => { if (refused) throw stopped; };
+      // A refusal is the boundary's own error, or the S2 prefetch's refusal,
+      // which reaches this request already as a `TelnyxCommandError`.
+      const isRefusal = (error: unknown) => error instanceof TestProviderSafetyError ||
+        error instanceof TelnyxCommandError && error.code === TEST_PROVIDER_BOUNDARY_CODE;
+      const chain = (work: () => Promise<void>) => work().catch((error: unknown) => {
+        if (isRefusal(error)) refused = true;
+        throw error;
+      });
+      const settled = await Promise.allSettled([
+        chain(async () => {
+          // Independent local proofs run together, but retain the boundary that
+          // rejects a foreign call before even reading its conference at Telnyx.
+          await Promise.all([...new Set(checked.callIds)].map(callId => verifyTestCall(callId, safety, requestDeadline)));
+          stop();
+          await Promise.all([...new Set(checked.conferenceIds)].map(async conferenceId => {
+            if (owner && createdTestConferences.get(owner)?.has(conferenceId)) return;
+            const response = await request<unknown>("GET", `/conferences/${encodeURIComponent(conferenceId)}`, { region }, requestDeadline);
+            if (asRecord(asRecord(response).data).connection_id !== configured.callControlAppId) throw new TestProviderSafetyError();
+          }));
+        }),
+        chain(async () => {
+          // Tokens and SIP targets must belong to the dedicated TEST connection,
+          // including credentials restored from a copied or stale device row.
+          const credentials = new Map<string, string | undefined>();
+          if (checked.credentialId) credentials.set(checked.credentialId, undefined);
+          for (const username of new Set(checked.sipUsernames)) {
+            stop();
+            // Proven earlier in this request (S2 prefetch): used once, then gone.
+            // Only a completed positive proof replaces this check; a refusal
+            // throws as the check would, and anything inconclusive (including a
+            // check still running when it ends that way) falls through to it.
+            const prefetched = method === "POST" && path === "/calls" ? prefetchedSipProofs.get(username) : undefined;
+            if (prefetched) {
+              prefetchedSipProofs.delete(username);
+              if (await prefetched === "proven") continue;
+            }
+            if (now() >= requestDeadline) throw new TestProviderSafetyError();
+            credentials.set(await resolveSipCredential(username), username);
+          }
+          stop();
+          await Promise.all([...credentials].map(([credentialId, username]) => assertTestCredential(credentialId, username, method, requestDeadline)));
+        }),
+        chain(async () => {
+          if (!checked.credentialId || method !== "POST") return;
+          // A browser possessing the JWT can dial without our REST client. Its
+          // dedicated SIP connection must therefore have provider-side PSTN off.
+          const response = await request<unknown>("GET", `/credential_connections/${encodeURIComponent(configured.credentialConnectionId!)}`, {}, requestDeadline);
+          const connection = asRecord(asRecord(response).data);
+          const outboundProfile = str(asRecord(connection.outbound).outbound_voice_profile_id);
+          if (connection.active !== true || connection.sip_uri_calling_preference !== "internal" || !outboundProfile || !configured.outboundVoiceProfileId ||
+            outboundProfile === configured.outboundVoiceProfileId) throw new TestProviderSafetyError();
+          stop();
+          const profileResponse = await request<unknown>("GET", `/outbound_voice_profiles/${encodeURIComponent(outboundProfile)}`, {}, requestDeadline);
+          if (asRecord(asRecord(profileResponse).data).enabled !== false) throw new TestProviderSafetyError();
+        }),
+      ]);
+      const failures = settled.flatMap(result => result.status === "rejected" && result.reason !== stopped ? [result.reason as unknown] : []);
+      if (failures.length) throw failures.find(isRefusal) ?? failures[0];
     } catch (error) {
       if (error instanceof TestProviderSafetyError) throw new TelnyxCommandError({ code: error.code, status: error.status, message: error.message, commandId });
       throw error;
@@ -593,7 +795,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     const log = (status: number | null, retried: boolean, error: string | null, cached = false) => {
       // Even a custom failing logger must not change the accepted command outcome.
       try {
-        void Promise.resolve(options.onRequest?.({ method, path, status, ms: now() - started,
+        void Promise.resolve(options.onRequest?.({ method, path, region, status, ms: now() - started,
           commandId, retried, error, attempts, cached })).catch(() => undefined);
       } catch { /* Telemetry is not part of command execution. */ }
     };
@@ -605,6 +807,21 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
         journal,
         async () => {
           const result = await measureRequestStep("provider", () => attempt(method, url.toString(), body, commandId, requestOptions.headers, deadline, { started, attempts }));
+          if (region === "eu" && cloudflareSignatureBanned(result.response.status, result.parsed)) {
+            const detail = "Cloudflare refused the eu API request (error 1010, browser signature banned) before it reached Telnyx; check the client's User-Agent";
+            // A dial that never reached Telnyx created no call. It is recorded
+            // as refused (403), so termination does not wait for a leg that
+            // cannot exist, and tagged, so it reads (and replays) as this
+            // configuration error rather than Telnyx's.
+            if (method === "POST" && path === "/calls") {
+              const refusal = { errors: [{ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, title: "Cloudflare error 1010", detail }] };
+              requestOptions.observe?.({ status: 403, result: refusal });
+              return { status: 403, result: refusal as unknown, raw: { response: result.response, parsed: refusal as unknown }, retryAfterMs: undefined };
+            }
+            // Any other command: nothing observed or journalled, as after a
+            // transport failure, and never retried.
+            throw new TelnyxCommandError({ code: CLOUDFLARE_SIGNATURE_BANNED_CODE, status: 403, retryable: false, commandId, detail });
+          }
           const sent = { status: result.response.status, result: result.parsed, raw: result,
             retryAfterMs: result.response.status === 429 ? parseRetryAfterMs(result.response.headers.get("retry-after"), now()) ?? TELNYX_DEFAULT_RETRY_AFTER_MS : undefined };
           // A batch member records its own answer, and records it whether the
@@ -659,6 +876,14 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     if (safety.restricted && method === "POST" && path === "/calls") {
       const created = str(asRecord(asRecord(parsed).data).call_control_id);
       if (created && createdTestCalls.size < 128) createdTestCalls.add(created);
+    }
+    if (safety.restricted && options.testConferenceSelfProof && method === "POST" && path === "/conferences" && owner?.contract === 2) {
+      const created = str(asRecord(asRecord(parsed).data).id);
+      if (created) {
+        const conferences = createdTestConferences.get(owner) ?? new Set<string>();
+        conferences.add(created);
+        createdTestConferences.set(owner, conferences);
+      }
     }
     return parsed as T;
   }
@@ -724,6 +949,7 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
     config: configured,
     liveGate,
     request,
+    proveSipDestination,
 
     /**
      * A whole ring step, under one journal.
@@ -1039,10 +1265,11 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       await request<unknown>("POST", `/conferences/${encodeURIComponent(conferenceId)}/actions/${action}`, { body: compact(rest), commandId: idempotencyId, journalCommandId: commandId });
     },
 
-    async retrieveCall(callControlId: string) {
+    async retrieveCall(callControlId: string, retrieveOptions = {}) {
       if (!callControlId) throw new TelnyxCommandError({ code: "invalid_call_control_id", status: 400, detail: "retrieveCall: callControlId is required" });
       try {
-        const response = await request<unknown>("GET", `/calls/${encodeURIComponent(callControlId)}`);
+        const response = await request<unknown>("GET", `/calls/${encodeURIComponent(callControlId)}`, { region: retrieveOptions.region },
+          retrieveOptions.timeoutMs === undefined ? Infinity : now() + retrieveOptions.timeoutMs);
         const raw = asRecord(asRecord(response).data);
         return { callControlId, known: true, alive: raw.is_alive === true, callSessionId: str(raw.call_session_id), raw };
       } catch (error) {

@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { createTelephonyHarness, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
-import { getTelephonyHealth, LEDGER_FAILURE_WINDOW_MS, WEBHOOK_SILENCE_WARN_MS } from "./health";
+import { getTelephonyHealth, LEDGER_FAILURE_WINDOW_MS, LEDGER_RETRY_GRACE_MS, WEBHOOK_SILENCE_WARN_MS } from "./health";
+import { alertsFromReport } from "./alerts";
 import { TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { usageDay } from "./usage";
 
@@ -14,6 +15,13 @@ function check(report: Awaited<ReturnType<typeof getTelephonyHealth>>, key: stri
   const found = report.checks.find((entry) => entry.key === key);
   if (!found) throw new Error(`missing check ${key}`);
   return found;
+}
+
+function retryableFailure(h: TelephonyHarness, overrides: Record<string, unknown> = {}) {
+  return { organization_id: ORG, event_id: "retrying-event", event_type: "call.playback.ended", status: "failed", attempts: 1,
+    received_at: new Date(h.now().getTime() - 30_000).toISOString(), contract_version: 2, retry_state: "ready",
+    effect_failure_count: 1, terminal_reason: null, next_attempt_at: h.now().toISOString(), claimed_at: null,
+    error: "Error: motorist_provider_command_prepare_v2: AbortError: owned database request exceeded 4000 ms", ...overrides };
 }
 
 // Anonymized shape of the 9 October simultaneous customer/fallback hangups.
@@ -172,6 +180,33 @@ describe("telephony health", () => {
     expect(report.status).toBe("warn");
   });
 
+  it("verifies one transient monitoring timeout before reporting an incident", async () => {
+    const h = createTelephonyHarness();
+    h.db.failNext("motorist_operator_devices", "select", {
+      message: "AbortError: un-owned read exceeded 10000 ms", code: "", details: null, hint: null,
+    });
+    const report = await getTelephonyHealth(healthDeps(h));
+    expect(check(report, "devices")).toMatchObject({ status: "ok", detail: { error: null } });
+    expect(report.status).toBe("ok");
+    expect(alertsFromReport(report, usageDay(h.now()))).toEqual([]);
+    expect(h.db.log.filter(entry => entry.table === "motorist_operator_devices")).toHaveLength(2);
+    expect(h.db.log.every(entry => entry.operation === "select")).toBe(true);
+  });
+
+  it("keeps persistent monitoring errors visible and does not retry every failing check", async () => {
+    const h = createTelephonyHarness();
+    const timeout = { message: "AbortError: un-owned read exceeded 10000 ms", code: "", details: null, hint: null };
+    h.db.failNext("motorist_telephony_settings", "select", timeout);
+    h.db.failNext("motorist_telephony_settings", "select", timeout);
+    h.db.failNext("motorist_operator_devices", "select", timeout);
+    const report = await getTelephonyHealth(healthDeps(h));
+    expect(check(report, "configuration")).toMatchObject({ status: "warn", detail: { error: timeout.message } });
+    expect(check(report, "devices")).toMatchObject({ status: "warn", detail: { error: timeout.message } });
+    expect(alertsFromReport(report, usageDay(h.now())).map(alert => alert.check)).toEqual(expect.arrayContaining(["configuration", "devices"]));
+    expect(h.db.log.filter(entry => entry.table === "motorist_telephony_settings")).toHaveLength(2);
+    expect(h.db.log.filter(entry => entry.table === "motorist_operator_devices")).toHaveLength(1);
+  });
+
   it("separates failed ledger rows from claims the replay job will pick up", async () => {
     const h = createTelephonyHarness();
     const at = (ms: number) => new Date(h.now().getTime() - ms).toISOString();
@@ -189,6 +224,95 @@ describe("telephony health", () => {
     const report = await getTelephonyHealth(healthDeps(h));
     expect(check(report, "ledger")).toMatchObject({ status: "fail", detail: { failed24h: 1, failedIds: ["burned"] } });
     expect(report.status).toBe("fail");
+  });
+
+  it.each(["call.playback.ended", "call.hangup"])("allows the next cron to recover a fresh %s failure without incident mail", async eventType => {
+    const h = createTelephonyHarness();
+    const row = retryableFailure(h, { event_type: eventType });
+    h.db.seed("motorist_telnyx_webhook_events", [row]);
+    const warning = await getTelephonyHealth(healthDeps(h));
+    expect(check(warning, "ledger")).toMatchObject({ status: "warn", detail: {
+      failed24h: 1, actionableFailures: 0, failedIds: [], retrying: 1, retryingIds: [row.event_id],
+      retryGraceMs: LEDGER_RETRY_GRACE_MS, retryingFailures: [{ eventId: row.event_id, kind: "database_timeout",
+        source: "scheduled_retry", effectFailureCount: 1, retryState: "ready", receivedAt: row.received_at,
+        nextAttemptAt: row.next_attempt_at, graceUntil: new Date(Date.parse(row.received_at) + LEDGER_RETRY_GRACE_MS).toISOString() }],
+    } });
+    expect(alertsFromReport(warning, usageDay(h.now()))).toEqual([]);
+    expect(h.db.log.every(entry => entry.operation === "select")).toBe(true);
+    // Mirrors the observed production sequence: the existing next cron succeeds.
+    h.advance(5 * 60_000);
+    h.db.update("motorist_telnyx_webhook_events", { status: "processed", processed_at: h.now().toISOString(), error: null }, () => true);
+    const recovered = await getTelephonyHealth(healthDeps(h));
+    expect(check(recovered, "ledger")).toMatchObject({ status: "ok", detail: { failed24h: 0, retrying: 0 } });
+    expect(alertsFromReport(recovered, usageDay(h.now()))).toEqual([]);
+  });
+
+  it("escalates at ten minutes from receipt even when retries and claims are fresh", async () => {
+    const h = createTelephonyHarness();
+    const row = retryableFailure(h, { received_at: h.now().toISOString() });
+    h.db.seed("motorist_telnyx_webhook_events", [row]);
+    h.advance(LEDGER_RETRY_GRACE_MS - 1);
+    expect(check(await getTelephonyHealth(healthDeps(h)), "ledger").status).toBe("warn");
+    h.advance(1);
+    h.db.update("motorist_telnyx_webhook_events", { attempts: 3, effect_failure_count: 3,
+      next_attempt_at: new Date(h.now().getTime() + 120_000).toISOString(), claimed_at: h.now().toISOString() }, () => true);
+    const expired = await getTelephonyHealth(healthDeps(h));
+    expect(check(expired, "ledger")).toMatchObject({ status: "fail", detail: { failed24h: 1, actionableFailures: 1,
+      failedIds: [row.event_id], retrying: 0, failures: [{ eventId: row.event_id, kind: "database_timeout" }] } });
+    expect(alertsFromReport(expired, usageDay(h.now())).map(alert => alert.detail.failedIds)).toEqual([[row.event_id]]);
+  });
+
+  it.each([
+    { name: "dead letter", retry_state: "dead_letter" },
+    { name: "terminal reason", terminal_reason: "awaiting_correlation_expired" },
+    { name: "exhausted effects", effect_failure_count: 5 },
+    { name: "missing retry metadata", contract_version: undefined },
+    { name: "legacy row", contract_version: 1 },
+    { name: "missing failure count", effect_failure_count: undefined },
+    { name: "missing terminal metadata", terminal_reason: undefined },
+    { name: "missing schedule", next_attempt_at: null },
+    { name: "invalid schedule", next_attempt_at: "invalid" },
+    { name: "unresolved correlation", retry_state: "awaiting_correlation" },
+    { name: "future receipt", received_at: "2099-01-01T00:00:00Z" },
+    { name: "invalid receipt", received_at: "invalid" },
+  ])("keeps $name failures immediately alertable", async ({ name: _name, ...overrides }) => {
+    const h = createTelephonyHarness();
+    h.db.seed("motorist_telnyx_webhook_events", [retryableFailure(h, overrides)]);
+    expect(check(await getTelephonyHealth(healthDeps(h)), "ledger")).toMatchObject({ status: "fail", detail: {
+      failedIds: ["retrying-event"], retrying: 0,
+    } });
+  });
+
+  it("keeps a current replay claim visible as a warning without extending the receipt grace", async () => {
+    const h = createTelephonyHarness();
+    h.db.seed("motorist_telnyx_webhook_events", [retryableFailure(h, { next_attempt_at: null, claimed_at: h.now().toISOString() })]);
+    expect(check(await getTelephonyHealth(healthDeps(h)), "ledger")).toMatchObject({ status: "warn", detail: {
+      retryingFailures: [{ source: "claimed_retry" }],
+    } });
+    h.advance(30_000);
+    expect(check(await getTelephonyHealth(healthDeps(h)), "ledger").status).toBe("fail");
+  });
+
+  it("does not defer an incomplete failure backlog behind newer retryable events", async () => {
+    const h = createTelephonyHarness();
+    h.db.seed("motorist_telnyx_webhook_events", Array.from({ length: 201 }, (_, index) => retryableFailure(h, {
+      event_id: `backlog-${index}`,
+    })));
+    expect(check(await getTelephonyHealth(healthDeps(h)), "ledger")).toMatchObject({ status: "fail", detail: {
+      failed24h: 201, actionableFailures: 201, truncated: true, retrying: 0,
+    } });
+  });
+
+  it("separates an immediately failed event from a retrying event in the same report", async () => {
+    const h = createTelephonyHarness();
+    h.db.seed("motorist_telnyx_webhook_events", [retryableFailure(h), retryableFailure(h, {
+      event_id: "terminal-event", retry_state: "dead_letter", terminal_reason: "effect_failure_limit", effect_failure_count: 5,
+    })]);
+    const report = await getTelephonyHealth(healthDeps(h));
+    expect(check(report, "ledger")).toMatchObject({ status: "fail", detail: { failed24h: 2, actionableFailures: 1,
+      failedIds: ["terminal-event"], retryingIds: ["retrying-event"],
+    } });
+    expect(alertsFromReport(report, usageDay(h.now())).map(alert => alert.detail.failedIds)).toEqual([["terminal-event"]]);
   });
 
   it("surfaces an open telephony incident", async () => {

@@ -13,7 +13,7 @@ export type ConnectionOutcome = {
   eventId: string;
   sessionId: string;
   failedAt: string;
-  outcome: "pending" | "confirmed_after_failure" | "command_recovered" | "ended_without_confirmation" | "unknown";
+  outcome: "pending" | "confirmed_after_failure" | "command_recovered" | "ended_without_confirmation" | "setup_failed" | "setup_recovered" | "unknown";
 };
 
 type FailedCommand = { id: string | null; kind: string };
@@ -23,7 +23,8 @@ type Recovery = { id: string; kind: string; at: string };
 export function classifyConnectionFailure(input: {
   eventId: string; sessionId: string; failedAt: string; eventAt: string | null;
   commands: FailedCommand[]; recovered?: Recovery[];
-  session: { state: string; ended_at: string | null; metadata: unknown } | undefined;
+  setup?: boolean; routed?: boolean;
+  session: { state: string; ended_at: string | null; metadata: unknown; answered_at?: string | null; pending_effects?: unknown } | undefined;
 }): ConnectionOutcome {
   const { session } = input;
   const recording = object(object(session?.metadata).recording);
@@ -36,11 +37,15 @@ export function classifyConnectionFailure(input: {
     result.id === command.id && result.kind === command.kind && time(result.at) >= sourceAt));
   const pending = object(recording.pendingAudio);
   const pendingCommands = Array.isArray(pending.commands) ? pending.commands.map(object) : [];
+  const effects = object(session?.pending_effects);
+  const setupPending = (Array.isArray(effects.entries) ? effects.entries.map(object) : []).some(entry =>
+    (Array.isArray(entry.commands) ? entry.commands.map(object) : []).some(command => input.commands.some(failed => failed.id && failed.id === command.commandId)));
   let outcome: ConnectionOutcome["outcome"] = "unknown";
-  if (confirmed) outcome = "confirmed_after_failure";
+  if (input.setup && (input.routed || session?.answered_at)) outcome = "setup_recovered";
+  else if (confirmed) outcome = "confirmed_after_failure";
   else if (recovered) outcome = "command_recovered";
-  else if (session?.ended_at || session && ["ended", "failed"].includes(session.state)) outcome = "ended_without_confirmation";
-  else if (input.commands.some((command) => command.id && pendingCommands.some((entry) => entry.commandId === command.id))) outcome = "pending";
+  else if (session?.ended_at || session && ["ended", "failed"].includes(session.state)) outcome = input.setup ? "setup_failed" : "ended_without_confirmation";
+  else if ((input.setup && setupPending) || input.commands.some((command) => command.id && pendingCommands.some((entry) => entry.commandId === command.id))) outcome = "pending";
   // A later hangup, park, objection, or unrelated bridge cannot explain an older
   // failure by itself. Historical audits without command identity stay unknown.
   return { eventId: input.eventId, sessionId: input.sessionId, failedAt: input.failedAt, outcome };
@@ -57,20 +62,28 @@ export async function getRecentConnectionOutcomes(deps: {
     const payload = object(event.normalized_payload);
     if (typeof payload.session_id !== "string") return [];
     const commands = Array.isArray(payload.commands) ? payload.commands.map(object) : [];
+    const setup = ["received", "greeting", "ivr"].includes(String(payload.state_before)) &&
+      commands.some(command => command.ok === false && ["answer", "playback_start", "gather"].includes(String(command.kind)));
     const connectionFailed = commands.some((command) => command.ok === false && ["bridge", "conference_join", "conference_unhold"].includes(String(command.kind)));
     const recordingContinuation = payload.error === "recording continuation superseded; delayed audio action cancelled";
-    if (!connectionFailed && !recordingContinuation) return [];
+    if (!setup && !connectionFailed && !recordingContinuation) return [];
     // A provider telling us the customer has already gone is normal teardown.
     if (typeof payload.error === "string" && /90018|call_gone|not_active/.test(payload.error)) return [];
-    return [{ eventId: event.id, sessionId: payload.session_id, failedAt: event.created_at, eventAt: event.provider_timestamp,
-      commands: commands.filter((command) => command.ok === false && ["bridge", "conference_join", "conference_unhold"].includes(String(command.kind)))
+    return [{ eventId: event.id, sessionId: payload.session_id, failedAt: typeof payload.failure_at === "string" ? payload.failure_at : event.created_at, eventAt: event.provider_timestamp, setup,
+      commands: commands.filter((command) => command.ok === false && (setup ? ["answer", "playback_start", "gather"] : ["bridge", "conference_join", "conference_unhold"]).includes(String(command.kind)))
         .map((command) => ({ id: typeof command.command_id === "string" ? command.command_id : null, kind: String(command.kind) })) }];
   });
   const ids = [...new Set(failures.map((entry) => entry.sessionId))];
   if (!ids.length) return { entries: [], truncated: (events.data?.length ?? 0) > 200, error: null };
-  const sessions = await deps.admin.from("motorist_call_sessions").select("id, state, ended_at, metadata")
+  const sessions = await deps.admin.from("motorist_call_sessions").select("id, state, answered_at, ended_at, metadata, pending_effects")
     .eq("organization_id", deps.organizationId).in("id", ids);
   if (sessions.error) return { entries: [], truncated: false, error: sessions.error.message };
+  const setupIds = [...new Set(failures.filter(failure => failure.setup).map(failure => failure.sessionId))];
+  const routed = setupIds.length ? await deps.admin.from("motorist_call_legs").select("session_id")
+    .eq("organization_id", deps.organizationId).in("session_id", setupIds).in("role", ["operator", "external"]).limit(501)
+    : { data: [], error: null };
+  if (routed.error) return { entries: [], truncated: false, error: routed.error.message };
+  const routedSessions = new Set((routed.data ?? []).map(leg => leg.session_id));
   const successes = await deps.admin.from("motorist_call_events").select("created_at, normalized_payload")
     .eq("organization_id", deps.organizationId).eq("handled_status", "processed")
     .in("normalized_payload->>session_id", ids).gte("created_at", deps.since)
@@ -85,6 +98,6 @@ export async function getRecentConnectionOutcomes(deps: {
     recovered.set(payload.session_id, [...(recovered.get(payload.session_id) ?? []), ...entries]);
   }
   const byId = new Map((sessions.data ?? []).map((session) => [session.id, session]));
-  return { entries: failures.map((failure) => classifyConnectionFailure({ ...failure, session: byId.get(failure.sessionId), recovered: recovered.get(failure.sessionId) })),
-    truncated: (events.data?.length ?? 0) > 200 || (successes.data?.length ?? 0) > 500, error: null };
+  return { entries: failures.map((failure) => classifyConnectionFailure({ ...failure, routed: routedSessions.has(failure.sessionId), session: byId.get(failure.sessionId), recovered: recovered.get(failure.sessionId) })),
+    truncated: (events.data?.length ?? 0) > 200 || (successes.data?.length ?? 0) > 500 || (routed.data?.length ?? 0) > 500, error: null };
 }

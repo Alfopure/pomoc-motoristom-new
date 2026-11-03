@@ -1,6 +1,6 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { afterRealtimeAuth, createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { activeCaseEditors, EDITOR_HEARTBEAT_MS, EDITOR_TTL_MS } from "@/domain/case-collaboration";
 import type { DispatchCase, DispatchNotification } from "@/domain/types";
 import { CaseCollaborationStore, type CaseCollaborationState } from "./case-collaboration-store";
@@ -58,11 +58,18 @@ function Session({ children, actorKey, viewerProfileId, enabled, initialCases, o
       const channels = topics.map(topic => client.channel(topic, { config: { private: true } })
         .on("broadcast", { event: "invalidate" }, store.invalidate)
         .on("broadcast", { event: "revoke" }, store.revoke)
-        .on("broadcast", { event: "authorize" }, () => { store.checkLease(); store.resume(); })
-        .subscribe(status => { if (status === "SUBSCRIBED") connected.add(topic); else connected.delete(topic); store.setConnected(connected.size === topics.length); }));
+        .on("broadcast", { event: "authorize" }, () => { store.checkLease(); store.resume(); }));
       let revoked = false;
+      // Private joins wait for the restored session; an earlier join is refused.
+      const cancelJoin = afterRealtimeAuth(client, () => {
+        if (revoked) return;
+        channels.forEach((channel, index) => channel.subscribe(status => {
+          if (status === "SUBSCRIBED") connected.add(topics[index]); else connected.delete(topics[index]);
+          store.setConnected(connected.size === topics.length);
+        }));
+      });
       const revoke = store.subscribe(() => { if (store.getSnapshot().denied && !revoked) { revoked = true; channels.forEach(channel => void client.removeChannel(channel)); } });
-      cleanup = () => { revoke(); auth.data.subscription.unsubscribe(); channels.forEach(channel => void client.removeChannel(channel)); };
+      cleanup = () => { cancelJoin(); revoke(); auth.data.subscription.unsubscribe(); channels.forEach(channel => void client.removeChannel(channel)); };
     } catch { /* The bounded HTTP fallback remains authoritative. */ }
     return () => { cleanup(); store.stop(); window.removeEventListener("focus", resume); window.removeEventListener("online", resume); document.removeEventListener("visibilitychange", resume); };
   }, [actorKey, enabled, store]);

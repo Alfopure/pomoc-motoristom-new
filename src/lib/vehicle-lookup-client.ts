@@ -2,6 +2,9 @@ import { readVehicleLookupSnapshot, type VehicleLookupInput, type VehicleLookupR
 import { beginDiagnosticOperation } from "./diagnostics/client";
 import { diagnosticFailure, diagnosticRequestId, diagnosticResponse } from "./diagnostics/operations";
 
+class VehicleLookupRequestError extends Error {}
+const unavailableMessage = "Overenie vozidla sa nepodarilo dokončiť. Skúste o chvíľu znova; údaje môžete vyplniť ručne.";
+
 function pause(ms: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
     signal.throwIfAborted();
@@ -35,9 +38,13 @@ export async function requestVehicleLookup(input: VehicleLookupInput, signal: Ab
           continue;
         }
       }
-      if (!response.ok || !readVehicleLookupSnapshot(result.snapshot)) { finishDiagnostic({ outcome: response.ok ? "failed" : diagnosticResponse(response), ...diagnosticRequestId(response) }); throw new Error(result.error || "Dohľadanie sa nepodarilo dokončiť."); }
+      if (!response.ok || !readVehicleLookupSnapshot(result?.snapshot)) { finishDiagnostic({ outcome: response.ok ? "failed" : diagnosticResponse(response), ...diagnosticRequestId(response) }); throw new VehicleLookupRequestError(typeof result?.error === "string" && result.error.trim() ? result.error : unavailableMessage); }
       finishDiagnostic({ outcome: "ok", ...diagnosticRequestId(response) });
       return result;
     }
-  } catch (error) { finishDiagnostic({ outcome: diagnosticFailure(error, false) }); throw error; }
+  } catch (error) {
+    finishDiagnostic({ outcome: diagnosticFailure(error, false) });
+    if (signal.aborted || error instanceof VehicleLookupRequestError) throw error;
+    throw new VehicleLookupRequestError(unavailableMessage);
+  }
 }

@@ -96,7 +96,7 @@ import styles from "./case-detail.module.css";
 type NewCaseFormProps = {
   call: DispatchCall;
   onClose: () => void;
-  onCreated: (dispatchData: DispatchData, caseId: string, notice?: string) => void;
+  onCreated: (dispatchData: DispatchData, caseId: string, notice?: string, openHandoff?: boolean) => void;
   partnerDirectory: PartnerDirectoryEntry[];
   commanderVehicles?: CommanderVehicleConnection[];
   onDirtyChange?: (dirty: boolean) => void;
@@ -150,6 +150,17 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   const [assistanceServiceName, setAssistanceServiceName] = useState("");
   const [assistanceReference, setAssistanceReference] = useState("");
   const [partnerDirectoryId, setPartnerDirectoryId] = useState("");
+  const [originPartnerId, setOriginPartnerId] = useState("");
+  const originChanged = useRef(false);
+  useEffect(() => {
+    if (!hasActiveCall || !call.lineId) return;
+    let active = true;
+    void fetch(`/api/partners?lineId=${encodeURIComponent(call.lineId)}&origin=true`, { cache: "no-store" })
+      .then(response => response.ok ? response.json() : null)
+      .then(value => { if (active && !originChanged.current && value?.origin?.partner_id) setOriginPartnerId(value.origin.partner_id); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [hasActiveCall, call.lineId]);
   const [directoryEntries, setDirectoryEntries] = useState(partnerDirectory);
   const [directorySaving, setDirectorySaving] = useState(false);
   const [directoryError, setDirectoryError] = useState<string | null>(null);
@@ -215,6 +226,9 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
   const [note, setNote] = useState("");
   const [draggedContactId, setDraggedContactId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const createInFlight = useRef(false);
+  const [saveUncertain, setSaveUncertain] = useState(false);
+  const pendingCreation = useRef<{ body: string; openHandoff: boolean } | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   const [commanderNotice, setCommanderNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -504,13 +518,15 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
     setReplacementVehicleNeeded(needed);
   }
 
-  async function submitCase(): Promise<boolean> {
-    if (!canSubmit || collaborationState.hidden) {
+  async function submitCase(openHandoff = false): Promise<boolean> {
+    if (createInFlight.current || !canSubmit || collaborationState.hidden) {
       return false;
     }
 
+    createInFlight.current = true;
     setIsSaving(true);
     setError(null);
+    let createResponse: Response | null = null;
 
     const payload: CreateCaseInput = {
       contactName,
@@ -524,6 +540,8 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
       assistanceServiceName,
       assistanceReference,
       partnerDirectoryId,
+      ...(originPartnerId ? { partnerOrigin: { partnerId: originPartnerId,
+        sourceLineId: call.lineId || null, sourceCallId: /^[0-9a-f-]{36}$/i.test(call.id) ? call.id : null } } : {}),
       contacts: contactInputs,
       alternativeContact: contactInputs[1]?.phone,
       customerNote,
@@ -586,17 +604,25 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
       note,
     };
 
+    const intent = pendingCreation.current ?? {
+      body: JSON.stringify({ ...payload, creationCommandId: crypto.randomUUID(), editorSessionId: editorPresence.sessionId() }),
+      openHandoff,
+    };
+    pendingCreation.current = intent;
+    openHandoff = intent.openHandoff;
     try {
       const { response, body: result } = await diagnosticJson<ApiMutationResponse>("case.create", "cases", "/api/cases", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...payload, editorSessionId: editorPresence.sessionId() }),
+        body: intent.body,
       }, {}, value => Boolean(value?.caseId && value?.dispatchData));
+      createResponse = response;
 
       if (!response.ok || !result.caseId || !result.dispatchData) {
         throw new Error(result.error ?? "Prípad sa nepodarilo uložiť.");
       }
 
+      setSaveUncertain(false);
       let nextDispatchData = result.dispatchData;
       editorPresence.stop();
 
@@ -621,7 +647,8 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
           const uploadError = uploadCaught instanceof Error ? uploadCaught.message : "Prílohy sa nepodarilo nahrať.";
           setIsDirty(false);
           onDirtyChange?.(false);
-          onCreated(result.dispatchData, result.caseId, `Prípad je uložený, ale prílohy sa nepodarilo nahrať: ${uploadError}`);
+          onCreated(result.dispatchData, result.caseId, `Prípad je uložený, ale prílohy sa nepodarilo nahrať: ${uploadError}`, openHandoff);
+          pendingCreation.current = null;
           resetTransientFields();
           return true;
         }
@@ -635,13 +662,22 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
       const warningNotice = noticeParts.join(" ");
       setIsDirty(false);
       onDirtyChange?.(false);
-      onCreated(nextDispatchData, result.caseId, warningNotice);
+      onCreated(nextDispatchData, result.caseId, warningNotice, openHandoff);
+      pendingCreation.current = null;
       resetTransientFields();
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Prípad sa nepodarilo uložiť.");
+      if (!createResponse || createResponse.ok || createResponse.status >= 500 || createResponse.headers.get("x-operation-committed") === "true") {
+        setSaveUncertain(true);
+        setError("Výsledok uloženia nie je potvrdený. Zopakujte pôvodné uloženie; rovnaký príkaz nevytvorí druhý prípad. Údaje do overenia zostávajú zamknuté.");
+      } else {
+        pendingCreation.current = null;
+        setSaveUncertain(false);
+        setError(caught instanceof Error ? caught.message : "Prípad sa nepodarilo uložiť.");
+      }
       return false;
     } finally {
+      createInFlight.current = false;
       setIsSaving(false);
     }
   }
@@ -740,6 +776,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
     >
       <div className="grid gap-3">
         <div className={`${styles.formMain} grid min-w-0 [&>section]:min-w-0`} data-testid="case-form-main">
+          <fieldset className="contents" disabled={saveUncertain || isSaving}>
           {(previewStatus === "current" || previewStatus === "sharing" || previewStatus === "error") && <p className={`text-xs ${previewStatus === "error" ? "text-amber-800" : "text-zinc-500"}`}>
             {previewStatus === "error" ? "Priebežný náhľad sa nepodarilo zdieľať. Rozpísané údaje zostávajú v tomto formulári." : "Kolegovia môžu sledovať vypĺňanie. Prípad ešte nie je uložený."}
           </p>}
@@ -793,6 +830,9 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
               </div>
             </div>
 
+            <SelectField label="Partner pôvodu konzultácie (nezávisle od platiteľa)" value={originPartnerId}
+              onChange={value => { originChanged.current = true; setOriginPartnerId(value); }}
+              options={[["", "Bez partnerskej konzultácie"], ...partnerDirectory.filter(entry => entry.active).map(entry => [entry.id, entry.name] as [string, string])]} />
             {(customerType === "insurance" || customerType === "company") && (
               <div className="grid gap-3 @3xl:grid-cols-3">
                 <SelectField
@@ -1236,6 +1276,7 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
             <TextareaField label="Iné poznámky" value={note} onChange={setNote} />
           </FormSection>
 
+          </fieldset>
           <div className="min-h-11" aria-live="polite">
             {(error || validationErrors.length > 0 || missingRequiredFields.length > 0) && (
               <div
@@ -1253,13 +1294,21 @@ export function NewCaseForm({ call, commanderVehicles = [], onClose, onCreated, 
             </button>
             <button
               type="button"
+              onClick={() => void submitCase(true)}
+              disabled={!canSubmit || saveUncertain || collaborationState.hidden}
+              className="h-10 rounded-md border border-zinc-200 px-4 text-sm font-semibold text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:text-zinc-400"
+            >
+              Uložiť a odovzdať
+            </button>
+            <button
+              type="button"
               onClick={() => void submitCase()}
               disabled={!canSubmit || collaborationState.hidden}
               title={formReady ? "Uložiť kartu" : "Uložiť rozpracovanú kartu a doplniť ju neskôr"}
               className="inline-flex h-10 items-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-300 disabled:text-zinc-600"
             >
               {isSaving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-              {isSaving ? "Ukladám…" : formReady ? "Uložiť kartu" : "Uložiť rozpracované"}
+              {isSaving ? "Ukladám…" : saveUncertain ? "Overiť pôvodné uloženie" : formReady ? "Uložiť kartu" : "Uložiť rozpracované"}
             </button>
           </div>
         </div>

@@ -47,6 +47,8 @@ export function registerContractTwoRpcs(db: FakeDatabase): void {
     row.lease_token = String(args.p_token);
     row.lease_until = new Date(nowMs + ttl).toISOString();
     row.lease_generation = Number(row.lease_generation ?? 0) + 1;
+    // Expose the actual SQL column as well as the adapter's historical alias.
+    row.ownership_generation = row.lease_generation;
     return { generation: row.lease_generation, contract: 2 };
   });
 

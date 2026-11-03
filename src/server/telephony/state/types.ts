@@ -3,6 +3,7 @@ import type { IncomingWaitPolicy } from "@/lib/telephony/incoming-flow";
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { CallLegRole, CallSessionState, Database, Json, OperatorPresenceStatus, RingAttemptResult } from "@/lib/supabase/database.types";
 
+import { resolveAppEnvironment } from "@/lib/app-environment";
 import type { BusinessHoursSchedule } from "@/lib/telephony/business-hours";
 import { ANNOUNCEMENT_DEFINITIONS, readAnnouncementConfig, resolveAnnouncement, type AnnouncementConfig, type AnnouncementKey } from "@/lib/telephony/announcements";
 import type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
@@ -173,6 +174,12 @@ export type TelephonyEvent = {
   conferenceId: string | null;
   customHeaders: Array<{ name: string; value: string }>;
   payload: Record<string, unknown>;
+  /**
+   * Call-speed S6.2 (N3): for a `call.hangup`, this leg's own `call.answered`
+   * is still unprocessed in the webhook ledger (set by the event processor for
+   * a concurrent start only): the leg was answered, its row does not say so yet.
+   */
+  answeredPending?: boolean;
 };
 
 export type TransferTarget =
@@ -203,7 +210,9 @@ export type AppEventType =
   | "invite_monitor"
   | "revoke_monitor"
   | "hangup"
-  | "sweep";
+  | "sweep"
+  /** Call-speed S6.2: the runner's follow-up after Telnyx accepted (2xx) the explicit concurrent bridge. */
+  | "concurrent_bridge_accepted";
 
 /**
  * Telnyx conference supervisor roles (`supervisor_role` on
@@ -220,7 +229,10 @@ export type AppEventType =
 export type { SupervisorMode } from "@/lib/telephony/supervisor-mode";
 export { isSupervisorMode, SUPERVISOR_MODE_ORDER as SUPERVISOR_MODES } from "@/lib/telephony/supervisor-mode";
 
+export type NativeHoldGuard = { profileId: string; deviceSessionId: string; callControlId: string; customerControlId: string; expectedVersion: number };
+
 export type AppEvent = {
+  nativeHold?: NativeHoldGuard;
   kind: "app";
   /** Unique id of the action (fingerprint for command ids and the call event row). */
   id: string;
@@ -244,7 +256,18 @@ export type AppEvent = {
    * writes to `motorist_call_sessions` and therefore refreshes `updated_at`.
    */
   stale?: boolean;
+  /**
+   * For `sweep` (call-speed S6.2): the overdue sweep's evidence for a
+   * concurrent bridge past its deadline, read before the lease
+   * (`ring-plan.ts`): the bridge command's journal outcome. Only a sweep that
+   * carries it may connect or end the pair; a pending `call.bridged` in the
+   * ledger makes the sweep yield instead of sending it.
+   */
+  concurrentBridge?: { journal: ConcurrentBridgeJournal };
 };
+
+/** The provider journal's outcome of a concurrent start's explicit bridge (`motorist_provider_commands.outcome`), or none. */
+export type ConcurrentBridgeJournal = "accepted" | "rejected" | "unknown" | "rate_limited" | "absent";
 
 export type SessionEvent = TelephonyEvent | AppEvent;
 
@@ -284,7 +307,17 @@ export type DialCommand = CommandBase & {
   profileId: string | null;
   externalNumber: string | null;
   clientState: TelnyxClientState;
-  linkTo: string | null;
+  /**
+   * `link_to`: a known leg, or (call-speed S6.1) the leg an earlier `dial` of
+   * the same entry creates, resolved from that dial's result at dispatch.
+   */
+  linkTo: string | { fromDial: string } | null;
+  /**
+   * S6 B′ (`start_mode.farLinkTo: false`): the own leg's dial this concurrent
+   * far dial belongs to, kept in our own state because no `link_to` tells the
+   * provider (callback contact proof binds the operator leg through it).
+   */
+  ownDialCommandId?: string;
   timeoutSecs: number;
   /** Provider connects this explicitly linked recipient as soon as they answer. */
   bridgeOnAnswer?: boolean;
@@ -293,6 +326,13 @@ export type DialCommand = CommandBase & {
   /** Ring attempt this dial belongs to (natural key, resolved by effects). */
   attempt?: { stepIndex: number; profileId: string | null; externalNumber: string | null; applicationDevice?: "web" | "mobile" } | null;
   autoAnswer?: boolean;
+  /**
+   * Own-leg dial of a start request only: that request's client `requestId`,
+   * sent as `X-PM-Request` next to `X-PM-Auto-Answer` so the tab still waiting
+   * for exactly this request may answer before the response identifies the
+   * leg (call-speed S3, `own_leg_request_header`).
+   */
+  requestHeader?: string;
   /**
    * The colleague's leg of a colleague call. Marked for the browser, which
    * otherwise silences invites while its operator is paused; it still rings
@@ -325,6 +365,8 @@ export type AttemptPlan = {
 
 export type RingFanout = CommandBase & {
   kind: "ring_fanout";
+  /** Internal fanout terminates the caller only after every endpoint definitively fails. */
+  internal?: true;
   step: number;
   /**
    * When set, `motorist_advance_ring_step(session, expectedStep)` must succeed
@@ -340,6 +382,7 @@ export type RingFanout = CommandBase & {
 };
 
 export type CommandBase = {
+  nativeHold?: NativeHoldGuard;
   /** Immutable target once a conference command is admitted. */
   conferenceId?: string;
   /** Log and continue on failure instead of running compensations (e.g. `playback_stop` on an idle leg). */
@@ -350,7 +393,28 @@ export type Command = CommandBase &
   (
   | { kind: "answer"; commandId: string; leg: LegRef; clientState: TelnyxClientState }
   | { kind: "hangup"; commandId: string; leg: LegRef; reason: string }
-  | { kind: "bridge"; commandId: string; leg: LegRef; target: LegRef; parkAfterUnbridge?: "self"; playRingtone?: boolean; recordingConferenceName?: string }
+  | { kind: "bridge"; commandId: string; leg: LegRef; target: LegRef; parkAfterUnbridge?: "self"; playRingtone?: boolean; recordingConferenceName?: string;
+      /**
+       * Call-speed S6.3: Telnyx may already have bridged this pair itself
+       * (`bridge_on_answer`). A 422 counts as the connection this bridge asked
+       * for only with `call.bridged` evidence on the target leg; whatever its
+       * wording, a refusal alone proves nothing.
+       */
+      alreadyBridgedOk?: true;
+      /**
+       * Call-speed S6.2: the explicit bridge of a concurrent start. Its 2xx
+       * (recorded as `far_end.bridge.acceptedAt`) or `call.bridged` connects
+       * the call; a 422, an unknown outcome or another refusal never does and
+       * leaves the pair to that evidence until `far_end.bridge.deadlineAt`,
+       * when the sweep retries, extends or ends both legs.
+       */
+      concurrentBridge?: true;
+      /**
+       * Call-speed S6.2: the customer dial whose connection this bridge
+       * completes. Its contact intent goes on the bridged leg, so the callback
+       * contact proof that dial began survives the explicit bridge.
+       */
+      contactCommandId?: string }
   | { kind: "playback_start"; commandId: string; leg: LegRef; media: MediaRef; loop?: "infinity" | number; clientState?: TelnyxClientState; forceSpeech?: boolean }
   | { kind: "playback_stop"; commandId: string; leg: LegRef }
   | { kind: "recording_start"; commandId: string; leg: LegRef; recorderId: string; epoch: number; maxLength: number }
@@ -378,6 +442,8 @@ export type Command = CommandBase &
       supervisorRole?: SupervisorMode;
       /** `whisper_call_control_ids`: the only legs that hear a `whisper` supervisor. */
       whisper?: LegRef[];
+      /** Call-speed S7b: `hold: true` with `hold_audio_url` — the participant joins already held. */
+      holdOnJoin?: { media: MediaRef };
     }
   | { kind: "conference_leave"; commandId: string; leg: LegRef }
   | { kind: "conference_hold"; commandId: string; legs: LegRef[]; media: MediaRef }
@@ -513,6 +579,9 @@ export function emptyTransition(): Transition {
   return { session: {}, legs: [], attempts: [], presence: [], callbacks: [], call: {}, memberTouches: [], notes: [] };
 }
 
+/** The reducer's and the lease-free path's reason for an exact duplicate `call.bridged` (S1.2). */
+export const DUPLICATE_BRIDGE = "leg already bridged";
+
 export function ignoredResult(reason: string): ReduceResult {
   return { next: emptyTransition(), commands: [], compensations: [], guard: null, ignored: reason };
 }
@@ -585,11 +654,70 @@ export const CAPACITY_RETRY_SECS = 5;
  * leg we never learn the id of; this guarantees it cannot run forever.
  */
 export const LEG_TIME_LIMIT_SECS = 4 * 60 * 60;
-export const TELNYX_SIP_DOMAIN = "sip.telnyx.com";
+/**
+ * The Telnyx SIP host a session dials its operators' credentials on. `com`
+ * (anycast `sip.telnyx.com`) is today's; `eu` (`sip.telnyx.eu`) is the
+ * call-speed S5 SIP-domain spike, frozen per session (`sessionSipDomain`).
+ */
+export type TelnyxSipDomain = "com" | "eu";
+const TELNYX_SIP_HOSTS: Record<TelnyxSipDomain, string> = { com: "sip.telnyx.com", eu: "sip.telnyx.eu" };
 
-/** SIP URI of an operator's WebRTC credential (SRTP is requested via `media_encryption`). */
-export function telnyxSipUri(sipUsername: string): string {
-  return `sip:${sipUsername}@${TELNYX_SIP_DOMAIN}`;
+/**
+ * SIP URI of an operator's WebRTC credential (SRTP is requested via
+ * `media_encryption`). The only place one is built: every dial of a session
+ * passes that session's `sessionSipDomain`.
+ */
+export function telnyxSipUri(sipUsername: string, domain: TelnyxSipDomain): string {
+  return `sip:${sipUsername}@${TELNYX_SIP_HOSTS[domain]}`;
+}
+
+/**
+ * Whether `uri` is exactly this credential's SIP URI on either Telnyx domain.
+ * The username is the identity; the domain only says which Telnyx SIP host
+ * the session's dial went through.
+ */
+export function isTelnyxSipUriOf(uri: unknown, sipUsername: string): boolean {
+  return uri === telnyxSipUri(sipUsername, "com") || uri === telnyxSipUri(sipUsername, "eu");
+}
+
+/** Both addresses a credential may have been dialled on, for an exact database match. */
+export function telnyxSipUris(sipUsername: string): string[] {
+  return [telnyxSipUri(sipUsername, "com"), telnyxSipUri(sipUsername, "eu")];
+}
+
+/**
+ * The credential username of a `sip:<user>@sip.telnyx.com` or `…@sip.telnyx.eu`
+ * destination; null for any other host, a port, URI parameters or escapes.
+ */
+export function telnyxSipUsername(uri: unknown): string | null {
+  return typeof uri === "string" ? /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.(?:com|eu)$/.exec(uri)?.[1] ?? null : null;
+}
+
+/**
+ * Whether this deployment may dial `sip.telnyx.eu` at all (call-speed S5
+ * SIP-domain spike, docs/operations/telnyx-runbook.md). Telnyx does not
+ * document it, so until the runbook records a pass only a deployment whose
+ * application environment is exactly `test` freezes it (`startSipDomain`) or
+ * honours a frozen one (`sessionSipDomain`): production, a local run
+ * (`development`, which may point at the TEST database) and an unreadable
+ * environment dial `sip.telnyx.com` whatever a row says. Production needs a
+ * reviewed change here.
+ */
+const EU_SIP_DOMAIN_PROVEN = false;
+export function euSipDomainAllowed(): boolean {
+  if (EU_SIP_DOMAIN_PROVEN) return true;
+  try { return resolveAppEnvironment() === "test"; }
+  catch { return false; }
+}
+
+/**
+ * The SIP domain a session dials its credentials on: the frozen
+ * `start_mode.sipDomain` where this deployment may (`euSipDomainAllowed`). A
+ * session without it dials `sip.telnyx.com` for good.
+ */
+export function sessionSipDomain(metadata: unknown): TelnyxSipDomain {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return "com";
+  return (metadata as SessionMeta).start_mode?.sipDomain === "eu" && euSipDomainAllowed() ? "eu" : "com";
 }
 
 export type RoutingContext = {
@@ -621,6 +749,8 @@ export type RoutingContext = {
   recordingPolicy?: RecordingRoutingPolicy;
   /** Execution permission only; false must never be treated as policy revocation. */
   recordingLeaseHeld?: boolean;
+  /** `bridged_observation_fast` (call-speed S1.2): an exact duplicate `call.bridged` is ignored, not rewritten. */
+  bridgedObservationFast?: boolean;
   /**
    * Loaded for one transition that needs almost none of this. Anything that
    * plans a further ring step must reload the full context first: presence,
@@ -650,7 +780,20 @@ export function appendJourneyEvidence(previous: unknown, entry: JourneyEvidenceE
 
 export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" | "consult";
 
+/**
+ * `origin` is the device that started the call; null for an inbound call.
+ * `holdJoinWithHold` (call-speed S7b) is present only when frozen on: the
+ * first hold joins the customer to the new conference already held.
+ */
+export type SessionStartMode = { concurrent: boolean; autoBridge: boolean; ownLegTimeoutSecs: number; apiRegion: "us" | "eu"; origin: "web" | "mobile" | null; holdJoinWithHold?: true;
+  /** S6 B′ (TEST experiment): the concurrent far dial carries no `link_to`/`bridge_on_answer`; the server bridges it. */
+  farLinkTo?: false;
+  /** S5 SIP-domain spike (TEST experiment): every SIP-credential dial of the session goes to `sip.telnyx.eu`. Only with `apiRegion: "eu"`. */
+  sipDomain?: "eu" };
+
 export type SessionMeta = {
+  holdControl?: { commandId: string; held: boolean; customerControlId: string } | null;
+  holdRecovery?: { commandId: string; customerControlId: string; operatorControlId: string } | null;
   journey?: JourneyEvidence;
   /** Dialled number's routing override, frozen at inbound session creation. */
   line_inbound_mode?: LineInboundMode;
@@ -686,13 +829,58 @@ export type SessionMeta = {
     capacity_wait_since?: string | null;
   } | null;
   outbound?: { to: string; by: string; from: string; case_id?: string | null } | null;
-  outbound_auto_bridge?: { commandId: string; operatorControlId: string; startedAt: string } | null;
+  /**
+   * `operatorControlId` is null for a concurrent start (S6.1): the own leg did
+   * not exist yet. `serverBridged` (S6 B′): the customer dial carries no
+   * `bridge_on_answer`; the server's explicit bridge connects it.
+   */
+  outbound_auto_bridge?: { commandId: string; operatorControlId: string | null; startedAt: string; serverBridged?: true } | null;
+  /**
+   * Call-speed S6.1, the record of a start that really ran concurrently
+   * (`start_mode` only says what was frozen at creation): the far end was
+   * dialled in the startup entry, next to the operator's own leg (`commandId`
+   * is its dial, or `ring_fanout:0` for several colleague endpoints).
+   * `answeredAt` records a far end that answered before the own leg did; the
+   * call becomes `talking` only on bridged evidence or once both legs have
+   * answered (S6.2). `bridge` is the explicit bridge sent when the far end
+   * answered first: until its `call.bridged` evidence the call stays
+   * `ringing`, and at `deadlineAt` the sweep connects an `acceptedAt` (2xx)
+   * bridge or ends both legs as `bridge_failed`. A non-call-gone 422 is
+   * `refusedAt`: about 2 s later the sweep retries the bridge once
+   * (`retried`). A bridge whose journal outcome is still unknown at the
+   * deadline gets one extension (`extended`). After a call connected on the
+   * bridge's 2xx, `deadlineAt` only verifies it: by then a leg should have
+   * reported `call.bridged`, or the sweep records `verification`
+   * `no_evidence` with a warning (it never tears a connected call down).
+   * `awaitBridgeUntil` comes
+   * first when the far leg carries `bridge_on_answer`: until then the call
+   * waits for Telnyx's own bridge and sends none (outcome A). `busyControlId` is a
+   * colleague leg whose answer was refused because they had become busy: its
+   * hangup ends the call as `colleague_busy`.
+   */
+  far_end?: { commandId: string; mode: "concurrent"; dialedAt: string; answeredAt?: string | null;
+    bridge?: { commandId: string; sentAt: string; deadlineAt: string; acceptedAt?: string | null; refusedAt?: string | null; retried?: boolean; extended?: boolean;
+      verification?: { at: string; outcome: "bridged" | "no_evidence" } | null } | null;
+    awaitBridgeUntil?: string | null; busyControlId?: string | null } | null;
+  /**
+   * Call-speed S6.3, the record of the colleague dials that really carried the
+   * auto-bridge (`bridge_on_answer`, Telnyx bridges them to the caller at
+   * answer; `start_mode.autoBridge` only says what was frozen). Only a leg of
+   * one of these dials skips the explicit bridge.
+   */
+  internal_auto_bridge?: { commandIds: string[] } | null;
+  /**
+   * Latency switches frozen at creation (`latency-flags.ts`): flipping a flag
+   * never changes a call already in progress. Older sessions have none and
+   * behave as all-off.
+   */
+  start_mode?: SessionStartMode;
   /**
    * Colleague call. Names are frozen display text; `caller_display` is the
    * caller's name already reduced to SIP display characters (older sessions
    * lack all three).
    */
-  internal?: { target_profile_id: string; target_sip: string; by: string; caller_name?: string | null; target_name?: string | null; caller_display?: string | null } | null;
+  internal?: { target_profile_id: string; target_sip: string; endpoints?: Array<{ device: "web" | "mobile"; sipUri: string }>; by: string; caller_name?: string | null; target_name?: string | null; caller_display?: string | null } | null;
   transfer?: { kind: "blind" | "attended"; target: TransferTarget; by: string | null; at: string; completed_at?: string | null } | null;
   consult?: { target: TransferTarget; by: string | null; at: string; leg_call_control_id?: string | null; answered_at?: string | null } | null;
   callback?: { requested_at?: string | null; source?: CallbackSource | null; confirmed?: boolean; declined_at?: string | null; digit?: string; context?: string; event_id?: string; deadline_at?: string; confirmation_retry?: boolean; closing_at?: string; input_retry?: boolean } | null;
@@ -734,6 +922,56 @@ export type SessionMeta = {
   partner_name?: string | null;
   [key: string]: unknown;
 };
+
+/**
+ * Call-speed S6.2: a concurrent start whose far end answered first connects on
+ * Telnyx's own `bridge_on_answer` (outcome A, measured on TEST: about 0.5 s
+ * after the own leg's answer), or on our explicit bridge's 2xx or
+ * `call.bridged` (B). These bound each wait before the overdue sweep
+ * (`ring-plan.ts`) and the reducer (`onConcurrentBridgeDeadline`) act. Shared
+ * by both, so the sweep looks exactly when the reducer would act.
+ */
+
+/** With `bridge_on_answer` on the far leg, how long after the own leg's answer Telnyx gets to report its own bridge before ours is sent. */
+export const CONCURRENT_PROVIDER_BRIDGE_WAIT_MS = 1_500;
+
+/** How long an explicit concurrent bridge waits for its `call.bridged` evidence. */
+export const CONCURRENT_BRIDGE_DEADLINE_MS = 8_000;
+/** One extension at the deadline while the bridge's journal outcome is still unknown (a lost response, a 5xx). */
+export const CONCURRENT_BRIDGE_EXTENSION_MS = 4_000;
+/** A non-call-gone 422 is retried once this long after it… */
+export const CONCURRENT_BRIDGE_RETRY_AFTER_MS = 2_000;
+/** …and the retry gets at least this long for its own evidence. */
+export const CONCURRENT_BRIDGE_RETRY_WAIT_MS = 3_000;
+/** The reducer note, runner warning and harness count for a call connected on a 2xx without any `call.bridged`. */
+export const CONCURRENT_BRIDGE_WITHOUT_EVIDENCE = "concurrent_bridge_connected_without_evidence";
+
+/** When the overdue sweep next has to look at this session's concurrent bridge (Telnyx's own wait, our retry or deadline), or null. */
+export function concurrentBridgeDueAt(meta: SessionMeta): number | null {
+  const bridge = meta.far_end?.bridge;
+  if (!bridge) {
+    const awaiting = Date.parse(meta.far_end?.awaitBridgeUntil ?? "");
+    return Number.isFinite(awaiting) ? awaiting : null;
+  }
+  const deadline = Date.parse(bridge.deadlineAt);
+  const retry = bridge.refusedAt && !bridge.retried && !bridge.acceptedAt ? Date.parse(bridge.refusedAt) + CONCURRENT_BRIDGE_RETRY_AFTER_MS : Number.NaN;
+  const due = [deadline, retry].filter(Number.isFinite);
+  return due.length ? Math.min(...due) : null;
+}
+
+/**
+ * The same for a whole session: the ringing-phase times above, or — once the
+ * call connected on the bridge's 2xx and is still up — the deadline that
+ * verifies a leg reported `call.bridged` (M1). Null when nothing is due.
+ */
+export function concurrentBridgeSessionDueAt(session: Pick<SessionRow, "metadata" | "state" | "ended_at">): number | null {
+  const meta = readMeta(session);
+  if (session.state === "ringing") return concurrentBridgeDueAt(meta);
+  const bridge = meta.far_end?.bridge;
+  if (session.ended_at || TERMINAL_STATES.has(session.state) || !bridge?.acceptedAt || bridge.verification) return null;
+  const deadline = Date.parse(bridge.deadlineAt);
+  return Number.isFinite(deadline) ? deadline : null;
+}
 
 export function readMeta(session: Pick<SessionRow, "metadata">): SessionMeta {
   const value = session.metadata;

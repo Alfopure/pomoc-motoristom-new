@@ -188,11 +188,11 @@ describe("manual inbound waiting room", () => {
     vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
     const h = createTelephonyHarness();
     h.db.insert("motorist_operator_telephony_settings", [{ organization_id: ORG, profile_id: PROFILES.o2,
-      delivery_mode: "personal_mobile", default_mobile_number: "+421905123456", pause_routing_mode: "none", wrap_up_seconds: 30 }]);
+      delivery_mode: "personal_mobile", default_mobile_number: "+421905123457", pause_routing_mode: "none", wrap_up_seconds: 30 }]);
     h.db.delete("motorist_operator_devices", (row) => row.profile_id === PROFILES.o2);
     const call = await h.inbound({ to: NUMBERS.allianz });
     const mobile = h.legFor(call.sessionId, PROFILES.o2)!;
-    expect(mobile).toMatchObject({ role: "external", to_number: "+421905123456" });
+    expect(mobile).toMatchObject({ role: "external", to_number: "+421905123457" });
     await expect(deferRingingCall(h.deps, actor, call.sessionId, String(mobile.telnyx_call_control_id)))
       .rejects.toMatchObject({ status: 409, code: "offer_unavailable" });
 

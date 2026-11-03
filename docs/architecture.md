@@ -2,9 +2,9 @@
 
 ## Direction
 
-This project is moving from a clickable dispatcher demo toward a production foundation for a first real client. The architecture should stay concrete enough for Pomoc Motoristom, but avoid hard-coding choices that would make a future client or provider swap expensive. The previous telephony provider was removed wholesale; the telephony provider going forward is Telnyx (see [`telnyx-data-contract.md`](./telnyx-data-contract.md)).
+This repository runs the production dispatch application and its isolated stable TEST deployment. It also contains the Expo mobile client in `mobile/`, which uses authenticated `/api/mobile/v1/*` routes. The previous telephony provider was removed; the current telephony provider is Telnyx (see [`telnyx-data-contract.md`](./telnyx-data-contract.md)).
 
-The intended shape is a modular monolith:
+The application is a modular monolith:
 
 - Next.js on Vercel (region `fra1`) handles the dispatcher UI, app-facing server routes, provider webhooks and provider REST clients.
 - Supabase Postgres is the operational source of truth.
@@ -72,6 +72,10 @@ The UI and domain workflow depend on these contracts, not on provider payloads. 
 - Keep `provider_session_id` as the primary external correlation key for call records.
 - Store raw external payloads for debugging, but drive app behavior from normalized columns.
 - Scope production data by `organization_id` from the first migration.
-- Keep the current mock demo working without Supabase, telephony, or Google credentials.
+- Keep offline tests independent of live credentials. Fixtures and local demo paths do not establish authenticated application or provider readiness.
 - Treat map routing and fleet locations as operational services, not as UI-only map code.
 - Every provider-affecting action is guarded by env and database kill switches and fails closed.
+
+## Development and deployment boundaries
+
+Production and stable TEST use separate Vercel and Supabase projects. Working-branch Preview shares the TEST database, with live integrations disabled. The AI demo is part of this application; its retired standalone copy must not be recreated. See [development](development.md), [release workflow](operations/release-workflow.md), and [current AI demo location](operations/ai-demo-veronika.md). A clean database bootstrap from the migration directory is not established; use the maintained TEST environment for authenticated development with approved credentials.

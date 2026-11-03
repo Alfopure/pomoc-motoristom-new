@@ -11,7 +11,7 @@ export const outcomeLabels: Record<DiagnosticOutcome, string> = { ok: "Potvrden�
 export const statusLabels = { new: "Nový", acknowledged: "Preveruje sa", resolved: "Vyriešený" } as const;
 export const classificationLabels: Record<DiagnosticIncident["classification"], string> = { observation: "Zaznamenaná udalosť", candidate: "Možné prerušenie", interruption_observed: "Prerušenie potvrdené", expected_end: "Očakávané ukončenie", unknown: "Nedostatok dôkazov" };
 export const kindLabels: Record<DiagnosticIncident["kind"], string> = { ui_error: "Chyba obrazovky", user_report: "Hlásenie používateľa", operation: "Problém pri úkone", call_interruption: "Prerušenie hovoru" };
-export const eventLabels: Record<DiagnosticStoredEvent["type"], string> = { ui_error: "Chyba obrazovky", unhandled_rejection: "Nezachytená chyba", chunk_error: "Chyba načítania aplikácie", user_report: "Hlásenie používateľa", operation: "Úkon", page_lifecycle: "Stav stránky", phone_lifecycle: "Stav telefónu", app_update: "Verzia aplikácie", call_timing: "Priebeh spojenia", coverage: "Úplnosť zberu" };
+export const eventLabels: Record<DiagnosticStoredEvent["type"], string> = { ui_error: "Chyba obrazovky", unhandled_rejection: "Nezachytená chyba", chunk_error: "Chyba načítania aplikácie", user_report: "Hlásenie používateľa", operation: "Úkon", page_lifecycle: "Stav stránky", phone_lifecycle: "Stav telefónu", app_update: "Verzia aplikácie", call_timing: "Priebeh spojenia", coverage: "Úplnosť zberu", exception_delivery: "Doručenie hlásení chýb" };
 // Reuse locale/time-zone setup across rows and the monitor's periodic redraws.
 let timestampFormatter: Intl.DateTimeFormat | undefined;
 export function timestamp(value: string | null | undefined): string {

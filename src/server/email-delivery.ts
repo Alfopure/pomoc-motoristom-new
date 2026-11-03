@@ -9,13 +9,14 @@ export type EmailDeliveryResult =
   | { status: "failed"; provider: "resend"; messageId?: null; error: string }
   | { status: "disabled"; provider: "resend" | "disabled"; messageId?: null; error: string | null };
 
-type EmailMessage = {
+export type EmailMessage = {
   to: string | string[];
   subject: string;
   html: string;
   text: string;
   idempotencyKey?: string;
   replyTo?: string;
+  attachments?: { filename: string; content: string; contentType: string }[];
 };
 
 type EmailConfig =
@@ -68,7 +69,19 @@ export function getEmailConfig(): EmailConfig {
   return { enabled: true, provider: "resend", apiKey, from, replyTo, appName };
 }
 
+export type EmailDeliveryOutcome = EmailDeliveryResult | { status: "unknown"; provider: "resend"; messageId?: null; error: string };
+
 export async function sendEmail(message: EmailMessage): Promise<EmailDeliveryResult> {
+  const result = await deliverEmail(message);
+  return result.status === "unknown" ? { ...result, status: "failed" } : result;
+}
+
+/** A bounded explicit send. Network failure can occur after provider acceptance. */
+export function sendEmailWithOutcome(message: EmailMessage): Promise<EmailDeliveryOutcome> {
+  return deliverEmail(message, true);
+}
+
+async function deliverEmail(message: EmailMessage, preserveUnknown = false): Promise<EmailDeliveryOutcome> {
   const config = getEmailConfig();
 
   if (!config.enabled) {
@@ -86,6 +99,12 @@ export async function sendEmail(message: EmailMessage): Promise<EmailDeliveryRes
     return { status: "disabled", provider: "resend", error: "TEST email recipient is outside the approved boundary" };
   }
 
+  const attachments = message.attachments;
+  if (attachments && (attachments.length > 5 || attachments.reduce((sum, file) => sum + file.content.length, 0) > 20_000_000 || attachments.some(file =>
+    !file.filename || file.filename.length > 120 || /[\r\n\\/]/.test(file.filename) || file.contentType !== "application/pdf" || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.content)))) {
+    return { status: "failed", provider: "resend", error: "Invalid email attachments" };
+  }
+
   const payload = removeUndefinedFields({
     from: config.from,
     to,
@@ -93,6 +112,7 @@ export async function sendEmail(message: EmailMessage): Promise<EmailDeliveryRes
     html: message.html,
     text: message.text,
     replyTo: cleanString(message.replyTo) || config.replyTo || undefined,
+    attachments: attachments?.map(file => ({ filename: file.filename, content: file.content, content_type: file.contentType })),
   });
 
   try {
@@ -111,8 +131,9 @@ export async function sendEmail(message: EmailMessage): Promise<EmailDeliveryRes
       method: "POST",
       headers,
       body: JSON.stringify(payload),
+      ...(preserveUnknown ? { signal: AbortSignal.timeout(15_000) } : {}),
     });
-    const raw = await response.text().catch(() => "");
+    const raw = preserveUnknown ? await response.text() : await response.text().catch(() => "");
     const data = parseJsonObject(raw);
 
     if (!response.ok) {
@@ -131,9 +152,9 @@ export async function sendEmail(message: EmailMessage): Promise<EmailDeliveryRes
     };
   } catch (error) {
     return {
-      status: "failed",
+      status: preserveUnknown ? "unknown" : "failed",
       provider: "resend",
-      error: error instanceof Error ? error.message : String(error),
+      error: preserveUnknown ? "Provider outcome could not be confirmed" : error instanceof Error ? error.message : String(error),
     };
   }
 }

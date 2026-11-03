@@ -41,6 +41,9 @@ export type PlaceSelectionInput = {
 };
 
 export type CreateCaseInput = {
+  /** Stable across retries of this exact web creation intent. */
+  creationCommandId?: string;
+  partnerOrigin?: { partnerId: string; sourceLineId?: string | null; sourceCallId?: string | null };
   vehicleLookup?: import("@/lib/vehicle-lookup").VehicleLookupSnapshot | null;
   contactName?: string;
   contactPhone?: string;

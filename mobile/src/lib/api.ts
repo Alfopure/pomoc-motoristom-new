@@ -1,0 +1,183 @@
+import type { MobileConsole, MobileDraftScope, MobileHistory, MobileMe, MobileScope, MobileVoiceReadiness, MobileVoiceColleagues } from "../../../src/lib/mobile-api";
+import type { MobileCallbackCounts, MobileCallbackSummary, MobileCallTarget } from "../../../src/lib/mobile-callbacks";
+import type { MobileConfig } from "./config";
+import { draftDate } from "../drafts/port";
+
+export class MobileApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) { super(message); }
+}
+
+// The query cache is scoped to the authenticated user and environment. A
+// failed background refresh must not disconnect an already-authorized call.
+// Auth, scope and malformed-contract failures still revoke cached access.
+export function usableMobileIdentity(data: MobileMe | undefined, error: unknown): MobileMe | null {
+  if (!data) return null;
+  if (!error) return data;
+  return error instanceof MobileApiError && (error.status === 0
+    || error.status >= 500 && error.status <= 599 && error.status !== 502) ? data : null;
+}
+type TokenGetter = () => Promise<string | null>;
+export type MobileTransport = (url: string, init: RequestInit) => Promise<Response>;
+type HistoryFilter = { category: "all" | "missed" | "received" | "outbound"; q: string; cursor?: string | null };
+const contractError = () => new MobileApiError("Odpoveď aplikácie sa nepodarilo overiť. Skúste obnoviť údaje.", 502);
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw contractError();
+  return value as Record<string, unknown>;
+}
+function text(value: unknown): value is string { return typeof value === "string"; }
+function nullableText(value: unknown): boolean { return value === null || text(value); }
+function scope(value: unknown, config: MobileConfig, profileId?: string): MobileScope {
+  const body = object(value);
+  if (body.ok !== true || body.apiVersion !== 1 || body.environment !== config.environment
+    || !text(body.profileId) || !text(body.checkedAt) || !Number.isFinite(Date.parse(body.checkedAt))
+    || profileId && body.profileId !== profileId) throw contractError();
+  return body as MobileScope;
+}
+/** Exact independent counters; origin totals must add up to the open total. */
+export function callbackCounts(value: unknown, extra: readonly string[] = []): MobileCallbackCounts & Record<string, number> {
+  const body = object(value), keys = ["open", "requested", "missed", "manual", "unknown", ...extra];
+  if (Object.keys(body).length !== keys.length || keys.some(key => !(typeof body[key] === "number" && Number.isSafeInteger(body[key]) && (body[key] as number) >= 0))
+    || (body.requested as number) + (body.missed as number) + (body.manual as number) + (body.unknown as number) !== body.open) throw contractError();
+  return body as MobileCallbackCounts & Record<string, number>;
+}
+function capabilities(value: unknown) {
+  const data = object(value);
+  // M1 exposes no calling actions. A backend toggle cannot activate them.
+  if (data.voice !== false || data.presenceWrite !== false) throw contractError();
+}
+function callFields(value: unknown) {
+  const call = object(value);
+  if (!text(call.id) || !text(call.direction) || !["inbound", "outbound", "internal"].includes(call.direction)
+    || !nullableText(call.number) || !nullableText(call.name) || !text(call.startedAt)) throw contractError();
+  return call;
+}
+
+export function createMobileApi(config: MobileConfig, getToken: TokenGetter, transport: MobileTransport = fetch) {
+  async function read(path: string, signal?: AbortSignal): Promise<unknown> {
+    const token = await getToken();
+    if (!token) throw new MobileApiError("Prihlásenie vypršalo. Prihláste sa znova.", 401);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, 12_000);
+    try {
+      const response = await transport(config.apiOrigin + "/api/mobile/v1/" + path, {
+        method: "GET", credentials: "omit", signal: controller.signal,
+        headers: { Authorization: "Bearer " + token, "X-PM-App-Environment": config.environment, Accept: "application/json" },
+      });
+      let body: unknown;
+      try { body = await response.json(); } catch { throw contractError(); }
+      if (!response.ok) {
+        const error = object(body).error;
+        const code = object(body).code;
+        throw new MobileApiError(text(error) ? error : "Údaje sa nepodarilo načítať.", response.status, typeof code === "string" && code.length <= 100 ? code : undefined);
+      }
+      return body;
+    } catch (error) {
+      if (error instanceof MobileApiError || signal?.aborted) throw error;
+      throw new MobileApiError("Nepodarilo sa spojiť s aplikáciou. Skontrolujte pripojenie a skúste znova.", 0);
+    } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+  }
+  return {
+    voiceColleagues: async (profileId: string, query: string, signal?: AbortSignal): Promise<MobileVoiceColleagues> => {
+      const q = query.trim();
+      if (q.length > 80) throw new MobileApiError("Vyhľadávanie môže mať najviac 80 znakov.", 400);
+      const body = object(await read("voice/colleagues?" + new URLSearchParams({ q }), signal));
+      scope(body, config, profileId);
+      if (!Array.isArray(body.colleagues) || body.colleagues.length > 50 || typeof body.hasMore !== "boolean") throw contractError();
+      const seen = new Set<string>();
+      for (const value of body.colleagues) {
+        const row = object(value);
+        if (!text(row.profileId) || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(row.profileId)
+          || row.profileId === profileId || seen.has(row.profileId) || !text(row.displayName) || !row.displayName.trim()
+          || row.displayName.length > 120 || row.displayName.trim() !== row.displayName || /[\u0000-\u001f\u007f]/.test(row.displayName)
+          || !text(row.status) || !["available", "paused", "busy", "offline"].includes(row.status) || typeof row.canCall !== "boolean"
+          || !(row.reason === null || text(row.reason) && ["busy", "wrap_up", "offline", "no_phone", "personal_mobile"].includes(row.reason))
+          || row.canCall && (row.reason !== null || !["available", "paused"].includes(row.status))
+          || !row.canCall && row.reason === null) throw contractError();
+        seen.add(row.profileId);
+      }
+      return body as MobileVoiceColleagues;
+    },
+    voiceReadiness: async (profileId: string, signal?: AbortSignal): Promise<MobileVoiceReadiness> => {
+      const body = object(await read("voice/readiness", signal));
+      scope(body, config, profileId);
+      if (typeof body.nativeCallingEnabled !== "boolean" || typeof body.backgroundIncomingEnabled !== "boolean"
+        || body.backgroundIncomingEnabled && !body.nativeCallingEnabled) throw contractError();
+      return body as MobileVoiceReadiness;
+    },
+    draftScope: async (profileId: string, signal?: AbortSignal): Promise<MobileDraftScope> => {
+      const body = object(await read("drafts/scope", signal));
+      scope(body, config, profileId);
+      const uuid = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i;
+      if (!uuid.test(profileId) || !text(body.organizationId) || !uuid.test(body.organizationId) || !draftDate(body.checkedAt)) throw contractError();
+      return { ok: true, apiVersion: 1, environment: config.environment, profileId, checkedAt: String(body.checkedAt), organizationId: body.organizationId };
+    },
+    me: async (signal?: AbortSignal): Promise<MobileMe> => {
+      const body = object(await read("me", signal));
+      scope(body, config);
+      const profile = object(body.profile);
+      if (profile.id !== body.profileId || !text(profile.displayName) || !nullableText(profile.email)
+        || !text(profile.role) || !["dispatcher", "senior_dispatcher", "manager", "admin"].includes(profile.role)) throw contractError();
+      capabilities(body.capabilities);
+      return body as MobileMe;
+    },
+    console: async (profileId: string, signal?: AbortSignal): Promise<MobileConsole> => {
+      const body = object(await read("console", signal));
+      scope(body, config, profileId);
+      const presence = object(body.presence);
+      if (!text(presence.status) || !["available", "paused", "offline", "ringing", "on_call", "after_call_work"].includes(presence.status) || !nullableText(presence.since)
+        || !Array.isArray(body.activeCalls) || body.activeCalls.length > 100) throw contractError();
+      for (const value of body.activeCalls) {
+        const call = callFields(value);
+        if (!text(call.state) || !nullableText(call.lineLabel) || call.contactName !== undefined && !nullableText(call.contactName)) throw contractError();
+      }
+      capabilities(body.capabilities);
+      return body as MobileConsole;
+    },
+    callbackSummary: async (profileId: string, signal?: AbortSignal): Promise<MobileCallbackSummary> => {
+      const body = object(await read("callbacks/summary", signal));
+      scope(body, config, profileId);
+      const counts = callbackCounts(body.counts, ["mine", "unclaimed", "overdue"]);
+      if (counts.mine > counts.open || counts.unclaimed > counts.open || counts.overdue > counts.open) throw contractError();
+      return body as MobileCallbackSummary;
+    },
+    callTarget: async (profileId: string, number: string, signal?: AbortSignal): Promise<MobileCallTarget["target"]> => {
+      const value = number.trim();
+      if (!value || value.length > 100) throw new MobileApiError("Zadajte platné telefónne číslo.", 400);
+      const body = object(await read("calls/target?" + new URLSearchParams({ number: value }), signal));
+      scope(body, config, profileId);
+      const target = object(body.target);
+      const phone = (item: unknown) => text(item) && item.trim().length > 0 && item.length <= 100;
+      const name = (item: unknown) => item === null || text(item) && item.length <= 200;
+      if (!["original", "verified_alternative", "blocked"].includes(target.status as string) || !phone(target.originalNumber)
+        || !name(target.sourceName) || !name(target.targetName)
+        || target.status === "original" && (target.dialNumber !== target.originalNumber || target.verificationId !== null)
+        || target.status === "blocked" && (target.dialNumber !== null || target.verificationId !== null)
+        || target.status === "verified_alternative" && (!phone(target.dialNumber) || !text(target.verificationId)
+          || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(target.verificationId))) throw contractError();
+      return target as MobileCallTarget["target"];
+    },
+    history: async (profileId: string, filter: HistoryFilter, signal?: AbortSignal): Promise<MobileHistory> => {
+      const params = new URLSearchParams({ category: filter.category, q: filter.q, limit: "25" });
+      if (filter.cursor) params.set("cursor", filter.cursor);
+      const body = object(await read("calls/history?" + params.toString(), signal));
+      scope(body, config, profileId);
+      if (!Array.isArray(body.calls) || body.calls.length > 100 || !nullableText(body.nextCursor)) throw contractError();
+      for (const value of body.calls) {
+        const call = callFields(value);
+        if (!text(call.status) || !text(call.lineLabel) || !nullableText(call.operatorName)
+          || !nullableText(call.answeredAt) || !nullableText(call.endedAt)
+          || !(call.durationSeconds === null || typeof call.durationSeconds === "number" && Number.isFinite(call.durationSeconds) && call.durationSeconds >= 0)) throw contractError();
+        // Older deployments omit the callback projection; it is display-only.
+        if (call.callback !== undefined && call.callback !== null) {
+          const callback = object(call.callback);
+          if (!["open", "scheduled", "done", "cancelled"].includes(callback.status as string) || !nullableText(callback.claimedByName)) throw contractError();
+        }
+      }
+      return body as MobileHistory;
+    },
+  };
+}
+export type MobileApi = ReturnType<typeof createMobileApi>;

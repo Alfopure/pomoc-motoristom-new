@@ -3,7 +3,14 @@ import type { NextConfig } from "next";
 
 const config: NextConfig = {
   poweredByHeader: false,
-  turbopack: { root: path.resolve(__dirname, "../..") },
+  // Keep parent application entrypoints (especially src/proxy.ts) outside this
+  // app's source root while allowing pnpm's shared dependency symlink targets.
+  turbopack: { root: __dirname },
+  experimental: {
+    turbopackAdditionalRoots: {
+      workspaceDependencies: { path: path.resolve(__dirname, "../../node_modules") },
+    },
+  },
   async headers() {
     return [
       {

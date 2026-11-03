@@ -9,13 +9,14 @@ import { canPickUpCall } from "@/lib/telephony/call-pickup";
 import { canSuperviseRole } from "@/lib/telephony/supervisor-mode";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 import { normalizeEditablePhone } from "@/lib/telephony/phone-entry";
-import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
+import { announcementConfigFromMetadata, readAnnouncementConfig } from "@/lib/telephony/announcements";
 import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured";
 import { isUuid } from "@/lib/telephony/uuid";
 import { colleaguePresenceBlock, COLLEAGUE_CALL_MESSAGES, type ColleagueCallBlock } from "@/lib/telephony/colleague-call";
 import { sipDisplayText } from "@/lib/telephony/sip-display";
 
 import { writeCallAudit } from "./audit";
+import { attachContactOperations } from "./contact-proof";
 import { isArchivedLine } from "./line-archive";
 import { deviceIsLive, deviceSipUri, getOperatorDevice, type DeviceDeps } from "./operator-devices";
 import { presenceAllowsOffer } from "./routing/eligibility";
@@ -26,31 +27,41 @@ import { effectivePresenceStatus } from "@/lib/telephony/presence-policy";
 import { findInitialCall, initialOperationIdentity, InitialOperationExistsError, readInitialCallPlan, recoverInitialDial, type InitialCallPlan } from "./initial-call-operation";
 import { ownedSessionWork, effectsDeps, loadRoutingSettings, runSessionEvent, type SessionRunnerDeps, type SessionRunResult } from "./session-runner";
 import { isOverLegCap, loadDailyUsage, type DailyUsage } from "./usage";
-import { resumePendingEffects, upsertCallRow, upsertDialedLeg, type CommandOutcome } from "./state/effects";
+import { resumePendingEffects, upsertCallRow, upsertDialedLeg, type CommandOutcome, type InitialDispatch } from "./state/effects";
+import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "./incidents";
 import { readPendingEffects, stageEffects } from "./state/continuation";
-import { CallActionRejected } from "./state/transitions";
+import { CallActionRejected, planInitialCall } from "./state/transitions";
 import {
   ACTIVE_SESSION_STATES,
+  DEFAULT_ROUTING_SETTINGS,
   emptyTransition,
   LEG_TIME_LIMIT_SECS,
   readMeta,
+  sessionSipDomain,
   TALKING_STATES,
+  telnyxSipUris,
   toJson,
   type AppEvent,
   type AppEventType,
   type DeviceRow,
   type LegRow,
   type LineRow,
+  type RoutingContext,
   type SessionRow,
   type SupervisorMode,
+  type TelnyxSipDomain,
   type TransferTarget,
 } from "./state/types";
 import { TelnyxCommandError, TelnyxLiveCallsDisabledError } from "./telnyx/client";
 import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
-import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, sessionOwnership } from "./ownership";
+import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, ownershipRpc, sessionOwnership, withTelephonyDatabaseBudget } from "./ownership";
+import { euApiRegionAllowed, freezeStartMode, latencyFlagsOf, providerRegionOf, startSipDomain } from "./latency-flags";
+import { resolveSessionRecordingPolicy } from "./recording-policy-service";
 import { humansOnly } from "@/server/profile-kind";
+import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
+import { nativeVoiceEnabled } from "@/lib/app-environment";
 
 export { CallActionError } from "./service-errors";
 
@@ -126,10 +137,19 @@ const defaultRateLimiter = createRateLimiter();
  * of truth every instance sees).
  */
 async function assertOutboundRate(deps: CallActionDeps, actor: CallActor): Promise<void> {
+  assertOutboundRateBucket(deps, actor);
+  assertOutboundRateCount(await outboundRateCount(deps, actor));
+}
+
+function assertOutboundRateBucket(deps: CallActionDeps, actor: CallActor): void {
   const limiter = deps.rateLimiter ?? defaultRateLimiter;
   if (!limiter.hit(`dial:${actor.profileId}`, OUTBOUND_RATE_LIMIT.limit, OUTBOUND_RATE_LIMIT.windowMs)) {
     throw new CallActionError("Príliš veľa odchádzajúcich hovorov za minútu.", 429, "rate_limited");
   }
+}
+
+/** Null when the counter fails: a failing counter never blocks a call. */
+async function outboundRateCount(deps: CallActionDeps, actor: CallActor): Promise<number | null> {
   const since = new Date(nowOf(deps).getTime() - OUTBOUND_RATE_LIMIT.windowMs).toISOString();
   const { count, error } = await deps.admin
     .from("motorist_call_sessions")
@@ -138,7 +158,10 @@ async function assertOutboundRate(deps: CallActionDeps, actor: CallActor): Promi
     .eq("answered_by_profile_id", actor.profileId)
     .in("direction", ["outbound", "internal"])
     .gte("started_at", since);
-  if (error) return; // never block a call on a failing counter
+  return error ? null : count ?? 0;
+}
+
+function assertOutboundRateCount(count: number | null): void {
   if ((count ?? 0) >= OUTBOUND_RATE_LIMIT.limit) {
     throw new CallActionError("Príliš veľa odchádzajúcich hovorov za minútu.", 429, "rate_limited");
   }
@@ -215,13 +238,14 @@ function deviceDeps(deps: CallActionDeps): DeviceDeps {
   return { admin: deps.admin, telnyx: deps.telnyx, environment: deps.environment, now: deps.now, deviceKind: deps.deviceKind };
 }
 
-async function requireLiveDevice(deps: CallActionDeps, profileId: string, message = "Telefón operátora nie je pripojený."): Promise<DeviceRow & { sipUri: string }> {
-  const device = await getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId });
-  return validateLiveDevice(device, nowOf(deps), message);
+/** `sipDomain` is the domain of the session that will dial the device (`sessionSipDomain`, or `startSipDomainOf` for a start). */
+async function requireLiveDevice(deps: CallActionDeps, profileId: string, sipDomain: TelnyxSipDomain | Promise<TelnyxSipDomain>, message = "Telefón operátora nie je pripojený."): Promise<DeviceRow & { sipUri: string }> {
+  const [device, domain] = await Promise.all([getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId }), sipDomain]);
+  return validateLiveDevice(device, nowOf(deps), domain, message);
 }
 
-function validateLiveDevice(device: DeviceRow | null, now: Date, message = "Telefón operátora nie je pripojený."): DeviceRow & { sipUri: string } {
-  const sipUri = device ? deviceSipUri(device) : null;
+function validateLiveDevice(device: DeviceRow | null, now: Date, sipDomain: TelnyxSipDomain, message = "Telefón operátora nie je pripojený."): DeviceRow & { sipUri: string } {
+  const sipUri = device ? deviceSipUri(device, sipDomain) : null;
   if (!device || !sipUri || !deviceIsLive(device, now)) throw new CallActionError(message, 409, "device_offline");
   return { ...device, sipUri };
 }
@@ -262,8 +286,11 @@ async function normalizeDestination(deps: CallActionDeps, raw: string, loadedSet
   return e164;
 }
 
-async function resolveFromLine(deps: CallActionDeps, profileId: string, lineId: string | null | undefined): Promise<{ line: LineRow | null; from: string }> {
+async function resolveFromLine(deps: CallActionDeps, profileId: string, lineId: string | null | undefined, speculative = false): Promise<{ line: LineRow | null; from: string }> {
   const { admin, organizationId } = deps;
+  const lineByNumber = (number: string) => admin.from("motorist_telephony_lines").select("*")
+    .eq("organization_id", organizationId).eq("phone_number", number).maybeSingle();
+  let fallback: Promise<Awaited<ReturnType<typeof lineByNumber>>> | null = null;
   let line: LineRow | null = null;
   if (lineId) {
     const { data, error } = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("id", lineId).eq("active", true).maybeSingle();
@@ -271,6 +298,15 @@ async function resolveFromLine(deps: CallActionDeps, profileId: string, lineId: 
     line = data ?? null;
     if (!line) throw new CallActionError("Zvolená linka neexistuje.", 400, "invalid_line");
   } else {
+    // Call-speed S2.1 (`start_fast_path`): the environment line is read next
+    // to the operator's default and used only where the order below reaches
+    // it, so an operator without a default resolves in one round trip.
+    const configuredFrom = deps.config.configured ? deps.config.defaultFromNumber : null;
+    if (speculative && configuredFrom) {
+      // A query builder runs only once awaited; start this one now.
+      fallback = Promise.resolve(lineByNumber(configuredFrom));
+      fallback.catch(() => undefined);
+    }
     const settings = await admin.from("motorist_operator_telephony_settings").select("default_from_line_id").eq("profile_id", profileId).maybeSingle();
     if (settings.data?.default_from_line_id) {
       const { data, error } = await admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).eq("id", settings.data.default_from_line_id).eq("active", true).maybeSingle();
@@ -284,8 +320,8 @@ async function resolveFromLine(deps: CallActionDeps, profileId: string, lineId: 
   // Operators without a personal default still use a configured DID. Resolve
   // its line so outbound startup settings and the displayed identity apply.
   if (!line) {
-    const result = await admin.from("motorist_telephony_lines").select("*")
-      .eq("organization_id", organizationId).eq("phone_number", from).maybeSingle();
+    // Without a line, `from` is the configured number the speculative read used.
+    const result = await (fallback ?? lineByNumber(from));
     if (result.error) throw new CallActionError("Nastavenia odchádzajúcej linky sa nepodarilo načítať.", 503, "line_unavailable");
     // An archived DID must not reappear through the environment fallback,
     // including when its row is already inactive after a transfer to TEST.
@@ -323,7 +359,7 @@ async function personalMobileTarget(deps: CallActionDeps, profileId: string, lab
   return { kind: "number", number, label, ownerProfileId: profileId };
 }
 
-async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, target: { profileId?: string | null; number?: string | null }): Promise<TransferTarget> {
+async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, target: { profileId?: string | null; number?: string | null }, sipDomain: TelnyxSipDomain): Promise<TransferTarget> {
   if (target.profileId) {
     if (target.profileId === actor.profileId) throw new CallActionError("Hovor nie je možné prepojiť na seba.", 400, "self_transfer");
     const profile = await deps.admin.from("motorist_profiles").select("id, display_name, active").eq("organization_id", deps.organizationId).eq("id", target.profileId).maybeSingle();
@@ -340,7 +376,7 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
     // transfer, consult and add-party still insisted on a live web device.
     const mobile = await personalMobileTarget(deps, target.profileId, profile.data.display_name);
     if (mobile) return mobile;
-    const device = await requireLiveDevice({ ...deps, deviceKind: "web" }, target.profileId, "Kolega nemá pripojený telefón.");
+    const device = await requireLiveDevice({ ...deps, deviceKind: "web" }, target.profileId, sipDomain, "Kolega nemá pripojený telefón.");
     return { kind: "operator", profileId: target.profileId, sipUri: device.sipUri, label: profile.data.display_name };
   }
   if (target.number) {
@@ -369,33 +405,127 @@ async function resolveTransferTarget(deps: CallActionDeps, actor: CallActor, tar
 export type StartOutboundInput = { requestId?: string; to: string; caseId?: string | null; lineId?: string | null; callbackRequestId?: string; callbackTargetVerificationId?: string };
 export type StartOutboundResult = { sessionId: string; operatorLegCallControlId: string; telnyxSessionId: string | null; to: string; from: string };
 
-export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput): Promise<StartOutboundResult> {
+/**
+ * Call-speed S2.3 (`start_early_response`): receives the start result once the
+ * own leg's dial has a recorded accepted outcome and an open leg row. The rest
+ * of the same leased work keeps running; see `respondWhenDialled`.
+ */
+export type EarlyStart<T> = (result: T) => void;
+
+/**
+ * The guard reads a new start needs, already in flight (call-speed S2.1).
+ * `unrecorded` is `startUnrecorded`; `sipDomain` is the domain its SIP URIs
+ * were built with (`startSipDomainOf`).
+ */
+type StartWave<T> = { rateCount?: Promise<number | null>; guards: Promise<T>; device: Promise<{ sipUri: string }>;
+  unrecorded: Promise<boolean>; sipDomain: Promise<TelnyxSipDomain> };
+
+/**
+ * Call-speed S5: whether the session a start is about to create will certainly
+ * not be recorded, which `api_region: "eu"` needs (recording through the EU
+ * API is not proven). Asked only while `eu` may be frozen, alongside the other
+ * guard reads, and answered from what `policyState` will apply:
+ * - a colleague call is never recorded;
+ * - an outgoing call is not recorded when its line has no start announcements
+ *   (the session freezes `announcements` from this same `line`, and without a
+ *   notice there is no capture), or when the policy the session runner applies
+ *   (`resolveSessionRecordingPolicy`: no read while this deployment's recording
+ *   switches are off) does not record outgoing calls. A policy that could not
+ *   be read, or a line that could not be resolved, may record.
+ * A policy switched on between this read and the runner's own can still record
+ * an `eu` call; its recording jobs follow the session's region (`recording-jobs.ts`).
+ */
+function startUnrecorded(deps: CallActionDeps, direction: "outbound" | "internal", fromLine?: Promise<{ line: LineRow | null }>): Promise<boolean> {
+  if (direction === "internal") return Promise.resolve(true);
+  if (!fromLine || latencyFlagsOf(deps).api_region !== "eu" || !euApiRegionAllowed()) return Promise.resolve(false);
+  const announced = fromLine.then(({ line }) => announcementConfigFromMetadata(line?.metadata).outboundStartAnnouncements === true, () => true);
+  const policyOff = resolveSessionRecordingPolicy(deps.admin, deps.organizationId)
+    .then(policy => policy.reason !== "recording_policy_unavailable" && !(policy.enabled && policy.outbound), () => false);
+  return Promise.all([announced, policyOff]).then(([withNotice, off]) => !withNotice || off);
+}
+
+/**
+ * The SIP domain the session a start is about to create will freeze (S5
+ * SIP-domain spike). Its URIs are built before that session exists;
+ * `createSession` refuses a frozen domain that differs. Only an unrecorded
+ * call may take `eu`, so everything else is decided now, before any read; the
+ * recording answer is awaited only where it could keep `eu`.
+ */
+function startSipDomainOf(deps: CallActionDeps, direction: "outbound" | "internal", unrecorded: Promise<boolean>): Promise<TelnyxSipDomain> {
+  const domain = startSipDomain(latencyFlagsOf(deps), { direction, providerRegion: providerRegionOf(deps.config), unrecorded: true });
+  return domain === "com" ? Promise.resolve(domain) : unrecorded.then(known => known ? domain : "com");
+}
+
+/** Started promises nobody may await (an identical retry); never an unhandled rejection. */
+function inFlight<T extends StartWave<unknown>>(wave: T): T {
+  for (const pending of [wave.rateCount, wave.guards, wave.device]) pending?.catch(() => undefined);
+  return wave;
+}
+
+/**
+ * Call-speed S2 (`start_test_proof_prefetch`): the TEST-only destination proof
+ * of the operator's own SIP leg. Started only once no earlier attempt of this
+ * request exists, as soon as the device is known, and awaited before anything
+ * is reserved; the dial in this same request may skip its own check only on a
+ * completed `proven`. Production runs no guard and gets null.
+ */
+function ownDestinationProof(deps: CallActionDeps, device: Promise<{ sipUri: string }>): Promise<unknown> | undefined {
+  const telnyx = deps.telnyx;
+  if (!latencyFlagsOf(deps).start_test_proof_prefetch || !telnyx?.proveSipDestination) return undefined;
+  const proof = device.then(row => telnyx.proveSipDestination!(row.sipUri));
+  proof.catch(() => undefined);
+  return proof;
+}
+
+function outboundGuards(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput, speculative: boolean) {
+  const fromLine = resolveFromLine(deps, actor.profileId, input.lineId, speculative);
+  const unrecorded = startUnrecorded(deps, "outbound", fromLine);
+  const sipDomain = startSipDomainOf(deps, "outbound", unrecorded);
+  const device = requireLiveDevice(deps, actor.profileId, sipDomain);
+  // These reads are independent. Finish every guard before reserving an operator
+  // or creating a call, but do not add each database round trip to setup latency.
+  return inFlight({ guards: Promise.all([
+    loadRoutingSettings(deps.admin, deps.organizationId),
+    loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) }),
+    resolveCallbackTarget(deps.admin, deps.organizationId, input.to),
+    device,
+    fromLine,
+  ]), device, unrecorded, sipDomain });
+}
+
+export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput, early?: EarlyStart<StartOutboundResult>): Promise<StartOutboundResult> {
   const identity = initialOperationIdentity(actor, "outbound", input);
+  // Call-speed S2.1 (`start_fast_path`): the rate count and every guard read
+  // leave together with the prior lookup. A prior still wins whatever they
+  // say, and the in-memory bucket counts only a request found to be new. A
+  // request the synchronous checks below refuse anyway sends none of them.
+  const wave = latencyFlagsOf(deps).start_fast_path && deps.config.configured && deps.telnyx && manualPhoneNumber(input.to)
+    ? inFlight({ rateCount: outboundRateCount(deps, actor), ...outboundGuards(deps, actor, input, true) }) : undefined;
   const prior = await findInitialCall(deps, identity);
   if (prior) return initializeOutgoingSession(deps, actor, prior, undefined, true);
-  try { return await startOutboundCallNew(deps, actor, input); }
+  try { return await startOutboundCallNew(deps, actor, input, wave, early); }
   catch (error) {
     if (error instanceof InitialOperationExistsError) return initializeOutgoingSession(deps, actor, error.session, undefined, true);
     throw error;
   }
 }
 
-async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput): Promise<StartOutboundResult> {
+async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput,
+  wave?: ReturnType<typeof outboundGuards> & Pick<StartWave<unknown>, "rateCount">, early?: EarlyStart<StartOutboundResult>): Promise<StartOutboundResult> {
   const startedAt = nowOf(deps).getTime();
   requireConfigured(deps);
   // Validate the submitted number before a callback policy may replace it with
   // a trusted stored target. The replacement itself keeps provider-tolerant parsing.
   if (!manualPhoneNumber(input.to)) throw new CallActionError(`Neplatné telefónne číslo: ${String(input.to ?? "").trim()}`, 400, "invalid_number");
-  await assertOutboundRate(deps, actor);
-  // These reads are independent. Finish every guard before reserving an operator
-  // or creating a call, but do not add each database round trip to setup latency.
-  const [settings, usage, target, device, { line, from }] = await Promise.all([
-    loadRoutingSettings(deps.admin, deps.organizationId),
-    loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) }),
-    resolveCallbackTarget(deps.admin, deps.organizationId, input.to),
-    requireLiveDevice(deps, actor.profileId),
-    resolveFromLine(deps, actor.profileId, input.lineId),
-  ]);
+  // The prior lookup missed: from here on this is a new start.
+  let sipProof = wave && ownDestinationProof(deps, wave.device);
+  if (wave?.rateCount) {
+    assertOutboundRateBucket(deps, actor);
+    assertOutboundRateCount(await wave.rateCount);
+  } else await assertOutboundRate(deps, actor);
+  const started = wave ?? outboundGuards(deps, actor, input, false);
+  sipProof ??= ownDestinationProof(deps, started.device);
+  const [settings, usage, target, device, { line, from }] = await started.guards;
   assertLoadedLegBudget(deps, usage, settings);
   const confirmed = confirmedCallbackTarget(target, input.callbackTargetVerificationId);
   if (!confirmed) throw new CallActionError(target.status === "blocked" ? "Toto číslo neprijíma spätné volania. Doplňte overený cieľ v adresári." : "Potvrďte overený alternatívny cieľ volania.", 409, "callback_target_confirmation_required");
@@ -409,6 +539,7 @@ async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, inpu
     lineId: line?.id ?? null,
     caseId: input.caseId ?? null,
     answeredBy: actor.profileId,
+    sipDomain: await started.sipDomain, unrecorded: await started.unrecorded,
     metadata: { ...(input.requestId ? { initial_operation: { ...initialOperationIdentity(actor, "outbound", input)!, request: input, to, from, sipUri: device.sipUri,
       fromDisplayName: actor.displayName?.replace(/[^A-Za-z0-9 \-\_~!.+]/g, "").slice(0, 128) || undefined,
       ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId } : {}) } } : {}), ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId, effects_v1: { generation: 0 } } : {}), outbound: { to, by: actor.profileId, from, case_id: input.caseId ?? null }, announcements: announcementConfigFromMetadata(line?.metadata), line_label: line?.label ?? null, partner_name: line?.partner_name ?? null },
@@ -416,16 +547,19 @@ async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, inpu
 
   const result = await initializeOutgoingSession(deps, actor, session, { to, from, sipUri: device.sipUri,
     fromDisplayName: actor.displayName?.replace(/[^A-Za-z0-9 \-\_~!.+]/g, "").slice(0, 128) || undefined,
-    callbackRequestId: input.callbackRequestId });
+    callbackRequestId: input.callbackRequestId }, false, { sipProof, early });
   deps.logger?.({ scope: "call-actions", action: "start_outbound", sessionId: session.id, by: actor.profileId, preflightMs: now.getTime() - startedAt, ms: nowOf(deps).getTime() - startedAt });
   return result;
 }
 
-export async function callColleague(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string }): Promise<StartOutboundResult> {
+export async function callColleague(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string }, early?: EarlyStart<StartOutboundResult>): Promise<StartOutboundResult> {
   const identity = initialOperationIdentity(actor, "internal", input);
+  // Call-speed S2.1 (`start_fast_path`): as for `startOutboundCall`.
+  const wave = latencyFlagsOf(deps).start_fast_path && deps.config.configured && deps.telnyx && input.targetProfileId !== actor.profileId
+    ? inFlight({ rateCount: outboundRateCount(deps, actor), ...colleagueGuards(deps, actor, input, true) }) : undefined;
   const prior = await findInitialCall(deps, identity);
   if (prior) return initializeOutgoingSession(deps, actor, prior, undefined, true);
-  try { return await callColleagueNew(deps, actor, input); }
+  try { return await callColleagueNew(deps, actor, input, wave, early); }
   catch (error) {
     if (error instanceof InitialOperationExistsError) return initializeOutgoingSession(deps, actor, error.session, undefined, true);
     throw error;
@@ -448,7 +582,7 @@ function colleagueCallError(block: ColleagueCallBlock, status = 409): CallAction
  * The daily cap and the organisation's concurrent-leg ceiling in one read
  * round. A colleague call never takes the capacity a customer would need.
  */
-async function assertInternalCallBudget(deps: CallActionDeps): Promise<void> {
+async function assertInternalCallBudget(deps: CallActionDeps): Promise<number> {
   const now = nowOf(deps);
   const [usage, settings, legs] = await Promise.all([
     loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now }),
@@ -459,16 +593,18 @@ async function assertInternalCallBudget(deps: CallActionDeps): Promise<void> {
   ]);
   assertLoadedLegBudget(deps, usage, settings);
   if (legs.error) throw new CallActionError("Voľnú kapacitu liniek sa nepodarilo overiť.", 503, "capacity_unknown");
-  if ((legs.count ?? 0) + INTERNAL_CALL_LEGS + INTERNAL_CALL_CUSTOMER_RESERVE > settings.maxConcurrentLegs) throw colleagueCallError("capacity");
+  const available = settings.maxConcurrentLegs - (legs.count ?? 0) - INTERNAL_CALL_CUSTOMER_RESERVE;
+  if (available < INTERNAL_CALL_LEGS) throw colleagueCallError("capacity");
+  return available;
 }
 
 /**
  * The colleague's own phone in the application — never a company line or a
  * private number. Rings an available colleague and one on pause.
  */
-async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): Promise<{ profileId: string; sipUri: string; label: string }> {
+async function resolveColleagueTarget(deps: CallActionDeps, profileId: string, sipDomain: TelnyxSipDomain): Promise<{ profileId: string; sipUri: string; label: string; endpoints: Array<{ device: "web" | "mobile"; sipUri: string }> }> {
   if (!isUuid(profileId)) throw new CallActionError("Kolega sa nenašiel.", 404, "target_not_found");
-  const [profile, presence, settings, device] = await Promise.all([
+  const [profile, presence, settings, webDevice, mobileDevice] = await Promise.all([
     humansOnly(deps.admin.from("motorist_profiles").select("id, display_name, active, access_status")
       .eq("organization_id", deps.organizationId).eq("id", profileId)).maybeSingle(),
     deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", deps.organizationId).eq("profile_id", profileId).maybeSingle(),
@@ -476,6 +612,9 @@ async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): 
       ? deps.admin.from("motorist_operator_telephony_settings").select("delivery_mode").eq("organization_id", deps.organizationId).eq("profile_id", profileId).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
     getOperatorDevice({ ...deviceDeps(deps), deviceKind: "web" }, { organizationId: deps.organizationId, profileId }),
+    nativeVoiceEnabled()
+      ? getOperatorDevice({ ...deviceDeps(deps), deviceKind: "mobile" }, { organizationId: deps.organizationId, profileId })
+      : Promise.resolve(null),
   ]);
   if (profile.error || presence.error || settings.error) throw new CallActionError("Kolegu sa nepodarilo overiť.", 503, "target_unknown");
   if (!profile.data || !profile.data.active || profile.data.access_status === "disabled") throw new CallActionError("Kolega sa nenašiel.", 404, "target_not_found");
@@ -484,30 +623,50 @@ async function resolveColleagueTarget(deps: CallActionDeps, profileId: string): 
   if (block) throw colleagueCallError(block);
   // Their calls go to a personal mobile: no application phone to ring.
   if ((settings.data as { delivery_mode?: string } | null)?.delivery_mode === "personal_mobile") throw colleagueCallError("personal_mobile");
-  const sipUri = device ? deviceSipUri(device) : null;
-  if (!device || !sipUri || !deviceIsLive(device, nowOf(deps))) throw colleagueCallError("no_phone");
-  return { profileId, sipUri, label: profile.data.display_name };
+  const mobileReachable = mobileDevice && (deviceIsLive(mobileDevice, nowOf(deps)) || nativeMobilePushReachable(mobileDevice, nowOf(deps)));
+  const endpoints: Array<{ device: "web" | "mobile"; sipUri: string }> = [];
+  const webSip = webDevice && deviceIsLive(webDevice, nowOf(deps)) ? deviceSipUri(webDevice, sipDomain) : null;
+  const mobileSip = mobileReachable ? deviceSipUri(mobileDevice, sipDomain) : null;
+  if (webSip) endpoints.push({ device: "web", sipUri: webSip });
+  if (mobileSip && mobileSip !== webSip) endpoints.push({ device: "mobile", sipUri: mobileSip });
+  if (!endpoints.length) throw colleagueCallError("no_phone");
+  return { profileId, sipUri: mobileSip ?? webSip!, label: profile.data.display_name, endpoints };
 }
 
-async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string }): Promise<StartOutboundResult> {
-  requireConfigured(deps);
-  if (input.targetProfileId === actor.profileId) throw new CallActionError("Nie je možné volať sám sebe.", 400, "self_call");
-  await assertOutboundRate(deps, actor);
+function colleagueGuards(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string }, speculative: boolean) {
+  const unrecorded = startUnrecorded(deps, "internal");
+  const sipDomain = startSipDomainOf(deps, "internal", unrecorded);
+  const device = requireLiveDevice(deps, actor.profileId, sipDomain);
   // Independent reads in one round; failures are reported in a fixed order.
-  const [budget, target, device, fromLine, caller] = await Promise.allSettled([
+  return inFlight({ guards: Promise.allSettled([
     assertInternalCallBudget(deps),
-    resolveColleagueTarget(deps, input.targetProfileId),
-    requireLiveDevice(deps, actor.profileId),
-    resolveFromLine(deps, actor.profileId, null),
+    sipDomain.then(domain => resolveColleagueTarget(deps, input.targetProfileId, domain)),
+    device,
+    resolveFromLine(deps, actor.profileId, null, speculative),
     actor.displayName ? Promise.resolve(actor.displayName) : deps.admin.from("motorist_profiles").select("display_name")
       .eq("organization_id", deps.organizationId).eq("id", actor.profileId).maybeSingle().then((result) => result.data?.display_name ?? null),
-  ]);
+  ]), device, unrecorded, sipDomain });
+}
+
+async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string },
+  wave?: ReturnType<typeof colleagueGuards> & Pick<StartWave<unknown>, "rateCount">, early?: EarlyStart<StartOutboundResult>): Promise<StartOutboundResult> {
+  requireConfigured(deps);
+  if (input.targetProfileId === actor.profileId) throw new CallActionError("Nie je možné volať sám sebe.", 400, "self_call");
+  // The prior lookup missed: from here on this is a new start.
+  let sipProof = wave && ownDestinationProof(deps, wave.device);
+  if (wave?.rateCount) {
+    assertOutboundRateBucket(deps, actor);
+    assertOutboundRateCount(await wave.rateCount);
+  } else await assertOutboundRate(deps, actor);
+  const started = wave ?? colleagueGuards(deps, actor, input, false);
+  sipProof ??= ownDestinationProof(deps, started.device);
+  const [budget, target, device, fromLine, caller] = await started.guards;
   for (const outcome of [budget, target, device, fromLine]) if (outcome.status === "rejected") throw outcome.reason;
-  if (target.status !== "fulfilled" || device.status !== "fulfilled" || fromLine.status !== "fulfilled") throw new CallActionError("Interný hovor sa nepodarilo pripraviť.", 500);
+  if (budget.status !== "fulfilled" || target.status !== "fulfilled" || device.status !== "fulfilled" || fromLine.status !== "fulfilled") throw new CallActionError("Interný hovor sa nepodarilo pripraviť.", 500);
+  if (budget.value < 1 + target.value.endpoints.length) throw colleagueCallError("capacity");
   const { line, from } = fromLine.value;
   const callerName = caller.status === "fulfilled" ? caller.value?.trim() || null : null;
   const plan = { to: target.value.sipUri, from, sipUri: device.value.sipUri, fromDisplayName: sipDisplayText(callerName) };
-
   const session = await createSession(deps, {
     direction: "internal",
     callerNumber: from,
@@ -515,17 +674,28 @@ async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: {
     lineId: line?.id ?? null,
     caseId: null,
     answeredBy: actor.profileId,
+    sipDomain: await started.sipDomain, unrecorded: await started.unrecorded,
     metadata: { ...(input.requestId ? { initial_operation: { ...initialOperationIdentity(actor, "internal", input)!, request: input, ...plan } } : {}),
       internal: { target_profile_id: target.value.profileId, target_sip: target.value.sipUri, by: actor.profileId,
+        ...(target.value.endpoints.length > 1 ? { endpoints: target.value.endpoints } : {}),
         caller_name: callerName, target_name: target.value.label, caller_display: plan.fromDisplayName ?? null },
       line_label: line?.label ?? null },
   });
-  return initializeOutgoingSession(deps, actor, session, plan);
+  // Call-speed S6.1: a session frozen concurrent dials the colleague in this
+  // same request, so the TEST destination proof of each endpoint leaves now
+  // too (the frozen decision, not the live switch: they can differ).
+  if (sipProof && readMeta(session).start_mode?.concurrent === true) {
+    for (const endpoint of target.value.endpoints) deps.telnyx?.proveSipDestination?.(endpoint.sipUri);
+  }
+  return initializeOutgoingSession(deps, actor, session, plan, false, { sipProof, early });
 }
 
 async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor, original: SessionRow,
-  legacyPlan?: Pick<InitialCallPlan, "to" | "from" | "sipUri" | "fromDisplayName" | "callbackRequestId">, recovering = false): Promise<StartOutboundResult> {
-  return ownedSessionWork(deps, original.id, async () => {
+  legacyPlan?: Pick<InitialCallPlan, "to" | "from" | "sipUri" | "fromDisplayName" | "callbackRequestId">, recovering = false,
+  options: { sipProof?: Promise<unknown>; early?: EarlyStart<StartOutboundResult> } = {}): Promise<StartOutboundResult> {
+  const flags = latencyFlagsOf(deps);
+  let incidentRecoveryDue = false;
+  const result = await ownedSessionWork(deps, original.id, async () => {
     const session = await loadSession(deps, original.id);
     const plan = readInitialCallPlan(session) ?? legacyPlan;
     if (!plan || session.writer_contract === 2 && !readInitialCallPlan(session)) throw new CallActionError("Volanie vyžaduje stabilnú identitu požiadavky.", 400, "request_id_required");
@@ -549,6 +719,12 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
     // untouched new row can have no earlier dispatch to recover.
     const fresh = !recovering && session.version === original.version && session.state === "received" &&
       !session.ended_at && !session.termination_requested_at && !readPendingEffects(session).entries.length;
+    if (!fresh) await endUndialedInitialCall(deps, actor, session, id).catch((error: unknown) => {
+      if (error instanceof SessionLeaseLostError) throw error;
+      // The request still answers 409 below; a later attempt can end the session.
+      deps.logger?.({ level: "warn", scope: "call-actions", code: "initial_cancellation_pending", sessionId: session.id,
+        error: error instanceof Error ? error.message : String(error) });
+    });
     const recovered = fresh ? null : await recoverInitialDial(deps, session, id, plan);
     if (recovered) return recovered;
     if (plan.callbackRequestId) {
@@ -559,7 +735,24 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
         throw new CallActionError("Požiadavka už bola vybavená alebo prebieha jej spätné volanie.", 409, "callback_link_rejected");
       }
     }
-    let reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId: session.id });
+    if (options.sipProof) {
+      // The TEST guard refused this destination: nothing is reserved or
+      // dialled. The session, the incident and the answer are those of the
+      // refused dial today (`recoverInitialDial`); only the reservation and
+      // its release are spared.
+      try { await options.sipProof; }
+      catch (error) {
+        deps.logger?.({ level: "warn", scope: "call-actions", code: "initial_destination_refused", sessionId: session.id,
+          error: error instanceof Error ? error.message : String(error) });
+        await markSessionFailed(deps, session, "dial_failed");
+        await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.commands, error, context: { sessionId: session.id, command: "dial", key: id } });
+        throw new CallActionError("Pôvodný hovor už skončil.", 409, "initial_call_ended");
+      }
+    }
+    // Call-speed S2.2 (`start_fast_path`): on the stable contract `acquire`
+    // re-checks availability under its row lock, so the read before it goes.
+    let reservation = await reserveOperatorOwnership(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, sessionId: session.id },
+      { lockedCheck: flags.start_fast_path });
     // A colleague call from a pause keeps the caller paused (owner, 28 Sep 2026).
     if (!reservation.applied && session.direction === "internal" &&
       await isPausedWithoutCall(deps.admin, { organizationId: deps.organizationId, profileId: actor.profileId, now: nowOf(deps) })) {
@@ -569,31 +762,37 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
       await markSessionFailed(deps, session, "operator_busy");
       throw new CallActionError("Operátor nie je dostupný (prebieha iný hovor).", 409, "operator_busy");
     }
+    // Call-speed S3: the start request's own (validated, single-use) id lets
+    // the waiting tab answer this leg before the response identifies it.
+    const requestHeader = latencyFlagsOf(deps).own_leg_request_header ? readInitialCallPlan(session)?.id : undefined;
     const dial = { kind: "dial" as const, commandId: id, to: plan.sipUri, from: plan.from, role: "operator" as const,
       profileId: actor.profileId, externalNumber: null, clientState: { sid: session.id, role: "operator" as const,
         operatorId: actor.profileId, intent: session.direction === "internal" ? "internal_caller" : "outbound", autoAnswer: true,
-        ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) }, linkTo: null, timeoutSecs: 30, autoAnswer: true, fromDisplayName: plan.fromDisplayName };
+        ...(reservation.offerToken ? { offerToken: reservation.offerToken } : {}) }, linkTo: null, timeoutSecs: 30, autoAnswer: true, fromDisplayName: plan.fromDisplayName,
+      ...(requestHeader ? { requestHeader } : {}) };
     if (session.writer_contract === 2) {
-      const next = emptyTransition();
-      next.call = { status: "outbound" };
-      next.notes = ["initial operator dial materialization"];
-      const refused = emptyTransition();
-      refused.session = { state: "failed", ended_at: nowOf(deps).toISOString() };
-      refused.call = { status: "failed", end_reason: "dial_failed" };
-      refused.presence = [{ profileId: actor.profileId, status: "available", sessionId: null,
-        onlyIfSession: session.id, onlyIfToken: reservation.offerToken ?? undefined, reason: "initial dial refused" }];
       const beforeStage = plan.callbackRequestId ? await loadSession(deps, session.id) : session;
-      const staged = await stageEffects(effectsFor(deps), { session: beforeStage, expectedVersion: beforeStage.version,
-        event: { kind: "app", type: "sweep", id: startupEntryId, actorProfileId: actor.profileId, occurredAt: nowOf(deps).toISOString() },
-        result: { next, commands: [dial], compensations: [{ forCommand: id, description: "release refused initial dial", commands: [], next: refused }], guard: null, ignored: null } });
+      const event: AppEvent = { kind: "app", type: "sweep", id: startupEntryId, actorProfileId: actor.profileId, occurredAt: nowOf(deps).toISOString() };
+      // Call-speed S6.1: a session frozen as concurrent dials its far end in
+      // this same entry, right after the own leg; any other keeps one dial.
+      const startup = planInitialCall(beforeStage, startupContext(deps, beforeStage), event, { ownDial: dial, offerToken: reservation.offerToken ?? undefined });
+      // Its customer dial is a callback contact intent like any direct dial;
+      // the leg it links to is bound once the own dial has created it.
+      if (startup.commands.length > 1) attachContactOperations({ session: beforeStage, legs: [] }, startup, event, true);
+      const staged = await stageEffects(effectsFor(deps), { session: beforeStage, expectedVersion: beforeStage.version, event, result: startup });
       // No external dispatch occurred before staging. Any accepted result below
       // is now backed by a cron-visible local materialization obligation.
-      return completeDurableInitialDial(deps, staged, id, plan);
+      // Call-speed S2: only this request's untouched row, staged just now under
+      // its own lease with its own reservation token, takes the start paths.
+      const fast = flags.start_fast_path && Boolean(reservation.offerToken);
+      const initial = fresh && (fast || options.early) ? { entryId: startupEntryId, commandId: id, fast, compact: Boolean(options.early) } : undefined;
+      return completeDurableInitialDial(deps, staged, id, plan, { initial, early: options.early, onClean: () => { incidentRecoveryDue = true; } });
     }
     try {
       const result = await telnyx.dial({ commandId: id, to: plan.sipUri, from: plan.from, clientState: encodeState(dial.clientState),
         timeoutSecs: 30, timeLimitSecs: LEG_TIME_LIMIT_SECS, sipRegion: "Europe", mediaEncryption: "SRTP",
-        customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }], fromDisplayName: plan.fromDisplayName });
+        customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }, ...(requestHeader ? [{ name: "X-PM-Request", value: requestHeader }] : [])],
+        fromDisplayName: plan.fromDisplayName });
       const effects = effectsFor(deps);
       await upsertDialedLeg(effects, session, dial, result);
       await upsertCallRow(effects, await loadSession(deps, session.id), { status: "outbound" });
@@ -604,12 +803,35 @@ async function initializeOutgoingSession(deps: CallActionDeps, actor: CallActor,
       throw toActionError(error, "Hovor sa nepodarilo vytočiť.");
     }
   }, { known: original });
+  // Call-speed S2.3: closing a stale command incident is a throttled
+  // bookkeeping read; the call's lease no longer waits for it.
+  if (incidentRecoveryDue) {
+    await withTelephonyDatabaseBudget(250, () => recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, nowOf(deps)))
+      .catch(() => undefined);
+  }
+  return result;
 }
 
 async function completeDurableInitialDial(deps: CallActionDeps, session: SessionRow, id: string,
-  plan: Pick<InitialCallPlan, "to" | "from">): Promise<StartOutboundResult> {
+  plan: Pick<InitialCallPlan, "to" | "from">,
+  start: { initial?: Omit<InitialDispatch, "onSettled">; early?: EarlyStart<StartOutboundResult>; onClean?: () => void } = {}): Promise<StartOutboundResult> {
+  const answered: { result: StartOutboundResult | null } = { result: null };
+  const early = start.early;
+  const initialDispatch: InitialDispatch | undefined = start.initial && { ...start.initial,
+    onSettled: early ? (settled) => {
+      // Only a recorded accepted dial with an open leg row answers early (the
+      // same evidence as the leg check below); anything else waits for the
+      // full work and keeps today's error mapping.
+      if (answered.result || !settled.legOpen) return;
+      answered.result = { sessionId: session.id, operatorLegCallControlId: settled.callControlId, telnyxSessionId: settled.callSessionId, to: plan.to, from: plan.from };
+      early(answered.result);
+    } : undefined };
   try {
-    const completed = await resumePendingEffects(effectsFor(deps), session, { priorityEntryId: `initial:${id}` });
+    const completed = await resumePendingEffects(effectsFor(deps), session, { priorityEntryId: `initial:${id}`, ...(initialDispatch ? { initialDispatch } : {}) });
+    if (initialDispatch?.compact && completed && !completed.failed) start.onClean?.();
+    // The response already left with this exact leg. Re-reading it would only
+    // hold the lease for a reply nobody is waiting for.
+    if (answered.result) return answered.result;
     const dial = completed?.commands.find(command => command.kind === "dial" && command.commandId === id && command.ok && !command.skipped);
     const controlId = dial?.detail?.callControlId;
     if (completed && !completed.failed && !completed.projectionPending &&
@@ -636,11 +858,40 @@ async function completeDurableInitialDial(deps: CallActionDeps, session: Session
     // survives it; return only authoritative journal evidence, never a guess.
     deps.logger?.({ scope: "call-actions", code: "initial_materialization_pending", sessionId: session.id,
       error: error instanceof Error ? error.message : String(error) });
+    // The early response already carries the journalled leg; cron or the
+    // next event resumes the surviving entry.
+    if (answered.result) return answered.result;
   }
   const current = await loadSession(deps, session.id);
   const accepted = await recoverInitialDial(deps, current, id, plan);
   if (accepted) return accepted;
   throw new CallActionError("Úvodný krok hovoru zostáva nedokončený. Zopakujte overenie pôvodnej požiadavky.", 503, "initial_call_pending");
+}
+
+/**
+ * A hangup committed its termination after INSERT and before this request
+ * reached the lease. Nothing was reserved or dialled, and no later event would
+ * ever end the session: `appHangup` needs legs, the sweep a customer leg. End
+ * it as cancelled once the journal proves its dial was never prepared; the
+ * request still answers 409 `initial_call_ended`.
+ */
+async function endUndialedInitialCall(deps: CallActionDeps, actor: CallActor, session: SessionRow, dialCommandId: string): Promise<void> {
+  if (session.writer_contract !== 2 || !session.termination_requested_at || session.ended_at || session.state !== "received" ||
+    readPendingEffects(session).entries.length || sessionOwnership.getStore()?.contract !== 2) return;
+  if (await ownershipRpc<unknown>(deps.admin, "motorist_provider_command_lookup_v2", { p_session_id: session.id, p_command_id: dialCommandId })) return;
+  const now = nowOf(deps).toISOString();
+  const cancelled = emptyTransition();
+  cancelled.session = { state: "ended", ended_at: now };
+  cancelled.call = { status: "ended", end_reason: "cancelled_before_dial", ended_at: now };
+  // No `onlyIfToken`: this request reserved nothing, so there is no token to
+  // match. `onlyIfSession` binds the release to this session, and a presence
+  // holding another owner's token is never released without that token.
+  cancelled.presence = [{ profileId: actor.profileId, status: "available", sessionId: null, onlyIfSession: session.id, reason: "cancelled before dial" }];
+  cancelled.notes = ["initial dial cancelled before dispatch"];
+  const staged = await stageEffects(effectsFor(deps), { session, expectedVersion: session.version,
+    event: { kind: "app", type: "sweep", id: `initial-cancelled:${dialCommandId}`, actorProfileId: actor.profileId, occurredAt: now },
+    result: { next: cancelled, commands: [], compensations: [], guard: null, ignored: null } });
+  await resumePendingEffects(effectsFor(deps), staged);
 }
 
 // --- in-call actions ---------------------------------------------------------
@@ -701,21 +952,43 @@ function appEvent(type: AppEventType, actor: CallActor | null, deps: CallActionD
   return { kind: "app", id: randomUUID(), type, actorProfileId: actor?.profileId ?? null, occurredAt: nowOf(deps).toISOString(), ...extra };
 }
 
-async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<SessionRow> {
+/** Rows the caller already read for this session under its lease (call-speed S7a.2). */
+export type KnownSessionRows = { session: SessionRow; legs: LegRow[] };
+
+async function ownedActiveSession(deps: CallActionDeps, actor: CallActor, sessionId: string, options: { nativeHangupCleanup?: boolean; known?: KnownSessionRows } = {}): Promise<SessionRow> {
   // The session and the legs that authorise the actor are independent reads,
   // and both stand between the click and the command.
-  const [session, legs] = await Promise.all([
-    loadSession(deps, sessionId),
-    deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", sessionId).neq("role", "supervisor").is("ended_at", null),
-  ]);
+  const known = options.known?.session.id === sessionId && options.known.session.organization_id === deps.organizationId ? options.known : null;
+  const [session, legs] = known
+    ? [known.session, { data: known.legs.filter(leg => leg.session_id === sessionId && leg.role !== "supervisor" && !leg.ended_at), error: null }]
+    : await Promise.all([
+      loadSession(deps, sessionId),
+      deps.admin.from("motorist_call_legs").select("profile_id").eq("session_id", sessionId).neq("role", "supervisor").is("ended_at", null),
+    ]);
   if (!ACTIVE_SESSION_STATES.has(session.state)) throw new CallActionError("Hovor už nie je aktívny.", 409, "not_active");
+  const meta = readMeta(session);
+  const acceptedId = meta.accepted_device_legs?.[actor.profileId];
+  if (options.nativeHangupCleanup && deps.deviceKind === "mobile" && session.direction === "internal" &&
+    meta.internal?.target_profile_id === actor.profileId && acceptedId) {
+    // The callee's provider hangup can precede whole-session cleanup. Only
+    // their exact accepted mobile endpoint retains this termination right.
+    const device = await getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId: actor.profileId });
+    if (device?.sip_username) {
+      // Its leg was dialled on the session's SIP domain; either domain is the same identity.
+      const accepted = await deps.admin.from("motorist_call_legs").select("id")
+        .eq("organization_id", deps.organizationId).eq("session_id", session.id).eq("profile_id", actor.profileId)
+        .eq("role", "operator").in("to_number", telnyxSipUris(device.sip_username)).eq("telnyx_call_control_id", acceptedId).maybeSingle();
+      if (accepted.error) throw new CallActionError("Účastníka hovoru sa nepodarilo overiť.", 503);
+      if (accepted.data) return session;
+    }
+  }
   await assertOwnership(deps, session, actor, legs.error ? undefined : (legs.data ?? []).map((leg) => leg.profile_id).filter((id): id is string => Boolean(id)));
   return session;
 }
 
-export async function holdCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
-  const session = await ownedActiveSession(deps, actor, sessionId);
-  return runAction(deps, session, appEvent("hold", actor, deps), "Podržanie hovoru zlyhalo. Rozšírené funkcie hovoru nie sú dostupné.");
+export async function holdCall(deps: CallActionDeps, actor: CallActor, sessionId: string, event?: Pick<AppEvent, "id" | "nativeHold">, known?: KnownSessionRows): Promise<CallActionResult> {
+  const session = await ownedActiveSession(deps, actor, sessionId, { known });
+  return runAction(deps, session, appEvent("hold", actor, deps, event), "Podržanie hovoru zlyhalo. Rozšírené funkcie hovoru nie sú dostupné.");
 }
 
 /** An objection survives holds, transfers and retries for this logical call. */
@@ -730,9 +1003,9 @@ export async function reconcileCallRecordingPolicy(deps: CallActionDeps, session
   return runSessionEvent(deps, session.id, { kind: "app", id: randomUUID(), type: "recording_policy_stop", actorProfileId: null, occurredAt: nowOf(deps).toISOString() });
 }
 
-export async function unholdCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
-  const session = await ownedActiveSession(deps, actor, sessionId);
-  return runAction(deps, session, appEvent("unhold", actor, deps), "Obnovenie hovoru zlyhalo.");
+export async function unholdCall(deps: CallActionDeps, actor: CallActor, sessionId: string, event?: Pick<AppEvent, "id" | "nativeHold">, known?: KnownSessionRows): Promise<CallActionResult> {
+  const session = await ownedActiveSession(deps, actor, sessionId, { known });
+  return runAction(deps, session, appEvent("unhold", actor, deps, event), "Obnovenie hovoru zlyhalo.");
 }
 
 export async function parkCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
@@ -749,7 +1022,7 @@ export async function deferRingingCall(deps: CallActionDeps, actor: CallActor, s
 }
 
 export async function hangupCall(deps: CallActionDeps, actor: CallActor, sessionId: string): Promise<CallActionResult> {
-  const session = await ownedActiveSession(deps, actor, sessionId);
+  const session = await ownedActiveSession(deps, actor, sessionId, { nativeHangupCleanup: true });
   try {
     // Contract 2 commits termination before acquiring ownership. Do not keep
     // the browser waiting/retrying behind the handler already ending this call.
@@ -822,7 +1095,7 @@ async function transferAction(
 ): Promise<CallActionResult> {
   let resolved: TransferTarget | undefined;
   try {
-    resolved = await resolveTransferTarget(deps, actor, input.target);
+    resolved = await resolveTransferTarget(deps, actor, input.target, sessionSipDomain(input.session.metadata));
     const result = await runAction(deps, input.session, appEvent(input.event, actor, deps, { target: resolved }), input.failureMessage);
     await auditAction(deps, actor, { action: input.action, sessionId: input.session.id, after: targetAudit(input.target, resolved) });
     return result;
@@ -886,7 +1159,7 @@ async function pickupWaitingCallOwned(deps: CallActionDeps, actor: CallActor, se
   if (presence.error) throw new CallActionError(`Prezenciu sa nepodarilo overiť: ${presence.error.message}`, 500);
   if (deviceResult.status === "rejected") throw deviceResult.reason;
   // A device read that finished first may have expired during a slow presence read.
-  const device = validateLiveDevice(deviceResult.value, nowOf(deps));
+  const device = validateLiveDevice(deviceResult.value, nowOf(deps), sessionSipDomain(session.metadata));
   const continuingOwnership = presence.data?.current_session_id === sessionId && Boolean(presence.data?.pause_return || presence.data?.offer_token);
   // Schema compatibility is independent of new-feature admission. In particular,
   // creation-off still requires availability; it must nevertheless retain the
@@ -1069,6 +1342,8 @@ async function superviseCallOwned(deps: CallActionDeps, actor: CallActor, sessio
   }
   if (!invitationId && !canSuperviseRole(actor.role)) throw new CallActionError("Dozor nad hovorom je dostupný len pre manažéra alebo administrátora.", 403, "forbidden");
   const session = await loadSession(deps, sessionId);
+  // Also refuses an invitation created before colleague calls refused monitoring.
+  if (session.direction === "internal") throw internalCallUnsupported();
   if (!TALKING_STATES.has(session.state)) throw new CallActionError("Dozor je možný len pri prebiehajúcom hovore.", 409, "not_active");
   if (invitationId) {
     const invitation = (session.metadata as import("./state/types").SessionMeta).monitorInvitations?.[invitationId];
@@ -1086,7 +1361,7 @@ async function superviseCallOwned(deps: CallActionDeps, actor: CallActor, sessio
   // limit (its own bucket, so listening in does not eat an operator's dials).
   await assertSuperviseRate(deps, actor);
   await assertLegBudget(deps);
-  const device = await requireLiveDevice(deps, actor.profileId, "Tvoj telefón nie je pripojený.");
+  const device = await requireLiveDevice(deps, actor.profileId, sessionSipDomain(session.metadata), "Tvoj telefón nie je pripojený.");
 
   const already = await deps.admin.from("motorist_call_legs").select("id").eq("session_id", sessionId).eq("profile_id", actor.profileId).eq("role", "supervisor").is("ended_at", null).maybeSingle();
   let reservation: PresenceTransitionResult = { applied: false };
@@ -1148,12 +1423,18 @@ async function requireActiveMonitorProfile(deps: CallActionDeps, profileId: stri
   return data;
 }
 
+/** The reducer's colleague-call refusal, before any further read, reservation or dial. */
+function internalCallUnsupported(): CallActionError {
+  return new CallActionError("Pri hovore s kolegom táto akcia nie je dostupná.", 409, "not_supported_internal");
+}
+
 export async function inviteCallMonitor(deps: CallActionDeps, actor: CallActor, sessionId: string, recipientProfileId: string): Promise<CallActionResult> {
   await requireMonitorInvitations(deps);
   const session = await conferenceSession(deps, actor, sessionId);
+  if (session.direction === "internal") throw internalCallUnsupported();
   if (recipientProfileId === actor.profileId) throw new CallActionError("Nemôžeš pozvať seba.", 400);
   const recipient = await requireActiveMonitorProfile(deps, recipientProfileId);
-  await requireLiveDevice(deps, recipientProfileId, "Telefón poslucháča nie je pripojený.");
+  await requireLiveDevice(deps, recipientProfileId, sessionSipDomain(session.metadata), "Telefón poslucháča nie je pripojený.");
   const now = nowOf(deps);
   return runAction(deps, session, appEvent("invite_monitor", actor, deps, { monitorInvitation: {
     id: randomUUID(), sessionId, inviterProfileId: actor.profileId, inviterName: actor.displayName ?? actor.profileId,
@@ -1231,6 +1512,22 @@ function effectsFor(deps: CallActionDeps) {
   return effectsDeps(deps);
 }
 
+/**
+ * What `planInitialCall` reads (call-speed S6.1): the clock, the caller id a
+ * colleague dial uses (in the reducer's order: the configured number, then the
+ * session's own) and the announcements frozen at creation.
+ */
+function startupContext(deps: CallActionDeps, session: SessionRow): RoutingContext {
+  const meta = readMeta(session);
+  const config = deps.config;
+  return { now: nowOf(deps), organizationId: deps.organizationId, environment: deps.environment, line: null, businessHours: null, ivr: null,
+    ringPlan: null, ringPlans: {}, presence: [], devices: [], openOffers: [], activeLegCount: 0, settings: DEFAULT_ROUTING_SETTINGS,
+    fromNumber: (config.configured ? config.defaultFromNumber : null) ?? null,
+    mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
+    announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : undefined,
+    recordingPolicy: meta.recording?.policy, lean: true };
+}
+
 async function createSession(
   deps: CallActionDeps,
   input: {
@@ -1240,9 +1537,26 @@ async function createSession(
     lineId: string | null;
     caseId: string | null;
     answeredBy: string;
+    /** The SIP domain every SIP URI in this input was built with (`StartWave.sipDomain`). */
+    sipDomain: TelnyxSipDomain;
+    /** S5: the call will certainly not be recorded (`StartWave.unrecorded`); `eu` needs it. */
+    unrecorded: boolean;
     metadata: Record<string, unknown>;
   },
 ): Promise<SessionRow> {
+  const metadata = { ...input.metadata, environment: deps.environment,
+    start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: input.direction, origin: deps.deviceKind ?? "web", providerRegion: providerRegionOf(deps.config),
+      unrecorded: input.unrecorded,
+      // Call-speed S6.1: a callback, or an outgoing call behind start
+      // announcements (and with them any recording), stays sequential.
+      concurrentEligible: !input.metadata.callbackRequestId && (input.direction === "internal" ||
+        readAnnouncementConfig(input.metadata.announcements).outboundStartAnnouncements !== true),
+      // S6.3: one colleague endpoint only; with web and mobile the server picks the winner.
+      autoBridgeEligible: !(input.metadata.internal as { endpoints?: unknown[] } | undefined)?.endpoints?.length }) };
+  // S5 SIP-domain spike: the start's URIs were built before this session's
+  // domain was frozen. Both come from the same flags and `unrecorded`; should they ever differ,
+  // nothing is created, so no session dials a domain it does not record.
+  if (sessionSipDomain(metadata) !== input.sipDomain) throw new CallActionError("Hovor sa nepodarilo založiť.", 500, "start_mode_changed");
   const inserted = await deps.admin
     .from("motorist_call_sessions")
     .insert({
@@ -1257,7 +1571,7 @@ async function createSession(
       caller_number: input.callerNumber,
       called_number: input.calledNumber,
       started_at: nowOf(deps).toISOString(),
-      metadata: toJson({ ...input.metadata, environment: deps.environment }),
+      metadata: toJson(metadata),
     })
     .select("*")
     .single();

@@ -61,10 +61,10 @@ and recheck the ratio afterwards: `sum(delivery_count)` against the row count of
 
 | Environment | Voice | SMS |
 |---|---|---|
-| Production (`main`) | `https://dispecing-test.vercel.app/api/telephony/telnyx/webhook` (failover: the project's default `*.vercel.app` alias) | `https://dispecing-test.vercel.app/api/sms/telnyx/webhook` |
+| Production (`main`) | `https://dispecing.linkapomoci.sk/api/telephony/telnyx/webhook` (failover: `https://dispecing-test.vercel.app/…`) | `https://dispecing.linkapomoci.sk/api/sms/telnyx/webhook` (failover: `https://dispecing-test.vercel.app/…`) |
 | Development (`dev` branch alias) | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/telephony/telnyx/webhook` | `https://pomoc-motoristom-new-git-dev-alfopures-projects.vercel.app/api/sms/telnyx/webhook` |
 
-Once the `test.dispecing.linkapomoci.sk` CNAME exists, the production URLs move to that domain and the `*.vercel.app` alias stays the failover.
+Moved to the custom domain on 2026-10-28 17:59 UTC on the owner's approval (call control app `3040091293100279025`, messaging profile `4001a062-20cf-44ea-a956-6f272163907f`); the production `*.vercel.app` alias stays the failover. Previous values are kept in the workspace `.context/telnyx-webhooks/before.json`. `TELNYX_MEDIA_BASE_URL` still points to the alias and moves with the next production release.
 
 The production outbound voice profile whitelists all EU27 destinations; the development profile only SK and CZ. Both keep a daily spend cap and a per-minute destination price ceiling.
 

@@ -4,7 +4,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useState, useSyn
 import { ArrowLeft, Check, LockKeyhole, Plus, Save, Share2, StickyNote, Trash2 } from "lucide-react";
 import { NOTE_BODY_LIMIT, NOTE_REVALIDATE_MS, NOTE_TITLE_LIMIT } from "@/domain/notes";
 import { protectDraftBeforeUnload } from "@/lib/draft-unload";
-import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { afterRealtimeAuth, createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { NotebookStore } from "./notebook-store";
 import styles from "./NotebookPanel.module.css";
 
@@ -64,9 +64,10 @@ function NotebookSession({ actorKey, viewerProfileId, onEditorStateChange, child
       // against auth.uid(), active organization and profile membership.
       const organizationId = actorKey.split(":")[0];
       const channel = client.channel(`notebook:${organizationId}:${viewerProfileId}`, { config: { private: true } })
-        .on("broadcast", { event: "invalidate" }, schedule)
-        .subscribe(status => { if (status === "SUBSCRIBED") schedule(); });
-      cleanupChannel = () => { void client.removeChannel(channel); };
+        .on("broadcast", { event: "invalidate" }, schedule);
+      // Private joins wait for the restored session; an earlier join is refused.
+      const cancelJoin = afterRealtimeAuth(client, () => { channel.subscribe(status => { if (status === "SUBSCRIBED") schedule(); }); });
+      cleanupChannel = () => { cancelJoin(); void client.removeChannel(channel); };
       store.setOnAccessRevoked(cleanupChannel);
     } catch { /* 25-second ACL checks also work without Realtime configuration. */ }
     return () => {

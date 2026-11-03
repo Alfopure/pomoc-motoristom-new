@@ -1,0 +1,15 @@
+.panel { border: 1px solid #dce3eb; border-radius: 12px; padding: 16px; display: grid; gap: 12px; background: #fff; color: #14253d; }
+.panel h3, .panel p { margin: 0; }
+.heading { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 0; }
+.summary div { min-width: 0; }
+.summary dt { font-size: 12px; color: #53657c; }
+.summary dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.form, .link { display: grid; gap: 12px; }
+.confirm { display: flex; gap: 8px; align-items: flex-start; }
+.publicPage { min-height: 100dvh; background: #f3f6fa; padding: 24px 16px; color: #14253d; }
+.publicCard { display: grid; gap: 18px; width: min(100%, 700px); margin: 0 auto; background: white; border: 1px solid #dce3eb; border-radius: 16px; padding: 24px; }
+.publicCard h1, .publicCard p { margin: 0; }
+.publicCard header { display: grid; gap: 6px; }
+.publicCard footer { font-size: 13px; color: #53657c; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }

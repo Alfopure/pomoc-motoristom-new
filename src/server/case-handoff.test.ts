@@ -5,7 +5,7 @@ vi.mock("@/lib/supabase/server", () => ({ createSupabaseServerClient: async () =
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => ({ rpc: mocks.publicRpc }) }));
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: mocks.cookieGet, set: mocks.cookieSet }) }));
 vi.mock("./api-auth", () => ({ requireDefaultMotoristActor: mocks.actor }));
-import { commandCaseHandoff, getCaseHandoffContext, HANDOFF_COOKIE, handoffHash, handoffResponse, publicHandoff, readHandoffBody, validateHandoffCommand } from "./case-handoff";
+import { prepareCaseHandoffCommand, type HandoffSession, commandCaseHandoff, getCaseHandoffContext, HANDOFF_COOKIE, handoffHash, handoffResponse, publicHandoff, readHandoffBody, validateHandoffCommand } from "./case-handoff";
 const grant = "10000000-0000-4000-8000-000000000001", caseId = "20000000-0000-4000-8000-000000000001", commandId = "30000000-0000-4000-8000-000000000001";
 const token = "a".repeat(43), session = "b".repeat(43);
 const handoff = { id: grant, status: "offered", revision: 1, publishedVersion: 1, published: { caseNumber: "PM-1" } };
@@ -149,6 +149,18 @@ describe("enhanced handoff HTTP boundary", () => {
     expect(result.url).toMatch(/#token=[\w-]{43}$/);
     expect(mocks.userRpc.mock.calls.map(call => call[1].p_action)).toEqual(["context", "renew", "link"]);
     expect(mocks.userRpc.mock.calls[1][1].p_input).toMatchObject({ issuedId: grant, secretGeneration: 2 });
+  });
+  it("returns the durable receipt before deferred link resolution, while the cookie wrapper retains its error behavior", async () => {
+    mocks.userRpc.mockImplementation(async (_name, args) => args.p_action === "issue"
+      ? { data: { handoff, commandId, committedRevision: 1, linkGeneration: 1 }, error: null }
+      : { data: null, error: { code: "PGRST000" } });
+    const verified = { actor: { organizationId: "org", profileId: "actor" }, client: { rpc: mocks.userRpc } } as unknown as HandoffSession;
+    const prepared = await prepareCaseHandoffCommand(request(`/api/cases/${caseId}/handoffs`, issue), caseId, issue, verified);
+    expect(prepared.receipt).toMatchObject({ commandId, committedRevision: 1 });
+    expect(mocks.userRpc.mock.calls.map(call => call[1].p_action)).toEqual(["issue"]);
+    expect(mocks.actor).not.toHaveBeenCalled();
+    await expect(prepared.resolveLink!()).rejects.toMatchObject({ status: 503 });
+    await expect(commandCaseHandoff(request(`/api/cases/${caseId}/handoffs`, issue), caseId)).rejects.toMatchObject({ status: 503 });
   });
   it("rejects retrieval without authorization and fails before issuing if a key is missing", async () => {
     vi.stubEnv("MOTORIST_HANDOFF_KEYS", "{}");

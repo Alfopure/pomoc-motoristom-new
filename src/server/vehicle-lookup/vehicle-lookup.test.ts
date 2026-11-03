@@ -53,6 +53,20 @@ describe("observed provider contracts", () => {
     expect(skp().facts.model).toBeUndefined();
     expect(skp().facts).not.toHaveProperty("insuranceValidUntil");
   });
+  it("accepts a policy by its exact plate without inventing a missing VIN", () => {
+    const parsed = parseSkp({ ok: true, status: "POISTENÉ", zmluvy: [{ ...contract, spz: " xx-000 xx ", vin: null }] }, query, date);
+    expect(parsed).toMatchObject({ status: "found", facts: { plate: { value: query.value }, insurer: { value: contract.poistitel }, insuranceStatus: { value: "Poistené" } } });
+    expect(parsed.facts.vin).toBeUndefined();
+    expect(emptyVehicleFieldPatch({ ...result(), sources: [parsed] }, { plate: query.value, vin: "", insurer: "" })).toEqual({ insurer: contract.poistitel });
+  });
+  it("requires the queried identifier and rejects malformed or conflicting returned VINs", () => {
+    const body = (rows: unknown[]) => ({ ok: true, status: "POISTENÉ", zmluvy: rows });
+    expect(parseSkp(body([{ ...contract, spz: "YY000YY", vin: null }]), query, date).status).toBe("ambiguous");
+    expect(parseSkp(body([{ ...contract, vin: "invalid" }]), query, date).status).toBe("ambiguous");
+    expect(parseSkp(body([{ ...contract, vin: null }]), { ...query, kind: "vin", value: vin }, date).status).toBe("ambiguous");
+    expect(parseSkp(body([{ ...contract, vin: "WVWZZZ1JZXW000002" }]), { ...query, kind: "vin", value: vin }, date).status).toBe("ambiguous");
+    expect(lookupIdentityConflict(result(), { plate: query.value, vin: "WVWZZZ1JZXW000002" })).toBeTruthy();
+  });
   it("SKP never silently takes the first vehicle or negative state on malformed/empty/challenge", () => {
     expect(parseSkp({ ok: true, status: "POISTENÉ", zmluvy: [contract, { ...contract, vin: "WVWZZZ1JZXW000002" }] }, query, date).status).toBe("ambiguous");
     expect(parseSkp({ ok: false, message: "captcha verification failed" }, query, date).status).toBe("challenge_required");

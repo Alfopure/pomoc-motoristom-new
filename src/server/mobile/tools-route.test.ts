@@ -1,0 +1,15 @@
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { routeTool } from "./tools";
+import { isMobileToolPolyline } from "@/lib/mobile-tools";
+const input = {origin:{lat:0,lng:0},destination:{lat:1,lng:2},intermediates:[]};
+const polyline = "_p~iF~ps|U_ulLnnqC_mqNvxq`@";
+const leg = {distanceMeters:100,duration:"2.5s",polyline:{encodedPolyline:polyline}};
+const fetcher = vi.fn();
+beforeEach(()=>{vi.stubEnv("GOOGLE_MAPS_API_KEY","fixture-server-key");vi.stubGlobal("fetch",fetcher);fetcher.mockResolvedValue(Response.json({routes:[{...leg,legs:[leg]}]}));});
+afterEach(()=>{vi.resetAllMocks();vi.unstubAllGlobals();vi.unstubAllEnvs();});
+it("uses actual guarded Google request and echoes exact numeric points",async()=>{const abort=new AbortController();const result=await routeTool(input,abort.signal);expect(result).toMatchObject({request:input,route:{distanceMeters:100,durationSeconds:2.5,encodedPolyline:polyline,legs:[{distanceMeters:100,durationSeconds:2.5,encodedPolyline:polyline}]}});expect(fetcher.mock.calls[0][0]).toBe("https://routes.googleapis.com/directions/v2:computeRoutes");const options=fetcher.mock.calls[0][1];expect(JSON.parse(options.body)).toMatchObject({optimizeWaypointOrder:false,travelMode:"DRIVE",routingPreference:"TRAFFIC_AWARE_OPTIMAL",origin:{location:{latLng:{latitude:0,longitude:0}}}});abort.abort();expect(options.signal.aborted).toBe(true);});
+it.each([{...leg,legs:[]},{...leg,legs:[{}]},{...leg,legs:[{...leg,distanceMeters:-1}]},{...leg,legs:[{...leg,duration:"NaNs"}]},{...leg,legs:[{...leg,polyline:{encodedPolyline:"bad"}}]},{...leg,polyline:{encodedPolyline:"?"},legs:[leg]}])("never substitutes missing/invalid leg facts %j",async route=>{fetcher.mockResolvedValue(Response.json({routes:[route]}));await expect(routeTool(input)).rejects.toMatchObject({status:502});});
+it.each(["", "?", "~~~~~~", "\u0000", "a".repeat(200001)])("rejects malformed or oversized polyline",value=>expect(isMobileToolPolyline(value)).toBe(false));
+it("does not fetch from Preview even with a key",async()=>{vi.stubEnv("VERCEL_ENV","preview");await expect(routeTool(input)).rejects.toMatchObject({status:503});expect(fetcher).not.toHaveBeenCalled();});
+it("bounds decompressed response and cancels oversized stream",async()=>{const cancel=vi.fn();fetcher.mockResolvedValue(new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array(1_000_001));},cancel}),{headers:{"content-length":"10"}}));await expect(routeTool(input)).rejects.toMatchObject({status:502});expect(cancel).toHaveBeenCalledOnce();});
+it("sanitizes provider/network errors",async()=>{fetcher.mockRejectedValue(new Error("secret-server-key"));await expect(routeTool(input)).rejects.toMatchObject({status:502});});

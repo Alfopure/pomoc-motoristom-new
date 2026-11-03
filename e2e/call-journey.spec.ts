@@ -125,18 +125,22 @@ test("monitor shares one read per refresh with its selected detail and changing 
 test("hidden monitor makes no requests and resumes one shared read when visible", async ({ page }) => {
   await freezeClock(page);
   const { state, errors } = await setup(page);
-  await openMonitor(page);
+  const monitor = await openMonitor(page);
   await page.evaluate(() => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await page.clock.runFor(30_000);
   expect(state.reads).toBe(1);
+  state.advanced = true;
   await page.evaluate(() => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await expect.poll(() => state.listReads).toBe(2);
+  // Wait for the resumed response to be consumed before advancing the clock;
+  // counting the intercepted request alone races the next-poll scheduling.
+  await expect(monitor.getByRole("button", { name: "+421 900 000 001: Čakáreň" })).toBeVisible();
   await page.clock.runFor(5_000);
   await expect.poll(() => state.listReads).toBe(3);
   expect(state.detailReads).toBe(0);

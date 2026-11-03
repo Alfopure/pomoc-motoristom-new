@@ -10,7 +10,9 @@ test("GitHub is not an integration scheduler or Vercel runtime dependency", () =
     .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
     .sort();
 
-  assert.deepEqual(workflowFiles, ["ci.yml"]);
+  // Mobile checks build/test JS bundles with synthetic public config. They
+  // do not schedule integrations or become a Vercel runtime dependency.
+  assert.deepEqual(workflowFiles, ["ci.yml", "mobile.yml"]);
 
   const combined = workflowFiles
     .map((name) => readFileSync(resolve(workflowDirectory, name), "utf8"))

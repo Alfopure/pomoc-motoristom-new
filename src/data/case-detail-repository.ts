@@ -7,8 +7,21 @@ import { MutationError } from "@/server/mutation-error";
 import { mapCase } from "./dispatch-repository";
 import type { CaseDetailData } from "./case-detail";
 
+type LocationRow = Database["public"]["Tables"]["motorist_locations"]["Row"];
+export type CaseDetailSnapshot = {
+  detail: CaseDetailData;
+  locations: { pickup: LocationRow | null; destination: LocationRow | null; clientLocation: LocationRow | null };
+  clientCapturedAt: string | null;
+};
+
 export async function loadCaseDetail(caseId: string, actor: Pick<MotoristActor, "organizationId" | "profileId">, signal?: AbortSignal,
   client: SupabaseClient<Database> = createSupabaseAdminClient()): Promise<CaseDetailData> {
+  return (await loadCaseDetailSnapshot(caseId, actor, signal, client)).detail;
+}
+
+/** Raw locations share the card's scoped read and final revision fence. */
+export async function loadCaseDetailSnapshot(caseId: string, actor: Pick<MotoristActor, "organizationId" | "profileId">, signal?: AbortSignal,
+  client: SupabaseClient<Database> = createSupabaseAdminClient()): Promise<CaseDetailSnapshot> {
   if (!/^[0-9a-f-]{36}$/i.test(caseId)) throw new MutationError("Neplatný prípad.", 400);
   const deadline = AbortSignal.timeout(8_000);
   const abort = signal ? AbortSignal.any([signal, deadline]) : deadline;
@@ -45,7 +58,12 @@ export async function loadCaseDetail(caseId: string, actor: Pick<MotoristActor, 
       events: events.data ?? [], tasks: [], customerLocationSubmission: submission,
     });
     Reflect.deleteProperty(detail, "tasks");
-    return detail;
+    const locationById = new Map((locations.data ?? []).map(item => [item.id, item]));
+    return { detail, locations: {
+      pickup: locationById.get(row.pickup_location_id ?? "") ?? null,
+      destination: locationById.get(row.destination_location_id ?? "") ?? null,
+      clientLocation: locationById.get(submission?.location_id ?? "") ?? null,
+    }, clientCapturedAt: submission?.submitted_at ?? null };
   }
   throw new MutationError("Prípad sa počas načítania zmenil. Skúste obnoviť znovu.", 503);
 }

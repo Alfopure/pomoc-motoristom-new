@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import { channel } from "node:diagnostics_channel";
 import { performance } from "node:perf_hooks";
 import { getAppVersion } from "./app-version";
+import { resolveAppEnvironment } from "@/lib/app-environment";
+import type { CallPerformanceOperation } from "@/lib/telephony/performance-operation";
 
 /**
  * `auth` is the whole gate; `auth.token` and `auth.profile` are the two halves
@@ -18,19 +20,20 @@ import { getAppVersion } from "./app-version";
  * second away is a decision about deactivated operators. They should not be
  * decided on one number.
  */
-const CONTROL_STAGES = ["recording.admission", "recording.ack", "participants", "projection", "audit", "finalize", "staging"] as const;
+const CONTROL_STAGES = ["recording.admission", "recording.ack", "participants", "projection", "audit", "finalize", "staging", "state_projection", "staging_reconcile"] as const;
 export type ControlStage = typeof CONTROL_STAGES[number];
 type ControlStep = `control.${ControlStage}`;
 const controlStages = new Set<string>(CONTROL_STAGES);
 
 export type RequestStep = "auth" | "auth.token" | "auth.profile" | "db" | "lease" | "provider" | "checkpoint" | "read" | "write"
   | "routing.snapshot" | "routing.configuration" | "routing.eligibility" | "guard.stage" | ControlStep;
-export type MeasuredRoute = "case.get" | "case.save" | "case.create" | "case.action" | "case.assign" | "sms.send" | "document.upload" | "document.generate" | "integration.lookup" | "call.start" | "call.action" | "call.webhook" | "call.active" | "dispatch.refresh" | "fleet.refresh";
+export type MeasuredRoute = "case.get" | "case.save" | "case.create" | "case.action" | "case.assign" | "sms.send" | "document.upload" | "document.generate" | "integration.lookup" | "call.start" | "call.action" | "call.webhook" | "call.active" | "call.token" | "call.offer" | "dispatch.refresh" | "fleet.refresh";
 
 type Metric = { count: number; ms: number; dbCount?: number; dbMs?: number };
 type RequestMetrics = {
   id: string;
   route: MeasuredRoute;
+  operation?: CallPerformanceOperation;
   started: number;
   now: () => number;
   steps: Partial<Record<RequestStep, Metric>>;
@@ -42,13 +45,16 @@ type RequestMetrics = {
   dbMaxMs: number | null;
   dbAborts: number;
   connectsAtStart: number;
+  telnyxConnectsAtStart: number;
   eluAtStart: ReturnType<typeof performance.eventLoopUtilization>;
 };
 
 const requests = new AsyncLocalStorage<RequestMetrics>();
 const controlStageScope = new AsyncLocalStorage<{ request: RequestMetrics; metric: Metric; finished: boolean }>();
 const databaseHosts = new Set<string>();
+const telnyxHosts = new Set<string>();
 let databaseConnects = 0;
+let telnyxConnects = 0;
 
 // Undici pools sockets across requests. This is an instance-window count,
 // deliberately not an attribution to whichever request happened to create it.
@@ -56,6 +62,7 @@ channel("undici:client:connected").subscribe((message) => {
   try {
     const host = (message as { connectParams?: { hostname?: string } }).connectParams?.hostname;
     if (host && databaseHosts.has(host)) databaseConnects += 1;
+    else if (host && telnyxHosts.has(host)) telnyxConnects += 1;
   } catch { /* Diagnostics callbacks must never affect the transport. */ }
 });
 
@@ -66,28 +73,43 @@ export function registerDatabaseOrigin(input: RequestInfo | URL): void {
   } catch { /* No URLs or credentials enter the log. */ }
 }
 
+/** The Telnyx API host(s) whose new sockets are counted; like the database, only a count is ever logged. */
+export function registerTelnyxOrigin(input: string | URL): void {
+  try {
+    const url = new URL(typeof input === "string" ? input : input.href);
+    if (telnyxHosts.size < 4) telnyxHosts.add(url.hostname);
+  } catch { /* No URLs or credentials enter the log. */ }
+}
+
 /** Observe the effective request deadline, including an RPC caller's timeout.
  * Ordinary cancellation is not a database timeout; never log its reason. */
 export function observeDatabaseTimeout(signal?: AbortSignal | null): () => void {
   if (!signal) return () => {};
   const scope = requests.getStore();
   const aborted = () => {
-    if (scope && !scope.finished && (signal.reason as { name?: unknown } | null)?.name === "TimeoutError") scope.dbAborts += 1;
+    const reason = signal.reason as { name?: unknown; message?: unknown } | null;
+    // These internal deadlines deliberately use AbortError to stop the
+    // PostgREST retry loop. Preserve timeout counts without logging the reason
+    // or treating arbitrary caller cancellation as a database timeout.
+    const deadline = reason?.name === "TimeoutError" || reason?.name === "AbortError" &&
+      typeof reason.message === "string" && (/^un-owned read exceeded \d+ ms$/.test(reason.message) ||
+        reason.message === "Read verification exceeded its deadline" || reason.message === "Incident recovery read expired");
+    if (scope && !scope.finished && deadline) scope.dbAborts += 1;
   };
   if (signal.aborted) aborted();
   else signal.addEventListener("abort", aborted, { once: true });
   return () => signal.removeEventListener("abort", aborted);
 }
 
-export function requestTimingContext(): { request_id: string; ingress_at: string } | null {
+export function requestTimingContext(): { request_id: string; ingress_at: string; route: MeasuredRoute; database_timeouts: number } | null {
   const scope = requests.getStore();
-  return scope && !scope.finished ? { request_id: scope.id, ingress_at: scope.ingressAt } : null;
+  return scope && !scope.finished ? { request_id: scope.id, ingress_at: scope.ingressAt, route: scope.route, database_timeouts: scope.dbAborts } : null;
 }
 
 function newScope(route: MeasuredRoute, now: () => number, logger: RequestMetrics["logger"], parent?: RequestMetrics): RequestMetrics {
-  return { id: parent?.id ?? randomUUID(), ingressAt: parent?.ingressAt ?? new Date().toISOString(), route,
+  return { id: parent?.id ?? randomUUID(), ingressAt: parent?.ingressAt ?? new Date().toISOString(), route, operation: parent?.operation,
     started: now(), now, logger, steps: {}, finished: false, dbIssued: 0, dbFirstMs: null, dbMaxMs: null, dbAborts: 0,
-    connectsAtStart: databaseConnects, eluAtStart: performance.eventLoopUtilization() };
+    connectsAtStart: databaseConnects, telnyxConnectsAtStart: telnyxConnects, eluAtStart: performance.eventLoopUtilization() };
 }
 
 function finish(scope: RequestMetrics, detail: Record<string, unknown>): void {
@@ -98,11 +120,14 @@ function finish(scope: RequestMetrics, detail: Record<string, unknown>): void {
     ...(metric.dbCount === undefined ? {} : { dbCount: metric.dbCount, dbMs: round(metric.dbMs ?? 0) }),
   }]));
   try {
-    scope.logger({ scope: "request-performance", requestId: scope.id, route: scope.route, serverBuild: getAppVersion(),
-      ms: Math.max(0, round(scope.now() - scope.started)), steps,
+    const duration = scope.now() - scope.started;
+    scope.logger({ scope: "request-performance", schemaVersion: 2, source: "server", environment: resolveAppEnvironment(),
+      operation: scope.operation ?? scope.route, timestamp: new Date().toISOString(), ingressAt: scope.ingressAt, sampleRate: 1, requestId: scope.id, route: scope.route, serverBuild: getAppVersion(),
+      ms: Number.isFinite(duration) && duration >= 0 ? round(duration) : null, steps,
       dbFirstMs: scope.dbFirstMs === null ? null : round(scope.dbFirstMs),
       dbMaxMs: scope.dbMaxMs === null ? null : round(scope.dbMaxMs), dbAborts: scope.dbAborts,
       dbConnects: databaseConnects - scope.connectsAtStart, dbConnectsScope: "instance-window",
+      telnyxConnects: telnyxConnects - scope.telnyxConnectsAtStart,
       instanceEventLoopUtilization: performance.eventLoopUtilization(scope.eluAtStart).utilization, ...detail });
   } catch { /* Telemetry must never change the result of a committed operation. */ }
 }
@@ -199,10 +224,11 @@ export async function measureRequestStep<T>(name: RequestStep, work: () => Promi
 export async function withRequestMetrics(
   route: MeasuredRoute,
   handler: () => Promise<Response>,
-  options: { logger?: (entry: Record<string, unknown>) => void; now?: () => number } = {},
+  options: { logger?: (entry: Record<string, unknown>) => void; now?: () => number; operation?: CallPerformanceOperation; quietBelowMs?: number } = {},
 ): Promise<Response> {
   const now = options.now ?? (() => performance.now());
   const scope = newScope(route, now, options.logger ?? ((entry) => console.info(JSON.stringify(entry))));
+  scope.operation = options.operation;
   return requests.run(scope, async () => {
     let status = 500;
     let responseBytes: number | null = null;
@@ -222,7 +248,9 @@ export async function withRequestMetrics(
       } catch { /* Redirects may have immutable headers; preserve the original response. */ }
       return response;
     } finally {
-      finish(scope, { phase: "response", status, responseBytes, timingHeaders });
+      // A frequent poll keeps its timing headers but logs only when slow or failed.
+      if (options.quietBelowMs !== undefined && status < 400 && now() - scope.started < options.quietBelowMs) scope.finished = true;
+      else finish(scope, { phase: "response", measurement: "handler_response", outcome: status === 202 ? "accepted" : status < 400 ? "ok" : "failed", status, responseBytes, timingHeaders });
     }
   });
 }

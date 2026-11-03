@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/supabase/server", () => ({ createSupabaseServerClient: mocks.server }));
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: mocks.admin }));
 vi.mock("@/server/default-organization", () => ({ resolveDefaultOrganizationId: async () => "org-fixture" }));
-vi.mock("@/server/telephony/operator-devices", () => ({ issueWebphoneToken: mocks.issueToken, touchDevice: mocks.touchDevice }));
+vi.mock("@/server/telephony/operator-devices", () => ({ issueWebphoneToken: mocks.issueToken, touchDevice: mocks.touchDevice, refuseIfAccessLost: async () => undefined }));
 vi.mock("@/server/telephony/runtime", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/server/telephony/runtime")>(),
   createTelephonyDeps: async () => ({ admin: {}, telnyx: {}, environment: "development", organizationId: "org-fixture" }),

@@ -1,0 +1,90 @@
+// Controlled framework boundary; no networking, device permissions or audio.
+import Foundation
+// Deterministic native timer adapter: actual callback bodies are unchanged.
+class Timer {
+  static var scheduled: [Timer] = []; let interval: TimeInterval; let callback: (Timer) -> Void; var valid = true
+  init(_ interval: TimeInterval, callback: @escaping (Timer) -> Void) { self.interval = interval; self.callback = callback }
+  static func scheduledTimer(withTimeInterval interval: TimeInterval, repeats: Bool, block: @escaping (Timer) -> Void) -> Timer { let timer = Timer(interval, callback: block); scheduled.append(timer); return timer }
+  func invalidate() { valid = false }
+  static func fire(_ interval: TimeInterval) { let timers = scheduled.filter { $0.valid && $0.interval == interval }; for timer in timers { timer.valid = false; timer.callback(timer) } }
+}
+// Unified logging adapter: keeps each public device-log line for privacy checks.
+struct OSLogPrivacy { static let `public` = OSLogPrivacy() }
+struct OSLogMessage: ExpressibleByStringInterpolation {
+  struct StringInterpolation: StringInterpolationProtocol {
+    var text = ""
+    init(literalCapacity: Int, interpolationCount: Int) {}
+    mutating func appendLiteral(_ literal: String) { text += literal }
+    mutating func appendInterpolation(_ value: String, privacy: OSLogPrivacy) { text += value }
+  }
+  let text: String
+  init(stringLiteral value: String) { text = value }
+  init(stringInterpolation: StringInterpolation) { text = stringInterpolation.text }
+}
+enum os { struct Logger { static var lines: [String] = []; init(subsystem: String, category: String) {}; func notice(_ message: OSLogMessage) { Self.lines.append(message.text) } } }
+enum AVAuthorizationStatus { case authorized, denied, restricted, notDetermined }
+enum AVMediaType: Equatable { case audio, video }
+class AVCaptureDevice {
+  static var status = AVAuthorizationStatus.notDetermined
+  static var reads: [AVMediaType] = []
+  static var requests = 0
+  static func authorizationStatus(for mediaType: AVMediaType) -> AVAuthorizationStatus { reads.append(mediaType); return status }
+  static func requestAccess(for mediaType: AVMediaType, completionHandler: (Bool) -> Void) { requests += 1; completionHandler(status == .authorized) }
+}
+class AVAudioSession {
+  static var requests = 0
+  static func sharedInstance() -> AVAudioSession { AVAudioSession() }
+  func requestRecordPermission(_ response: (Bool) -> Void) { Self.requests += 1; response(false) }
+}
+protocol PKPushRegistryDelegate: AnyObject {}
+struct PKPushType: Hashable { static let voIP = PKPushType() }
+class PKPushRegistry { weak var delegate: PKPushRegistryDelegate?; var desiredPushTypes: Set<PKPushType>?; init(queue: DispatchQueue) {} }
+class PKPushCredentials { var token = Data() }
+class PKPushPayload { var dictionaryPayload: [String: Any]; init(_ data: [String: Any]) { dictionaryPayload = data } }
+protocol CXProviderDelegate: AnyObject {}
+class CXHandle { enum HandleType: Hashable { case phoneNumber, generic }; let type: HandleType; let value: String; init(type: HandleType, value: String) { self.type = type; self.value = value } }
+class CXProviderConfiguration { var supportsVideo = false; var supportedHandleTypes: Set<CXHandle.HandleType> = []; var maximumCallGroups = 1; var maximumCallsPerCallGroup = 1 }
+enum CXCallEndedReason { case failed, remoteEnded, unanswered, answeredElsewhere }
+class CXCallUpdate { var remoteHandle: CXHandle?; var localizedCallerName: String?; var hasVideo = false; var supportsHolding = false; var supportsGrouping = false; var supportsUngrouping = false }
+class CXAction { var uuid = UUID(); var timeoutDate = Date().addingTimeInterval(30); var isComplete = false; var fulfills = 0; var failures = 0; func fulfill() { fulfills += 1; isComplete = true }; func fail() { failures += 1; isComplete = true } }
+class CXCallAction: CXAction { let callUUID: UUID; init(call: UUID) { callUUID = call } }
+class CXAnswerCallAction: CXCallAction {}
+class CXEndCallAction: CXCallAction {}
+class CXStartCallAction: CXCallAction { let handle: CXHandle; init(call: UUID, handle: CXHandle) { self.handle = handle; super.init(call: call) } }
+class CXSetHeldCallAction: CXCallAction { let isOnHold: Bool; init(call: UUID, onHold: Bool) { isOnHold = onHold; super.init(call: call) }
+  // iOS hands the provider a new object for a requested action: same uuid, different identity.
+  func deliveredCopy() -> CXSetHeldCallAction { let copy = CXSetHeldCallAction(call: callUUID, onHold: isOnHold); copy.uuid = uuid; copy.timeoutDate = timeoutDate; return copy } }
+class CXSetMutedCallAction: CXCallAction { let isMuted: Bool; init(call: UUID, muted: Bool) { isMuted = muted; super.init(call: call) } }
+class CXTransaction { let action: CXAction; init(action: CXAction) { self.action = (action as? CXSetHeldCallAction)?.deliveredCopy() ?? action } }
+class CXCallController { static var transactions: [CXTransaction] = []; static var requestError: Error?; func request(_ transaction: CXTransaction, completion: @escaping (Error?) -> Void) { Self.transactions.append(transaction); completion(Self.requestError) } }
+class CXProvider { var updates: [UUID: CXCallUpdate] = [:]; var updateCount = 0; var incoming: [UUID] = []; var ended: [UUID: CXCallEndedReason] = [:]; func reportCall(with id: UUID, updated: CXCallUpdate) { updates[id] = updated; updateCount += 1 }; static var last: CXProvider!; let configuration: CXProviderConfiguration; init(configuration: CXProviderConfiguration) { self.configuration = configuration; Self.last = self }; func setDelegate(_ delegate: CXProviderDelegate, queue: DispatchQueue) {}; func reportNewIncomingCall(with id: UUID, update: CXCallUpdate, completion: @escaping (Error?) -> Void) { incoming.append(id); completion(nil) }; func reportCall(with id: UUID, endedAt: Date, reason: CXCallEndedReason) { ended[id] = reason }; func reportOutgoingCall(with: UUID, startedConnectingAt: Date) {}; func reportOutgoingCall(with: UUID, connectedAt: Date) {} }
+struct CallTerminationReason: Equatable {}
+enum CallState: Equatable { case NEW, CONNECTING, RINGING, ACTIVE, HELD; case DONE(reason: CallTerminationReason? = nil), RECONNECTING(reason: Reason), DROPPED(reason: Reason); enum Reason { case networkSwitch, networkLost } }
+struct CallInfo { let callId: UUID; var callerNumber: String? = "fixture"; var callerName: String? = "fixture" }
+class Call {
+  var callInfo: CallInfo?; var telnyxLegId: UUID?; var telnyxCallControlId: String?; var callState = CallState.RINGING
+  var isMuted = false; var answerCount = 0, hangs = 0, mutes = 0, tones = 0; var answerCompletion: ((Bool) -> Void)?
+  init(_ id: UUID, leg: UUID) { callInfo = CallInfo(callId: id); telnyxLegId = leg }
+  func answer(completion: @escaping (Bool) -> Void) { answerCount += 1; answerCompletion = completion }
+  func completeAnswer(_ success: Bool) { if success { callState = .ACTIVE }; answerCompletion?(success) }
+  func hangup() { hangs += 1; callState = .DONE() }
+  func muteAudio() { mutes += 1; isMuted = true }; func unmuteAudio() { mutes -= 1; isMuted = false }; func dtmf(dtmf: String) { tones += 1 }
+}
+// TelnyxRTC 4.2.2 signatures (TxConfig.swift, TxServerConfiguration.swift, Region.swift), defaults included.
+struct TxConfig { enum PushEnvironment { case production }; enum LogLevel { case none }; let token: String; let reconnectClient: Bool; let useTrickleIce: Bool
+  init(token: String, pushDeviceToken: String?, pushEnvironment: PushEnvironment, logLevel: LogLevel, reconnectClient: Bool, debug: Bool, useTrickleIce: Bool = false, enableCallReports: Bool) {
+    self.token = token; self.reconnectClient = reconnectClient; self.useTrickleIce = useTrickleIce } }
+enum Region { case auto, eu }
+struct TxServerConfiguration { let signalingServer: URL?; let region: Region
+  init(signalingServer: URL? = nil, region: Region = .auto) { self.signalingServer = signalingServer; self.region = region } }
+protocol TxClientDelegate: AnyObject { func onClientReady(); func onSocketConnected(); func onSocketDisconnected(); func onClientError(error: Error); func onPushDisabled(success: Bool, message: String); func onSessionUpdated(sessionId: String); func onIncomingCall(call: Call); func onPushCall(call: Call); func onRemoteCallEnded(callId: UUID, reason: CallTerminationReason?); func onCallStateUpdated(callState: CallState, callId: UUID) }
+class TxClient {
+  static var last: TxClient!; weak var delegate: TxClientDelegate?; var registry: [UUID: Call] = [:]; var config: TxConfig?; var server: TxServerConfiguration?; var prepares = 0
+  init() { Self.last = self }
+  func connect(txConfig: TxConfig, serverConfiguration: TxServerConfiguration = TxServerConfiguration()) throws { config = txConfig; server = serverConfiguration }
+  func processVoIPNotification(txConfig: TxConfig, serverConfiguration: TxServerConfiguration, pushMetaData: [String: Any]) throws { config = txConfig; server = serverConfiguration; prepares += 1 }
+  func getCall(callId: UUID) -> Call? { registry[callId] }
+  var declines: [UUID] = []
+  func disconnect() {}; func disablePushNotifications() {}; func endCallFromCallkit(endAction: CXEndCallAction) { declines.append(endAction.callUUID); endAction.fulfill() }
+  func setSpeaker() {}; func setEarpiece() {}; func enableAudioSession(audioSession: AVAudioSession) {}; func disableAudioSession(audioSession: AVAudioSession) {}
+}

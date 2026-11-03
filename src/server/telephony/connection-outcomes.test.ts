@@ -54,4 +54,36 @@ describe("connection outcome after replay", () => {
     const skipped = await getRecentConnectionOutcomes({ admin: h.deps.admin, organizationId: ORG, since: "2026-09-09T14:00:00Z" });
     expect(skipped.entries[0].outcome).toBe("unknown");
   });
+
+  it("distinguishes failed setup from a recovered greeting followed by an unanswered routed call", async () => {
+    const h = createTelephonyHarness();
+    h.db.seed("motorist_call_sessions", [{ id: "session", organization_id: ORG, state: "ended", ended_at: "2026-09-09T14:06:47Z", metadata: {} }]);
+    h.db.seed("motorist_call_events", [{ id: "setup-failure", organization_id: ORG, handled_status: "failed", created_at: "2026-09-09T14:06:47Z",
+      provider_timestamp: failure.eventAt, normalized_payload: { session_id: "session", state_before: "received", failure_at: failure.failedAt,
+        commands: [{ kind: "playback_start", command_id: "greeting", ok: false }], error: "database timeout" } }]);
+    const read = () => getRecentConnectionOutcomes({ admin: h.admin, organizationId: ORG, since: "2026-09-09T14:00:00Z" });
+    expect((await read()).entries[0]).toMatchObject({ outcome: "setup_failed", failedAt: failure.failedAt });
+    // Routing may end unanswered. It still proves the initial greeting advanced.
+    h.db.seed("motorist_call_legs", [{ id: "operator", organization_id: ORG, session_id: "session", role: "operator", state: "ended" }]);
+    expect((await read()).entries[0].outcome).toBe("setup_recovered");
+  });
+
+  it("does not create a failed-setup incident for normal cancellation or a gone customer", async () => {
+    const h = createTelephonyHarness();
+    h.db.seed("motorist_call_sessions", [{ id: "session", organization_id: ORG, state: "ended", ended_at: "2026-09-09T14:06:47Z", metadata: {} }]);
+    h.db.seed("motorist_call_events", [
+      { id: "cancel", organization_id: ORG, handled_status: "processed", created_at: failure.failedAt,
+        normalized_payload: { session_id: "session", state_before: "greeting", commands: [] } },
+      { id: "already-gone", organization_id: ORG, handled_status: "failed", created_at: failure.failedAt,
+        normalized_payload: { session_id: "session", state_before: "greeting", error: "Telnyx 90018 call is no longer active",
+          commands: [{ kind: "playback_start", command_id: "greeting", ok: false }] } },
+    ]);
+    expect((await getRecentConnectionOutcomes({ admin: h.admin, organizationId: ORG, since: "2026-09-09T14:00:00Z" })).entries).toEqual([]);
+  });
+
+  it("does not let unidentifiable or unrelated pending commands prove setup recovery", () => {
+    const session = { state: "greeting", ended_at: null, metadata: {}, pending_effects: { entries: [{ commands: [{ commandId: "different" }, {}] }] } };
+    expect(classifyConnectionFailure({ ...failure, setup: true, commands: [{ id: null, kind: "playback_start" }], session }).outcome).toBe("unknown");
+    expect(classifyConnectionFailure({ ...failure, setup: true, session }).outcome).toBe("unknown");
+  });
 });

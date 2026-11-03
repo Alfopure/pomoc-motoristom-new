@@ -203,8 +203,8 @@ export async function endWrapUp(deps: PresenceDeps, input: { organizationId: str
 export async function sweepExpiredWrapUp(deps: PresenceDeps & { organizationId: string }, limit = 100): Promise<{ checked: number; applied: number; errors: Array<{ profileId: string; error: string }> }> {
   const now = nowOf(deps).toISOString();
   const due = await deps.admin.from("motorist_operator_presence").select("*").eq("organization_id", deps.organizationId)
-    .eq("status", "after_call_work").or(`wrap_up_until.is.null,wrap_up_until.lte.${now}`).order("wrap_up_until", { nullsFirst: true }).limit(Math.max(1, Math.min(100, limit)));
-  if (due.error) throw new PresenceServiceError(`Ukončenie wrap-up sa nepodarilo načítať: ${due.error.message}`, 500);
+    .eq("status", "after_call_work").or(`wrap_up_until.is.null,wrap_up_until.lte.${now}`).order("wrap_up_until", { nullsFirst: true }).limit(Math.max(1, Math.min(100, limit))).abortSignal(AbortSignal.timeout(4_000));
+  if (due.error) throw new PresenceServiceError(`Ukončenie wrap-up sa nepodarilo načítať: ${due.error.message}`, 500, { cause: due.error });
   let applied = 0;
   const errors: Array<{ profileId: string; error: string }> = [];
   for (const row of due.data ?? []) {

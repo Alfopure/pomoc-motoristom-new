@@ -1,11 +1,107 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createTelephonyHarness, NUMBERS, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
+import { createTelephonyHarness, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 import { completeAnnouncedAction } from "@/test/complete-call-announcements";
-import { blindTransfer, hangupCall, holdCall, unholdCall } from "../call-actions";
+import { delayDatabase, WAVE_MS, type DatabaseDelay } from "@/test/delay-database";
+import { changeNativeHold } from "@/server/mobile/voice-hold";
+import { blindTransfer, callColleague, createRateLimiter, hangupCall, holdCall, startOutboundCall, unholdCall } from "../call-actions";
+import { defaultLatencyFlags, type LatencyFlags } from "../latency-flags";
+import { recoverSessionContactChecks } from "../session-runner";
+import type { TelephonyRuntimeDeps } from "../runtime";
 import { readPendingEffects } from "./continuation";
-import { commandKey } from "./types";
+import { commandKey, readMeta } from "./types";
 import type { SessionRow } from "./types";
+
+/**
+ * Dependent-wave bounds (suite below), measured on 30 Oct 2026 at `dev` 489dbd6
+ * with S0. Waves count the database and provider round trips a step waits for
+ * in sequence; requests count all of them. Later stages lower these.
+ */
+const BOUND = {
+  outboundStart: { requests: 37, toOwnDial: 18, resolved: 31 },
+  colleagueStart: { 1: { requests: 42, toOwnDial: 19, resolved: 32 }, 2: { requests: 43, toOwnDial: 19, resolved: 32 } },
+  outboundOwnAnswer: { requests: 33, toCustomerDial: 12 },
+  internalOwnAnswer: { 1: { requests: 41, toColleagueDial: 20 }, 2: { requests: 51, toColleagueDial: 20 } },
+  internalCalleeAnswer: { requests: 37, toBridge: 18, toTalking: 9, toCalleeAnswered: 11 },
+  firstBridged: { requests: 29, leases: 1 },
+  duplicateBridged: { requests: 28, leases: 1 },
+  knownInitiated: { requests: 24 },
+  webHoldFirst: { requests: 35, waves: 31 },
+  webHoldLater: { requests: 28, waves: 20 },
+  nativeHoldFirst: { requests: 69, waves: 65 },
+  nativeHoldLater: { requests: 57, waves: 49 },
+  // Call-speed S7 switches on (2 Nov 2026): the lean hold context plus
+  // join-with-hold on the web, and the phone's single read wave plus the lean
+  // context on the phone. The early web answer is bounded in the hold route's
+  // fast-web test, where the response exists.
+  webHoldFirstS7: { requests: 30, waves: 26 },
+  webHoldLaterS7: { requests: 26, waves: 19 },
+  nativeHoldFirstS7: { requests: 56, waves: 42 },
+  nativeHoldLaterS7: { requests: 42, waves: 29 },
+} as const;
+
+/**
+ * The same scenarios with the S1 switches on (`internal_lean_path`,
+ * `bridged_observation_fast`), measured on 30 Oct 2026 on S0 + S1. `BOUND`
+ * above stays the switch-off contract. Colleague calls take the
+ * recording-frozen-off paths and the lean answer contexts; the first
+ * `call.bridged` writes one fenced row and audits after the lease; an exact
+ * duplicate takes no lease at all. Same two requests of headroom.
+ */
+const BOUND_S1 = {
+  colleagueStart: { 1: { requests: 40, toOwnDial: 15, resolved: 29 }, 2: { requests: 41, toOwnDial: 15, resolved: 29 } },
+  internalOwnAnswer: { 1: { requests: 35, toColleagueDial: 13 }, 2: { requests: 45, toColleagueDial: 13 } },
+  internalCalleeAnswer: { requests: 28, toBridge: 11, toTalking: 7, toCalleeAnswered: 8 },
+  // The whole delivery, not the lease: claim, session, duplicate check, lease,
+  // snapshot, one write (+ call identity), release, audit ∥ ledger finish, then
+  // the post-release inbox drain (three reads) the harness awaits inline.
+  // Lease held for 2 of them.
+  firstBridged: { requests: 19, leases: 1, waves: 11 },
+  duplicateBridged: { requests: 13, leases: 0 },
+} as const;
+
+/**
+ * The starts with the S2 switches, measured on 2 Nov 2026 on dev a3b2b3f + S2.
+ * `fast` is `start_fast_path` alone; `early` adds `start_early_response`, where
+ * `toEarly` is the wave the route may answer at, `resolved` still counts the
+ * whole leased work behind it and `leaseHeld` the waves from acquisition to
+ * release. The TEST proof prefetch needs the real provider guard and is
+ * covered in `start-fast-path.test.ts`. Same request headroom as S1.
+ */
+const BOUND_S2_FLAGS = { start_fast_path: true, start_early_response: true } as const;
+const BOUND_S2 = {
+  start: {
+    // `resolved` allows the once-a-minute incident read, which the process may
+    // or may not still owe (`recoverTelephonyIncidentThrottled`).
+    outbound: { toOwnDial: 8, fast: { requests: 33, resolved: 23 }, early: { requests: 29, toEarly: 11, resolved: 17, leaseHeld: 12 } },
+    1: { toOwnDial: 8, fast: { requests: 36, resolved: 23 }, early: { requests: 33, toEarly: 11, resolved: 17, leaseHeld: 12 } },
+    2: { toOwnDial: 8, fast: { requests: 37, resolved: 23 }, early: { requests: 34, toEarly: 11, resolved: 17, leaseHeld: 12 } },
+  },
+} as const;
+
+/**
+ * Call-speed S6 on top of the S2 switches (`start_fast_path`,
+ * `start_early_response`), measured on 2 Nov 2026 on dev 3f52dce + S6: the far
+ * end leaves in the start request (`toFarDial`, waves from the tap) instead of
+ * after the response, the device's answer and that answer's webhook chain.
+ * The own dial and the early response are unchanged; `resolved` and
+ * `leaseHeld` grow by the far dial the tail now carries. Same headroom as S2.
+ */
+const BOUND_S6 = {
+  start: {
+    // The customer dial: settle (1) + checkpoint (1) + prepare (1) after the own dial's answer.
+    outbound: { requests: 37, toOwnDial: 8, toFarDial: 13, toEarly: 11, resolved: 26, leaseHeld: 20 },
+    // A colleague dial also reads the pause and claims the colleague, durably, before it leaves.
+    1: { requests: 45, toOwnDial: 8, toFarDial: 16, toEarly: 11, resolved: 29, leaseHeld: 24 },
+    2: { requests: 57, toOwnDial: 8, toFarDial: 17, toEarly: 11, resolved: 31, leaseHeld: 26 },
+  },
+  // With S1's lean path: the caller's own answer dials nothing; the colleague's
+  // answer reaches `talking` without any bridge (audio was already bridged).
+  ownAnswer: { requests: 23 },
+  calleeAnswer: { requests: 24, toTalking: 7 },
+  // Without the auto-bridge: the explicit bridge at the sequential answer's wave, `talking` on its 2xx.
+  calleeAnswerExplicit: { requests: 36, toBridge: 11, toTalking: 21 },
+} as const;
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
@@ -14,7 +110,10 @@ const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
 /** Contract 2 — generation leases and the fenced provider journal — is what production runs. */
 function harness() {
   vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
-  return createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+  const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
+  // `BOUND` is the contract with every latency switch off, whatever the environment says.
+  h.deps.latencyFlags = defaultLatencyFlags();
+  return h;
 }
 
 async function talking(h: TelephonyHarness) {
@@ -205,5 +304,447 @@ describe("contract 2 request cost", () => {
     await hangupCall(h.deps, actor, call.sessionId);
 
     expect(h.session(call.sessionId).cancellations_next_attempt_at ?? null).toBeNull();
+  });
+});
+
+/**
+ * Request counts and dependent waves on the call-setup and hold paths (call-
+ * speed plan S0.3). Every database request and provider command waits one
+ * `WAVE_MS`, so elapsed time ÷ `WAVE_MS` is the chain a real round trip
+ * multiplies. Each bound is the value measured on 30 Oct 2026 (`dev` 489dbd6
+ * plus S0); later stages lower them and nothing may raise them. Request counts
+ * keep the existing two of headroom for the throttled incident-recovery read.
+ */
+describe("contract 2 dependent waves", () => {
+  const requestId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const rateLimited = (h: TelephonyHarness) => ({ ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) });
+
+  type Metered<T> = { value: T; requests: number; leases: number; waves: number; meter: DatabaseDelay; sent: TelephonyHarness["telnyx"]["sent"] };
+  async function metered<T>(h: TelephonyHarness, run: () => Promise<T>, watch: (meter: DatabaseDelay) => void = () => {}): Promise<Metered<T>> {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const meter = delayDatabase(h);
+    h.telnyx.setFetchDelay(WAVE_MS);
+    try {
+      watch(meter);
+      const from = h.db.log.length, sentFrom = h.telnyx.sent.length;
+      const pending = run();
+      await vi.runAllTimersAsync();
+      const value = await pending;
+      const log = h.db.log.slice(from);
+      return { value, requests: log.length, leases: log.filter(row => row.table === "motorist_session_lease_acquire_v2").length,
+        waves: meter.waves(), meter, sent: h.telnyx.sent.slice(sentFrom) };
+    } finally {
+      meter.restore();
+      h.telnyx.setFetchDelay(0);
+      vi.useRealTimers();
+    }
+  }
+  /** Waves until the `nth` (0-based) provider send of `method` in this measurement. */
+  const sendWave = (run: Metered<unknown>, method: string, nth = 0) => {
+    const send = run.sent.filter(entry => entry.method === method)[nth];
+    if (!send) throw new Error(`no ${method} send #${nth}`);
+    return run.meter.waves(send.at);
+  };
+  const markWave = (run: Metered<unknown>, name: string) => {
+    if (!(name in run.meter.marks)) throw new Error(`${name} never held`);
+    return run.meter.marks[name] / WAVE_MS;
+  };
+  /** At most the bound, and more than nothing: a broken meter must not pass as a fast path. */
+  const bounded = (actual: number, max: number) => {
+    expect(actual).toBeGreaterThan(0);
+    expect(actual).toBeLessThanOrEqual(max);
+  };
+
+  it("counts waves, not requests: parallel requests share one, dependent ones add up", async () => {
+    const h = harness();
+    const one = await metered(h, async () => {
+      await Promise.all([h.admin.from("motorist_call_sessions").select("id"), h.client.rpc("motorist_provider_pending_commands_v2", {})]);
+      await h.admin.from("motorist_call_legs").select("id");
+    });
+    expect(one).toMatchObject({ requests: 3, waves: 2 });
+  });
+
+  async function outbound(h: TelephonyHarness) {
+    const start = await metered(h, () => startOutboundCall(rateLimited(h), actor, { to: NUMBERS.customer, requestId: requestId(9101) }));
+    return { start, call: start.value };
+  }
+
+  function nativeWorld() {
+    for (const [key, value] of Object.entries({ MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev",
+      VERCEL_PROJECT_ID: "prj_EZKlWCdDXJQNJuYryc4z1mVDKIhk", SUPABASE_URL: "https://nzpnqdstvkfncflgqlny.supabase.co",
+      APP_BASE_URL: "https://test.dispecing.linkapomoci.sk", MOTORIST_NATIVE_VOICE_TEST_ENABLED: "true" })) vi.stubEnv(key, value);
+    return harness();
+  }
+
+  async function colleague(h: TelephonyHarness) {
+    const start = await metered(h, () => callColleague(rateLimited(h), actor, { targetProfileId: PROFILES.o2, requestId: requestId(9102) }));
+    return { start, call: start.value };
+  }
+
+  it("starts an outgoing direct-connect call", async () => {
+    const h = harness();
+    const { start, call } = await outbound(h);
+    expect(call.operatorLegCallControlId).toBeTruthy();
+    bounded(start.requests, BOUND.outboundStart.requests);
+    bounded(sendWave(start, "dial"), BOUND.outboundStart.toOwnDial);
+    bounded(start.waves, BOUND.outboundStart.resolved);
+  });
+
+  it.each([1, 2] as const)("starts a colleague call to %i application endpoint(s)", async (endpoints) => {
+    const h = endpoints === 2 ? nativeWorld() : harness();
+    if (endpoints === 2) h.db.seed("motorist_operator_mobile_devices", [{ organization_id: ORG, profile_id: PROFILES.o2, environment: "development",
+      sip_username: "native-colleague", device_session_id: requestId(9103), device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
+    const { start, call } = await colleague(h);
+    expect(readMeta(h.session(call.sessionId) as SessionRow).internal?.endpoints?.length ?? 1).toBe(endpoints);
+    bounded(start.requests, BOUND.colleagueStart[endpoints].requests);
+    bounded(sendWave(start, "dial"), BOUND.colleagueStart[endpoints].toOwnDial);
+    bounded(start.waves, BOUND.colleagueStart[endpoints].resolved);
+
+    // The caller's own leg answers: the colleague is dialled.
+    h.telnyx.physical.answered(call.operatorLegCallControlId);
+    const answer = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.answered"));
+    const colleagueDial = endpoints === 1 ? sendWave(answer, "dial") : Math.min(sendWave(answer, "dial", 0), sendWave(answer, "dial", 1));
+    bounded(colleagueDial, BOUND.internalOwnAnswer[endpoints].toColleagueDial);
+    bounded(answer.requests, BOUND.internalOwnAnswer[endpoints].requests);
+  });
+
+  it("dials the customer when the operator's own leg answers", async () => {
+    const h = harness();
+    const { call } = await outbound(h);
+    h.telnyx.physical.answered(call.operatorLegCallControlId);
+    const answer = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.answered"));
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    bounded(sendWave(answer, "dial"), BOUND.outboundOwnAnswer.toCustomerDial);
+    bounded(answer.requests, BOUND.outboundOwnAnswer.requests);
+  });
+
+  it("costs little for call.initiated of a leg the dial already recorded", async () => {
+    const h = harness();
+    const { call } = await outbound(h);
+    const initiated = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.initiated"));
+    expect(initiated.value.outcome).toMatch(/processed|ignored/);
+    bounded(initiated.requests, BOUND.knownInitiated.requests);
+  });
+
+  it("connects a colleague who answers, then observes call.bridged", async () => {
+    const h = harness();
+    const { call } = await colleague(h);
+    h.telnyx.physical.answered(call.operatorLegCallControlId);
+    await h.legEvent(call.operatorLegCallControlId, "call.answered");
+    const callee = String(h.openLegFor(call.sessionId, PROFILES.o2)!.telnyx_call_control_id);
+    h.telnyx.physical.answered(callee);
+    const answer = await metered(h, () => h.legEvent(callee, "call.answered"), meter => {
+      meter.watch("talking", () => h.session(call.sessionId).state === "talking");
+      meter.watch("callee answered_at", () => Boolean(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === callee)?.answered_at));
+    });
+    expect(h.session(call.sessionId).state).toBe("talking");
+    bounded(sendWave(answer, "bridge"), BOUND.internalCalleeAnswer.toBridge);
+    bounded(markWave(answer, "talking"), BOUND.internalCalleeAnswer.toTalking);
+    bounded(markWave(answer, "callee answered_at"), BOUND.internalCalleeAnswer.toCalleeAnswered);
+    bounded(answer.requests, BOUND.internalCalleeAnswer.requests);
+
+    const first = await metered(h, () => h.legEvent(callee, "call.bridged"));
+    expect(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === callee)?.bridged_at).toBeTruthy();
+    bounded(first.requests, BOUND.firstBridged.requests);
+    bounded(first.leases, BOUND.firstBridged.leases);
+    const duplicate = await metered(h, () => h.legEvent(callee, "call.bridged"));
+    bounded(duplicate.requests, BOUND.duplicateBridged.requests);
+    bounded(duplicate.leases, BOUND.duplicateBridged.leases);
+  });
+
+  describe("with the S1 switches (internal_lean_path, bridged_observation_fast)", () => {
+    const lean = (h: TelephonyHarness) => {
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), internal_lean_path: true, bridged_observation_fast: true };
+      return h;
+    };
+
+    it.each([1, 2] as const)("starts a colleague call to %i endpoint(s) and dials the colleague from the lean context", async (endpoints) => {
+      const h = lean(endpoints === 2 ? nativeWorld() : harness());
+      if (endpoints === 2) h.db.seed("motorist_operator_mobile_devices", [{ organization_id: ORG, profile_id: PROFILES.o2, environment: "development",
+        sip_username: "native-colleague", device_session_id: requestId(9103), device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
+      const { start, call } = await colleague(h);
+      bounded(start.requests, BOUND_S1.colleagueStart[endpoints].requests);
+      bounded(sendWave(start, "dial"), BOUND_S1.colleagueStart[endpoints].toOwnDial);
+      bounded(start.waves, BOUND_S1.colleagueStart[endpoints].resolved);
+
+      h.telnyx.physical.answered(call.operatorLegCallControlId);
+      const answer = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.answered"));
+      expect(h.session(call.sessionId).state).toBe("ringing");
+      const colleagueDial = endpoints === 1 ? sendWave(answer, "dial") : Math.min(sendWave(answer, "dial", 0), sendWave(answer, "dial", 1));
+      bounded(colleagueDial, BOUND_S1.internalOwnAnswer[endpoints].toColleagueDial);
+      bounded(answer.requests, BOUND_S1.internalOwnAnswer[endpoints].requests);
+      // Strictly below the switch-off bounds above.
+      expect(BOUND_S1.internalOwnAnswer[endpoints].toColleagueDial).toBeLessThan(BOUND.internalOwnAnswer[endpoints].toColleagueDial);
+    });
+
+    it("connects a colleague who answers, records call.bridged without staging and acknowledges a duplicate lease-free", async () => {
+      const h = lean(harness());
+      const { call } = await colleague(h);
+      h.telnyx.physical.answered(call.operatorLegCallControlId);
+      await h.legEvent(call.operatorLegCallControlId, "call.answered");
+      const callee = String(h.openLegFor(call.sessionId, PROFILES.o2)!.telnyx_call_control_id);
+      h.telnyx.physical.answered(callee);
+      const answer = await metered(h, () => h.legEvent(callee, "call.answered"), meter => {
+        meter.watch("talking", () => h.session(call.sessionId).state === "talking");
+        meter.watch("callee answered_at", () => Boolean(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === callee)?.answered_at));
+      });
+      expect(h.session(call.sessionId).state).toBe("talking");
+      bounded(sendWave(answer, "bridge"), BOUND_S1.internalCalleeAnswer.toBridge);
+      bounded(markWave(answer, "talking"), BOUND_S1.internalCalleeAnswer.toTalking);
+      bounded(markWave(answer, "callee answered_at"), BOUND_S1.internalCalleeAnswer.toCalleeAnswered);
+      bounded(answer.requests, BOUND_S1.internalCalleeAnswer.requests);
+
+      const first = await metered(h, () => h.legEvent(callee, "call.bridged"));
+      expect(h.legs(call.sessionId).find(leg => leg.telnyx_call_control_id === callee)?.bridged_at).toBeTruthy();
+      bounded(first.requests, BOUND_S1.firstBridged.requests);
+      bounded(first.leases, BOUND_S1.firstBridged.leases);
+      bounded(first.waves, BOUND_S1.firstBridged.waves);
+      const duplicate = await metered(h, () => h.legEvent(callee, "call.bridged"));
+      expect(duplicate.value.outcome).toBe("ignored");
+      bounded(duplicate.requests, BOUND_S1.duplicateBridged.requests);
+      // Lease-free: none at all, not merely few.
+      expect(duplicate.leases).toBe(BOUND_S1.duplicateBridged.leases);      // Below the switch-off contract on every measured step.
+      expect(BOUND_S1.internalCalleeAnswer.toBridge).toBeLessThan(BOUND.internalCalleeAnswer.toBridge);
+      expect(BOUND_S1.internalCalleeAnswer.toCalleeAnswered).toBeLessThan(BOUND.internalCalleeAnswer.toCalleeAnswered);
+      expect(BOUND_S1.firstBridged.requests).toBeLessThan(BOUND.firstBridged.requests);
+      expect(BOUND_S1.duplicateBridged.requests).toBeLessThan(BOUND.duplicateBridged.requests);
+    });
+  });
+
+  describe("with the S2 switches (start_fast_path, start_early_response)", () => {
+    type Start = "outbound" | 1 | 2;
+    async function measuredStart(kind: Start, flags: Partial<typeof BOUND_S2_FLAGS>) {
+      const h = kind === 2 ? nativeWorld() : harness();
+      if (kind === 2) h.db.seed("motorist_operator_mobile_devices", [{ organization_id: ORG, profile_id: PROFILES.o2, environment: "development",
+        sip_username: "native-colleague", device_session_id: requestId(9103), device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), ...flags };
+      let early: number | null = null;
+      // What the start routes pass while `start_early_response` is on.
+      const hook: [] | [() => void] = flags.start_early_response ? [() => { early ??= Date.now(); }] : [];
+      const run = await metered(h, () => kind === "outbound"
+        ? startOutboundCall(rateLimited(h), actor, { to: NUMBERS.customer, requestId: requestId(9101) }, ...hook)
+        : callColleague(rateLimited(h), actor, { targetProfileId: PROFILES.o2, requestId: requestId(9102) }, ...hook));
+      const lease = (table: string) => run.meter.requests.find(row => row.table === table)!.at / WAVE_MS;
+      return { run, toOwnDial: sendWave(run, "dial"), toEarly: early === null ? null : run.meter.waves(early),
+        leaseHeld: lease("motorist_session_lease_release_v2") - lease("motorist_session_lease_acquire_v2") };
+    }
+
+    it.each(["outbound", 1, 2] as const)("starts %s with the guard wave, the lean dial and an early response", async (kind) => {
+      const bound = BOUND_S2.start[kind];
+      const fast = await measuredStart(kind, { start_fast_path: true });
+      bounded(fast.run.requests, bound.fast.requests);
+      bounded(fast.toOwnDial, bound.toOwnDial);
+      bounded(fast.run.waves, bound.fast.resolved);
+      const all = await measuredStart(kind, BOUND_S2_FLAGS);
+      bounded(all.run.requests, bound.early.requests);
+      bounded(all.toOwnDial, bound.toOwnDial);
+      bounded(all.toEarly!, bound.early.toEarly);
+      bounded(all.run.waves, bound.early.resolved);
+      bounded(all.leaseHeld, bound.early.leaseHeld);
+      // Strictly below the switch-off contract.
+      const off = kind === "outbound" ? BOUND.outboundStart : BOUND.colleagueStart[kind];
+      expect(bound.toOwnDial).toBeLessThan(off.toOwnDial);
+      expect(bound.early.toEarly).toBeLessThan(bound.fast.resolved);
+      expect(bound.fast.resolved).toBeLessThan(off.resolved);
+    });
+  });
+
+  describe("with the S6 switches (concurrent_dial, internal_auto_bridge) on top of S2", () => {
+    type Start = "outbound" | 1 | 2;
+    async function concurrentStart(kind: Start, concurrent: boolean) {
+      const h = kind === 2 ? nativeWorld() : harness();
+      if (kind === 2) h.db.seed("motorist_operator_mobile_devices", [{ organization_id: ORG, profile_id: PROFILES.o2, environment: "development",
+        sip_username: "native-colleague", device_session_id: requestId(9103), device_seen_at: h.now().toISOString(), registration_state: "registered" }]);
+      const all = { web: concurrent, mobile: concurrent };
+      // Until spikes S6.0/1–4 pass only a TEST deployment freezes a concurrent start.
+      vi.stubEnv("MOTORIST_APP_ENV", "test");
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), ...BOUND_S2_FLAGS, internal_auto_bridge: concurrent, concurrent_dial: { outbound: all, internal: all } };
+      let early: number | null = null;
+      const hook = () => { early ??= Date.now(); };
+      const run = await metered(h, () => kind === "outbound"
+        ? startOutboundCall(rateLimited(h), actor, { to: NUMBERS.customer, requestId: requestId(9301) }, hook)
+        : callColleague(rateLimited(h), actor, { targetProfileId: PROFILES.o2, requestId: requestId(9302) }, hook));
+      const lease = (table: string) => run.meter.requests.find(row => row.table === table)!.at / WAVE_MS;
+      const dials = run.sent.filter(entry => entry.method === "dial").length;
+      return { h, run, dials, toOwnDial: sendWave(run, "dial"), toFarDial: dials > 1 ? sendWave(run, "dial", 1) : null, toEarly: early === null ? null : run.meter.waves(early),
+        leaseHeld: lease("motorist_session_lease_release_v2") - lease("motorist_session_lease_acquire_v2") };
+    }
+
+    it.each(["outbound", 1, 2] as const)("dials the far end of a %s start inside the start request, a few waves after the own leg", async (kind) => {
+      const bound = BOUND_S6.start[kind];
+      const s6 = await concurrentStart(kind, true);
+      expect(s6.dials).toBe(kind === 2 ? 3 : 2);
+      bounded(s6.toOwnDial, bound.toOwnDial);
+      bounded(s6.toFarDial!, bound.toFarDial);
+      bounded(s6.toEarly!, bound.toEarly);
+      bounded(s6.run.waves, bound.resolved);
+      bounded(s6.leaseHeld, bound.leaseHeld);
+      bounded(s6.run.requests, bound.requests);
+      // The own leg and the early response lose nothing to the far dial behind them.
+      const s2 = BOUND_S2.start[kind];
+      expect(bound.toOwnDial).toBeLessThanOrEqual(s2.toOwnDial);
+      expect(bound.toEarly).toBeLessThanOrEqual(s2.early.toEarly);
+      // Sequentially the far dial waits for the response, the device's answer
+      // and that answer's own webhook chain; concurrently it needs none of them.
+      const sequentialChain = s2.early.toEarly + (kind === "outbound" ? BOUND.outboundOwnAnswer.toCustomerDial : BOUND_S1.internalOwnAnswer[kind].toColleagueDial);
+      expect(bound.toFarDial).toBeLessThan(sequentialChain);
+      const sequential = await concurrentStart(kind, false);
+      expect(sequential.dials).toBe(1);
+    });
+
+    it("connects an auto-bridged colleague with no bridge command: Telnyx bridged at the answer (S6.3)", async () => {
+      const h = harness();
+      vi.stubEnv("MOTORIST_APP_ENV", "test");
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), internal_lean_path: true, bridged_observation_fast: true, internal_auto_bridge: true,
+        concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } } };
+      const { call } = await colleague(h);
+      h.telnyx.physical.answered(call.operatorLegCallControlId);
+      const own = await metered(h, () => h.legEvent(call.operatorLegCallControlId, "call.answered"));
+      // The own answer dials nothing now: the colleague already rings.
+      expect(own.sent).toEqual([]);
+      bounded(own.requests, BOUND_S6.ownAnswer.requests);
+      const callee = String(h.openLegFor(call.sessionId, PROFILES.o2)!.telnyx_call_control_id);
+      // The colleague answers after the caller's leg: Telnyx bridged at that answer.
+      h.advance(300);
+      h.telnyx.physical.answered(callee);
+      expect(h.telnyx.physical.connected(call.operatorLegCallControlId, callee)).toBe(true);
+      const answer = await metered(h, () => h.legEvent(callee, "call.answered"), meter => {
+        meter.watch("talking", () => h.session(call.sessionId).state === "talking");
+      });
+      expect(answer.sent.filter(send => send.method === "bridge")).toEqual([]);
+      bounded(markWave(answer, "talking"), BOUND_S6.calleeAnswer.toTalking);
+      bounded(answer.requests, BOUND_S6.calleeAnswer.requests);
+      expect(BOUND_S6.calleeAnswer.toTalking).toBeLessThanOrEqual(BOUND_S1.internalCalleeAnswer.toTalking);
+    });
+  });
+
+    // Spike S6.0 (TEST, noauto): 290 ms from the colleague's `call.answered`
+    // webhook to the bridge's dispatch. That is this answer's ordinary chain —
+    // ledger claim, lease, journal reconcile, snapshot, dial observation, the
+    // colleague's presence guard, staging, the critical write, the bridge's
+    // source identity, `prepare_v2` — exactly as many waves as the sequential
+    // answer (S1), with no pending startup entry and the lease free: neither
+    // the start's `after()` tail nor its lease is involved. What the
+    // concurrent call added was the wait for `call.bridged` after the bridge;
+    // its 2xx now connects the call.
+    it("bridges the colleague who answers second explicitly without the auto-bridge, in as many waves as the sequential answer, and its 2xx connects", async () => {
+      const h = harness();
+      vi.stubEnv("MOTORIST_APP_ENV", "test");
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), internal_lean_path: true, bridged_observation_fast: true, ...BOUND_S2_FLAGS,
+        concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } } };
+      const { call } = await colleague(h);
+      h.telnyx.physical.answered(call.operatorLegCallControlId);
+      await h.legEvent(call.operatorLegCallControlId, "call.answered");
+      expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries).toEqual([]);
+      const callee = String(h.openLegFor(call.sessionId, PROFILES.o2)!.telnyx_call_control_id);
+      h.advance(300);
+      h.telnyx.physical.answered(callee);
+      const answer = await metered(h, () => h.legEvent(callee, "call.answered"), meter => {
+        meter.watch("talking", () => h.session(call.sessionId).state === "talking");
+      });
+      expect(h.session(call.sessionId).state).toBe("talking");
+      bounded(sendWave(answer, "bridge"), BOUND_S6.calleeAnswerExplicit.toBridge);
+      bounded(markWave(answer, "talking"), BOUND_S6.calleeAnswerExplicit.toTalking);
+      bounded(answer.requests, BOUND_S6.calleeAnswerExplicit.requests);
+      expect(BOUND_S6.calleeAnswerExplicit.toBridge).toBe(BOUND_S1.internalCalleeAnswer.toBridge);
+    });
+
+  it("holds from the web console, first with the conference promotion and later without", async () => {
+    const h = harness();
+    const call = await talking(h);
+    const first = await metered(h, () => holdCall(h.deps, actor, call.sessionId));
+    expect(h.session(call.sessionId).state).toBe("held");
+    await unholdCall(h.deps, actor, call.sessionId);
+    const later = await metered(h, () => holdCall(h.deps, actor, call.sessionId));
+    expect(h.session(call.sessionId).state).toBe("held");
+    bounded(first.requests, BOUND.webHoldFirst.requests);
+    bounded(first.waves, BOUND.webHoldFirst.waves);
+    bounded(later.requests, BOUND.webHoldLater.requests);
+    bounded(later.waves, BOUND.webHoldLater.waves);
+  });
+
+  /** The S7 switches, set before the call so a frozen one (join-with-hold) applies. */
+  const s7 = (h: TelephonyHarness, flags: Partial<LatencyFlags>) => {
+    // Until spike S7.0 passes only a TEST deployment freezes join-with-hold.
+    if (flags.hold_join_with_hold) vi.stubEnv("MOTORIST_APP_ENV", "test");
+    h.deps.latencyFlags = { ...defaultLatencyFlags(), ...flags };
+    return h;
+  };
+  /** As the control routes do after every action: retire the contact check a promotion leaves behind. */
+  const settle = (h: TelephonyHarness, sessionId: string) => recoverSessionContactChecks(h.deps, sessionId);
+
+  it("holds from the web console with the S7 switches: lean context and join-with-hold", async () => {
+    const h = s7(harness(), { hold_lean_context: true, hold_join_with_hold: true });
+    const call = await talking(h);
+    const first = await metered(h, () => holdCall(h.deps, actor, call.sessionId));
+    expect(h.session(call.sessionId).state).toBe("held");
+    expect(first.sent.map(send => send.method)).toEqual(["createConference", "conference:join"]);
+    await settle(h, call.sessionId);
+    await unholdCall(h.deps, actor, call.sessionId);
+    await settle(h, call.sessionId);
+    const later = await metered(h, () => holdCall(h.deps, actor, call.sessionId));
+    expect(h.session(call.sessionId).state).toBe("held");
+    expect(later.sent.map(send => send.method)).toEqual(["conference:hold"]);
+    bounded(first.requests, BOUND.webHoldFirstS7.requests);
+    bounded(first.waves, BOUND.webHoldFirstS7.waves);
+    bounded(later.requests, BOUND.webHoldLaterS7.requests);
+    bounded(later.waves, BOUND.webHoldLaterS7.waves);
+    // Lower than with the switches off, not merely within budget.
+    expect(first.waves).toBeLessThan(BOUND.webHoldFirst.waves - 4);
+    expect(later.waves).toBeLessThan(BOUND.webHoldLater.waves);
+  });
+
+  it("holds from the phone with the S7 switches: one read wave and the lean context", async () => {
+    const h = s7(nativeWorld(), { hold_lean_context: true, hold_mobile_dedupe: true });
+    const call = await talking(h);
+    const control = String(h.legFor(call.sessionId, actor.profileId)!.telnyx_call_control_id);
+    h.telnyx.physical.answered(control);
+    const lease = requestId(9204);
+    const web = h.rows("motorist_operator_devices").find(row => row.profile_id === actor.profileId)!;
+    h.db.seed("motorist_operator_mobile_devices", [{ ...web, sip_username: "native-hold", device_session_id: lease, registration_state: "registered", metadata: {} }]);
+    h.db.update("motorist_call_legs", { to_number: "sip:native-hold@sip.telnyx.com" }, row => row.telnyx_call_control_id === control);
+    const mobile = { ...h.deps, deviceKind: "mobile" } as TelephonyRuntimeDeps;
+    const phone = { userId: actor.profileId, profileId: actor.profileId, organizationId: ORG, displayName: "Test", role: "dispatcher" as const };
+    const body = (n: number, held: boolean) => ({ deviceSessionId: lease, requestId: requestId(n), callControlId: control, held,
+      expectedVersion: Number(h.session(call.sessionId).version) });
+    const first = await metered(h, () => changeNativeHold(mobile, phone, call.sessionId, body(9205, true)));
+    expect(first.value).toMatchObject({ operation: { outcome: "accepted", held: true }, media: { state: "held", canHold: true } });
+    // The reply carries the version the phone sends next.
+    expect((first.value as { media: { version: number } }).media.version).toBe(Number(h.session(call.sessionId).version));
+    await settle(h, call.sessionId);
+    await changeNativeHold(mobile, phone, call.sessionId, body(9206, false));
+    await settle(h, call.sessionId);
+    const later = await metered(h, () => changeNativeHold(mobile, phone, call.sessionId, body(9207, true)));
+    expect(later.value).toMatchObject({ operation: { outcome: "accepted", held: true } });
+    bounded(first.requests, BOUND.nativeHoldFirstS7.requests);
+    bounded(first.waves, BOUND.nativeHoldFirstS7.waves);
+    bounded(later.requests, BOUND.nativeHoldLaterS7.requests);
+    bounded(later.waves, BOUND.nativeHoldLaterS7.waves);
+    expect(first.waves).toBeLessThan(BOUND.nativeHoldFirst.waves - 20);
+    expect(later.waves).toBeLessThan(BOUND.nativeHoldLater.waves - 15);
+  });
+
+  it("holds from the phone, first with the conference promotion and later without", async () => {
+    const h = nativeWorld();
+    const call = await talking(h);
+    const control = String(h.legFor(call.sessionId, actor.profileId)!.telnyx_call_control_id);
+    h.telnyx.physical.answered(control);
+    const lease = requestId(9104);
+    const web = h.rows("motorist_operator_devices").find(row => row.profile_id === actor.profileId)!;
+    h.db.seed("motorist_operator_mobile_devices", [{ ...web, sip_username: "native-hold", device_session_id: lease, registration_state: "registered", metadata: {} }]);
+    h.db.update("motorist_call_legs", { to_number: "sip:native-hold@sip.telnyx.com" }, row => row.telnyx_call_control_id === control);
+    const mobile = { ...h.deps, deviceKind: "mobile" } as TelephonyRuntimeDeps;
+    const phone = { userId: actor.profileId, profileId: actor.profileId, organizationId: ORG, displayName: "Test", role: "dispatcher" as const };
+    const body = (n: number, held: boolean) => ({ deviceSessionId: lease, requestId: requestId(n), callControlId: control, held,
+      expectedVersion: Number(h.session(call.sessionId).version) });
+    const first = await metered(h, () => changeNativeHold(mobile, phone, call.sessionId, body(9105, true)));
+    expect(first.value).toMatchObject({ operation: { outcome: "accepted", held: true } });
+    await changeNativeHold(mobile, phone, call.sessionId, body(9106, false));
+    const later = await metered(h, () => changeNativeHold(mobile, phone, call.sessionId, body(9107, true)));
+    expect(later.value).toMatchObject({ operation: { outcome: "accepted", held: true } });
+    bounded(first.requests, BOUND.nativeHoldFirst.requests);
+    bounded(first.waves, BOUND.nativeHoldFirst.waves);
+    bounded(later.requests, BOUND.nativeHoldLater.requests);
+    bounded(later.waves, BOUND.nativeHoldLater.waves);
   });
 });

@@ -29,3 +29,9 @@ if (!enabled) {
   run(process.execPath, ['scripts/diagnostics-source-maps.mjs', 'build']);
   run(process.execPath, ['scripts/diagnostics-source-maps.mjs', 'upload']);
 }
+
+// A per-deployment opt-in, used only on the dedicated stable TEST project.
+// The runner checks project, database, branch, SHA and origin before writes.
+if (process.env.LIVE_DELIVERY_QA === '1') {
+  run(process.execPath, ['scripts/qa/live-delivery-handoff.mjs']);
+}

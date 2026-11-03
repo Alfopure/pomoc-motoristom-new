@@ -14,3 +14,7 @@ export type MonitorInvitation = {
 };
 export type MonitorInvitationView = MonitorInvitation & { mine: boolean; status: "pending" | "listening" | "disconnecting" | "ended" | "expired" | "revoked" };
 export const MONITOR_INVITATION_TTL_MS = 120_000;
+/** A colleague call has no customer to listen to; the server refuses it (409 not_supported_internal). */
+export function canInviteMonitor(call: { direction: string } | null | undefined): boolean {
+  return Boolean(call) && call!.direction !== "internal";
+}

@@ -114,7 +114,7 @@ export function VehicleLookupControl(props: Props) {
   }
   const snapshot = proposal?.snapshot ?? (props.snapshot?.result.query.country === country ? props.snapshot : undefined);
   const result = snapshot?.result;
-  const conflict = result ? lookupIdentityConflict(result, { plate: props.plate, vin: props.vin, country }) : undefined;
+  const conflict = result ? proposal?.conflict ?? lookupIdentityConflict(result, { plate: props.plate, vin: props.vin, country }) : undefined;
   const skpPlateDifference = result && !conflict ? vinLinkedSkpPlateDifference(result) : undefined;
   const facts = result ? preferredVehicleFacts(result, true) : {};
   const patch = result ? emptyVehicleFieldPatch(result, { ...props.values, plate: props.plate, vin: props.vin }, includePartial, choices) : {};

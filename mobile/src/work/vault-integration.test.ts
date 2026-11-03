@@ -1,0 +1,71 @@
+import { describe, expect, it, vi } from "vitest";
+import { DraftVault, type DraftScope } from "../drafts/vault";
+import { WorkStore } from "./store";
+import type { WorkApi } from "./api";
+import { deferred } from "./draft-test-port";
+import { HandoffDraft } from "../handoff/draft";
+import { context, receipt, caseId as handoffCase, commandId as handoffCommand, scope as handoffScope } from "../handoff/fixtures";
+vi.mock("expo-crypto", () => ({ randomUUID: () => "00000000-0000-4000-8000-000000000009" }));
+const profileId = "00000000-0000-4000-8000-000000000001", taskId = "00000000-0000-4000-8000-000000000003", commandId = "00000000-0000-4000-8000-000000000004";
+const reply = { ok: true as const, apiVersion: 1 as const, environment: "test" as const, profileId, checkedAt: "2026-10-12T14:00:00Z" };
+function fixture(profile = profileId) {
+  let counter = 100;
+  const files = new Map<string, string>(), storage = { getItem: async (key: string) => files.get(key) ?? null, setItem: async (key: string, value: string) => { files.set(key, value); }, removeItem: async (key: string) => { files.delete(key); } };
+  const scope: DraftScope = { environment: "test", projectUrl: "https://nzpnqdstvkfncflgqlny.supabase.co", userId: "00000000-0000-4000-8000-000000000031", profileId: profile, organizationId: "00000000-0000-4000-8000-000000000032" };
+  const options = { durable: true, uuid: () => `00000000-0000-4000-8000-${String(counter++).padStart(12, "0")}`, current: () => true, revalidate: async () => {} };
+  return { files, storage, scope, options };
+}
+describe("actual vault and task/handoff controller protocol", () => {
+  it("persists both late outcomes after closing the account, then restores from actual encoded vault storage", async () => {
+    const f = fixture(), vault = await DraftVault.open(f.storage, f.scope, f.options);
+    const work = deferred<unknown>(), message = deferred<unknown>();
+    const api = { transition: vi.fn(() => work.promise), sendMessage: vi.fn(() => message.promise) } as unknown as WorkApi;
+    const store = new WorkStore(api, () => {}, (kind, id) => vault.bind(kind, id)), retained = store.task(taskId);
+    retained.comment = "Koncept cez skutočný vault";
+    const input = { action: "start" as const, expectedRevision: 2, commandId }, messageInput = { body: "Presné telo", clientMessageId: commandId };
+    const a = retained.workflow.submit(input), b = retained.message.submit(messageInput);
+    await vi.waitFor(() => { expect(api.transition).toHaveBeenCalledOnce(); expect(api.sendMessage).toHaveBeenCalledOnce(); });
+    const wal = JSON.parse([...f.files.values()][0]).records[0].payload;
+    expect(wal.workflow.pending).toEqual(input); expect(wal.message.pending).toEqual(messageInput);
+    store.dispose(); vault.close();
+    work.resolve({ ...reply, taskId, commandId, committedRevision: 3, currentRevision: 3, refreshRequired: true }); await a;
+    message.resolve({ ...reply, taskId, refreshRequired: true, message: { id: commandId, taskId, authorProfileId: profileId, authorName: "Operátor", createdAt: reply.checkedAt, ...messageInput } }); await b;
+    const restoredVault = await DraftVault.open(f.storage, f.scope, f.options), restoredStore = new WorkStore({} as WorkApi, () => {}, (kind, id) => restoredVault.bind(kind, id));
+    const restored = restoredStore.task(taskId);
+    expect(restoredVault.snapshot().error).toBeNull(); expect(restored.workflow.snapshot().status).toBe("saved"); expect(restored.message.snapshot().status).toBe("saved"); expect(restored.comment).toBe(retained.comment);
+    restoredStore.dispose(); restoredVault.close();
+  });
+  it("keeps both command WALs when sibling authority checks finish out of order", async () => {
+    const f = fixture(), authorityA = deferred<void>(), authorityB = deferred<void>();
+    let checks = 0;
+    const vault = await DraftVault.open(f.storage, f.scope, { ...f.options, revalidate: () => ++checks === 1 ? authorityA.promise : authorityB.promise });
+    const work = deferred<unknown>(), message = deferred<unknown>();
+    const api = { transition: vi.fn(() => work.promise), sendMessage: vi.fn(() => message.promise) } as unknown as WorkApi;
+    const store = new WorkStore(api, () => {}, (kind, id) => vault.bind(kind, id)), retained = store.task(taskId);
+    const workflowInput = { action: "start" as const, expectedRevision: 2, commandId };
+    const messageInput = { body: "Sibling in flight", clientMessageId: commandId };
+    const a = retained.workflow.submit(workflowInput), b = retained.message.submit(messageInput);
+    authorityB.resolve(); await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledOnce());
+    authorityA.resolve(); await vi.waitFor(() => expect(api.transition).toHaveBeenCalledOnce());
+    const wal = JSON.parse([...f.files.values()][0]).records[0].payload;
+    expect(wal.workflow).toMatchObject({ status: "saving", pending: workflowInput });
+    expect(wal.message).toMatchObject({ status: "saving", pending: messageInput });
+    store.dispose(); vault.close();
+    work.resolve({ ...reply, taskId, commandId, committedRevision: 3, currentRevision: 3, refreshRequired: true });
+    message.resolve({ ...reply, taskId, refreshRequired: true, message: { id: commandId, taskId, authorProfileId: profileId, authorName: "Operátor", createdAt: reply.checkedAt, ...messageInput } });
+    await Promise.all([a, b]);
+  });
+  it("stores complete handoff preview and receipt without signed links under the real privacy allowlist", async () => {
+    const f = fixture(handoffScope.profileId), vault = await DraftVault.open(f.storage, f.scope, f.options);
+    const api = { context: vi.fn(async () => context()), command: vi.fn(async () => receipt()) };
+    const draft = new HandoffDraft(api, handoffCase, () => handoffCommand, () => {}, vault.bind("handoff", handoffCase));
+    await draft.refresh(); draft.select("issue"); draft.edit({ recipientName: "MOCK", recipientPhone: "+421900000000" }); await draft.submit();
+    expect(draft.snapshot().status).toBe("saved"); expect(vault.snapshot().error).toBeNull();
+    const encoded = [...f.files.values()][0]; expect(encoded).not.toContain('"url"'); expect(encoded).not.toContain("token="); expect(encoded).not.toContain('"context"');
+    expect(JSON.parse(encoded).records[0].payload.selected.preview).toEqual(context().preview);
+    draft.dispose(); vault.close();
+    const restoredVault = await DraftVault.open(f.storage, f.scope, f.options), restored = new HandoffDraft(api, handoffCase, () => handoffCommand, () => {}, restoredVault.bind("handoff", handoffCase));
+    expect(restored.snapshot()).toMatchObject({ status: "saved", link: null, context: null, receipt: { commandId: handoffCommand } });
+    expect(api.command).toHaveBeenCalledOnce(); restored.dispose(); restoredVault.close();
+  });
+});

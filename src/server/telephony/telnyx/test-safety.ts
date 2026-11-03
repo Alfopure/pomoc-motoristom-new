@@ -1,10 +1,10 @@
 import { canOperateTelephony, isTestLiveDeployment, resolveAppEnvironment, TEST_APP_ORIGIN, TEST_SUPABASE_REF } from "@/lib/app-environment";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
+import { telnyxSipUsername } from "../state/types";
 
 export type TestProviderSafety = { restricted: boolean; deploymentAllowed: boolean; enabled: boolean; allowedNumbers: readonly string[]; fromNumbers: readonly string[]; allowAnyPhoneNumber?: boolean; aiSipTarget?: string | null; smsAlphaSender?: string | null; smsAllowAnyRecipient?: boolean };
 const E164 = /^\+[1-9]\d{7,14}$/;
-const SIP = /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.com$/;
 
 function numbers(value: string | undefined): string[] {
   const entries = value?.split(",").map(item => item.trim()) ?? [];
@@ -38,6 +38,15 @@ export function getTestProviderSafety(env: Record<string, string | undefined> = 
 export function allowsUnlistedTestSmsRecipient(safety: TestProviderSafety | undefined, destination: string): boolean {
   return safety?.restricted === true && safety.deploymentAllowed && safety.enabled &&
     safety.smsAllowAnyRecipient === true && E164.test(destination);
+}
+
+/**
+ * The enrolled-identity part of a `sip:<user>@sip.telnyx.com` or (S5
+ * SIP-domain spike) `sip:<user>@sip.telnyx.eu` destination, as the dial check
+ * reads it. Both name the same credential, which must still be enrolled.
+ */
+export function testSipUsername(destination: string): string | null {
+  return telnyxSipUsername(destination);
 }
 
 export class TestProviderSafetyError extends Error {
@@ -145,8 +154,8 @@ export function checkTestProviderRequest(boundary: ProviderBoundary, method: str
   for (const destination of destinations) {
     if (typeof destination !== "string") throw new TestProviderSafetyError();
     if (path === "/calls" && destination === boundary.safety.aiSipTarget) continue;
-    const sip = path !== "/messages" ? SIP.exec(destination) : null;
-    if (sip) checked.sipUsernames.push(sip[1]);
+    const sipUsername = path !== "/messages" ? testSipUsername(destination) : null;
+    if (sipUsername) checked.sipUsernames.push(sipUsername);
     else if (!boundary.safety.allowedNumbers.includes(destination) &&
       !(boundary.safety.allowAnyPhoneNumber === true && E164.test(destination)) &&
       !(path === "/messages" && allowsUnlistedTestSmsRecipient(boundary.safety, destination))) throw new TestProviderSafetyError();
@@ -189,7 +198,7 @@ export async function hasTestCallProvenance(boundary: ProviderBoundary, callCont
   return Boolean(command.data?.length);
 }
 
-/** Resolve only an enrolled TEST browser/mobile identity; never accept arbitrary sip.telnyx.com users. */
+/** Resolve only an enrolled TEST browser/mobile identity; never accept arbitrary Telnyx SIP users (on either SIP domain). */
 export async function resolveTestSipCredential(sipUsername: string, context?: TestProviderContext): Promise<string> {
   const admin = context?.admin ?? (await import("@/lib/supabase/admin")).createSupabaseAdminClient();
   const signal = AbortSignal.timeout(1500);

@@ -55,7 +55,10 @@ export type ActiveCallLegPayload = {
   supervisorMode: string | null;
 };
 
+export type CallControlProgress = { action: "hold" | "unhold" | "park"; startedAt: string; failed: boolean };
+
 export type ActiveCallPayload = {
+  controlPending?: CallControlProgress | null;
   audioConnection?: AudioConnectionView | null;
   sessionId: string;
   /** `motorist_calls.id` of the log row (link-case / outcome), null until it exists. */
@@ -88,12 +91,19 @@ export type ActiveCallPayload = {
   offeredProfileIds: string[];
   legs: ActiveCallLegPayload[];
   mine: boolean;
+  /** Colleague call frozen with the provider auto-bridge (call-speed S6.3); absent on older servers. */
+  autoBridge?: boolean;
 };
+
+/** Browser latency switches; every default is today's behaviour (call-speed S0.1). */
+export type WebCallTuning = { webEarlyAccept: boolean; webRtcRegion: "auto" | "eu"; webPrefetchIce: boolean; targetLocalFirst: boolean };
 
 export type ActiveCallsPayload = {
   checkedAt: string;
   configured: boolean;
   pausedPickupEnabled?: boolean;
+  /** `freshAfterWrite`: the server honours `?after=` (`fresh_after_write`, call-speed S1.4). */
+  tuning?: WebCallTuning & { freshAfterWrite?: boolean };
   /** Organisation whose Realtime topic carries telephony changes. */
   organizationId: string;
   actorProfileId: string;
@@ -122,6 +132,22 @@ export const EMPTY_ACTIVE_CALLS: ActiveCallsPayload = {
 
 const TALKING_STATES = new Set<ActiveCallSessionState>(["talking", "held", "consulting", "conference"]);
 const WAITING_STATES = new Set<ActiveCallSessionState>(["waiting", "parked"]);
+
+/**
+ * Server minus browser clock, from one snapshot (`fresh_after_write`, S1.4).
+ * `checkedAt` is the server's time when it took the request, which is after
+ * the browser sent it: the estimate errs late, so a change time converted with
+ * it is never earlier than the change itself.
+ */
+export function serverClockOffsetMs(checkedAt: string | null | undefined, sentAt: number): number | null {
+  const server = Date.parse(checkedAt ?? "");
+  return Number.isFinite(server) && Number.isFinite(sentAt) ? server - sentAt : null;
+}
+
+/** `?after=<server epoch ms>` for a refetch after a change, only when the server honours it. */
+export function freshAfterQuery(after: number | undefined, tuning: ActiveCallsPayload["tuning"], offsetMs: number): string {
+  return after !== undefined && Number.isFinite(after) && tuning?.freshAfterWrite === true ? `?after=${Math.ceil(after + offsetMs)}` : "";
+}
 
 export function isTalkingState(state: ActiveCallSessionState): boolean {
   return TALKING_STATES.has(state);
@@ -232,6 +258,7 @@ export function callCenterCallFromActive(
 export type PhoneBarCallKind = "active" | "offer" | "waiting";
 
 export type PhoneBarCall = {
+  controlPending?: CallControlProgress | null;
   /** Frozen waiting-room policy and queue progress for this session. */
   waitingSince?: string | null;
   waitingMaxMinutes?: number | null;
@@ -278,6 +305,15 @@ export type PhoneBarCall = {
   offeredToMe: boolean;
   /** Everyone on the call right now: caller, operator, added parties, supervisors. */
   participants: CallParticipant[];
+  /**
+   * Call-speed S6.2: this colleague answered, and the call connects as soon as
+   * the caller's own phone does ("Spájam…"). The session itself still rings.
+   */
+  connecting?: boolean;
+  /** Call-speed S6.3: Telnyx bridges this colleague call at answer. */
+  autoBridge?: boolean;
+  /** Colleague call whose caller's own phone has answered (no audio is possible before). */
+  callerAnswered?: boolean;
 };
 
 export type CallParticipantKind = "caller" | "operator" | "party" | "supervisor" | "consult";
@@ -362,6 +398,12 @@ export type PhoneBarModel = {
   presence: TelephonyPresenceSnapshot;
   ownPresenceStatus: TelephonyPresenceStatus | null;
   pausedPickupEnabled?: boolean;
+  /**
+   * Call-speed S6.4 (`tuning.targetLocalFirst`): an answering colleague trusts
+   * its own media first. Not usable yet: there is no far-party audio signal
+   * (see `latency-flags.ts`); keep the switch off.
+   */
+  targetLocalFirst?: boolean;
 };
 
 export type PhoneBarModelOptions = { operatorName?: OperatorNameLookup };
@@ -393,7 +435,17 @@ function colleagueInvitation(call: ActiveCallPayload, actorProfileId: string): b
 
 /** This operator answered a colleague's call; the session stays owned by the caller. */
 function colleagueCallAnswered(call: ActiveCallPayload, actorProfileId: string): boolean {
-  return call.direction === "internal" && isTalkingState(call.state) && call.legs.some((leg) =>
+  return call.direction === "internal" && (isTalkingState(call.state) || colleagueCallConnecting(call, actorProfileId)) && call.legs.some((leg) =>
+    leg.profileId === actorProfileId && leg.intent === "internal" && Boolean(leg.answeredAt) && !["ended", "failed"].includes(leg.state));
+}
+
+/**
+ * Call-speed S6.2: in a concurrent start the colleague can answer before the
+ * caller's own phone has; the session keeps ringing until it does. Derived
+ * from fields every server already sends, so no new state crosses the wire.
+ */
+function colleagueCallConnecting(call: ActiveCallPayload, actorProfileId: string): boolean {
+  return call.direction === "internal" && call.state === "ringing" && call.legs.some((leg) =>
     leg.profileId === actorProfileId && leg.intent === "internal" && Boolean(leg.answeredAt) && !["ended", "failed"].includes(leg.state));
 }
 
@@ -420,6 +472,7 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     parkedByProfileId: call.parkedByProfileId,
     startedAt: call.startedAt,
     audioConnection: call.audioConnection ?? null,
+    controlPending: call.controlPending ?? null,
     sessionId: call.sessionId,
     callId: call.callId,
     browserCallControlIds: [...new Set(call.legs.flatMap((leg) =>
@@ -453,6 +506,9 @@ function toPhoneBarCall(call: ActiveCallPayload, kind: PhoneBarCallKind, actorPr
     offeredOperatorNames: call.offeredProfileIds.map((profileId) => options.operatorName?.(profileId)).filter((name): name is string => Boolean(name)),
     offeredToMe: call.offeredProfileIds.includes(actorProfileId) || colleagueInvitation(call, actorProfileId),
     participants: callParticipants(call, { actorProfileId, operatorName: options.operatorName }),
+    ...(colleagueCallConnecting(call, actorProfileId) ? { connecting: true } : {}),
+    ...(call.autoBridge === true ? { autoBridge: true } : {}),
+    ...(call.direction === "internal" && call.legs.some((leg) => leg.intent === "internal_caller" && Boolean(leg.answeredAt)) ? { callerAnswered: true } : {}),
   };
 }
 
@@ -519,6 +575,7 @@ export function buildPhoneBarModel(payload: ActiveCallsPayload, options: PhoneBa
         : null,
     presence: payload.presence,
     pausedPickupEnabled: payload.pausedPickupEnabled === true,
+    ...(payload.tuning?.targetLocalFirst === true ? { targetLocalFirst: true } : {}),
     ownPresenceStatus: payload.presence.presence.find((row) => row.profileId === actorProfileId)?.status ?? null,
   };
 }

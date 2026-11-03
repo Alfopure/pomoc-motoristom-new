@@ -30,10 +30,10 @@ Po vydaní oznámiť nasadené commity oboch prostredí, konkrétne rozdiely a s
 ## Existujúci build
 
 ```sh
-pnpm exec vitest run && pnpm run typecheck && pnpm run build
+pnpm test && pnpm typecheck && node scripts/diagnostics-browser-check.mjs && node scripts/diagnostics-vercel-build.mjs
 ```
 
-Preview, stabilný TEST aj produkcia používajú existujúcu Vercel build gate. Nepridávame ďalší povinný GitHub CI ani ručného reviewera. Workflow `Full CI (manual)` zostáva dostupný pre potrebné rozšírené overenie. Rozsah ďalších kontrol sa riadi konkrétnou zmenou.
+Zdrojom tejto gate je `vercel.json`. `pnpm test` spúšťa Vitest aj Node testy; diagnostický wrapper spustí `pnpm build` a pri zapnutej konfigurácii nahrá súkromné source mapy. Preview, stabilný TEST aj produkcia používajú túto Vercel build gate. Nepridávame ďalší povinný GitHub CI ani ručného reviewera. Workflow `Full CI (manual)` zostáva dostupný pre potrebné rozšírené overenie. Mobilné a súvisiace zdieľané/backendové zmeny automaticky overuje aj workflow `Mobile checks`. Webový lint nie je v gate Vercelu. Rozsah ďalších kontrol sa riadi konkrétnou zmenou. Lokálna príprava je v [development.md](development.md).
 
 Pred merge musí povinný check patriť aktuálnemu PR headu. Po merge treba počkať na nový READY deployment; zelený Preview sám nepreukazuje nasadenie na canonical doméne. Pri zlyhaní nového buildu zostáva predchádzajúci deployment aktívny.
 

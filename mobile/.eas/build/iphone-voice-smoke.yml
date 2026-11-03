@@ -1,0 +1,7 @@
+build:
+  name: Compile and launch the TEST iPhone app
+  steps:
+    - eas/build
+    - eas/maestro_test:
+        inputs:
+          flow_path: maestro/iphone-startup.yaml

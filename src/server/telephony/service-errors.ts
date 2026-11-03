@@ -3,10 +3,20 @@ export class SessionLeaseLostError extends Error {
   // this transport refusal as a network failure and sleeps/retries a GET.
   readonly code = "ABORT_ERR";
 
-  constructor() {
-    super("session lease unavailable during effects");
+  constructor(message = "session lease unavailable during effects") {
+    super(message);
     this.name = "SessionLeaseLostError";
   }
+}
+
+/** PostgREST may serialize the transport's lease refusal into an error object. */
+export function isSessionLeaseLost(error: unknown): boolean {
+  if (error instanceof SessionLeaseLostError) return true;
+  if (!error || typeof error !== "object") return false;
+  const failure = error as { code?: unknown; message?: unknown };
+  if (typeof failure.message !== "string") return false;
+  return failure.code === "PT409" && /ownership|writer|lease|contract/.test(failure.message) ||
+    (!failure.code || failure.code === "ABORT_ERR") && /^SessionLeaseLostError:/.test(failure.message);
 }
 
 export class SessionConflictError extends Error {
@@ -21,8 +31,9 @@ export class CallActionError extends Error {
     message: string,
     readonly status = 500,
     readonly code?: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "CallActionError";
   }
 }
@@ -80,19 +91,24 @@ export class PresenceServiceError extends Error {
   constructor(
     message: string,
     readonly status = 400,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "PresenceServiceError";
   }
 }
 
 export class OperatorDeviceError extends Error {
+  /** A machine-readable reason the iPhone app acts on; the browser responses do not carry it. */
+  readonly code?: string;
   constructor(
     message: string,
     readonly status = 500,
+    options?: ErrorOptions & { code?: string },
   ) {
-    super(message);
+    super(message, options);
     this.name = "OperatorDeviceError";
+    this.code = options?.code;
   }
 }
 

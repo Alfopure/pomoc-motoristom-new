@@ -44,5 +44,10 @@ jobs:
           NODE_ENV: test
         run: pnpm test
 
+      - name: Telephony tests with the call-speed switches on
+        env:
+          NODE_ENV: test
+        run: pnpm test:latency-flags
+
       - name: Build
         run: pnpm run build

@@ -8,6 +8,9 @@ export const PINNABLE_NAVIGATION_VIEWS = [
   "call-center",
   "attendance",
   "fleet",
+  "branches",
+  "operations",
+  "partners",
   "reports",
   "settings",
 ] as const;
@@ -27,6 +30,9 @@ export const MOBILE_NAVIGATION_SHORTCUTS = [
   "call-center",
   "attendance",
   "fleet",
+  "branches",
+  "operations",
+  "partners",
   "reports",
   "settings",
 ] as const;

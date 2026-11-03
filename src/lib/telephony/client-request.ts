@@ -1,3 +1,4 @@
+import { beginRequestPerformance } from "./request-performance";
 import { isMobileApp } from "./phone-platform";
 import { beginBrowserCallStep } from "./call-timing";
 import { beginDiagnosticOperation } from "@/lib/diagnostics/client";
@@ -71,6 +72,17 @@ export type TelephonyFetchInit = Omit<RequestInit, "signal"> & {
   onSlow?: () => void;
 };
 
+let mutationEpoch = 0;
+
+/**
+ * Changes whenever a non-GET telephony request starts or settles. A shared read
+ * (`loadRoutingConfig`) is joined only while it is unchanged, so a read begun
+ * after a write never receives a response from before that write.
+ */
+export function telephonyMutationEpoch(): number {
+  return mutationEpoch;
+}
+
 /**
  * `fetch` with a mandatory budget. The caller's signal and our timer are
  * composed into one controller so either can cancel the request, and the two
@@ -87,10 +99,14 @@ export async function telephonyFetch(
   const cancel = runtime.clearTimeout ?? globalThis.clearTimeout;
 
   if (callerSignal?.aborted) throw abortError();
+  const mutation = (rest.method ?? "GET").toUpperCase() !== "GET";
+  if (mutation) mutationEpoch += 1;
 
+  const finishPerformance = beginRequestPerformance(input, rest.method);
   const finishTiming = beginBrowserCallStep("request", { operationId });
   const controller = new AbortController();
   let timedOut = false;
+  let responseContext: { status?: number; requestId?: string; requestBuild?: string } = {};
   const onCallerAbort = () => controller.abort();
   callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
   const timer = schedule(() => {
@@ -109,19 +125,24 @@ export async function telephonyFetch(
       headers: isMobileApp() && input.startsWith("/api/telephony/") ? { ...Object.fromEntries(new Headers(rest.headers)), "x-pm-phone-kind": "mobile" } : rest.headers,
       signal: controller.signal,
     });
+    responseContext = { status: response.status, requestId: response.headers.get("x-request-id") ?? undefined,
+      requestBuild: response.headers.get("x-app-version") ?? undefined };
     // Every caller consumes a finite API response. Keep the deadline alive
     // through the body: fetch() alone resolves as soon as headers arrive.
     const body = response.body ? await readBoundedBody(response.body, controller.signal) : null;
     if (controller.signal.aborted) throw abortError();
+    finishPerformance({ ...responseContext, outcome: response.status === 202 ? "accepted" : response.ok ? "ok" : "failed" });
     finishTiming({ outcome: response.ok ? "ok" : "failed", requestId: response.headers.get("x-request-id") });
     return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   } catch (error) {
+    finishPerformance({ ...responseContext, outcome: callerSignal?.aborted ? "cancelled" : timedOut ? "timeout" : "failed" });
     finishTiming({ outcome: callerSignal?.aborted ? "cancelled" : "failed" });
     // Keep caller cancellation distinguishable if it races the timer.
     if (callerSignal?.aborted) throw abortError();
     if (timedOut) throw new TelephonyRequestTimeoutError(label, timeoutMs);
     throw error;
   } finally {
+    if (mutation) mutationEpoch += 1;
     cancel(timer);
     if (slowTimer !== null) cancel(slowTimer);
     callerSignal?.removeEventListener("abort", onCallerAbort);

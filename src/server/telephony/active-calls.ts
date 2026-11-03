@@ -1,14 +1,19 @@
 import { loadCallContactNames } from "./contact-names";
 import { normalizeDialNumberForComparison } from "@/lib/telephony/phone";
 import { readPauseReturn } from "@/lib/telephony/presence-policy";
+import { nativeVoiceEnabled } from "@/lib/app-environment";
+import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { telephonyStabilityEnabled } from "./stability";
 import { UNOWNED_READ_MS } from "./ownership";
+import { createTransientReadRetry } from "@/server/transient-read";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { CallerMatch } from "@/data/dispatch-types";
 import type { Database } from "@/lib/supabase/database.types";
 import type { TelephonyPresenceSnapshot } from "@/lib/telephony/presence";
 import { AUDIO_CONNECTION_WARNING_MS, type AudioConnectionView } from "@/lib/telephony/audio-connection";
+import type { CallControlProgress } from "@/lib/telephony/active-calls-model";
+import { pendingCallControl } from "./state/control-progress";
 
 import { deviceIsLive } from "./operator-devices";
 import { effectivePresenceStatus, effectivePresenceSince } from "./presence-service";
@@ -58,6 +63,7 @@ function legMetaOf(leg: LegRow): Record<string, unknown> {
 }
 
 export type ActiveCallView = {
+  controlPending?: CallControlProgress | null;
   sessionId: string;
   /** `motorist_calls.id` of the log row, once one exists (link-case / outcome). */
   callId: string | null;
@@ -102,6 +108,8 @@ export type ActiveCallView = {
   legs: ActiveCallLegView[];
   /** True when the polling operator owns or is being offered this call. */
   mine: boolean;
+  /** Colleague call dialled with the provider auto-bridge (call-speed S6.3, `meta.internal_auto_bridge`). */
+  autoBridge?: boolean;
 };
 
 export type ActiveCallsSnapshot = {
@@ -210,6 +218,7 @@ export type ActiveCallRows = {
   attempts: AttemptRow[];
   presence: PresenceRow[];
   devices: DeviceRow[];
+  mobileDevices?: DeviceRow[];
   lines: LineRow[];
   operatorSettings: Array<{ profile_id: string; delivery_mode?: string | null; default_mobile_number?: string | null }>;
   contactNames?: Map<string, string>;
@@ -230,7 +239,10 @@ export type ActiveCallRows = {
  * cache interval. Realtime also pushes changes between polls.
  */
 export const ACTIVE_CALLS_CACHE_TTL_MS = 1_000;
-type RowsCacheEntry = { at: number; pending: boolean; rows: Promise<ActiveCallRows> };
+/** Shortest gap between a pass and one a fresh read forces after it (S1.4), per organisation and instance. */
+export const ACTIVE_CALLS_FRESH_GAP_MS = 250;
+/** `planned`: a forced pass whose `at` is its start, up to one gap ahead of the request (S1.4). */
+type RowsCacheEntry = { at: number; pending: boolean; rows: Promise<ActiveCallRows>; planned?: true };
 const rowsCache = new Map<string, RowsCacheEntry>();
 
 /** Test seam: drops the per-instance row cache. */
@@ -249,13 +261,29 @@ export function resetActiveCallsCache(): void {
 export async function loadActiveCallsCached(
   deps: ActiveCallsDeps,
   actor: { profileId: string; canManageAssignments: boolean },
+  /**
+   * `fresh_after_write` (call-speed S1.4): only a pass that started at or
+   * after this instant may answer — the console's doorbell or its own control
+   * write happened then, and an earlier pass can predate it. Tabs asking for
+   * the same or an older instant still share one pass.
+   */
+  options: { minStartedAt?: number } = {},
 ): Promise<ActiveCallsSnapshot> {
   const now = (deps.now ?? (() => new Date()))();
   const key = `${deps.organizationId}:${deps.environment}`;
   const at = now.getTime();
   let entry = rowsCache.get(key);
-  if (!entry || !entry.pending && (at - entry.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < entry.at)) {
+  if (!entry || !entry.pending && (at - entry.at >= ACTIVE_CALLS_CACHE_TTL_MS || at < entry.at - (entry.planned ? ACTIVE_CALLS_FRESH_GAP_MS : 0))) {
     entry = { at, pending: true, rows: readActiveCallRows(deps) };
+    rowsCache.set(key, entry);
+  } else if (options.minStartedAt !== undefined && entry.at < options.minStartedAt) {
+    // The cached pass may predate the change. The next one starts no sooner
+    // than `ACTIVE_CALLS_FRESH_GAP_MS` after it, and every tab asking for the
+    // same or an older instant joins it: no client can force a pass per request.
+    const startAt = Math.max(at, entry.at + ACTIVE_CALLS_FRESH_GAP_MS);
+    const delay = startAt - at;
+    entry = { at: startAt, pending: true, planned: true,
+      rows: (delay > 0 ? new Promise<void>(resolve => setTimeout(resolve, delay)) : Promise.resolve()).then(() => readActiveCallRows(deps)) };
     rowsCache.set(key, entry);
   }
   let rows: ActiveCallRows;
@@ -274,10 +302,22 @@ export async function loadActiveCallsCached(
 
 export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveCallRows> {
   const { admin, organizationId } = deps;
+  // One verification read for this shared pass, including concurrent polls and
+  // all compatibility queries. Never retry the full pass or serve stale rows.
+  const read = createTransientReadRetry();
   if (process.env.TELEPHONY_ACTIVE_SNAPSHOT_V1_ENABLED === "true") {
-    const { data, error } = await admin.rpc("motorist_active_call_snapshot_v1", {
-      p_organization_id: organizationId, p_environment: deps.environment,
-    }).abortSignal(AbortSignal.timeout(UNOWNED_READ_MS));
+    const { data, error } = await read(async signal => {
+      // This specific STABLE RPC only reads: the SQL fixture verifies it in a
+      // read-only transaction. Keep POST (no implicit GET retries) and its 10 s
+      // deadline, using AbortError to identify only our own read timeout.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new DOMException(`un-owned read exceeded ${UNOWNED_READ_MS} ms`, "AbortError")), UNOWNED_READ_MS);
+      try {
+        return await admin.rpc("motorist_active_call_snapshot_v1", {
+          p_organization_id: organizationId, p_environment: deps.environment,
+        }).abortSignal(AbortSignal.any([signal, controller.signal]));
+      } finally { clearTimeout(timer); }
+    });
     // A timeout or installation error must not multiply load with eight more
     // reads. Activation follows verification of this RPC on the exact project.
     if (error) throw new Error(`active call snapshot failed: ${error.message}`);
@@ -285,20 +325,23 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
     const keys = ["sessions", "legs", "attempts", "presence", "devices", "lines", "operatorSettings", "callRows"] as const;
     if (!keys.every(key => Array.isArray(data[key]))) throw new Error("incomplete active call snapshot");
     const rows = data as unknown as Omit<ActiveCallRows, "callIdBySession"> & { callRows: Array<{ id: string; session_id: string | null }> };
+    const mobileDevices = await readNativeDevices(deps, read);
     return {
       contactNames: await loadCallContactNames(admin, organizationId, rows.sessions.filter(session => session.direction !== "internal").map(session => session.direction === "outbound" ? session.called_number : session.caller_number), 300),
       sessions: rows.sessions, legs: rows.legs, attempts: rows.attempts,
       presence: rows.presence, devices: rows.devices, lines: rows.lines, operatorSettings: rows.operatorSettings,
+      mobileDevices,
       callIdBySession: new Map(rows.callRows.flatMap(row => row.session_id ? [[row.session_id, row.id] as const] : [])),
     };
   }
 
-  const [sessionsResult, presenceResult, devicesResult, linesResult, operatorSettingsResult] = await Promise.all([
-    admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).in("state", ACTIVE_STATES).order("started_at", { ascending: true }),
-    admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId),
-    admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment),
-    admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId),
-    admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId),
+  const [sessionsResult, presenceResult, devicesResult, linesResult, operatorSettingsResult, mobileDevices] = await Promise.all([
+    read(signal => admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).in("state", ACTIVE_STATES).order("started_at", { ascending: true }).abortSignal(signal)),
+    read(signal => admin.from("motorist_operator_presence").select("*").eq("organization_id", organizationId).abortSignal(signal)),
+    read(signal => admin.from("motorist_operator_devices").select("*").eq("organization_id", organizationId).eq("environment", deps.environment).abortSignal(signal)),
+    read(signal => admin.from("motorist_telephony_lines").select("*").eq("organization_id", organizationId).abortSignal(signal)),
+    read(signal => admin.from("motorist_operator_telephony_settings").select("*").eq("organization_id", organizationId).abortSignal(signal)),
+    readNativeDevices(deps, read),
   ]);
   if (sessionsResult.error) throw new Error(`active sessions load failed: ${sessionsResult.error.message}`);
   if (presenceResult.error) throw new Error(`presence load failed: ${presenceResult.error.message}`);
@@ -311,12 +354,12 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
 
   const [legsResult, attemptsResult, callRowsResult] = sessionIds.length
     ? await Promise.all([
-        admin.from("motorist_call_legs").select("*").in("session_id", sessionIds).is("ended_at", null),
-        admin.from("motorist_ring_attempts").select("*").in("session_id", sessionIds).eq("result", "offered"),
+        read(signal => admin.from("motorist_call_legs").select("*").in("session_id", sessionIds).is("ended_at", null).abortSignal(signal)),
+        read(signal => admin.from("motorist_ring_attempts").select("*").in("session_id", sessionIds).eq("result", "offered").abortSignal(signal)),
         // The console links a live call to a case and stores its outcome
         // through the existing `motorist_calls` routes, which are keyed on the
         // log row, not on the session.
-        admin.from("motorist_calls").select("id, session_id").in("session_id", sessionIds),
+        read(signal => admin.from("motorist_calls").select("id, session_id").in("session_id", sessionIds).abortSignal(signal)),
       ])
     : [
         { data: [] as LegRow[], error: null },
@@ -334,12 +377,21 @@ export async function readActiveCallRows(deps: ActiveCallsDeps): Promise<ActiveC
     attempts: (attemptsResult.data ?? []) as AttemptRow[],
     presence: (presenceResult.data ?? []) as PresenceRow[],
     devices: (devicesResult.data ?? []) as DeviceRow[],
+    mobileDevices,
     lines: (linesResult.data ?? []) as LineRow[],
     operatorSettings: operatorSettingsResult.data ?? [],
     callIdBySession: new Map(
       (callRowsResult.data ?? []).flatMap((row) => (row.session_id ? [[row.session_id, row.id] as const] : [])),
     ),
   };
+}
+
+async function readNativeDevices(deps: ActiveCallsDeps, read: ReturnType<typeof createTransientReadRetry>): Promise<DeviceRow[]> {
+  if (!nativeVoiceEnabled()) return [];
+  const result = await read(signal => deps.admin.from("motorist_operator_mobile_devices").select("*")
+    .eq("organization_id", deps.organizationId).eq("environment", deps.environment).abortSignal(signal));
+  if (result.error) throw new Error(`mobile devices load failed: ${result.error.message}`);
+  return result.data ?? [];
 }
 
 export async function loadActiveCalls(
@@ -396,13 +448,16 @@ function buildActiveCalls(
 
   const calls = sessions.map((session) => {
     const meta = readMeta(session);
+    const pending = pendingCallControl(session);
+    const operatorProfileId = pending?.operatorProfileId ?? session.answered_by_profile_id;
     const line = session.line_id ? lines.get(session.line_id) : undefined;
     const offeredProfileIds = offersBySession.get(session.id) ?? [];
     const sessionLegs = legsBySession.get(session.id) ?? [];
     return {
       sessionId: session.id,
       callId: callIdBySession.get(session.id) ?? null,
-      state: session.state,
+      state: pending?.state ?? session.state,
+      controlPending: pending?.progress ?? null,
       direction: session.direction,
       contactName: session.direction === "internal" ? null : rows.contactNames?.get(normalizeDialNumberForComparison(session.direction === "outbound" ? session.called_number : session.caller_number)) ?? null,
       callerNumber: session.caller_number,
@@ -416,8 +471,8 @@ function buildActiveCalls(
       match: null,
       startedAt: session.started_at,
       answeredAt: session.answered_at,
-      answeredByProfileId: session.answered_by_profile_id,
-      audioConnection: audioConnectionView(session, legs.filter((leg) => leg.session_id === session.id), now),
+      answeredByProfileId: operatorProfileId,
+      audioConnection: pending ? null : audioConnectionView(session, legs.filter((leg) => leg.session_id === session.id), now),
       holdStartedAt: session.hold_started_at,
       parkedAt: session.parked_at,
       parkedByProfileId: meta.park?.by ?? null,
@@ -431,9 +486,11 @@ function buildActiveCalls(
       offeredProfileIds,
       legs: sessionLegs,
       mine:
-        session.answered_by_profile_id === actor.profileId ||
+        operatorProfileId === actor.profileId ||
         offeredProfileIds.includes(actor.profileId) ||
         sessionLegs.some((leg) => leg.profileId === actor.profileId),
+      // What the colleague dial really carries, not only what was asked for.
+      ...(session.direction === "internal" && meta.internal_auto_bridge?.commandIds?.length ? { autoBridge: true } : {}),
     } satisfies ActiveCallView;
   });
 
@@ -449,7 +506,7 @@ function buildActiveCalls(
     actorProfileId: actor.profileId,
     calls,
     waiting: calls.filter((call) => WAITING_STATES.has(call.state)),
-    presence: buildPresenceSnapshot({ actor, now, presence: presenceRows, devices: deviceRows, personalMobileProfileIds: new Set(rows.operatorSettings.filter((row) => telephonyStabilityEnabled() && row.delivery_mode === "personal_mobile" && row.default_mobile_number).map((row) => row.profile_id)) }),
+    presence: buildPresenceSnapshot({ actor, now, presence: presenceRows, devices: deviceRows, mobileDevices: rows.mobileDevices, personalMobileProfileIds: new Set(rows.operatorSettings.filter((row) => telephonyStabilityEnabled() && row.delivery_mode === "personal_mobile" && row.default_mobile_number).map((row) => row.profile_id)) }),
     ownPresenceStale: Boolean(ownPresence?.current_session_id) &&
       ["ringing", "on_call"].includes(effectivePresenceStatus(ownPresence!, now)) &&
       !sessions.some((session) => session.id === ownPresence!.current_session_id),
@@ -469,17 +526,29 @@ export function buildPresenceSnapshot(input: {
   now: Date;
   presence: PresenceRow[];
   devices: DeviceRow[];
+  mobileDevices?: DeviceRow[];
   personalMobileProfileIds?: ReadonlySet<string>;
 }): TelephonyPresenceSnapshot {
+  const devices = new Map(input.devices.map(device => [device.profile_id, {
+    profileId: device.profile_id,
+    registered: deviceIsLive(device, input.now),
+    ...(device.device_seen_at ? { seenAt: device.device_seen_at } : {}),
+  }]));
+  // The web colleague-call button must use the same reachability as dialing.
+  // Keep browser freshness unchanged and merge the opted-in native endpoint.
+  if (nativeVoiceEnabled()) for (const device of input.mobileDevices ?? []) {
+    if (!device.sip_username || !device.telnyx_credential_id ||
+      !(deviceIsLive(device, input.now) || nativeMobilePushReachable(device, input.now))) continue;
+    const browser = devices.get(device.profile_id);
+    devices.set(device.profile_id, { profileId: device.profile_id, registered: true,
+      ...(browser?.seenAt || device.device_seen_at ? { seenAt: [browser?.seenAt, device.device_seen_at].filter((value): value is string => Boolean(value)).sort().at(-1)! } : {}),
+    });
+  }
   return {
     actorProfileId: input.actor.profileId,
     canManageAssignments: input.actor.canManageAssignments,
     checkedAt: input.now.toISOString(),
-    devices: input.devices.map((device) => ({
-      profileId: device.profile_id,
-      registered: deviceIsLive(device, input.now),
-      ...(device.device_seen_at ? { seenAt: device.device_seen_at } : {}),
-    })),
+    devices: [...devices.values()],
     presence: input.presence.map((row) => ({
       profileId: row.profile_id,
       status: effectivePresenceStatus(row, input.now),

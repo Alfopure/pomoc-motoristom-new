@@ -1,0 +1,12 @@
+appId: sk.linkapomoci.dispecing.test
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible: "Váš dispečing vo vrecku"
+    timeout: 60000
+- assertVisible: "TEST"
+- assertVisible: "E-mail"
+- assertVisible: "Heslo"
+- assertVisible: "Prihlásiť sa"
+- takeScreenshot: iphone-native-startup

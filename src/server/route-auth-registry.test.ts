@@ -53,12 +53,19 @@ describe("route-auth-registry", () => {
   it("PUBLIC_ROUTES contains exactly the intentional public routes", () => {
     expect([...PUBLIC_ROUTES].sort()).toEqual([
       "auth/forgot-password",
+      "towing/auth/forgot-password",
       "health/live",
       "health/ready",
+      // The native app asks before sign-in whether its version is still supported.
+      "mobile/v1/app-status",
       "public/location-links/[token]",
       "public/handoffs/commands",
       "public/handoffs/current",
       "public/handoffs/session",
+      // Web logistics links use their own restricted grant, separate from a dispatch session.
+      "public/operation-handoffs/commands",
+      "public/operation-handoffs/current",
+      "public/operation-handoffs/session",
       // Telnyx webhooky — autentifikáciou je Ed25519 podpis, nie session.
       "sms/telnyx/webhook",
       "telephony/telnyx/webhook",

@@ -17,6 +17,8 @@ import { createTelnyxClient, resolveTelnyxLiveGate, TelnyxCommandError, type Tel
 import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "./telnyx/env";
 import { createTelnyxRequestLogger } from "./telnyx/request-telemetry";
 import type { ProcessorDeps } from "./telnyx/event-processor";
+import { readLatencyFlags } from "./latency-flags";
+import { keepAliveFetch } from "@/server/http/keepalive";
 
 /**
  * Shared wiring for the telephony API routes (design §4 Phase 2).
@@ -110,10 +112,17 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
   let callNotificationsScheduled = false;
 
   let telnyx: TelnyxClient | null = null;
+  // Separate selects in one round: a deployment ahead of the latency-flags
+  // migration must never lose its live gate to the missing column.
+  const [data, latencyFlags] = await Promise.all([
+    config.configured ? readLiveGateSettings(admin, organizationId) : null,
+    readLatencyFlags(admin, organizationId, { logger: options.logger ?? telephonyLogger }),
+  ]);
   if (config.configured) {
-    const data = await readLiveGateSettings(admin, organizationId);
+    // S4: `undefined` for `http_keepalive_ms: 0`, which keeps the global fetch.
     telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data), testProvenanceContext: { admin, organizationId },
-      onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger) });
+      onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger), testConferenceSelfProof: latencyFlags.test_conference_self_proof,
+      fetch: keepAliveFetch(latencyFlags.http_keepalive_ms) });
   }
 
   return {
@@ -122,6 +131,7 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
     config,
     organizationId,
     environment,
+    latencyFlags,
     deviceKind: options.deviceKind,
     sweepAfterEvent: options.sweepAfterEvent,
     logger: options.logger ?? telephonyLogger,
@@ -197,11 +207,12 @@ export function telephonyErrorResponse(error: unknown, fallback: string): Respon
     // Register while Next owns the request, then load the reporter after the
     // response. Keep diagnostic modules out of the cold webhook import graph.
     try {
-      const requestId = requestTimingContext()?.request_id;
+      const timing = requestTimingContext();
+      const requestId = timing?.request_id;
       after(async () => {
         try {
           const { captureServerError } = await import("@/server/diagnostics/server-errors");
-          await captureServerError(error, { source: "telephony", route: "telephony.operation", status: knownStatus, requestId });
+          await captureServerError(error, { source: "telephony", route: timing?.route ?? "telephony.operation", status: knownStatus, requestId, databaseTimeouts: timing?.database_timeouts });
         } catch { /* Reporting cannot change call control. */ }
       });
     } catch { /* No retained request lifecycle: skip reporting. */ }

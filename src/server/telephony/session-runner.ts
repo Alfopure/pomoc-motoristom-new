@@ -5,6 +5,7 @@ import type { InboundHangupRecovery, InboundHangupRecoveryResult } from "./inbou
 import { sessionOwnership, ownershipRpc, assertOwnership, firstProviderDispatchAt, withProviderDispatchTiming, OWNERSHIP_RENEW_SKIP_MS, SESSION_WORK_MS, SESSION_LEASE_MS, DATABASE_REQUEST_MS, type Ownership } from "./ownership";
 import { ACTIVE_LEG_WINDOW_MS, resolvePersonalRingMembers } from "./routing/ring-plan";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
@@ -21,7 +22,7 @@ import { attachContactOperations, collectContactProof, readContactHistory } from
 import { readPendingEffects } from "./state/continuation";
 import { cancelRevokedOffers } from "./state/cancelled-offers";
 import { reduce } from "./state/transitions";
-import { needsRecordingContinuation, requiresRecordingLease } from "./state/recording";
+import { needsRecordingContinuation, recordingFrozenOff, requiresRecordingLease } from "./state/recording";
 import { SessionEventDeferredError, SessionLeaseBusyError, SessionLeaseLostError, SessionTerminationPendingError } from "./service-errors";
 export { SessionEventDeferredError } from "./service-errors";
 import { resolveSessionRecordingPolicy } from "./recording-policy-service";
@@ -52,6 +53,8 @@ import {
 import type { TelnyxClient } from "./telnyx/client";
 import type { TelnyxClientState } from "./telnyx/client-state";
 import type { TelnyxConfig } from "./telnyx/env";
+import { latencyFlagsOf, sessionApiRegion, type LatencyFlags } from "./latency-flags";
+import { CONCURRENT_BRIDGE_WITHOUT_EVIDENCE } from "./state/types";
 
 /**
  * Runs one event through the per-session pipeline shared by the webhook
@@ -85,6 +88,8 @@ export type SessionRunnerDeps = {
   maxConflictRetries?: number;
   /** Registers best-effort after-response work; never performs push under the session lease. */
   onCallTransition?: (sessionId: string) => void;
+  /** Resolved by `createTelephonyDeps`; absent means env defaults (`latencyFlagsOf`). */
+  latencyFlags?: LatencyFlags;
 };
 
 export const LEASE_WAIT_MS = 3_000;
@@ -128,7 +133,40 @@ export { ACTIVE_LEG_WINDOW_MS } from "./routing/ring-plan";
 export type SessionRunResult = (
   | { outcome: "ignored"; reason: string; session: SessionRow; leaseAcquired: boolean; retries: number }
   | { outcome: "applied"; apply: ApplyResult; session: SessionRow; leaseAcquired: boolean; retries: number; stateBefore: string; commands: CommandOutcome[] }
-) & { inboundHangupRecovery?: InboundHangupRecovery };
+) & {
+  inboundHangupRecovery?: InboundHangupRecovery;
+  /**
+   * Observation-only `call.bridged` (call-speed S1.2): its audit row, which the
+   * caller writes once the session lease is released and before it finishes
+   * the webhook ledger. Present only when the caller asked for it.
+   */
+  afterRelease?: () => Promise<void>;
+};
+
+/**
+ * The session-level preconditions of an observation that only records a leg
+ * fact (call-speed S1.2): nothing else may be owed or in flight. Recording,
+ * pending effects, a committed termination, offer cancellations and callback
+ * contact accounting each keep the ordinary staged path.
+ */
+export function observationOnlyAllowed(session: SessionRow, leanInternal: boolean): boolean {
+  const history = readContactHistory(session);
+  return recordingFrozenOff(session, leanInternal) && !readPendingEffects(session).entries.length &&
+    !session.termination_requested_at && !session.cancellations_next_attempt_at &&
+    !(session.presence_cancellations && Object.keys(session.presence_cancellations).length) &&
+    !history.operations.length && !history.pendingDials?.length;
+}
+
+/** Only leg patches: no command, presence, attempt, call projection, callback or session change. */
+function legPatchesOnly(result: ReduceResult, session: SessionRow): boolean {
+  const next = result.next;
+  return !result.ignored && !result.guard && !result.commands.length && !result.compensations.length &&
+    next.legs.length > 0 && next.legs.every(leg => !leg.createIfMissing) &&
+    !next.attempts.length && !next.presence.length && !next.callbacks.length && !next.memberTouches.length &&
+    !next.contactProofs?.length && !next.contactChecks?.length && !next.routing?.length && !Object.keys(next.call).length &&
+    Object.keys(next.session).every(key => key === "metadata") &&
+    (next.session.metadata === undefined || isDeepStrictEqual(readMeta({ metadata: next.session.metadata }), readMeta(session)));
+}
 
 export class SessionNotFoundError extends Error {
   constructor(readonly sessionId: string) {
@@ -428,10 +466,8 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
   const { admin, organizationId } = deps;
   const now = nowOf(deps)();
   const meta = readMeta(session);
-  const noContinuation =
-    meta.recording?.policy.enabled === false && !meta.recording.recorders.length &&
-    !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence &&
-    !readPendingEffects(session).entries.length;
+  const leanInternal = latencyFlagsOf(deps).internal_lean_path;
+  const noContinuation = recordingFrozenOff(session, leanInternal) && !readPendingEffects(session).entries.length;
   const bridgeObservation = noContinuation && event?.kind === "telnyx" && event.type === "call.bridged" &&
     snapshotLegs?.some(leg => leg.telnyx_call_control_id === event.callControlId && Boolean(leg.answered_at));
   const passiveObservation = noContinuation && event?.kind === "telnyx" && (
@@ -491,8 +527,9 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
     !session.ended_at && !session.termination_requested_at && !meta.hangup && !meta.customer_gone_at &&
     event?.kind === "app" && event.type === "pickup" &&
     snapshotLegs?.some(leg => leg.id === session.customer_leg_id && leg.role === "customer" && isOpenLeg(leg));
+  // `ringing` only for a concurrent start (S6.1), whose customer was dialled with this leg.
   const outboundOwnLegAnswer = noContinuation && session.writer_contract === 2 &&
-    session.direction === "outbound" && session.state === "received" && !session.ended_at &&
+    session.direction === "outbound" && (session.state === "received" || session.state === "ringing" && meta.far_end?.mode === "concurrent") && !session.ended_at &&
     !session.termination_requested_at && !meta.hangup && Boolean(meta.outbound) && Boolean(meta.announcements) &&
     event?.kind === "telnyx" && ["call.answered", "call.bridged"].includes(event.type) &&
     event.clientState?.sid === session.id && event.clientState.role === "operator" && event.clientState.intent === "outbound" &&
@@ -522,6 +559,42 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
       lean: true,
     };
   }
+  // Colleague calls (`internal_lean_path`, call-speed S1.1). The colleague's
+  // answer (`onInternalCalleeAnswered`) reads only `now`; the caller's own
+  // answer (`onOwnLegAnswered` → the colleague dial or `fanoutInternalColleague`)
+  // reads `now` and `fromNumber`, falling back to the session's caller number.
+  // Neither reads the line, IVR, plans, presence, devices, capacity or settings,
+  // and the follow loop below reloads the full context for anything that would.
+  const internalAnswer = leanInternal && noContinuation && session.direction === "internal" && !session.ended_at &&
+    !session.termination_requested_at && !meta.hangup && Boolean(meta.internal) &&
+    event?.kind === "telnyx" && ["call.answered", "call.bridged"].includes(event.type) && event.clientState?.sid === session.id;
+  const internalCalleeAnswer = internalAnswer && session.state === "ringing" && event.clientState?.intent === "internal" &&
+    pickupLeg !== undefined && pickupLeg.role !== "customer";
+  // `ringing` only for a session frozen as concurrent (S6), where the far end
+  // is already dialled when the caller's own leg answers.
+  const internalOwnLegAnswer = internalAnswer && (session.state === "received" || session.state === "ringing" && meta.far_end?.mode === "concurrent") &&
+    event.clientState?.role === "operator" && event.clientState.intent === "internal_caller" &&
+    pickupLeg?.role === "operator" && isOpenLeg(pickupLeg) && !pickupLeg.answered_at &&
+    pickupLeg.profile_id === session.answered_by_profile_id && savedPickup?.sid === session.id && savedPickup.intent === "internal_caller";
+  if (internalCalleeAnswer || internalOwnLegAnswer) {
+    const config = deps.config;
+    const defaultFrom = (config.configured ? config.defaultFromNumber : null) ?? null;
+    // The full context's priority: the configured caller id, then the line's number.
+    const line = internalOwnLegAnswer && !defaultFrom && session.line_id
+      ? await admin.from("motorist_telephony_lines").select("phone_number").eq("organization_id", organizationId).eq("id", session.line_id).maybeSingle()
+      : null;
+    if (line?.error) throw new Error(`line load failed: ${line.error.message}`);
+    return {
+      now, organizationId, environment: deps.environment, line: null,
+      businessHours: null, ivr: null, ringPlan: null, ringPlans: {}, presence: [], devices: [],
+      openOffers: [], activeLegCount: 0, settings: DEFAULT_ROUTING_SETTINGS,
+      fromNumber: defaultFrom ?? line?.data?.phone_number ?? null,
+      mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
+      announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : undefined,
+      recordingPolicy: meta.recording?.policy,
+      lean: true,
+    };
+  }
   if (event?.kind === "app" && event.type === "hangup" || bridgeObservation || passiveObservation || initiatedObservation) {
     // Top-level and the nested `termination:<sid>:<ts>` run alike (E3): the
     // hangup reduce reads nothing from configuration.
@@ -541,6 +614,31 @@ export async function loadRoutingContext(deps: SessionRunnerDeps, session: Sessi
       announcements: meta.announcements ? readAnnouncementConfig(meta.announcements) : undefined,
       recordingPolicy: meta.recording?.policy,
       ...(initiatedObservation ? { lean: true } : {}),
+    };
+  }
+  // Hold and unhold (`hold_lean_context`, call-speed S7a.4). `appHold`,
+  // `appUnhold` and `promoteToConference` read only `now`; around them the
+  // recording wrapper reads the frozen policy and, for the optional action
+  // prompt, the announcements frozen at answer. With recording frozen off that
+  // is all: not the line, IVR, settings, presence or capacity. The MOH URL is
+  // resolved at dispatch from the deployment's media base, not from here.
+  // Pending work keeps the full context, except a contact check: the callback
+  // contact proof a conference promotion stages has no command and changes
+  // nothing these reducers read, yet stays pending while the caller is held.
+  if (event?.kind === "app" && (event.type === "hold" || event.type === "unhold") && latencyFlagsOf(deps).hold_lean_context &&
+    meta.recording?.policy.enabled === false && !meta.recording.recorders.length && !meta.recording.barrier &&
+    !meta.recording.pendingAudio && !meta.announcement_sequence && Boolean(meta.announcements) &&
+    readPendingEffects(session).entries.every(entry => entry.id.startsWith("contact-check:") && !entry.commands.length)) {
+    const config = deps.config;
+    return {
+      now, organizationId, environment: deps.environment, line: null,
+      businessHours: null, ivr: null, ringPlan: null, ringPlans: {}, presence: [], devices: [],
+      openOffers: [], activeLegCount: 0, settings: DEFAULT_ROUTING_SETTINGS,
+      fromNumber: (config.configured ? config.defaultFromNumber : null) ?? null,
+      mediaAvailable: config.configured ? Boolean(config.mediaBaseUrl) : false,
+      announcements: readAnnouncementConfig(meta.announcements),
+      recordingPolicy: meta.recording?.policy,
+      lean: true,
     };
   }
   const { line, settings, recordingPolicy, routing, businessHours, ivr, ringPlan, ringPlans } =
@@ -638,6 +736,8 @@ export function effectsDeps(deps: SessionRunnerDeps): EffectsDeps {
     monotonicNow: deps.monotonicNow,
     logger: deps.logger,
     callIds: new Map(),
+    endedLegs: new Map(),
+    latencyFlags: deps.latencyFlags,
     wrapUpSecondsFor: async (profileId) => {
       const { data } = await deps.admin.from("motorist_operator_telephony_settings").select("wrap_up_seconds").eq("profile_id", profileId).maybeSingle();
       return data?.wrap_up_seconds ?? DEFAULT_ROUTING_SETTINGS.wrapUpSecondsDefault;
@@ -725,9 +825,10 @@ export async function ownedSessionWork<T>(
   // The caller often just read this row (webhook correlation); re-reading it
   // only to look at `writer_contract` is a round trip on the critical path.
   // `writer_contract === undefined` means "no lease at all", so a partial row
-  // must never be accepted here: it would silently skip ownership.
+  // must never be accepted here: it would silently skip ownership. Nor one
+  // without `metadata`: it would lose the session's frozen API region (S5).
   const known = options.known?.id === sessionId && options.known.organization_id === deps.organizationId &&
-    options.known.writer_contract !== undefined ? options.known : null;
+    options.known.writer_contract !== undefined && options.known.metadata !== undefined ? options.known : null;
   const probe = known ? { data: known, error: null }
     : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(DATABASE_REQUEST_MS)).maybeSingle();
   if (probe.error) throw new SessionEventDeferredError(`Session ownership lookup failed: ${probe.error.message}`, "snapshot_unavailable");
@@ -762,7 +863,11 @@ export async function ownedSessionWork<T>(
   }
   const owner: Ownership = { admin: deps.admin, sessionId, organizationId: deps.organizationId, token,
     generation: claim.generation, contract: claim.contract, deadline: Date.now() + SESSION_WORK_MS,
-    acquiredAt: Date.now(), leaseWaitMs: Math.max(0, Date.now() - started) };
+    acquiredAt: Date.now(), leaseWaitMs: Math.max(0, Date.now() - started),
+    // S5: every call and conference command of this session goes to the region it was created in.
+    providerRegion: sessionApiRegion(probe.data.metadata) };
+  // `route` and `eventType` name the holder, so a deferred webhook (which never
+  // logs a wait of its own) can be matched to it by session and time.
   const leaseLog = { scope: "lease-timing", sessionId, generation: owner.generation,
     eventType: options.eventType ?? null, ...requestTimingContext(), lease_acquired_at: new Date(owner.acquiredAt).toISOString(),
     lease_wait_ms: owner.leaseWaitMs, polls };
@@ -782,7 +887,7 @@ export async function runSessionEvent(
   deps: SessionRunnerDeps,
   sessionId: string,
   event: SessionEvent,
-  options?: { known?: SessionRow },
+  options?: { known?: SessionRow; /** The caller writes `afterRelease` (S1.2). */ deferObservationAudit?: boolean },
 ): Promise<SessionRunResult> {
   let known: SessionRow | undefined = options?.known;
   if (event.kind === "app" && event.type === "hangup") {
@@ -805,19 +910,19 @@ export async function runSessionEvent(
   return ownedSessionWork(ownershipDeps, sessionId, async () => {
     const owner = sessionOwnership.getStore();
     if (owner) owner.terminationPending = false;
-    const result = await runOwnedSessionEvent(deps, sessionId, event, owner);
+    const result = await runOwnedSessionEvent(deps, sessionId, event, owner, undefined, options?.deferObservationAudit);
     if (owner?.terminationPending && event.kind === "app") throw new SessionTerminationPendingError();
     return result;
   }, { known, eventType: `${event.kind}.${event.type}` });
 }
 
 async function runOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership,
-  verifiedStatus?: InboundHangupRecoveryResult["terminal"]): Promise<SessionRunResult> {
-  return withProviderDispatchTiming(nowOf(deps), () => processOwnedSessionEvent(deps, sessionId, event, owner, verifiedStatus));
+  verifiedStatus?: InboundHangupRecoveryResult["terminal"], deferObservationAudit = false): Promise<SessionRunResult> {
+  return withProviderDispatchTiming(nowOf(deps), () => processOwnedSessionEvent(deps, sessionId, event, owner, verifiedStatus, deferObservationAudit));
 }
 
 async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: string, event: SessionEvent, owner?: Ownership,
-  verifiedStatus?: InboundHangupRecoveryResult["terminal"]): Promise<SessionRunResult> {
+  verifiedStatus?: InboundHangupRecoveryResult["terminal"], deferObservationAudit = false): Promise<SessionRunResult> {
   const runnerStarted = nowOf(deps)();
   const token = owner?.token ?? randomUUID();
   let leaseAcquired: boolean;
@@ -834,6 +939,7 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
   };
   if (!leaseAcquired) deps.logger?.({ level: "warn", scope: "lease", sessionId, eventId: event.id, message: "lease unavailable; checking whether event can safely proceed" });
   const maxRetries = deps.maxConflictRetries ?? MAX_CONFLICT_RETRIES;
+  const flags = latencyFlagsOf(deps);
   let effectsMayHaveStarted = false;
   let inboundRecovery: InboundHangupRecoveryResult | undefined;
   const finish = async (result: SessionRunResult): Promise<SessionRunResult> => {
@@ -938,6 +1044,7 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
         throw new SessionEventDeferredError(error instanceof Error ? error.message : "routing context unavailable", "routing_context");
       }
       context.recordingLeaseHeld = leaseAcquired;
+      if (flags.bridged_observation_fast) context.bridgedObservationFast = true;
       const recordingLeaseRequired = requiresRecordingLease(snapshot.session, context);
       const effects: EffectsDeps = { ...effectsDeps(deps), deferredCommandIds: inboundRecovery?.deferredCommandIds,
         eventTiming: () => timing(), renewLease: leaseAcquired ? () => renewSessionLease(deps, sessionId, token, recordingLeaseRequired || durable) : undefined };
@@ -960,6 +1067,7 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
         try {
           effectsMayHaveStarted = true;
           const resumed = await resumePendingEffects(effects, snapshot.session, { databaseOnly: preemptsAudio, skipCompletedProjections: event.kind !== "app" || event.type !== "sweep",
+            projectionRecovery: event.kind === "app" && event.type === "sweep",
             deferContactChecks: snapshot.session.writer_contract === 2 && event.kind === "app" && event.type !== "sweep" });
           if (resumed?.failed && !preemptsAudio && event.kind === "app") return finish({ outcome: "applied", apply: resumed, session: resumed.session, leaseAcquired, retries, stateBefore: snapshot.session.state, commands: resumed.commands });
         } catch (error) {
@@ -977,6 +1085,11 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
       if (!leaseAcquired && recordingLeaseRequired && event.kind === "app" && event.type !== "hangup") {
         throw new SessionEventDeferredError("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.");
       }
+      if (event.kind === "app" && event.nativeHold) {
+        const { assertNativeHoldAuthority } = await import("./native-hold-authority");
+        await assertNativeHoldAuthority(deps, snapshot.session, event.nativeHold, snapshot.legs);
+        if (snapshot.session.version !== event.nativeHold.expectedVersion) throw new SessionEventDeferredError("Native hold revision changed before staging", "native_hold_revision");
+      }
       const previousContact = JSON.stringify(readContactHistory(snapshot.session));
       if (!terminalReplay && (durable || readContactHistory(snapshot.session).operations.length)) {
         snapshot.session = { ...snapshot.session, metadata: toJson({ ...readMeta(snapshot.session), callback_contact: collectContactProof(snapshot, event) }) };
@@ -993,6 +1106,46 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
         // The webhook ledger retains this event for retry. Pure bookkeeping
         // (e.g. conference.created) may advance version without owning media.
         throw new SessionEventDeferredError("Prebieha zmena nahrávania. Zopakujte akciu o chvíľu.");
+      }
+      // Observation-only `call.bridged` (`bridged_observation_fast`, S1.2): the
+      // first bridge of an answered leg only records `state`/`bridged_at`. One
+      // fenced row write replaces the stage entry, checkpoints, projection and
+      // finalize; the audit row follows the lease release. Anything else owed
+      // on the session keeps the staged path.
+      if (deferObservationAudit && flags.bridged_observation_fast && owner?.contract === 2 && leaseAcquired && !terminalReplay &&
+        !effectsMayHaveStarted && event.kind === "telnyx" && event.type === "call.bridged" &&
+        Array.isArray(snapshot.pendingCommands) && !snapshot.pendingCommands.length &&
+        JSON.stringify(readContactHistory(snapshot.session)) === previousContact &&
+        observationOnlyAllowed(snapshot.session, flags.internal_lean_path) && legPatchesOnly(result, snapshot.session)) {
+        const effectsStarted = nowOf(deps)();
+        effectsMayHaveStarted = true;
+        // No expected version: like a staged entry's critical write, a leg fact
+        // under the fenced lease neither needs nor bumps the session revision.
+        // The audit row's call identity is read alongside, so after the release
+        // the audit is a single insert next to the ledger finish.
+        const [applied, call] = await Promise.all([
+          measureRequestStep("write", () => ownershipRpc<{ applied: boolean; session?: SessionRow } | null>(deps.admin, "motorist_apply_critical_v2", {
+            p_session_id: sessionId, p_expected_version: null, p_patch: null,
+            p_legs: result.next.legs.map(leg => ({ callControlId: leg.callControlId, values: leg.values })), p_attempts: [],
+          })),
+          deps.admin.from("motorist_calls").select("id").eq("organization_id", deps.organizationId).eq("session_id", sessionId).maybeSingle(),
+        ]);
+        if (!applied?.applied || !applied.session) throw new Error("observation write returned no session");
+        if (!call.error && call.data?.id) effects.callIds?.set(sessionId, call.data.id);
+        const session = applied.session;
+        const notes = [...result.next.notes, "observation only"];
+        const auditTiming = timing(effectsStarted);
+        const stateBefore = snapshot.session.state;
+        if (["ringing", "waiting", "parked", "consulting", "conference"].includes(session.state) || readMeta(session).party_pending) {
+          try { deps.onCallTransition?.(sessionId); }
+          catch { deps.logger?.({ level: "warn", scope: "call-push", sessionId, message: "notification scheduling unavailable" }); }
+        }
+        deps.logger?.({ scope: "session", sessionId, eventId: event.id, type: event.type, stateBefore, stateAfter: session.state,
+          branch: "observation", commands: [], leaseAcquired, retries });
+        return finish({ outcome: "applied", apply: { session, branch: "main", commands: [], compensations: [], failed: false, failure: null, notes },
+          session, leaseAcquired, retries, stateBefore, commands: [],
+          afterRelease: () => recordCallEvent(effects, { session, event, handledStatus: "processed", stateBefore, stateAfter: session.state,
+            notes, commands: [], timing: auditTiming }) });
       }
       if (result.ignored && JSON.stringify(readContactHistory(snapshot.session)) !== previousContact) {
         const next = emptyTransition();
@@ -1043,10 +1196,14 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
           const stopReady = needsRecordingContinuation(apply.session);
           const mediaFailed = sequence && Date.parse(sequence.deadlineAt) <= nowOf(deps)().getTime() ||
             meta.gather?.failed && !meta.gather.call_gone && Date.parse(meta.gather.deadline_at) <= nowOf(deps)().getTime();
-          if ((!stopReady && !mediaFailed && !ringFollow) || stopReady && !leaseAcquired) break;
+          // Call-speed S6.2: Telnyx accepted (2xx) the explicit concurrent bridge
+          // this event sent; the call connects now, not at its `call.bridged`.
+          const bridgeAccepted = !apply.failed && apply.session.state === "ringing" && Boolean(meta.far_end?.bridge?.acceptedAt);
+          if ((!stopReady && !mediaFailed && !ringFollow && !bridgeAccepted) || stopReady && !leaseAcquired && !bridgeAccepted) break;
           const fresh = await loadSessionSnapshot(deps, sessionId);
-          const followEvent: SessionEvent = { kind: "app", type: stopReady ? "recording_continue" : "sweep", id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
-          if (followContext.lean || ringFollow) followContext = await loadRoutingContext(deps, fresh.session, followEvent, fresh.legs);
+          const followEvent: SessionEvent = { kind: "app", type: bridgeAccepted ? "concurrent_bridge_accepted" : stopReady ? "recording_continue" : "sweep",
+            id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
+          if (!bridgeAccepted && (followContext.lean || ringFollow)) followContext = await loadRoutingContext(deps, fresh.session, followEvent, fresh.legs);
           if (ringFollow) {
             const skipped = ringFollow.detail?.skippedMembers;
             if (Array.isArray(skipped)) followContext = { ...followContext, openOffers: [...new Set([
@@ -1084,6 +1241,10 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
             // A notification scheduler cannot change the result of a SIP command.
             deps.logger?.({ level: "warn", scope: "call-push", sessionId, message: "notification scheduling unavailable" });
           }
+        }
+        if (apply.notes.includes(CONCURRENT_BRIDGE_WITHOUT_EVIDENCE)) {
+          // Call-speed S6.2 (N5): connected on Telnyx's 2xx alone; no leg ever reported `call.bridged`.
+          deps.logger?.({ level: "warn", scope: "session", sessionId, eventId: event.id, code: CONCURRENT_BRIDGE_WITHOUT_EVIDENCE });
         }
         deps.logger?.({
           scope: "session",

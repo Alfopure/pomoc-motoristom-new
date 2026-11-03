@@ -1,6 +1,11 @@
 import "server-only";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/supabase/database.types";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { TASK_REVIEW_COMMENT_LIMIT, taskWorkflowActions, taskWorkflowStates, type TaskWorkflowCommand, type TaskWorkflowReceipt } from "@/domain/task-workflow";
+import { pushTaskReview } from "./mobile/push-events";
+import { mobilePushEnabled } from "./mobile/push";
 import { MutationError } from "./mutation-error";
 import { taskId, type TaskWorkspaceActor } from "./tasks";
 
@@ -30,22 +35,23 @@ function workflowError(error: { code?: string; message?: string }): MutationErro
   return new MutationError("Zmenu stavu úlohy sa nepodarilo overiť. Skúste tú istú požiadavku znova.", 503);
 }
 
-export async function taskWorkflowEnabled(actor: TaskWorkspaceActor): Promise<boolean> {
-  const client = await createSupabaseServerClient();
+export async function taskWorkflowEnabled(actor: TaskWorkspaceActor, userClient?: SupabaseClient<Database>): Promise<boolean> {
+  const client = userClient ?? await createSupabaseServerClient();
   const { data, error } = await client.rpc("motorist_task_workflow_enabled", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId });
   if (error?.code === "PGRST202" || error?.code === "42883") return false;
   if (error) throw workflowError(error);
   return data === true;
 }
 
-export async function transitionWorkspaceTask(actor: TaskWorkspaceActor, id: string, input: Record<string, unknown>): Promise<TaskWorkflowReceipt> {
+export async function transitionWorkspaceTask(actor: TaskWorkspaceActor, id: string, input: Record<string, unknown>, userClient?: SupabaseClient<Database>): Promise<TaskWorkflowReceipt> {
   const command = validateTaskWorkflowCommand(input), task = taskId(id);
-  const client = await createSupabaseServerClient();
+  const client = userClient ?? await createSupabaseServerClient();
   const { data, error } = await client.rpc("motorist_task_workflow", { p_organization_id: actor.organizationId, p_actor_profile_id: actor.profileId, p_task_id: task, p_input: { ...command } });
   if (error) throw workflowError(error);
   const receipt = data as unknown as TaskWorkflowReceipt;
   if (!receipt?.task || receipt.task.id !== task || receipt.task.workflowVersion !== 1 || !receipt.task.workflowState || !taskWorkflowStates.includes(receipt.task.workflowState)
     || !["open", "done", "overdue"].includes(receipt.task.status) || (receipt.task.status === "done") !== (receipt.task.workflowState === "done")
     || receipt.commandId !== command.commandId || !Number.isSafeInteger(receipt.committedRevision) || receipt.committedRevision < 1 || !Number.isSafeInteger(receipt.task.revision) || receipt.task.revision < receipt.committedRevision) throw new MutationError("Potvrdenie zmeny úlohy sa nepodarilo overiť. Skúste tú istú požiadavku znova.", 503);
+  if (mobilePushEnabled()) pushTaskReview(createSupabaseAdminClient(), { organizationId: actor.organizationId, taskId: task, action: command.action });
   return receipt;
 }

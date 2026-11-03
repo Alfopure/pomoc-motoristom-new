@@ -1,0 +1,70 @@
+{
+  "cli": { "version": ">=18.0.0", "appVersionSource": "remote" },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "environment": "development",
+      "env": { "APP_VARIANT": "development", "EXPO_PUBLIC_APP_ENV": "test" }
+    },
+    "test": {
+      "node": "24.14.1",
+      "distribution": "internal",
+      "environment": "preview",
+      "autoIncrement": true,
+      "env": { "APP_VARIANT": "test", "EXPO_PUBLIC_APP_ENV": "test" },
+      "android": { "buildType": "apk", "image": "sdk-57" }
+    },
+    "test-simulator": {
+      "extends": "test",
+      "ios": { "simulator": true, "image": "sdk-57" }
+    },
+    "voice-proof-simulator": {
+      "extends": "test-simulator",
+      "env": { "EXPO_PUBLIC_VOICE_PROOF": "1" }
+    },
+    "voice-smoke-simulator": {
+      "extends": "voice-proof-simulator",
+      "ios": { "config": "iphone-voice-smoke.yml" }
+    },
+    "voice-test": {
+      "extends": "test",
+      "ios": { "image": "sdk-57" },
+      "env": { "EXPO_PUBLIC_VOICE_PROOF": "1" }
+    },
+    "testflight": {
+      "extends": "voice-test",
+      "distribution": "store",
+      "credentialsSource": "local"
+    },
+    "play-internal": {
+      "extends": "test",
+      "distribution": "store",
+      "android": { "buildType": "app-bundle", "image": "sdk-57" }
+    },
+    "production": {
+      "node": "24.14.1",
+      "environment": "production",
+      "autoIncrement": true,
+      "env": { "APP_VARIANT": "production", "EXPO_PUBLIC_APP_ENV": "production" },
+      "ios": { "image": "sdk-57", "env": { "EXPO_PUBLIC_VOICE_PROOF": "1" } }
+    }
+  },
+  "submit": {
+    "play-internal": {
+      "android": {
+        "track": "internal",
+        "releaseStatus": "draft"
+      }
+    },
+    "testflight": {
+      "ios": {
+        "appleTeamId": "792TJPXTL3",
+        "ascAppId": "6825741096",
+        "ascApiKeyPath": "$EXPO_ASC_API_KEY_PATH",
+        "ascApiKeyId": "$EXPO_ASC_KEY_ID",
+        "ascApiKeyIssuerId": "$EXPO_ASC_ISSUER_ID"
+      }
+    }
+  }
+}

@@ -27,7 +27,7 @@ function makeChainableQuery() {
     single: async () => single,
     then: (resolve: (v: unknown) => unknown) => Promise.resolve(list).then(resolve),
   };
-  for (const method of ["select", "eq", "neq", "in", "is", "not", "gte", "lte", "gt", "lt", "order", "limit", "range", "or", "filter", "match", "contains", "overlaps", "insert", "update", "upsert", "delete"]) {
+  for (const method of ["select", "eq", "neq", "in", "is", "not", "gte", "lte", "gt", "lt", "order", "limit", "range", "or", "filter", "match", "contains", "overlaps", "insert", "update", "upsert", "delete", "abortSignal"]) {
     query[method] = () => query;
   }
   return query;
@@ -109,6 +109,8 @@ const routeFiles = findRouteFiles(API_ROOT);
 
 describe("API route auth enumeration (fail-closed)", () => {
   beforeAll(() => {
+    // Exercise towing authorization while enabled, rather than its disabled 404.
+    process.env.MOTORIST_TOWING_ENABLED = "true";
     for (const name of BEARER_SECRET_ENV) {
       process.env[name] = `test-${name.toLowerCase()}`;
     }

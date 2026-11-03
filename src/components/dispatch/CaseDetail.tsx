@@ -144,12 +144,17 @@ import styles from "./case-detail.module.css";
 import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { CaseHandoffPanel } from "./CaseHandoffPanel";
+import { CaseOperationsPanel } from "@/components/operations/OperationsModule";
+import { CaseBranchPanel } from "@/components/branches/BranchWorkspace";
+import { CasePartnerPanel } from "@/components/partners/CasePartnerPanel";
+import { CaseTowingOrdersPanel } from "./CaseTowingOrdersPanel";
 import { useLayoutPreview } from "./LayoutPreview";
 import { CaseEditorBoundary } from "./CaseEditorBoundary";
 
 type CaseDetailProps = {
   /** Visibility of the mounted content; does not control its draft lifetime. */
   active?: boolean;
+  openHandoff?: boolean;
   renderTaskWorkflow?: (taskId: string) => ReactNode;
   onEditorControlsChange?: (controls: CaseHeaderControls | null) => void;
   caseItem: DispatchCase;
@@ -276,6 +281,7 @@ export function CaseDetail(props: CaseDetailProps) {
 
 function CaseDetailContent({
   active = true,
+  openHandoff = false,
   renderTaskWorkflow,
   caseItem,
   branches,
@@ -737,7 +743,11 @@ function CaseDetailContent({
 
       <CaseSummary caseItem={caseItem} assets={assets} operators={operators} identityInHeader={compactEditor && embedded && Boolean(onEditorControlsChange)} />
       <CaseSectionNavigation editing={isEditing} />
-      <CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} />
+      <CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} initiallyExpanded={openHandoff} />
+      <CaseBranchPanel key={`branches:${caseItem.id}`} caseId={caseItem.id} />
+      <CaseOperationsPanel key={`operations:${caseItem.id}`} caseId={caseItem.id} />
+      <CasePartnerPanel key={`partner:${caseItem.id}`} caseId={caseItem.id} />
+      <CaseTowingOrdersPanel key={`towing:${caseItem.id}`} caseId={caseItem.id} caseNumber={caseItem.caseNumber} />
 
       {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
 

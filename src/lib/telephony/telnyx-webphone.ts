@@ -23,8 +23,9 @@ import { applyStoredAudioOutput, REMOTE_AUDIO_ELEMENT_ID } from "@/lib/telephony
 import { expectedVoiceSilence, voiceQualityWarning, type VoiceQualityWarning, type VoiceQualityWarningCode } from "@/lib/diagnostics/voice-quality";
 import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
 import { browserCallMonotonicNow, browserCallTelemetry, prepareBrowserCallHeartbeat, type BrowserCallPhase, type BrowserCallObservation } from "@/lib/telephony/browser-call-telemetry";
+import { flushBrowserCallTelemetry } from "@/lib/telephony/browser-call-transport";
 import { beginBrowserCallStep, type CallTimingContext } from "@/lib/telephony/call-timing";
-import { telephonyJson, TELEPHONY_TIMEOUT_MS, type TelephonyJsonResult } from "@/lib/telephony/client-request";
+import { nextBackoffDelayMs, telephonyJson, TELEPHONY_TIMEOUT_MS, type TelephonyJsonResult } from "@/lib/telephony/client-request";
 import type { IClientOptions } from "@telnyx/webrtc";
 import {
   EXPECTED_LEG_TTL_MS,
@@ -32,8 +33,10 @@ import {
   inviteIsColleagueCall,
   matchAutoAnswer,
   matchExpectedLeg,
+  matchExpectedRequest,
   pruneExpectedLegs,
   rememberExpectedLeg,
+  rememberExpectedRequest,
   reduceWebphone,
   WEBPHONE_HEARTBEAT_MS,
   WEBPHONE_RECOVERY_TIMEOUT_MS,
@@ -41,6 +44,8 @@ import {
   WEBPHONE_INITIAL_STATE,
   webphoneRegistrationView,
   type ExpectedOperatorLeg,
+  type ExpectedOperatorRequest,
+  type InviteIdentity,
   type WebphoneCredentials,
   type WebphoneEffect,
   type WebphoneEvent,
@@ -91,6 +96,11 @@ export type WebphoneSdkClient = {
   disconnect: () => Promise<void>;
   /** `HTMLMediaElement | string | Function` in the SDK; kept opaque so both stay assignable. */
   remoteElement: unknown;
+  /** Where the SDK registered, set before `telnyx.ready` (2.27.10); see `rtc_edge_connected`. */
+  region?: string | null;
+  dc?: string | null;
+  /** Forgets the tab's SDK signaling session (`voice_sdk_id`) before the next socket. */
+  clearReconnectToken?: () => void;
 };
 
 export type WebphoneSdkNotification = {
@@ -131,6 +141,14 @@ export type WebphoneSnapshot = {
   answering?: boolean;
   /** Remote audio was refused or paused and needs a user gesture to resume. */
   audioBlocked?: boolean;
+  /**
+   * Call-speed S6.4 (N4): the current call's remote audio element is playing
+   * its stream (`playing` seen for this call, no `pause` since). False before
+   * any media, after a pause and for every new call. Telnyx's media for an
+   * answered leg also plays before the far party is bridged, so this says
+   * "audio is flowing", not "the other person can be heard".
+   */
+  remoteAudioPlaying?: boolean;
   /** A call/media failure does not mean that the SIP registration was lost. */
   callError?: string | null;
   /** Last operator-facing error from an SDK/HTTP failure. */
@@ -152,7 +170,7 @@ export type TelnyxWebphoneOptions = {
   createClient?: (credentials: WebphoneCredentials) => Promise<WebphoneSdkClient> | WebphoneSdkClient;
   /** Test seam: download the SDK independently of credentials/socket setup. */
   loadSdk?: () => Promise<WebphoneSdkModule>;
-  /** Test seam for the two HTTP calls this module makes. */
+  /** Test seam for bounded credential, heartbeat and own-leg status requests. */
   requestJson?: typeof telephonyJson;
   setTimeout?: (handler: () => void, timeoutMs: number) => number;
   clearTimeout?: (handle: number) => void;
@@ -163,11 +181,38 @@ export type TelnyxWebphoneOptions = {
 
 const TOKEN_URL = "/api/telephony/webphone/token";
 const HEARTBEAT_URL = "/api/telephony/devices/heartbeat";
+const OFFER_STATUS_URL = "/api/telephony/webphone/offer-status";
+const OFFER_STATUS_INTERVAL_MS = 2_000;
 // SDK attach recovery answers its own replacement peer. It is never a new offer.
 const RINGING_STATES = new Set(["ringing"]);
 const ACTIVE_STATES = new Set(["active", "held", "early", "answering"]);
 const DEAD_STATES = new Set(["hangup", "destroy", "purge"]);
 const SDK_LOGIN_TIMEOUT_MS = 15_000;
+
+type RtcEdge = "eu" | "default";
+type EuEdgeTrigger = "connect_rejected" | "socket_closed" | "socket_error" | "sdk_error" | "login_timeout";
+/**
+ * An EU-edge client must log in within this (call-speed S5). With the
+ * immediate fallback retry and a default connect, a silent EU failure still
+ * fits the mobile `prepareForCall` budget.
+ */
+export const EU_EDGE_LOGIN_TIMEOUT_MS = 8_000;
+/** Ours: the edge this tab's SDK signaling session last used (sessionStorage). */
+const RTC_EDGE_STORAGE_KEY = "pm:phone-rtc-edge";
+/** SDK 2.27.10's sessionStorage marker of calls it reattaches after a reload. */
+const SDK_ACTIVE_CALLS_KEY = "telnyx-voice-sdk-active-calls";
+
+/**
+ * `webRtcRegion` (call-speed S5): set once an EU-edge client of this page
+ * failed before its first login. Every later client of the page, whichever
+ * phone instance creates it, connects to the SDK's default edge.
+ */
+let euEdgeFailed = false;
+
+/** Test seam: a new page. */
+export function resetEuEdgeFallback(): void {
+  euEdgeFailed = false;
+}
 
 type SdkLoginRequest = {
   client: WebphoneSdkClient;
@@ -177,6 +222,21 @@ type SdkLoginRequest = {
   timedOut: boolean;
 };
 
+type OfferObservation = {
+  call: WebphoneSdkCall;
+  callControlId: string;
+  deviceSessionId: string;
+  clientGeneration: number;
+  abort: AbortController;
+  failures: number;
+};
+
+type OfferStatus = {
+  callControlId: string;
+  sessionId: string | null;
+  status: "pending" | "ringing" | "connected" | "superseded" | "ended";
+};
+
 export class TelnyxWebphone {
   private state: WebphoneState = WEBPHONE_INITIAL_STATE;
   private client: WebphoneSdkClient | null = null;
@@ -184,6 +244,10 @@ export class TelnyxWebphone {
   private qualityWarnings = new Map<VoiceQualityWarningCode, number>();
   private qualityWarningsAmbiguous = false;
   private expected: ExpectedOperatorLeg[] = [];
+  /** Start requests armed for early accept (call-speed S3); see `expectOperatorRequest`. */
+  private expectedRequests: ExpectedOperatorRequest[] = [];
+  /** The own leg answered from its request header, until the start response verifies it. */
+  private earlyAccepted: { requestId: string; call: WebphoneSdkCall } | null = null;
   private incomingPolicy: IncomingOfferPolicy = { automaticAllowed: true };
   private withdrawnInvites = new Set<string>();
   private confirmedEndedCallIds = new Set<string>();
@@ -201,9 +265,15 @@ export class TelnyxWebphone {
   private refreshTimer: number | null = null;
   private recoveryTimer: number | null = null;
   private loginTimer: number | null = null;
+  /** Bounds an EU-edge client's first login; see `abandonEuEdge`. */
+  private euEdgeTimer: number | null = null;
+  /** A client created while `webRtcRegion` asks for the EU edge, until its first `telnyx.ready` (call-speed S5). */
+  private edgeTrial: { client: WebphoneSdkClient; edge: RtcEdge } | null = null;
   private heartbeatTimer: number | null = null;
   private heartbeatWorker: Worker | null = null;
   private expectedLegTimer: number | null = null;
+  private offerStatusTimer: number | null = null;
+  private offerObservation: OfferObservation | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
   private ringtone: BrowserIncomingRingtone | null = null;
   private ringing = false;
@@ -216,6 +286,7 @@ export class TelnyxWebphone {
   private answeredCallId: string | null = null;
   private callError: string | null = null;
   private audioBlocked = false;
+  private remoteAudioPlaying = false;
   private audioAttempt = 0;
   /** Set by `takeover()`: the next mint may revoke another tab's live device. */
   private takeoverRequested = false;
@@ -248,11 +319,14 @@ export class TelnyxWebphone {
   private readonly boundResume = () => this.onResume();
   private readonly boundAudioReady = () => void this.playRemoteAudio();
   private readonly boundAudioPlaying = () => {
-    if (this.hasRemoteMedia()) { this.finishAudioTiming?.(); this.finishAudioTiming = null; }
+    if (this.hasRemoteMedia()) { this.finishAudioTiming?.(); this.finishAudioTiming = null; this.remoteAudioPlaying = true; }
     this.setAudioBlocked(false);
+    this.publish();
   };
   private readonly boundAudioPause = () => {
+    this.remoteAudioPlaying = false;
     if (this.hasRemoteMedia()) this.setAudioBlocked(true);
+    this.publish();
   };
 
   constructor(options: TelnyxWebphoneOptions = {}) {
@@ -307,6 +381,8 @@ export class TelnyxWebphone {
     this.stopHeartbeat();
     this.clearTimer("expectedLegTimer");
     this.expected = [];
+    this.expectedRequests = [];
+    this.earlyAccepted = null;
     this.callError = null;
     this.dispatch({ type: "stop" }, reason);
     this.disposeAudio();
@@ -317,7 +393,25 @@ export class TelnyxWebphone {
    * answered without the operator touching anything (design §2.2). Correlation
    * is on `telnyxIDs.telnyxCallControlId`, never on arrival order.
    */
-  expectOperatorLeg(input: { callControlId: string; sessionId: string; timingOperationId?: string }): void {
+  expectOperatorLeg({ requestId, ...input }: { callControlId: string; sessionId: string; timingOperationId?: string; requestId?: string }): void {
+    if (requestId) {
+      // The response names the leg exactly; the request header decides nothing more.
+      this.expectedRequests = this.expectedRequests.filter((entry) => entry.requestId !== requestId);
+      const early = this.earlyAccepted?.requestId === requestId ? this.earlyAccepted : null;
+      if (early) {
+        this.earlyAccepted = null;
+        if (early.call.telnyxIDs?.telnyxCallControlId === input.callControlId) {
+          if (this.call?.telnyxIDs?.telnyxCallControlId === input.callControlId) {
+            this.callSessionId = input.sessionId;
+            if (input.timingOperationId) this.callTiming.operationId = input.timingOperationId;
+          }
+          this.publish();
+          return;
+        }
+        // Not the leg this request dialled: end it, then wait for the real one.
+        this.endEarlyAccepted(early.call, "early_accept_mismatch");
+      }
+    }
     // An invite can end before the API response identifies its operator leg.
     // That late response must not reserve the mobile phone for another 90 s.
     if (this.endedCallControlIds.has(input.callControlId)) return;
@@ -330,6 +424,60 @@ export class TelnyxWebphone {
       this.scheduleExpectedLegExpiry();
       this.publish();
     }
+  }
+
+  /**
+   * Early accept of the own leg (call-speed S3, `tuning.webEarlyAccept`): armed
+   * with a start POST's own `requestId` just before it is sent, so the invite
+   * carrying exactly that id (`matchExpectedRequest`) is answered without
+   * waiting for the response. Single use, 30 s. The response still has to
+   * confirm the leg (`expectOperatorLeg` with the same `requestId`), and
+   * `releaseOperatorRequest` ends whatever it did not confirm.
+   */
+  expectOperatorRequest(input: { requestId: string; timingOperationId?: string }): void {
+    if (!this.started) return;
+    this.expectedRequests = rememberExpectedRequest(this.expectedRequests, { ...input, at: this.now() }, this.now());
+    // Only a retried request can find its own invite already ringing.
+    this.autoAnswerCurrentCall();
+  }
+
+  /**
+   * The start request is over. Disarm it and hang up a leg answered under it
+   * that the response did not confirm: a failed start must not leave an open
+   * microphone on a call the console never learnt about. That includes a
+   * client-side failure or timeout of a call the server did place; see
+   * `withEarlyAccept` for why that fails safe.
+   */
+  releaseOperatorRequest(requestId: string): void {
+    this.expectedRequests = this.expectedRequests.filter((entry) => entry.requestId !== requestId);
+    const early = this.earlyAccepted;
+    if (early?.requestId !== requestId) return;
+    this.earlyAccepted = null;
+    this.endEarlyAccepted(early.call, "early_accept_cancelled");
+  }
+
+  /**
+   * Ends exactly that early-accepted leg and reports why, whether or not it is
+   * still this tab's current call: a later invite (the real own leg, an
+   * unrelated offer) may have taken that slot, and must itself stay untouched.
+   */
+  private endEarlyAccepted(call: WebphoneSdkCall, reason: "early_accept_mismatch" | "early_accept_cancelled"): void {
+    const callControlId = call.telnyxIDs?.telnyxCallControlId;
+    this.log({ event: reason, reason, callControlId });
+    // SDK recovery can replace the Call object while keeping the leg's id.
+    const current = this.call;
+    if (current && (current === call || (callControlId && current.telnyxIDs?.telnyxCallControlId === callControlId))) {
+      this.confirmCallEnded(current.id);
+      return;
+    }
+    if (DEAD_STATES.has(String(call.state).toLowerCase())) return;
+    // Retired: its late updates can never become the current call again.
+    this.retiredCalls.add(call);
+    this.confirmedEndedCallIds.add(call.id);
+    this.rememberEndedOperatorLeg(callControlId);
+    this.releaseCallMedia(call);
+    void Promise.resolve().then(() => call.hangup()).catch(() => undefined);
+    this.publish();
   }
 
   /** Server presence controls automatic offers; explicit legs use exact IDs. */
@@ -354,7 +502,9 @@ export class TelnyxWebphone {
   private suppressAutomaticInvite(call: WebphoneSdkCall): boolean {
     if (!RINGING_STATES.has(String(call.state).toLowerCase()) || call.direction !== "inbound") return false;
     const id = call.telnyxIDs?.telnyxCallControlId || call.id;
-    const exact = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now());
+    // An own leg recognised by its exact request id counts as an exact match.
+    const exact = matchExpectedLeg(this.expected, { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId }, this.now()) ??
+      (this.earlyAccepted?.call === call || matchExpectedRequest(this.expectedRequests, { customHeaders: call.options?.customHeaders }, this.now()));
     if (!this.withdrawnInvites.has(id) && (this.incomingPolicy.automaticAllowed || exact || this.callSessionId || this.isColleagueInvite(call))) return false;
     this.recordCallObservation(call, "ringtone_start", { outcome: "suppressed" });
     this.stopRinging();
@@ -532,7 +682,7 @@ export class TelnyxWebphone {
     return timer(handler, delayMs);
   }
 
-  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer" | "expectedLegTimer" | "recoveryTimer" | "loginTimer"): void {
+  private clearTimer(key: "retryTimer" | "refreshTimer" | "heartbeatTimer" | "expectedLegTimer" | "recoveryTimer" | "loginTimer" | "euEdgeTimer" | "offerStatusTimer"): void {
     const handle = this[key];
     if (handle === null) return;
     this[key] = null;
@@ -560,6 +710,67 @@ export class TelnyxWebphone {
     return this.options.requestJson ?? telephonyJson;
   }
 
+  /** Only the SDK owner observes its exact leg; shared tabs receive its snapshot. */
+  private syncOfferObservation(): void {
+    const call = this.call;
+    const callControlId = call?.telnyxIDs?.telnyxCallControlId;
+    const deviceSessionId = this.state.credentials?.deviceSessionId;
+    const current = this.offerObservation;
+    if (this.started && this.options.deviceKind !== "mobile" && call && callControlId && deviceSessionId) {
+      if (current?.call === call && current.callControlId === callControlId &&
+        current.deviceSessionId === deviceSessionId && current.clientGeneration === this.clientGeneration) return;
+      this.clearOfferObservation();
+      const observation: OfferObservation = {
+        call, callControlId, deviceSessionId, clientGeneration: this.clientGeneration,
+        abort: new AbortController(), failures: 0,
+      };
+      this.offerObservation = observation;
+      this.scheduleOfferObservation(observation);
+    } else this.clearOfferObservation();
+  }
+
+  private clearOfferObservation(): void {
+    const observation = this.offerObservation;
+    this.offerObservation = null;
+    this.clearTimer("offerStatusTimer");
+    observation?.abort.abort();
+  }
+
+  private scheduleOfferObservation(observation: OfferObservation): void {
+    if (this.offerObservation !== observation) return;
+    this.offerStatusTimer = this.schedule(() => {
+      if (this.offerObservation !== observation) return;
+      this.offerStatusTimer = null;
+      void this.observeOffer(observation);
+    }, nextBackoffDelayMs({ baseMs: OFFER_STATUS_INTERVAL_MS, consecutiveFailures: observation.failures, maxMs: 15_000, jitter: 0 }));
+  }
+
+  private async observeOffer(observation: OfferObservation): Promise<void> {
+    if (this.offerObservation !== observation) return;
+    try {
+      const query = new URLSearchParams({ deviceSessionId: observation.deviceSessionId, callControlId: observation.callControlId });
+      const result = await this.requestJson<OfferStatus>(`${OFFER_STATUS_URL}?${query}`, {
+        method: "GET", cache: "no-store", signal: observation.abort.signal,
+        label: "stav vlastného hovoru", timeoutMs: TELEPHONY_TIMEOUT_MS.read,
+      });
+      if (this.offerObservation !== observation || observation.abort.signal.aborted) return;
+      observation.failures = result.ok ? 0 : observation.failures + 1;
+      const body = result.body;
+      if (result.ok && body?.callControlId === observation.callControlId &&
+        typeof body.sessionId === "string" && body.sessionId.length > 0 &&
+        (!this.callSessionId || body.sessionId === this.callSessionId) &&
+        (body.status === "superseded" || body.status === "ended")) {
+        // This ends this SDK leg only. A full-session hangup could kill the
+        // winner on the iPhone while the provider's loser BYE is delayed.
+        this.confirmCallEnded(observation.call.id);
+      }
+    } catch {
+      if (this.offerObservation === observation) observation.failures++;
+    } finally {
+      this.scheduleOfferObservation(observation);
+    }
+  }
+
   private async mintToken(): Promise<void> {
     if (!this.started || this.minting) return;
     this.minting = true;
@@ -581,11 +792,13 @@ export class TelnyxWebphone {
         this.dispatch({ type: "token_rejected", status: result.status, message: result.body?.error ?? null, code: result.body?.code });
         return;
       }
-      const { token, expiresAt, deviceSessionId, sipUsername } = result.body;
+      const { token, expiresAt, deviceSessionId, sipUsername, webRtcRegion, webPrefetchIce } = result.body;
       this.resumeSessionId = deviceSessionId;
       this.handoffPending = false;
       this.options.onSession?.(deviceSessionId);
-      this.dispatch({ type: "token_issued", credentials: { token, expiresAt, deviceSessionId, sipUsername } });
+      // Connect-time switches (call-speed S5) only when on; anything else is today's client.
+      this.dispatch({ type: "token_issued", credentials: { token, expiresAt, deviceSessionId, sipUsername,
+        ...(webRtcRegion === "eu" ? { webRtcRegion } : {}), ...(webPrefetchIce === true ? { webPrefetchIce } : {}) } });
     } catch {
       if (!this.started || generation !== this.mintGeneration) return;
       this.dispatch({ type: "token_rejected", status: 0, message: "Telefón sa nepodarilo prihlásiť (sieť)." });
@@ -688,14 +901,11 @@ export class TelnyxWebphone {
     // await that same acknowledgement instead of adding another HTTP roundtrip.
     // Leaving/unregistered reports and new socket generations remain distinct.
     if (!leaving && pending?.body === body && pending.generation === generation) return pending.promise;
-    // Attach observations only at transport: changing diagnostics must not
-    // invalidate confirmRegistration's device-state comparison or deduplication.
-    const transport = prepareBrowserCallHeartbeat(body, browserCallTelemetry);
     const promise = this.requestJson<{ error?: string; reason?: string }>(HEARTBEAT_URL, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: transport.body,
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
       keepalive: leaving, label: "heartbeat telefónu", timeoutMs: TELEPHONY_TIMEOUT_MS.read,
     }).then((result) => {
-      if (result.ok) transport.acknowledge();
+      if (result.ok && !leaving) void flushBrowserCallTelemetry();
       return result;
     });
     if (!leaving) {
@@ -766,10 +976,12 @@ export class TelnyxWebphone {
     if (this.connecting) return;
     this.connecting = true;
     const generation = ++this.clientGeneration;
+    // Call-speed S5: one edge per client, from its mint. The test seam `createClient` chooses none.
+    const edge: RtcEdge | null = this.options.createClient ? null : credentials.webRtcRegion === "eu" && !euEdgeFailed ? "eu" : "default";
     try {
       const client = await (this.options.createClient
         ? this.options.createClient(credentials)
-        : this.createTelnyxClient(credentials));
+        : this.createTelnyxClient(credentials, edge === "eu"));
       if (!this.started || generation !== this.clientGeneration) {
         await Promise.resolve(client.disconnect()).catch(() => undefined);
         return;
@@ -780,6 +992,13 @@ export class TelnyxWebphone {
       const current = () => this.started && this.client === client && generation === this.clientGeneration;
       client.on("telnyx.ready", (() => {
         if (!current()) return;
+        const trial = this.edgeTrial;
+        if (trial?.client === client) {
+          this.edgeTrial = null;
+          this.clearTimer("euEdgeTimer");
+          // The edge the switch really reached, as the SDK's registration reported it.
+          this.log({ event: "rtc_edge_connected", reason: "rtc_edge_connected", rtcEdge: trial.edge, rtcRegion: client.region, rtcDc: client.dc });
+        }
         this.sdkReady = true;
         this.authenticationNeeded = false;
         if (this.socketLoginToken) {
@@ -791,10 +1010,14 @@ export class TelnyxWebphone {
         void this.applyPendingCredentials();
       }) as (payload: never) => void);
       client.on("telnyx.error", ((payload: WebphoneSdkError) => {
-        if (current()) this.onSdkError(payload);
+        if (!current()) return;
+        // The SDK's own recoverable errors are only logged today.
+        if (payload?.error?.fatal !== false && this.abandonEuEdge(client, "sdk_error")) return;
+        this.onSdkError(payload);
       }) as (payload: never) => void);
       client.on("telnyx.socket.close", ((payload: WebphoneSdkSocketEvent) => {
         if (!current() || !this.currentSocketEvent(client, payload)) return;
+        if (this.abandonEuEdge(client, "socket_closed")) return;
         this.onTransportLost();
       }) as (payload: never) => void);
       client.on("telnyx.socket.open", (() => {
@@ -808,7 +1031,7 @@ export class TelnyxWebphone {
         this.socketLoginToken = client.options.login_token ?? null;
       }) as (payload: never) => void);
       client.on("telnyx.socket.error", ((payload: WebphoneSdkSocketEvent) => {
-        if (current() && this.currentSocketEvent(client, payload)) this.onTransportLost();
+        if (current() && this.currentSocketEvent(client, payload) && !this.abandonEuEdge(client, "socket_error")) this.onTransportLost();
       }) as (payload: never) => void);
       client.on("telnyx.warning", ((payload: WebphoneSdkWarning) => {
         if (current()) this.onSdkWarning(payload);
@@ -818,9 +1041,20 @@ export class TelnyxWebphone {
       }) as (payload: never) => void);
       const element = this.getRemoteAudio();
       if (element) client.remoteElement = element;
+      if (edge) this.matchReconnectToken(client, edge);
+      if (edge && credentials.webRtcRegion === "eu") {
+        this.edgeTrial = { client, edge };
+        if (edge === "eu") {
+          this.euEdgeTimer = this.schedule(() => {
+            this.euEdgeTimer = null;
+            if (current()) this.abandonEuEdge(client, "login_timeout");
+          }, EU_EDGE_LOGIN_TIMEOUT_MS);
+        }
+      }
       await client.connect();
     } catch (error) {
       if (!this.started || generation !== this.clientGeneration) return;
+      if (this.client && this.abandonEuEdge(this.client, "connect_rejected")) return;
       this.dispatch({
         type: "client_error",
         message: error instanceof Error ? error.message : "Telefón sa nepodarilo pripojiť.",
@@ -830,11 +1064,46 @@ export class TelnyxWebphone {
     }
   }
 
-  private async createTelnyxClient(credentials: WebphoneCredentials): Promise<WebphoneSdkClient> {
+  private async createTelnyxClient(credentials: WebphoneCredentials, euEdge: boolean): Promise<WebphoneSdkClient> {
     const { TelnyxRTC } = await this.loadSdk();
     // Send the SDP answer immediately and deliver ICE candidates as they
     // arrive, avoiding the SDK's non-trickle gathering wait before answering.
-    return new TelnyxRTC({ login_token: credentials.token, trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5 });
+    // The call-speed S5 switches add their options only when on.
+    return new TelnyxRTC({ login_token: credentials.token, trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5,
+      ...(euEdge ? { region: "eu" } : {}), ...(credentials.webPrefetchIce === true ? { prefetchIceCandidates: true } : {}) });
+  }
+
+  /**
+   * SDK 2.27.10 keeps one signaling session per tab (`voice_sdk_id` in
+   * sessionStorage) and resumes it on whichever edge it connects to. A client
+   * on another edge than the tab last used starts a fresh session, unless a
+   * call may still be reattached to the old one. Nothing is stored or cleared
+   * while the tab stays on the default edge.
+   */
+  private matchReconnectToken(client: WebphoneSdkClient, edge: RtcEdge): void {
+    try {
+      if (typeof sessionStorage === "undefined" || (sessionStorage.getItem(RTC_EDGE_STORAGE_KEY) ?? "default") === edge) return;
+      if (this.call || sessionStorage.getItem(SDK_ACTIVE_CALLS_KEY)) return;
+      client.clearReconnectToken?.();
+      sessionStorage.setItem(RTC_EDGE_STORAGE_KEY, edge);
+    } catch { /* Storage refused: the SDK keeps its session, as before. */ }
+  }
+
+  /**
+   * An EU-edge client that fails before its first login (call-speed S5) is
+   * replaced at once on the default edge, and this page stays there. Nothing
+   * rides on it yet: invites arrive only after login, so the switch can never
+   * cost a call, nor count as a failed connection of the phone. At most once
+   * per page, since no EU-edge client is created after it.
+   */
+  private abandonEuEdge(client: WebphoneSdkClient, trigger: EuEdgeTrigger): boolean {
+    if (this.edgeTrial?.client !== client || this.edgeTrial.edge !== "eu") return false;
+    this.edgeTrial = null;
+    this.clearTimer("euEdgeTimer");
+    euEdgeFailed = true;
+    this.log({ event: "rtc_region_fallback", reason: "rtc_region_fallback", rtcEdge: "eu", rtcTrigger: trigger });
+    this.dispatch({ type: "client_error", edgeFallback: true });
+    return true;
   }
 
   private beginRecovery(message: string, signaling: boolean): void {
@@ -997,8 +1266,10 @@ export class TelnyxWebphone {
     this.loginRequest = null;
     this.loginFailureEvent = null;
     this.lastWarningRefreshAt = -Infinity;
+    this.edgeTrial = null;
     this.clearTimer("recoveryTimer");
     this.clearTimer("loginTimer");
+    this.clearTimer("euEdgeTimer");
     this.confirmedEndedCallIds.clear();
     this.retiredCalls = new WeakSet();
     this.retiredCallIds.clear();
@@ -1010,7 +1281,14 @@ export class TelnyxWebphone {
     this.hangupRequestedCallId = null;
     this.audioAttempt += 1;
     this.audioBlocked = false;
+    this.remoteAudioPlaying = false;
     if (!client) return;
+    // SDK 2.27.10 iterates its live listener array. A socket event can emit a
+    // nested fatal error (reconnect exhaustion); off() inside that callback
+    // deletes the outer event's array and crashes its next iteration. Retire
+    // ownership/media above immediately, then let event dispatch finish before
+    // removing listeners. The generation guard ignores remaining callbacks.
+    await Promise.resolve();
     for (const event of ["telnyx.ready", "telnyx.error", "telnyx.socket.close", "telnyx.socket.open", "telnyx.socket.error", "telnyx.warning", "telnyx.notification"]) client.off(event);
     await Promise.resolve(client.disconnect()).catch(() => undefined);
   }
@@ -1111,6 +1389,7 @@ export class TelnyxWebphone {
       this.answeredCallId = null;
       this.audioAttempt++;
       this.audioBlocked = false;
+      this.remoteAudioPlaying = false;
     } else if (this.call?.id !== call.id) {
       this.finishInviteTiming?.({ outcome: "cancelled" });
       this.finishAudioTiming?.({ outcome: "cancelled" });
@@ -1126,6 +1405,7 @@ export class TelnyxWebphone {
       this.hangupRequestedCallId = null;
       this.audioAttempt += 1;
       this.audioBlocked = false;
+      this.remoteAudioPlaying = false;
     }
     if (this.call !== call) {
       // SDK warnings contain a call ID but no peer object/generation. After a
@@ -1189,17 +1469,32 @@ export class TelnyxWebphone {
     if (!RINGING_STATES.has(state) || String(call.direction ?? "").toLowerCase() !== "inbound") return false;
 
     if (this.suppressAutomaticInvite(call)) return false;
-    const expected = (this.incomingPolicy.automaticAllowed ? matchAutoAnswer : matchExpectedLeg)(
-      this.expected,
-      { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId, customHeaders: call.options?.customHeaders },
-      this.now(),
-    );
+    // Answered early and awaiting its start response: never re-correlate it.
+    if (this.earlyAccepted?.call === call) return false;
+    const invite: InviteIdentity = { telnyxCallControlId: call.telnyxIDs?.telnyxCallControlId, customHeaders: call.options?.customHeaders };
+    const exact = matchExpectedLeg(this.expected, invite, this.now());
+    // An exact request id outranks the header-only tiebreaker of `matchAutoAnswer`.
+    if (!exact && this.acceptEarly(call, invite)) return true;
+    const expected = exact ?? (this.incomingPolicy.automaticAllowed ? matchAutoAnswer(this.expected, invite, this.now()) : null);
     if (!expected) return false;
     this.expected = this.expected.filter((entry) => entry.callControlId !== expected.callControlId);
     this.scheduleExpectedLegExpiry();
     this.callSessionId = expected.sessionId;
     if (expected.timingOperationId) this.callTiming.operationId = expected.timingOperationId;
 
+    void this.answerCall(call, "automatic");
+    return true;
+  }
+
+  /** Early accept (call-speed S3): the own leg of a start request still in flight. */
+  private acceptEarly(call: WebphoneSdkCall, invite: InviteIdentity): boolean {
+    const request = matchExpectedRequest(this.expectedRequests, invite, this.now());
+    if (!request) return false;
+    // Single use: this id can never answer a second invite.
+    this.expectedRequests = this.expectedRequests.filter((entry) => entry.requestId !== request.requestId);
+    this.earlyAccepted = { requestId: request.requestId, call };
+    if (request.timingOperationId) this.callTiming.operationId = request.timingOperationId;
+    this.log({ event: "early_accept", reason: "early_accept", callControlId: invite.telnyxCallControlId });
     void this.answerCall(call, "automatic");
     return true;
   }
@@ -1353,6 +1648,7 @@ export class TelnyxWebphone {
   private disposeAudio(): void {
     this.audioAttempt += 1;
     this.audioBlocked = false;
+    this.remoteAudioPlaying = false;
     this.ringtone?.dispose();
     this.ringtone = null;
     const element = this.remoteAudio;
@@ -1378,16 +1674,14 @@ export class TelnyxWebphone {
     this.scheduleExpectedLegExpiry();
   }
 
-  private clearCurrentCall(): void {
-    // SDK 2.27 sets Hangup before awaiting BYE (up to 5 seconds), and only
-    // closes its peer afterwards. Release this terminal call's actual tracks
-    // now; signaling and the authoritative server command still finish normally.
-    const remoteStream = this.call?.remoteStream;
-    if (this.call) {
-      this.confirmedEndedCallIds.add(this.call.id);
-      if (this.confirmedEndedCallIds.size > 128) this.confirmedEndedCallIds.delete(this.confirmedEndedCallIds.values().next().value!);
-    }
-    for (const stream of new Set([this.call?.localStream, remoteStream])) {
+  /**
+   * SDK 2.27 sets Hangup before awaiting BYE (up to 5 seconds), and only
+   * closes its peer afterwards. Release a terminal call's actual tracks now;
+   * signaling and the authoritative server command still finish normally.
+   */
+  private releaseCallMedia(call: WebphoneSdkCall | null): void {
+    const remoteStream = call?.remoteStream;
+    for (const stream of new Set([call?.localStream, remoteStream])) {
       for (const track of stream?.getTracks() ?? []) {
         try { track.stop(); } catch { /* Continue releasing the other tracks. */ }
       }
@@ -1396,6 +1690,15 @@ export class TelnyxWebphone {
       this.remoteAudio.pause();
       this.remoteAudio.srcObject = null;
     }
+  }
+
+  private clearCurrentCall(): void {
+    this.clearOfferObservation();
+    if (this.call) {
+      this.confirmedEndedCallIds.add(this.call.id);
+      if (this.confirmedEndedCallIds.size > 128) this.confirmedEndedCallIds.delete(this.confirmedEndedCallIds.values().next().value!);
+    }
+    this.releaseCallMedia(this.call);
     this.finishInviteTiming?.({ outcome: "cancelled" });
     this.finishAudioTiming?.({ outcome: "cancelled" });
     this.finishInviteTiming = null;
@@ -1411,6 +1714,7 @@ export class TelnyxWebphone {
     this.answeredCallId = null;
     this.audioAttempt += 1;
     this.audioBlocked = false;
+    this.remoteAudioPlaying = false;
     if (this.mediaRecovering) {
       this.mediaRecovering = false;
       if (this.sdkReady) this.dispatch({ type: "client_ready" });
@@ -1433,6 +1737,7 @@ export class TelnyxWebphone {
       message: this.state.message,
       answering: this.answeringCallId !== null,
       audioBlocked: this.audioBlocked,
+      remoteAudioPlaying: this.remoteAudioPlaying && this.hasRemoteMedia(),
       callError: this.callError,
       pendingOperatorLegs: pruneExpectedLegs(this.expected, this.now()).length,
       call: call
@@ -1457,6 +1762,7 @@ export class TelnyxWebphone {
     // SDK methods and errors can change the mutable Call without a final
     // notification. Never leave a terminated call holding the mobile busy lock.
     if (this.call && DEAD_STATES.has(String(this.call.state).toLowerCase())) this.clearCurrentCall();
+    this.syncOfferObservation();
     this.snapshot = this.buildSnapshot();
     for (const listener of this.listeners) listener(this.snapshot);
   }

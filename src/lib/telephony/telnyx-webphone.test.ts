@@ -1,16 +1,19 @@
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { Call, IClientOptions, TelnyxRTC } from "@telnyx/webrtc";
 
-import { TelnyxWebphone, isAuthFailure, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
+import { EU_EDGE_LOGIN_TIMEOUT_MS, TelnyxWebphone, isAuthFailure, resetEuEdgeFallback, type TelnyxWebphoneOptions, type WebphoneSdkCall, type WebphoneSdkClient, type WebphoneSdkNotification } from "./telnyx-webphone";
 import type { TelephonyJsonResult } from "./client-request";
-import { EXPECTED_LEG_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_RECOVERY_TIMEOUT_MS } from "./webphone-model";
+import { EXPECTED_LEG_TTL_MS, EXPECTED_REQUEST_TTL_MS, TOKEN_REFRESH_MIN_MS, WEBPHONE_EDGE_FALLBACK_RETRY_MS, WEBPHONE_MAX_CONNECT_FAILURES, WEBPHONE_RECOVERY_TIMEOUT_MS, webphoneRetryDelayMs } from "./webphone-model";
+import { MOBILE_PREPARE_TIMEOUT_MS } from "./coordinated-webphone";
 import { isDeviceLive } from "./device-liveness";
 import * as browserTiming from "./browser-call-telemetry";
+import * as browserTransport from "./browser-call-transport";
 import { BrowserIncomingRingtone } from "./browser-ringtone";
 import { VOICE_QUALITY_WARNINGS } from "@/lib/diagnostics/voice-quality";
 
 beforeEach(() => {
   vi.spyOn(browserTiming, "browserCallTelemetry").mockReturnValue(new browserTiming.BrowserCallTelemetry());
+  vi.spyOn(browserTransport, "flushBrowserCallTelemetry").mockResolvedValue(undefined);
 });
 
 /**
@@ -30,6 +33,9 @@ class FakeClient implements WebphoneSdkClient {
   options: { login_token?: string };
   connection = { connected: false, socketGeneration: 1 };
   calls = new Set<WebphoneSdkCall>();
+  region: string | null = null;
+  dc: string | null = null;
+  clearReconnectToken = vi.fn();
   constructor(options: { login_token?: string } = {}) { this.options = options; }
   login = vi.fn(async (options?: Parameters<WebphoneSdkClient["login"]>[0]) => {
     // Real 2.27.10 returns without callbacks when its socket is not alive.
@@ -103,9 +109,9 @@ function fakeCall(overrides: Partial<WebphoneSdkCall> = {}): WebphoneSdkCall & {
   return call as WebphoneSdkCall & { answered: boolean; hungUp: boolean; digits: string[] };
 }
 
-type Request = { url: string; body: unknown };
+type Request = { url: string; body: unknown; init: Parameters<NonNullable<TelnyxWebphoneOptions["requestJson"]>>[1] };
 
-function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: boolean; token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"] } = {}) {
+function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: boolean; deviceKind?: TelnyxWebphoneOptions["deviceKind"]; token?: TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; heartbeat?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; offerStatus?: () => TelephonyJsonResult<unknown> | Promise<TelephonyJsonResult<unknown>>; now?: () => number; createClient?: TelnyxWebphoneOptions["createClient"]; loadSdk?: TelnyxWebphoneOptions["loadSdk"]; random?: TelnyxWebphoneOptions["random"] } = {}) {
   const requests: Request[] = [];
   const timers: Array<{ id: number; handler: () => void; delayMs: number }> = [];
   let nextTimer = 1;
@@ -113,10 +119,12 @@ function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: b
 
   const phone = new TelnyxWebphone({
     silent: options.silent ?? true,
+    deviceKind: options.deviceKind,
     logger: options.logger,
     now: options.now ?? (() => Date.parse("2026-09-03T08:00:00.000Z")),
     createClient: options.createClient ?? (options.loadSdk ? undefined : credentials => { client.options.login_token = credentials.token; return client; }),
     loadSdk: options.loadSdk,
+    random: options.random,
     setTimeout: (handler, delayMs) => {
       const id = nextTimer++;
       timers.push({ id, handler, delayMs });
@@ -127,7 +135,8 @@ function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: b
       if (index >= 0) timers.splice(index, 1);
     },
     requestJson: async (url, init) => {
-      requests.push({ url, body: init.body });
+      requests.push({ url, body: init.body, init });
+      if (url.includes("/webphone/offer-status")) return (options.offerStatus?.() ?? { ok: true, status: 200, body: { status: "pending" } }) as never;
       if (url.includes("/webphone/token")) {
         return (options.token ?? {
           ok: true,
@@ -160,6 +169,160 @@ function harness(options: { logger?: TelnyxWebphoneOptions["logger"]; silent?: b
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+describe("authoritative browser leg settlement", () => {
+  const sessionId = "00000000-0000-4000-8000-000000000001";
+  const result = (status: string, callControlId = "cc-1") => ({
+    ok: true, status: 200, body: { status, callControlId, sessionId },
+  });
+  async function ringing(options: Parameters<typeof harness>[0] = {}) {
+    const h = harness(options);
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    const call = fakeCall();
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    return { ...h, call };
+  }
+
+  it("silences a losing incoming web leg without waiting for BYE or ending the shared call", async () => {
+    const h = await ringing({ offerStatus: () => result("superseded"), silent: false });
+    const stopRingtone = vi.spyOn(BrowserIncomingRingtone.prototype, "stop");
+    const bye = deferred<void>();
+    const hangup = vi.fn(() => bye.promise);
+    h.call.hangup = hangup;
+    expect(h.phone.getSnapshot().call).toMatchObject({ ringing: true, sessionId: null });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: null });
+    expect(stopRingtone).toHaveBeenCalled();
+    expect(hangup).toHaveBeenCalledOnce();
+    const request = h.requests.find(request => request.url.includes("offer-status"))!;
+    expect(new URL(request.url, "https://test.example").searchParams.get("callControlId")).toBe("cc-1");
+    expect(new URL(request.url, "https://test.example").searchParams.get("deviceSessionId")).toBe("device-1");
+    expect(request.init).toMatchObject({ method: "GET", cache: "no-store", timeoutMs: 8_000 });
+    expect(h.requests.filter(request => request.init.method !== "GET").every(request => /token|heartbeat/.test(request.url))).toBe(true);
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: h.call });
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    bye.resolve(); h.phone.stop();
+  });
+
+  it.each(["pending", "ringing", "connected", "unknown"])("keeps the current call on %s", async status => {
+    const h = await ringing({ offerStatus: () => result(status) });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(h.call.id);
+    expect(h.call.hungUp).toBe(false);
+    expect(h.timers.filter(timer => timer.delayMs === 2_000)).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("ignores mismatched control IDs, missing session identity and a different known session", async () => {
+    const offerStatus = vi.fn()
+      .mockResolvedValueOnce(result("ended", "different-leg"))
+      .mockResolvedValueOnce({ ok: true, status: 200, body: { status: "ended", callControlId: "cc-1", sessionId: null } })
+      .mockResolvedValueOnce({ ...result("ended"), body: { ...result("ended").body, sessionId: "other-session" } });
+    const h = await ringing({ offerStatus });
+    for (let index = 0; index < 2; index++) { h.runTimer(timer => timer.delayMs === 2_000); await flush(); }
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(h.call.id);
+    expect(h.call.hungUp).toBe(false);
+    h.phone.stop();
+  });
+
+  it("releases ended active media and only hangs up its exact local SDK leg", async () => {
+    const h = await ringing({ offerStatus: () => result("ended") });
+    const stop = vi.fn();
+    h.call.state = "active";
+    h.call.localStream = { getTracks: () => [{ stop }] } as unknown as MediaStream;
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: h.call });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(h.client.disconnected).toBe(false);
+    h.phone.stop();
+  });
+
+  it("never overlaps requests and aborts an obsolete response before another call", async () => {
+    const old = deferred<TelephonyJsonResult<unknown>>();
+    const h = await ringing({ offerStatus: () => old.promise });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    const request = h.requests.find(request => request.url.includes("offer-status"))!;
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: true });
+    expect(h.requests.filter(request => request.url.includes("offer-status"))).toHaveLength(1);
+    h.call.state = "hangup";
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: h.call });
+    expect(request.init.signal?.aborted).toBe(true);
+    const next = fakeCall({ id: "next", telnyxIDs: { ...h.call.telnyxIDs, telnyxCallControlId: "cc-next" } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: next });
+    old.resolve(result("ended")); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(next.id);
+    expect(next.hungUp).toBe(false);
+    expect(h.timers.filter(timer => timer.delayMs === 2_000)).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("backs off errors without treating network or lease rejection as an ended call", async () => {
+    const offerStatus = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ ok: false, status: 409, body: { status: "ended", callControlId: "cc-1", sessionId } })
+      .mockResolvedValue(result("ringing"));
+    const h = await ringing({ offerStatus });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    expect(h.timers.some(timer => timer.delayMs === 4_000)).toBe(true);
+    h.runTimer(timer => timer.delayMs === 4_000); await flush();
+    expect(h.timers.some(timer => timer.delayMs === 8_000)).toBe(true);
+    expect(h.call.hungUp).toBe(false);
+    h.runTimer(timer => timer.delayMs === 8_000); await flush();
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(true);
+    h.phone.stop();
+  });
+
+  it("aborts on ownership shutdown and fences late terminal reads after restart", async () => {
+    const old = deferred<TelephonyJsonResult<unknown>>();
+    const h = await ringing({ offerStatus: () => old.promise });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    const request = h.requests.find(request => request.url.includes("offer-status"))!;
+    h.phone.stop("ownership_release");
+    expect(request.init.signal?.aborted).toBe(true);
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    const next = fakeCall({ id: "new-account-call" });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call: next });
+    old.resolve(result("superseded")); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(next.id);
+    expect(next.hungUp).toBe(false);
+    h.phone.stop();
+  });
+
+  it("ignores a terminal response from the previous lease after a token renewal", async () => {
+    const credentials = { token: "jwt", expiresAt: "2026-09-03T09:00:00.000Z", deviceSessionId: "device-1", sipUsername: "gencred1" };
+    const token: TelephonyJsonResult<unknown> = { ok: true, status: 200, body: credentials };
+    const old = deferred<TelephonyJsonResult<unknown>>();
+    const h = await ringing({ token, offerStatus: () => old.promise });
+    h.runTimer(timer => timer.delayMs === 2_000); await flush();
+    const request = h.requests.find(request => request.url.includes("offer-status"))!;
+    token.body = { ...credentials, token: "renewed", deviceSessionId: "device-2" };
+    h.runTimer(timer => timer.delayMs === 1_800_000); await flush();
+    expect(h.phone.getSnapshot().deviceSessionId).toBe("device-2");
+    expect(request.init.signal?.aborted).toBe(true);
+    old.resolve(result("ended")); await flush();
+    expect(h.phone.getSnapshot().call?.id).toBe(h.call.id);
+    expect(h.call.hungUp).toBe(false);
+    expect(h.timers.filter(timer => timer.delayMs === 2_000)).toHaveLength(1);
+    h.phone.stop();
+  });
+
+  it("does not query idle phones, calls without a control ID or legacy mobile browser leases", async () => {
+    const h = harness(); h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    const call = fakeCall({ telnyxIDs: { telnyxCallControlId: "", telnyxSessionId: "ts", telnyxLegId: "leg" } });
+    h.client.emit("telnyx.notification", { type: "callUpdate", call });
+    expect(h.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    h.phone.stop();
+    const mobile = await ringing({ deviceKind: "mobile" });
+    expect(mobile.timers.some(timer => timer.delayMs === 2_000)).toBe(false);
+    mobile.phone.stop();
+  });
+});
 
 describe("bounded SDK voice-quality observations", () => {
   const session = "00000000-0000-4000-8000-000000000001";
@@ -308,6 +471,7 @@ describe("TelnyxWebphone", () => {
     expect(() => h.phone.hangup()).not.toThrow();
     expect(call.hungUp).toBe(true);
     expect(() => h.phone.stop("component_unmount")).not.toThrow();
+    await flush();
     expect(h.client.disconnected).toBe(true);
     expect(logger).toHaveBeenCalled();
   });
@@ -325,6 +489,7 @@ describe("TelnyxWebphone", () => {
       expect.objectContaining({ event: "disconnect", reason: "component_unmount", deviceSessionId: "device-1", callSessionId: "session-1", alreadyDisconnected: false }),
     ]);
     expect(h.phone.getSnapshot().call).toBeNull();
+    await flush();
     expect(h.client.disconnected).toBe(true);
   });
 
@@ -366,20 +531,26 @@ describe("TelnyxWebphone", () => {
     h.phone.stop();
   });
 
-  it("keeps timings after a failed heartbeat and piggybacks them on the next ordinary pulse", async () => {
+  it("does not discard timings on heartbeat success and never waits for the diagnostic transport", async () => {
     let fail = false;
     const h = harness({ heartbeat: () => ({ ok: !fail, status: fail ? 500 : 200, body: {} }) });
     h.phone.start(); await flush(); h.client.emit("telnyx.ready"); await flush();
     h.client.emit("telnyx.notification", { type: "callUpdate", call: fakeCall() });
     const batch = browserTiming.browserCallTelemetry().batch();
+    vi.mocked(browserTransport.flushBrowserCallTelemetry).mockClear();
+    const diagnostic = deferred<void>();
+    vi.mocked(browserTransport.flushBrowserCallTelemetry).mockReturnValue(diagnostic.promise);
     fail = true;
     h.runTimer(timer => timer.delayMs === 30_000); await flush();
-    expect(JSON.parse(h.requests.at(-1)!.body as string).callTimings).toEqual(batch);
+    expect(JSON.parse(h.requests.at(-1)!.body as string).callTimings).toBeUndefined();
     expect(browserTiming.browserCallTelemetry().batch()).toEqual(batch);
+    expect(browserTransport.flushBrowserCallTelemetry).not.toHaveBeenCalled();
     fail = false;
     h.runTimer(timer => timer.delayMs === 30_000); await flush();
-    expect(JSON.parse(h.requests.at(-1)!.body as string).callTimings).toEqual(batch);
-    expect(browserTiming.browserCallTelemetry().batch()).toEqual([]);
+    expect(browserTransport.flushBrowserCallTelemetry).toHaveBeenCalledTimes(1);
+    expect(browserTiming.browserCallTelemetry().batch()).toEqual(batch);
+    await expect(h.phone.confirmRegistration()).resolves.toBeUndefined();
+    diagnostic.resolve();
     h.phone.stop();
   });
 
@@ -500,7 +671,7 @@ describe("TelnyxWebphone", () => {
     expect(h.phone.getSnapshot().status).toBe("registered");
     expect(h.phone.getSnapshot().registration.label).toBe("Registrované");
     expect(h.phone.getSnapshot().sipUsername).toBe("gencred1");
-    expect(h.requests.at(-1)).toEqual({ url: "/api/telephony/devices/heartbeat", body: JSON.stringify({ deviceSessionId: "device-1", registrationState: "registered" }) });
+    expect(h.requests.at(-1)).toMatchObject({ url: "/api/telephony/devices/heartbeat", body: JSON.stringify({ deviceSessionId: "device-1", registrationState: "registered" }) });
   });
 
   it("stays in the not-configured mode when the token route answers 503", async () => {
@@ -541,7 +712,7 @@ describe("TelnyxWebphone", () => {
     await expect(h.phone.confirmRegistration()).resolves.toBeUndefined();
 
     Object.assign(token, { ok: true, status: 200, body: { ...credentials, token: "renewed-jwt", deviceSessionId: "device-2" } });
-    h.runTimer(timer => timer.delayMs < 30_000);
+    h.runTimer(timer => timer.delayMs > 2_000 && timer.delayMs < 30_000);
     await flush();
     expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", deviceSessionId: "device-2", message: null, call: { active: true } });
     expect(connect).toHaveBeenCalledTimes(1);
@@ -1400,6 +1571,292 @@ describe("PA-01/02/10 paused browser offer policy", () => {
   });
 });
 
+describe("early accept of the own leg (call-speed S3)", () => {
+  const REQUEST = "6f1c2a4e-8b3d-4c5e-9f60-7a8b9c0d1e2f";
+  const OTHER = "0b7e5d3c-1a2f-4e6d-8c9b-a0b1c2d3e4f5";
+  const SESSION = "00000000-0000-4000-8000-000000000301";
+  const ownHeaders = (requestId = REQUEST) => [{ name: "X-PM-Auto-Answer", value: "1" }, { name: "X-PM-Request", value: requestId }];
+  const leg = (id: string, customHeaders: Array<{ name: string; value: string }> = ownHeaders()) => fakeCall({ id,
+    telnyxIDs: { telnyxCallControlId: `cc-${id}`, telnyxSessionId: `ts-${id}`, telnyxLegId: `leg-${id}` },
+    options: { remoteCallerNumber: "+421232408718", customHeaders } });
+  const invite = (h: ReturnType<typeof harness>, call: WebphoneSdkCall) => h.client.emit("telnyx.notification", { type: "callUpdate", call } satisfies WebphoneSdkNotification);
+  /** Ends a call the way the SDK reports it, so the next invite starts clean. */
+  const gone = (h: ReturnType<typeof harness>, call: ReturnType<typeof fakeCall>) => { call.hangup(); invite(h, call); };
+  async function ready(options: Parameters<typeof harness>[0] = {}) {
+    const h = harness(options);
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    return h;
+  }
+
+  it("answers its own leg from the request header before the start response, which then confirms it", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const h = await ready({ logger: (entry) => logs.push(entry) });
+    h.phone.expectOperatorRequest({ requestId: REQUEST, timingOperationId: REQUEST });
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(true);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "own", active: true, sessionId: null });
+    expect(logs).toContainEqual(expect.objectContaining({ event: "early_accept", reason: "early_accept", callControlId: "cc-own" }));
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-own", sessionId: SESSION, timingOperationId: REQUEST, requestId: REQUEST });
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(own.hungUp).toBe(false);
+    expect(h.phone.getSnapshot()).toMatchObject({ call: { id: "own", active: true, sessionId: SESSION }, pendingOperatorLegs: 0 });
+    expect(logs.some((entry) => entry.event === "early_accept_mismatch" || entry.event === "early_accept_cancelled")).toBe(false);
+    h.phone.stop();
+  });
+
+  it("hangs up an early leg the start response does not own, then answers the real leg by its id", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const h = await ready({ logger: (entry) => logs.push(entry) });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const wrong = leg("wrong");
+    invite(h, wrong);
+    expect(wrong.answered).toBe(true);
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-real", sessionId: SESSION, requestId: REQUEST });
+    await flush();
+    expect(wrong.hungUp).toBe(true);
+    expect(h.phone.getSnapshot()).toMatchObject({ call: null, pendingOperatorLegs: 1 });
+    expect(logs).toContainEqual(expect.objectContaining({ event: "early_accept_mismatch", reason: "early_accept_mismatch", callControlId: "cc-wrong" }));
+    // Its late SDK update cannot bring the hung-up leg back.
+    invite(h, wrong);
+    expect(h.phone.getSnapshot().call).toBeNull();
+
+    const real = leg("real");
+    invite(h, real);
+    expect(real.answered).toBe(true);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "real", sessionId: SESSION });
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(real.hungUp).toBe(false);
+    h.phone.stop();
+  });
+
+  it("hangs up whatever it answered when the start request fails, and stays disarmed", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const h = await ready({ logger: (entry) => logs.push(entry) });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(true);
+
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(own.hungUp).toBe(true);
+    expect(h.phone.getSnapshot().call).toBeNull();
+    expect(logs).toContainEqual(expect.objectContaining({ event: "early_accept_cancelled", reason: "early_accept_cancelled" }));
+
+    const late = leg("late");
+    invite(h, late);
+    expect(late.answered).toBe(false);
+    h.phone.stop();
+  });
+
+  it("hangs up the wrong early leg even after the real own-leg invite took its place", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const h = await ready({ logger: (entry) => logs.push(entry) });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const wrong = leg("wrong");
+    invite(h, wrong);
+    expect(wrong.answered).toBe(true);
+    // The real own leg arrives before the response names it; the id is used up.
+    const real = leg("real");
+    invite(h, real);
+    expect(real.answered).toBe(false);
+    expect(h.phone.getSnapshot().call?.id).toBe("real");
+
+    h.phone.expectOperatorLeg({ callControlId: "cc-real", sessionId: SESSION, requestId: REQUEST });
+    await flush();
+    expect(wrong.hungUp).toBe(true);
+    expect(logs).toContainEqual(expect.objectContaining({ event: "early_accept_mismatch", callControlId: "cc-wrong" }));
+    expect(real.answered).toBe(true);
+    expect(real.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "real", sessionId: SESSION });
+    // The retired leg's late update never becomes the current call again.
+    invite(h, wrong);
+    expect(h.phone.getSnapshot().call?.id).toBe("real");
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(real.hungUp).toBe(false);
+    h.phone.stop();
+  });
+
+  it("hangs up the early leg when the start fails after another invite became current, and only that leg", async () => {
+    const h = await ready();
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(true);
+    const offer = leg("offer", []);
+    invite(h, offer);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "offer", ringing: true });
+
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(own.hungUp).toBe(true);
+    expect(offer.hungUp).toBe(false);
+    expect(offer.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "offer", ringing: true });
+    invite(h, own);
+    expect(h.phone.getSnapshot().call?.id).toBe("offer");
+    h.phone.stop();
+  });
+
+  it("does not answer a wrong, an already used or an expired request id", async () => {
+    let now = Date.parse("2026-09-03T08:00:00.000Z");
+    const h = await ready({ now: () => now });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+
+    const wrong = leg("wrong", ownHeaders(OTHER));
+    invite(h, wrong);
+    expect(wrong.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "wrong", ringing: true });
+    gone(h, wrong);
+
+    const first = leg("first");
+    invite(h, first);
+    expect(first.answered).toBe(true);
+    gone(h, first);
+    // Single use: a second invite with the same id rings like any other call.
+    const reused = leg("reused");
+    invite(h, reused);
+    expect(reused.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "reused", ringing: true });
+    gone(h, reused);
+
+    h.phone.expectOperatorRequest({ requestId: OTHER });
+    now += EXPECTED_REQUEST_TTL_MS;
+    const expired = leg("expired", ownHeaders(OTHER));
+    invite(h, expired);
+    expect(expired.answered).toBe(false);
+    h.phone.stop();
+  });
+
+  it("never answers an unrelated offer while a request is armed", async () => {
+    const h = await ready();
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const offers = [
+      // An inbound customer offer, a header-only auto-answer leg (no request
+      // identity), a request header without auto-answer, a colleague's call.
+      leg("customer", []),
+      leg("hint", [{ name: "X-PM-Auto-Answer", value: "1" }]),
+      leg("bare", [{ name: "X-PM-Request", value: REQUEST }]),
+      leg("colleague", [...ownHeaders(), { name: "X-PM-Colleague-Call", value: "1" }]),
+    ];
+    for (const offer of offers) {
+      invite(h, offer);
+      expect(offer.answered).toBe(false);
+      expect(h.phone.getSnapshot().call).toMatchObject({ id: offer.id, ringing: true, sessionId: null });
+      gone(h, offer);
+    }
+    // The request is still armed for its own leg alone.
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(true);
+    h.phone.stop();
+  });
+
+  it("answers its own leg on pause, where every automatic offer stays silenced", async () => {
+    const h = await ready();
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: false, requestPending: true });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const offer = leg("offer", [{ name: "X-PM-Auto-Answer", value: "1" }]);
+    invite(h, offer);
+    expect(offer.answered).toBe(false);
+    expect(h.phone.getSnapshot().call?.ringing).toBe(false);
+    gone(h, offer);
+
+    const own = leg("own");
+    invite(h, own);
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: false, requestPending: true, presenceRevision: 1 });
+    await flush();
+    expect(own.answered).toBe(true);
+    expect(own.hungUp).toBe(false);
+    h.phone.expectOperatorLeg({ callControlId: "cc-own", sessionId: SESSION, requestId: REQUEST });
+    h.phone.releaseOperatorRequest(REQUEST);
+    h.phone.setIncomingOfferPolicy({ automaticAllowed: false, requestPending: false, presenceRevision: 2 });
+    await flush();
+    expect(own.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "own", sessionId: SESSION, active: true });
+    h.phone.stop();
+  });
+
+  it("never attributes an early-accepted leg to another pending leg while its answer is in flight", async () => {
+    const h = await ready();
+    h.phone.expectOperatorLeg({ callControlId: "cc-pickup", sessionId: "pickup-session" });
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    const answer = deferred<void>();
+    const own = leg("own");
+    own.answer = vi.fn(() => answer.promise);
+    invite(h, own);
+    expect(own.answer).toHaveBeenCalledOnce();
+    // A repeated ringing update must not fall through to the header-only tiebreaker.
+    invite(h, own);
+    expect(h.phone.getSnapshot()).toMatchObject({ call: { id: "own", sessionId: null }, pendingOperatorLegs: 1 });
+    own.state = "active";
+    answer.resolve();
+    await flush();
+    h.phone.expectOperatorLeg({ callControlId: "cc-own", sessionId: SESSION, requestId: REQUEST });
+    expect(h.phone.getSnapshot()).toMatchObject({ call: { id: "own", sessionId: SESSION }, pendingOperatorLegs: 1 });
+    h.phone.stop();
+  });
+
+  it("answers only in the tab holding the expectation during a two-tab takeover", async () => {
+    const stale = await ready();
+    const holder = await ready();
+    holder.phone.expectOperatorRequest({ requestId: REQUEST });
+    const atStale = leg("own");
+    invite(stale, atStale);
+    expect(atStale.answered).toBe(false);
+    const atHolder = leg("own");
+    invite(holder, atHolder);
+    expect(atHolder.answered).toBe(true);
+    stale.phone.stop();
+    holder.phone.stop();
+  });
+
+  it("keeps today's correlation when nothing is armed, and when the response beats the invite", async () => {
+    const h = await ready();
+    // Switch off: the console arms nothing, so the header alone answers nothing.
+    const unarmed = leg("unarmed");
+    invite(h, unarmed);
+    expect(unarmed.answered).toBe(false);
+    expect(h.phone.getSnapshot().call).toMatchObject({ id: "unarmed", ringing: true, sessionId: null });
+    h.phone.expectOperatorLeg({ callControlId: "cc-unarmed", sessionId: SESSION, requestId: REQUEST });
+    expect(unarmed.answered).toBe(true);
+    h.phone.releaseOperatorRequest(REQUEST);
+    await flush();
+    expect(unarmed.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call?.sessionId).toBe(SESSION);
+    gone(h, unarmed);
+
+    // Armed, but the response arrives first: the exact id governs, as before.
+    h.phone.expectOperatorRequest({ requestId: OTHER });
+    h.phone.expectOperatorLeg({ callControlId: "cc-next", sessionId: "next-session", requestId: OTHER });
+    h.phone.releaseOperatorRequest(OTHER);
+    const next = leg("next", ownHeaders(OTHER));
+    invite(h, next);
+    expect(next.answered).toBe(true);
+    await flush();
+    expect(next.hungUp).toBe(false);
+    expect(h.phone.getSnapshot().call?.sessionId).toBe("next-session");
+    h.phone.stop();
+  });
+
+  it("forgets armed requests when the phone stops", async () => {
+    const h = await ready();
+    h.phone.expectOperatorRequest({ requestId: REQUEST });
+    h.phone.stop();
+    h.phone.start(); await flush(); h.client.emit("telnyx.ready");
+    const own = leg("own");
+    invite(h, own);
+    expect(own.answered).toBe(false);
+    h.phone.stop();
+  });
+});
+
 it("a stale available snapshot from another tab cannot undo a newer accepted pause", async () => {
   const h = harness(); h.phone.start(); await flush();
   h.phone.setIncomingOfferPolicy({ automaticAllowed: false, presenceRevision: 9 });
@@ -1682,6 +2139,8 @@ describe("Telnyx SDK authentication and recovery contract", () => {
     const h = await active();
     h.client.emit("telnyx.error", { error: { code: 45003, fatal: true } });
     expect(h.phone.getSnapshot()).toMatchObject({ status: "failed", call: null });
+    expect(h.media.track.stop).toHaveBeenCalledOnce();
+    await flush();
     expect(h.client.disconnected).toBe(true);
     expect(h.requests.filter(row => row.url.includes("/token"))).toHaveLength(1);
     h.phone.stop();
@@ -1730,5 +2189,282 @@ describe("Telnyx SDK authentication and recovery contract", () => {
     h.client.emit("telnyx.notification", { type: "callUpdate", call: replacement });
     expect(h.phone.getSnapshot().call).toMatchObject({ id: "recovered-call", sessionId: "accepted-session", telnyxCallControlId: "new-cc" });
     h.phone.stop();
+  });
+});
+
+describe("browser RTC edge and ICE prefetch (call-speed S5)", () => {
+  const epoch = Date.parse("2026-09-03T08:00:00.000Z");
+  const TODAY = { login_token: "jwt", trickleIce: true, keepConnectionAliveOnSocketClose: true, maxReconnectAttempts: 5 };
+  const fallbackRetry = (timer: { delayMs: number }) => timer.delayMs === WEBPHONE_EDGE_FALLBACK_RETRY_MS;
+  const euBound = (timer: { delayMs: number }) => timer.delayMs === EU_EDGE_LOGIN_TIMEOUT_MS;
+  beforeEach(() => resetEuEdgeFallback());
+
+  /** The real `createTelnyxClient` over a recording SDK; the token route answers with `switches`. */
+  function edgeHarness(switches: Record<string, unknown>, options: { logger?: TelnyxWebphoneOptions["logger"]; connectFailures?: Error[]; random?: () => number } = {}) {
+    const created: Array<{ options: IClientOptions; client: FakeClient }> = [];
+    /** `clear:<n>` / `connect:<n>` of the n-th client, in the order the SDK saw them. */
+    const order: string[] = [];
+    const connectFailures = options.connectFailures ?? [];
+    const token = { ok: true, status: 200, body: { token: "jwt", expiresAt: new Date(epoch + 3_600_000).toISOString(), deviceSessionId: "device-1", sipUsername: "gencred1", ...switches } };
+    const h = harness({ token, logger: options.logger, random: options.random, loadSdk: async () => ({ TelnyxRTC: class extends FakeClient {
+      private readonly index = created.length;
+      constructor(sdkOptions: IClientOptions) {
+        super(sdkOptions);
+        created.push({ options: sdkOptions, client: this });
+        this.clearReconnectToken = vi.fn(() => { order.push(`clear:${this.index}`); });
+      }
+      override async connect() {
+        order.push(`connect:${this.index}`);
+        const failure = connectFailures.shift();
+        if (failure) throw failure;
+        await super.connect();
+      }
+    } }) });
+    return { ...h, token, created, order };
+  }
+  const logged = (logger: ReturnType<typeof vi.fn>, event: string) => logger.mock.calls.filter(([entry]) => entry.event === event);
+  const fallbacks = (logger: ReturnType<typeof vi.fn>) => logged(logger, "rtc_region_fallback");
+
+  it.each([
+    ["switches off", { webRtcRegion: "auto", webPrefetchIce: false }, TODAY],
+    ["an older server", {}, TODAY],
+    ["values the flags never produce", { webRtcRegion: "us-central", webPrefetchIce: "yes" }, TODAY],
+    ["the EU edge", { webRtcRegion: "eu", webPrefetchIce: false }, { ...TODAY, region: "eu" }],
+    ["ICE prefetch", { webRtcRegion: "auto", webPrefetchIce: true }, { ...TODAY, prefetchIceCandidates: true }],
+    ["both", { webRtcRegion: "eu", webPrefetchIce: true }, { ...TODAY, region: "eu", prefetchIceCandidates: true }],
+  ])("creates the SDK client for %s with exactly the expected options", async (_name, switches, expected) => {
+    const h = edgeHarness(switches);
+    h.phone.start(); await flush();
+    expect(h.created).toHaveLength(1);
+    // Strict: a switch that is off leaves no key behind, not even an undefined one.
+    expect(h.created[0].options).toStrictEqual(expected);
+    h.phone.stop();
+  });
+
+  it.each([
+    ["socket_error", (client: FakeClient) => client.emit("telnyx.socket.error", { socketGeneration: 1 })],
+    ["socket_closed", (client: FakeClient) => client.emit("telnyx.socket.close", { socketGeneration: 1 })],
+    ["sdk_error", (client: FakeClient) => client.emit("telnyx.error", { error: { code: 46001, fatal: true, message: "Authentication failed" } })],
+  ])("replaces an EU client that fails before login (%s) at once and keeps the page on the default edge", async (trigger, fail) => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    expect(h.created[0].options).toMatchObject({ region: "eu" });
+    fail(h.created[0].client); await flush();
+    expect(h.created[0].client.disconnected).toBe(true);
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    h.runTimer(fallbackRetry); await flush();
+    expect(h.created).toHaveLength(2);
+    expect(h.created[1].options).toStrictEqual(TODAY);
+    h.created[1].client.region = "us-central";
+    h.created[1].client.emit("telnyx.ready");
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    expect(logged(logger, "rtc_edge_connected")).toEqual([[expect.objectContaining({ reason: "rtc_edge_connected", rtcEdge: "default", rtcRegion: "us-central" })]]);
+    // Sticky for the page: a later phone instance (mobile standby, ownership change) still skips the EU edge.
+    h.phone.stop();
+    const next = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    next.phone.start(); await flush();
+    expect(next.created[0].options).toStrictEqual(TODAY);
+    expect(fallbacks(logger)).toEqual([[expect.objectContaining({ scope: "webphone", reason: "rtc_region_fallback", rtcEdge: "eu", rtcTrigger: trigger })]]);
+    next.phone.stop();
+  });
+
+  it("replaces an EU client whose connect is rejected", async () => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger, connectFailures: [new Error("socket refused")] });
+    h.phone.start(); await flush();
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    h.runTimer(fallbackRetry); await flush();
+    expect(h.created.map(entry => entry.options)).toStrictEqual([{ ...TODAY, region: "eu" }, TODAY]);
+    expect(fallbacks(logger)).toEqual([[expect.objectContaining({ rtcTrigger: "connect_rejected" })]]);
+    h.phone.stop();
+  });
+
+  it("does not count the fallback towards the phone's connect failures", async () => {
+    const random = () => 0.5;
+    const h = edgeHarness({ webRtcRegion: "eu" }, { random });
+    Object.assign(h.token, { ok: false, status: 500 });
+    h.phone.start(); await flush();
+    for (let attempts = 1; attempts < WEBPHONE_MAX_CONNECT_FAILURES; attempts++) {
+      if (attempts === WEBPHONE_MAX_CONNECT_FAILURES - 1) Object.assign(h.token, { ok: true, status: 200 });
+      h.runTimer(timer => timer.delayMs === webphoneRetryDelayMs(attempts, random)); await flush();
+    }
+    // Four failed mints, then an EU client: one more counted failure would be terminal.
+    expect(h.created).toHaveLength(1);
+    h.created[0].client.emit("telnyx.socket.error", { socketGeneration: 1 }); await flush();
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    h.runTimer(fallbackRetry); await flush();
+    h.created[1].client.emit("telnyx.ready");
+    expect(h.phone.getSnapshot().status).toBe("registered");
+    h.phone.stop();
+  });
+
+  it("bounds the first login of an EU client only", async () => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    h.runTimer(euBound); await flush();
+    expect(h.created[0].client.disconnected).toBe(true);
+    h.runTimer(fallbackRetry); await flush();
+    expect(h.created[1].options).toStrictEqual(TODAY);
+    // The default edge keeps today's behaviour: no such bound.
+    expect(h.timers.some(euBound)).toBe(false);
+    expect(fallbacks(logger)).toEqual([[expect.objectContaining({ rtcTrigger: "login_timeout" })]]);
+    h.phone.stop();
+  });
+
+  it("removes the EU bound when the phone stops before login", async () => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    expect(h.timers.some(euBound)).toBe(true);
+    h.phone.stop();
+    expect(h.timers.some(euBound)).toBe(false);
+    expect(fallbacks(logger)).toEqual([]);
+    h.phone.start(); await flush();
+    expect(h.created[1].options).toMatchObject({ region: "eu" });
+    h.phone.stop();
+  });
+
+  it.each([45004, 46003])("leaves recoverable SDK error %i before login to today's handling, and the bound still falls back", async code => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    h.created[0].client.emit("telnyx.error", { error: { code, fatal: false } }); await flush();
+    expect(h.phone.getSnapshot().status).toBe("reconnecting");
+    expect(h.created[0].client.disconnected).toBe(false);
+    expect(fallbacks(logger)).toEqual([]);
+    h.runTimer(euBound); await flush();
+    expect(h.created[0].client.disconnected).toBe(true);
+    h.runTimer(fallbackRetry); await flush();
+    expect(h.created[1].options).toStrictEqual(TODAY);
+    expect(fallbacks(logger)).toEqual([[expect.objectContaining({ rtcTrigger: "login_timeout" })]]);
+    h.phone.stop();
+  });
+
+  it.each(["telnyx.socket.error", "telnyx.socket.close"])("keeps a logged-in EU client and its active call through %s", async event => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "eu" }, { logger });
+    h.phone.start(); await flush();
+    const client = h.created[0].client;
+    Object.assign(client, { region: "eu", dc: "fr5" });
+    client.emit("telnyx.ready");
+    expect(logged(logger, "rtc_edge_connected")).toEqual([[expect.objectContaining({ rtcEdge: "eu", rtcRegion: "eu", rtcDc: "fr5" })]]);
+    expect(h.timers.some(euBound)).toBe(false);
+    const call = fakeCall({ state: "active" });
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "session-1" });
+    client.emit("telnyx.notification", { type: "callUpdate", call });
+    client.emit(event, { socketGeneration: 1 }); await flush();
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "reconnecting", call: { id: call.id, active: true } });
+    expect(client.disconnected).toBe(false);
+    expect(call.hungUp).toBe(false);
+    expect(h.created).toHaveLength(1);
+    expect(fallbacks(logger)).toEqual([]);
+    h.phone.stop();
+    // The page still uses the EU edge next time.
+    h.phone.start(); await flush();
+    expect(h.created[1].options).toMatchObject({ region: "eu" });
+    h.phone.stop();
+  });
+
+  it("applies a flag change at the next client creation, never to the client carrying a call", async () => {
+    const logger = vi.fn();
+    const h = edgeHarness({ webRtcRegion: "auto", webPrefetchIce: false }, { logger });
+    h.phone.start(); await flush();
+    const client = h.created[0].client;
+    client.emit("telnyx.ready");
+    expect(logged(logger, "rtc_edge_connected")).toEqual([]);
+    const call = fakeCall({ state: "active" });
+    h.phone.expectOperatorLeg({ callControlId: "cc-1", sessionId: "session-1" });
+    client.emit("telnyx.notification", { type: "callUpdate", call });
+    Object.assign(h.token.body, { token: "jwt-b", webRtcRegion: "eu", webPrefetchIce: true });
+    client.emit("telnyx.warning", { warning: { code: 34001 } }); await flush();
+    expect(h.created).toHaveLength(1);
+    expect(client.login.mock.calls.map(([options]) => options?.creds)).toEqual([{ login_token: "jwt-b" }]);
+    expect(client.disconnected).toBe(false);
+    expect(h.phone.getSnapshot()).toMatchObject({ status: "registered", call: { id: call.id, active: true } });
+    h.phone.stop();
+    h.phone.start(); await flush();
+    expect(h.created[1].options).toStrictEqual({ ...TODAY, login_token: "jwt-b", region: "eu", prefetchIceCandidates: true });
+    h.phone.stop();
+  });
+
+  describe("the tab's SDK signaling session", () => {
+    function storage(initial: Record<string, string> = {}) {
+      const data = new Map(Object.entries(initial));
+      vi.stubGlobal("sessionStorage", { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value); }, removeItem: (key: string) => { data.delete(key); } });
+      return data;
+    }
+
+    it("starts afresh only when the tab's edge changes, before that client's socket opens", async () => {
+      const data = storage();
+      // Default edge as before: nothing stored, nothing cleared.
+      const off = edgeHarness({ webRtcRegion: "auto" });
+      off.phone.start(); await flush();
+      expect(off.order).toEqual(["connect:0"]);
+      expect(data.size).toBe(0);
+      off.phone.stop();
+
+      const h = edgeHarness({ webRtcRegion: "eu" });
+      h.phone.start(); await flush();
+      expect(h.order).toEqual(["clear:0", "connect:0"]);
+      expect(data.get("pm:phone-rtc-edge")).toBe("eu");
+      // Another client on the same edge resumes the session.
+      h.phone.stop(); h.phone.start(); await flush();
+      expect(h.order).toEqual(["clear:0", "connect:0", "connect:1"]);
+      // The fallback goes back to the default edge: afresh again.
+      h.created[1].client.emit("telnyx.socket.error", { socketGeneration: 1 }); await flush();
+      h.runTimer(fallbackRetry); await flush();
+      expect(h.order).toEqual(["clear:0", "connect:0", "connect:1", "clear:2", "connect:2"]);
+      expect(data.get("pm:phone-rtc-edge")).toBe("default");
+      h.phone.stop();
+    });
+
+    it("never clears a session the SDK may still reattach a call to", async () => {
+      const data = storage({ "telnyx-voice-sdk-active-calls": JSON.stringify({ calls: [{ id: "call-1" }], storedAt: epoch }) });
+      const h = edgeHarness({ webRtcRegion: "eu" });
+      h.phone.start(); await flush();
+      expect(h.order).toEqual(["connect:0"]);
+      expect(data.has("pm:phone-rtc-edge")).toBe(false);
+      h.phone.stop();
+    });
+  });
+
+  it("fits a silent EU failure, the fallback and a default connect into the mobile prepareForCall budget", async () => {
+    vi.useFakeTimers({ now: epoch });
+    try {
+      const MINT_MS = 1_500, DEFAULT_CONNECT_MS = 2_500;
+      const regions: Array<string | undefined> = [];
+      const body = { token: "jwt", expiresAt: new Date(epoch + 3_600_000).toISOString(), deviceSessionId: "device-1", sipUsername: "gencred1", webRtcRegion: "eu" };
+      const phone = new TelnyxWebphone({
+        silent: true, deviceKind: "mobile", now: () => Date.now(),
+        setTimeout: (handler, delayMs) => setTimeout(handler, delayMs) as unknown as number,
+        clearTimeout: (handle) => clearTimeout(handle),
+        loadSdk: async () => ({ TelnyxRTC: class extends FakeClient {
+          private readonly euEdge: boolean;
+          constructor(options: IClientOptions) { super(options); this.euEdge = options.region === "eu"; regions.push(options.region); }
+          override async connect() {
+            await super.connect();
+            // The EU edge stays silent; the default edge logs in after a realistic delay.
+            if (!this.euEdge) setTimeout(() => this.emit("telnyx.ready"), DEFAULT_CONNECT_MS);
+          }
+        } }),
+        requestJson: (async (url: string) => url.includes("/webphone/token")
+          ? new Promise(resolve => setTimeout(() => resolve({ ok: true, status: 200, body }), MINT_MS))
+          : { ok: true, status: 200, body: {} }) as never,
+      });
+      let registeredAt: number | null = null;
+      phone.subscribe(snapshot => { if (snapshot.status === "registered" && registeredAt === null) registeredAt = Date.now(); });
+      phone.start();
+      await vi.advanceTimersByTimeAsync(MOBILE_PREPARE_TIMEOUT_MS);
+      expect(regions).toEqual(["eu", undefined]);
+      // Mint, EU bound, fallback retry, mint, default connect: nothing else waits.
+      const elapsed = registeredAt! - epoch;
+      expect(elapsed).toBe(MINT_MS + EU_EDGE_LOGIN_TIMEOUT_MS + WEBPHONE_EDGE_FALLBACK_RETRY_MS + MINT_MS + DEFAULT_CONNECT_MS);
+      expect(elapsed).toBeLessThanOrEqual(MOBILE_PREPARE_TIMEOUT_MS - 5_000);
+      phone.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -3,6 +3,7 @@ import { defaultAnnouncementConfig } from "@/lib/telephony/announcements";
 import { createTelephonyHarness, NUMBERS, ORG, PROFILES } from "@/test/telephony-harness";
 import { createRateLimiter, hangupCall, startOutboundCall } from "../call-actions";
 import { readContactHistory } from "../contact-proof";
+import { latencyFlagsOf } from "../latency-flags";
 import { readMeta, type SessionRow } from "./types";
 
 const actor = { profileId: PROFILES.o1, role: "dispatcher" as const };
@@ -116,6 +117,99 @@ describe("direct outgoing provider connection", () => {
     expect(h.telnyx.of("dial")[2].params.commandId).toBe(dial.params.commandId);
     expect(readContactHistory(h.session(call.sessionId) as SessionRow).proofs).toHaveLength(1);
     expect(h.telnyx.of("bridge")).toHaveLength(0);
+  });
+
+  it("hangs up the ringing customer when the operator's own answered leg drops", async () => {
+    const { h, call, operator, customer } = await outbound();
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    expect(h.presence(actor.profileId)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
+
+    await h.legEvent(operator, "call.hangup", { hangup_cause: "normal_clearing" });
+
+    // Before: only the operator's presence moved; the customer kept ringing toward nobody.
+    const customerHangups = h.telnyx.of("hangup").filter((command) => command.params.callControlId === customer);
+    // The urgent teardown and its durable replay carry one idempotent command.
+    expect(customerHangups.length).toBeGreaterThan(0);
+    expect(new Set(customerHangups.map((command) => command.params.commandId)).size).toBe(1);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: expect.any(String) });
+    expect(h.call(call.sessionId)).toMatchObject({ status: "ended", end_reason: "operator_left" });
+    expect(h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
+    h.telnyx.physical.answered(customer);
+    expect(h.telnyx.physical.connected(operator, customer)).toBe(false);
+
+    await h.legEvent(customer, "call.hangup", { hangup_cause: "normal_clearing" });
+    expect(h.session(call.sessionId).state).toBe("ended");
+    expect(h.call(call.sessionId)).toMatchObject({ end_reason: "operator_left" });
+  });
+
+  it("ends the call when the own leg drops while the customer dial's outcome is still unknown", async () => {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    const h = createTelephonyHarness();
+    const call = await startOutboundCall({ ...h.deps, rateLimiter: createRateLimiter() }, actor, { to: NUMBERS.customer });
+    const operator = call.operatorLegCallControlId;
+    h.telnyx.physical.answered(operator);
+    h.telnyx.loseNextResponse("dial");
+    expect((await h.legEvent(operator, "call.answered")).outcome).toBe("failed");
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    expect(h.legs(call.sessionId).some((leg) => leg.role === "customer")).toBe(false);
+
+    await h.legEvent(operator, "call.hangup", { hangup_cause: "normal_clearing" });
+
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: expect.any(String) });
+    expect(h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
+    // The leg the provider did create meets a terminal session and is hung up.
+    const dial = h.telnyx.of("dial")[1];
+    const customer = [...h.telnyx.physical.legs.keys()].find((id) => id !== operator)!;
+    await h.process(h.envelope("call.initiated", { call_control_id: customer, call_leg_id: `leg-${customer}`,
+      client_state: dial.params.clientState, to: NUMBERS.customer, from: NUMBERS.allianz, direction: "outgoing" }));
+    expect(h.telnyx.physical.legs.get(customer)?.ended).toBe(true);
+  });
+
+  it("ends the call under contract 2 when the own leg drops while the customer dial's outcome is unknown", async () => {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    const h = createTelephonyHarness({ writerContract: 2 });
+    // The customer dialled at the own leg's answer (sequential); the concurrent start's
+    // lost customer response is `concurrent-start.test.ts`.
+    const sequential = { ...latencyFlagsOf(h.deps), concurrent_dial: { outbound: { web: false, mobile: false }, internal: { web: false, mobile: false } } };
+    const call = await startOutboundCall({ ...h.deps, latencyFlags: sequential, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) }, actor,
+      { to: NUMBERS.customer, requestId: "00000000-0000-4000-8000-0000000005a3" });
+    const operator = call.operatorLegCallControlId;
+    h.telnyx.physical.answered(operator);
+    h.telnyx.loseNextResponse("dial");
+    expect((await h.legEvent(operator, "call.answered")).outcome).toBe("failed");
+    expect(h.session(call.sessionId).state).toBe("ringing");
+    expect(h.legs(call.sessionId).some((leg) => leg.role === "customer")).toBe(false);
+
+    await h.legEvent(operator, "call.hangup", { hangup_cause: "normal_clearing" });
+
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", ended_at: expect.any(String), writer_contract: 2 });
+    expect(h.call(call.sessionId)).toMatchObject({ status: "ended", end_reason: "operator_left" });
+    expect(h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
+    const dial = h.telnyx.of("dial")[1];
+    const customer = [...h.telnyx.physical.legs.keys()].find((id) => id !== operator)!;
+    await h.process(h.envelope("call.initiated", { call_control_id: customer, call_leg_id: `leg-${customer}`,
+      client_state: dial.params.clientState, to: NUMBERS.customer, from: NUMBERS.allianz, direction: "outgoing" }));
+    expect(h.telnyx.physical.legs.get(customer)?.ended).toBe(true);
+    expect(h.telnyx.physical.connected(operator, customer)).toBe(false);
+  });
+
+  it("does the same under contract 2, the path production runs", async () => {
+    vi.stubEnv("TELEPHONY_STABILITY_V1_ENABLED", "true");
+    const h = createTelephonyHarness({ writerContract: 2 });
+    const call = await startOutboundCall({ ...h.deps, rateLimiter: createRateLimiter({ now: () => h.now().getTime() }) }, actor,
+      { to: NUMBERS.customer, requestId: "00000000-0000-4000-8000-0000000005a2" });
+    const operator = call.operatorLegCallControlId;
+    h.telnyx.physical.answered(operator);
+    await h.legEvent(operator, "call.answered");
+    const customer = String(h.legs(call.sessionId).find((leg) => leg.role === "customer")!.telnyx_call_control_id);
+    expect(h.session(call.sessionId).state).toBe("ringing");
+
+    await h.legEvent(operator, "call.hangup", { hangup_cause: "normal_clearing" });
+
+    expect(h.telnyx.physical.legs.get(customer)?.ended).toBe(true);
+    expect(h.session(call.sessionId)).toMatchObject({ state: "ended", writer_contract: 2 });
+    expect(h.call(call.sessionId)).toMatchObject({ status: "ended", end_reason: "operator_left" });
+    expect(h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
   });
 
   it("retains contact identity when the operator answer arrives before its dial response is saved", async () => {

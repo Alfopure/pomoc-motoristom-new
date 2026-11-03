@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { correlateWebphoneDiagnostic, telephonyRequestDiagnostic, webphoneDiagnostic } from "./diagnostics";
 import { VOICE_QUALITY_WARNINGS } from "@/lib/diagnostics/voice-quality";
+import { parseDiagnosticEvent } from "@/lib/diagnostics/types";
 import type { ActiveCallPayload } from "./active-calls-model";
 import type { WebphoneCallView } from "./telnyx-webphone";
 
@@ -12,6 +13,29 @@ describe("phone diagnostics boundary", () => {
       type: "phone_lifecycle", module: "telephony", outcome: "ok", reason: "component_unmount", callSessionId: session,
     });
     expect(webphoneDiagnostic({ message: "private", event: "sdk_payload" })).toBeNull();
+  });
+
+  it("reports the browser RTC edge (call-speed S5) with closed values only", () => {
+    const fallback = webphoneDiagnostic({ event: "rtc_region_fallback", reason: "rtc_region_fallback", rtcEdge: "eu", rtcTrigger: "socket_error" });
+    expect(fallback).toEqual({ type: "phone_lifecycle", module: "telephony", outcome: "failed", reason: "rtc_region_fallback", rtcEdge: "eu", rtcTrigger: "socket_error" });
+    const connected = webphoneDiagnostic({ event: "rtc_edge_connected", reason: "rtc_edge_connected", rtcEdge: "eu", rtcRegion: "eu", rtcDc: "fr5" });
+    expect(connected).toEqual({ type: "phone_lifecycle", module: "telephony", outcome: "ok", reason: "rtc_edge_connected", rtcEdge: "eu", rtcRegion: "eu", rtcDc: "fr5" });
+    // Provider strings outside the closed sets never leave the browser.
+    expect(webphoneDiagnostic({ event: "rtc_edge_connected", reason: "rtc_edge_connected", rtcEdge: "default", rtcRegion: "mars", rtcDc: "wss://x.example/?t=1", rtcTrigger: "socket_error" }))
+      .toEqual({ type: "phone_lifecycle", module: "telephony", outcome: "ok", reason: "rtc_edge_connected", rtcEdge: "default" });
+    expect(webphoneDiagnostic({ event: "rtc_region_fallback", reason: "rtc_region_fallback", rtcEdge: "us", rtcTrigger: "anything" }))
+      .toEqual({ type: "phone_lifecycle", module: "telephony", outcome: "failed", reason: "rtc_region_fallback" });
+    expect(webphoneDiagnostic({ event: "registered", reason: "registered", rtcEdge: "eu", rtcRegion: "eu" })).not.toHaveProperty("rtcEdge");
+
+    const envelope = { id: session, pageId: session, sequence: 1, occurredAt: "2026-11-02T10:00:00.000Z", monotonicMs: 1, buildId: "test-build", sampled: false, sampleRate: 1 };
+    for (const event of [fallback, connected]) expect(parseDiagnosticEvent({ ...envelope, ...event })).toEqual({ ...envelope, ...event });
+    for (const patch of [{ rtcTrigger: "offline" }, { reason: "registered" }, { module: "app" }, { rtcEdge: undefined }]) {
+      expect(parseDiagnosticEvent({ ...envelope, ...fallback, ...patch })).toBeNull();
+    }
+    for (const patch of [{ rtcRegion: "mars" }, { rtcDc: "a.b" }, { rtcTrigger: "socket_error" }, { type: "ui_error" }]) {
+      expect(parseDiagnosticEvent({ ...envelope, ...connected, ...patch })).toBeNull();
+    }
+    expect(parseDiagnosticEvent({ ...envelope, ...fallback, rtcRegion: "eu" })).toBeNull();
   });
 
   it("measures explicit controls but never the existing snapshot/heartbeat polling", () => {

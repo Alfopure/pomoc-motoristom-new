@@ -8,7 +8,7 @@
  * the editor can show them next to the offending row.
  */
 
-import { TELEPHONY_TIMEOUT_MS, telephonyJson } from "@/lib/telephony/client-request";
+import { TELEPHONY_TIMEOUT_MS, telephonyJson, telephonyMutationEpoch } from "@/lib/telephony/client-request";
 import type { OperatorSettingsDoc, RoutingDocument, TelephonySettingsDoc, ValidationIssue } from "@/server/telephony/config-service";
 
 export const TELEPHONY_CONFIG_ENDPOINTS = {
@@ -70,13 +70,46 @@ function unwrap(result: { ok: boolean; status: number; body: (RoutingConfigRespo
   };
 }
 
-export async function loadRoutingConfig(section: TelephonyConfigSection, options: ConfigRequestOptions = {}): Promise<RoutingConfigResponse> {
+async function readRoutingConfig(section: TelephonyConfigSection, options: ConfigRequestOptions): Promise<RoutingConfigResponse> {
   const result = await telephonyJson<RoutingConfigResponse & ErrorBody>(
     TELEPHONY_CONFIG_ENDPOINTS[section],
     { label: "nastavenia telefónie", timeoutMs: TELEPHONY_TIMEOUT_MS.read, signal: options.signal ?? null },
     options.runtime,
   );
   return unwrap(result, "Nastavenia telefónie sa nepodarilo načítať.");
+}
+
+/**
+ * Panels that mount together each read the same section. An identical read
+ * already in flight is shared, but only while no telephony write has started
+ * or settled since it began, so a read started after a save never receives the
+ * document from before it.
+ */
+const inflightReads = new Map<TelephonyConfigSection, { read: Promise<RoutingConfigResponse>; epoch: number }>();
+
+/** The caller's own abort still rejects at once, without cancelling the shared read. */
+function abortable<T>(shared: Promise<T>, signal: AbortSignal | null | undefined): Promise<T> {
+  if (!signal) return shared;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    shared.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+export async function loadRoutingConfig(section: TelephonyConfigSection, options: ConfigRequestOptions = {}): Promise<RoutingConfigResponse> {
+  // An injected runtime is a test or tool seam; it keeps its own request.
+  if (options.runtime) return readRoutingConfig(section, options);
+  if (options.signal?.aborted) throw options.signal.reason;
+  let shared = inflightReads.get(section);
+  if (!shared || shared.epoch !== telephonyMutationEpoch()) {
+    const entry = { read: readRoutingConfig(section, {}), epoch: telephonyMutationEpoch() };
+    shared = entry;
+    inflightReads.set(section, entry);
+    void entry.read.finally(() => { if (inflightReads.get(section) === entry) inflightReads.delete(section); }).catch(() => undefined);
+  }
+  return abortable(shared.read, options.signal);
 }
 
 export async function saveRoutingConfig(

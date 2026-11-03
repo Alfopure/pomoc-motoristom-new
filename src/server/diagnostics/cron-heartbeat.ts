@@ -5,7 +5,7 @@ import type { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type Admin = ReturnType<typeof createSupabaseAdminClient>;
 type Environment = Record<string, string | undefined>;
-type ExecutionStatus = "ok" | "degraded" | "failed";
+type ExecutionStatus = "ok" | "auxiliary_degraded" | "degraded" | "failed";
 
 export const CRON_HEARTBEAT_LIMITS = { ioMs: 1_000, maxAgeMs: 10 * 60_000, maxRuntimeMs: 120_000 } as const;
 const PRODUCTION_PROJECT = "prj_DN3smSO1EbGowAmw3nHLQUYoSVJG";
@@ -53,7 +53,7 @@ export async function recordCronHeartbeat(admin: Admin, startedAt: number, execu
   const configuration = cronHeartbeatConfiguration(env);
   const completedAt = Date.now();
   if (!configuration || !Number.isFinite(startedAt) || startedAt > completedAt ||
-      completedAt - startedAt > CRON_HEARTBEAT_LIMITS.maxRuntimeMs || !["ok", "degraded", "failed"].includes(executionStatus)) return false;
+      completedAt - startedAt > CRON_HEARTBEAT_LIMITS.maxRuntimeMs || !["ok", "auxiliary_degraded", "degraded", "failed"].includes(executionStatus)) return false;
   const finished = new Date(completedAt).toISOString();
   const result = await bounded(signal => admin.from("motorist_worker_status").upsert({
     instance_id: configuration.instanceId,
@@ -68,26 +68,40 @@ export async function recordCronHeartbeat(admin: Admin, startedAt: number, execu
   return false;
 }
 
-/** Default-off extension of the existing generic readiness response. */
-export async function cronHeartbeatReady(admin: Admin, env: Environment = process.env): Promise<boolean> {
-  if (env.DIAGNOSTICS_CRON_READINESS_ENABLED !== "true") return true;
+export type CronReadinessReason = "disabled" | "ok" | "auxiliary_degraded" | "configuration_invalid" | "writer_disabled"
+  | "heartbeat_unavailable" | "heartbeat_missing" | "heartbeat_invalid" | "critical_jobs_failed" | "heartbeat_stale";
+export type CronReadiness = { ready: boolean; reason: CronReadinessReason };
+
+/** Safe reason codes are for internal observations, never raw database errors. */
+export async function cronHeartbeatReadiness(admin: Admin, env: Environment = process.env): Promise<CronReadiness> {
+  if (env.DIAGNOSTICS_CRON_READINESS_ENABLED !== "true") return { ready: true, reason: "disabled" };
   const configuration = cronHeartbeatConfiguration(env);
-  // Explicitly enabled with an invalid deployment or a stopped writer is not healthy.
-  if (!configuration || env.DIAGNOSTICS_CRON_HEARTBEAT_ENABLED !== "true") return false;
+  if (!configuration) return { ready: false, reason: "configuration_invalid" };
+  if (env.DIAGNOSTICS_CRON_HEARTBEAT_ENABLED !== "true") return { ready: false, reason: "writer_disabled" };
   const result = await bounded(signal => admin.from("motorist_worker_status")
     .select("instance_id,deployment_version,heartbeat_at,scheduler_tick_at,scheduler_status,updated_at")
     .eq("instance_id", configuration.instanceId).abortSignal(signal).maybeSingle());
-  const row = result?.data;
-  if (!result || result.error || !row || row.instance_id !== configuration.instanceId ||
-      !validRelease(row.deployment_version) || row.scheduler_status !== "ok" || !row.scheduler_tick_at) return false;
+  if (!result || result.error) return { ready: false, reason: "heartbeat_unavailable" };
+  const row = result.data;
+  if (!row) return { ready: false, reason: "heartbeat_missing" };
+  if (row.instance_id !== configuration.instanceId || !validRelease(row.deployment_version) || !row.scheduler_tick_at)
+    return { ready: false, reason: "heartbeat_invalid" };
   const startedAt = Date.parse(row.scheduler_tick_at);
   const completedAt = Date.parse(row.heartbeat_at);
   const updatedAt = Date.parse(row.updated_at);
   const now = Date.now();
   // A fresh previous release is valid during a rollout in the SAME project/DB.
-  // Requiring its SHA to equal this build would raise an alarm at every deploy.
-  return Number.isFinite(startedAt) && Number.isFinite(completedAt) && Number.isFinite(updatedAt) &&
-    startedAt <= completedAt && completedAt <= now && updatedAt === completedAt &&
-    completedAt - startedAt <= CRON_HEARTBEAT_LIMITS.maxRuntimeMs &&
-    now - completedAt <= CRON_HEARTBEAT_LIMITS.maxAgeMs;
+  if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt) || !Number.isFinite(updatedAt) ||
+      startedAt > completedAt || completedAt > now || updatedAt !== completedAt ||
+      completedAt - startedAt > CRON_HEARTBEAT_LIMITS.maxRuntimeMs)
+    return { ready: false, reason: "heartbeat_invalid" };
+  if (now - completedAt > CRON_HEARTBEAT_LIMITS.maxAgeMs) return { ready: false, reason: "heartbeat_stale" };
+  if (row.scheduler_status === "degraded" || row.scheduler_status === "failed") return { ready: false, reason: "critical_jobs_failed" };
+  if (row.scheduler_status !== "ok" && row.scheduler_status !== "auxiliary_degraded") return { ready: false, reason: "heartbeat_invalid" };
+  return { ready: true, reason: row.scheduler_status };
+}
+
+/** Default-off extension of the existing generic readiness response. */
+export async function cronHeartbeatReady(admin: Admin, env: Environment = process.env): Promise<boolean> {
+  return (await cronHeartbeatReadiness(admin, env)).ready;
 }

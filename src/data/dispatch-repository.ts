@@ -1933,11 +1933,18 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
 }
 
 /** The fleet refresh must not read cases, calls, attendance or Auth users. */
-export async function loadFleetData(organizationId: string, signal?: AbortSignal): Promise<import("./dispatch-types").FleetData> {
+export async function loadFleetData(organizationId: string, signal?: AbortSignal, options?: { maxRows: number }): Promise<import("./dispatch-types").FleetData> {
   const supabase = createSupabaseAdminClient();
   const deadline = AbortSignal.timeout(8_000);
   const abort = signal ? AbortSignal.any([signal, deadline]) : deadline;
-  const query = <T extends keyof Tables>(table: T) => supabase.from(table).select("*").eq("organization_id" as never, organizationId as never).abortSignal(abort);
+  if (options && (!Number.isSafeInteger(options.maxRows) || options.maxRows < 1 || options.maxRows > 1000)) throw new Error("Invalid fleet bound");
+  const query = <T extends keyof Tables>(table: T, bounded = true) => {
+    const read = supabase.from(table).select("*", options && bounded ? { count: "exact" } : {}).eq("organization_id" as never, organizationId as never).abortSignal(abort);
+    return options && bounded ? read.limit(options.maxRows + 1) : read;
+  };
+  const complete = (result: { data: unknown[] | null; count?: number | null }) => {
+    if (options && (typeof result.count !== "number" || !Number.isSafeInteger(result.count) || result.count < 0 || result.count > options.maxRows || result.data?.length !== result.count)) throw new Error("Fleet snapshot exceeds bounded complete read");
+  };
   const [assets, branchRows, records, links, positions, providerVehicles, integrations, lastSuccess, latestRun, occupancy] = await Promise.all([
     query("motorist_fleet_assets").order("label"), query("motorist_branches").eq("active", true),
     query("motorist_external_vehicle_records").in("source_provider", ["commander", "client_vehicle_db"]),
@@ -1945,16 +1952,18 @@ export async function loadFleetData(organizationId: string, signal?: AbortSignal
     query("motorist_fleet_current_positions").eq("source_provider", "commander"),
     query("motorist_fleet_provider_vehicles").eq("provider", "webdispecink"),
     query("motorist_organization_integrations").in("provider", ["commander", "client_vehicle_db", "fleet"]),
-    query("motorist_fleet_sync_runs").eq("provider", "commander").in("mode", ["positions", "full"]).eq("status", "success").order("finished_at", { ascending: false }).limit(1).maybeSingle(),
-    query("motorist_fleet_sync_runs").eq("provider", "commander").in("mode", ["positions", "full"]).order("started_at", { ascending: false }).limit(1).maybeSingle(),
-    query("motorist_fleet_replacement_occupancy").order("captured_at", { ascending: false }).limit(1).maybeSingle(),
+    query("motorist_fleet_sync_runs", false).eq("provider", "commander").in("mode", ["positions", "full"]).eq("status", "success").order("finished_at", { ascending: false }).limit(1).maybeSingle(),
+    query("motorist_fleet_sync_runs", false).eq("provider", "commander").in("mode", ["positions", "full"]).order("started_at", { ascending: false }).limit(1).maybeSingle(),
+    query("motorist_fleet_replacement_occupancy", false).order("captured_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
   for (const result of [assets, branchRows, records, links, positions, providerVehicles, integrations, lastSuccess, latestRun, occupancy]) {
     if (result.error) throw new Error("Fleet snapshot unavailable");
   }
+  for (const result of [assets, branchRows, records, links, positions, providerVehicles, integrations]) complete(result);
   const locationIds = [...new Set([...(assets.data ?? []).map(row => row.current_location_id), ...(branchRows.data ?? []).map(row => row.location_id)].filter((id): id is string => Boolean(id)))];
   const locations = locationIds.length ? await query("motorist_locations").in("id", locationIds) : { data: [], error: null };
   if (locations.error) throw new Error("Fleet locations unavailable");
+  if (locationIds.length) complete(locations);
   const locationsById = new Map((locations.data ?? []).map(row => [row.id, row]));
   const branches = (branchRows.data ?? []).map(row => mapBranch(row, locationsById, ""));
   const commanderPositions = positions.data ?? [];

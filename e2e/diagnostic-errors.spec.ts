@@ -16,7 +16,7 @@ test.beforeAll(async () => {
         define: { 'process.env.NODE_ENV': '"production"', 'process.env.NEXT_PUBLIC_DIAGNOSTICS_SENTRY_DSN': '"https://public@errors.test/1"', 'process.env.NEXT_PUBLIC_DIAGNOSTICS_BUILD_ID': '"diagnostics-fixture"', 'process.env.NEXT_PUBLIC_DIAGNOSTICS_ENVIRONMENT': '"test"' },
         plugins: [{ name: 'isolated-internal-collector', setup(builder) {
             builder.onResolve({ filter: /\/client$/ }, args => {
-                if (args.importer.endsWith('/instrumentation-client.ts') || args.importer.endsWith('/diagnostics/errors.ts')) return { path: 'collector', namespace: 'fixture' };
+                if (args.importer.endsWith('/instrumentation-client.ts') || args.importer.endsWith('/diagnostics/errors.ts') || args.importer.endsWith('/diagnostics/sentry.ts')) return { path: 'collector', namespace: 'fixture' };
             });
             builder.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({ loader: 'js', contents: `export function recordDiagnostic(event){window.diagnosticRecords.push(event);return null;} export function getDiagnosticPageId(){return '11111111-1111-4111-8111-111111111111';} export async function flushDiagnostics(){}` }));
         } }],
@@ -36,7 +36,7 @@ async function setup(page: Page, status = 200) {
         if (/^\/_next\/static\/(?:immutable\/)?chunks\/abcdef1234567890\.js$/.test(new URL(route.request().url()).pathname)) return route.fulfill({ contentType: 'application/javascript', body: "throw new TypeError('CANARY_email@example.com +421901123456 CANARY_SECRET');" });
         return route.abort();
     });
-    await page.addInitScript({ content: `window.diagnosticRecords=[];\n${script}` });
+    await page.addInitScript({ content: `if(sessionStorage.getItem('fixture-offline')==='1')Object.defineProperty(navigator,'onLine',{configurable:true,get:()=>false});window.diagnosticRecords=[];\n${script}` });
     await page.goto('https://diagnostics.test/');
     return envelopes;
 }
@@ -77,11 +77,16 @@ for (const directory of ['chunks', 'immutable/chunks']) test(`a real browser thr
 });
 test('offline error survives reload and is delivered once after online with its original ID and time', async ({ page, context }) => {
     const envelopes = await setup(page); await context.setOffline(true);
+    // Serverless Chromium resets navigator.onLine on navigation while CDP still
+    // blocks transport. Keep both signals offline until this fixture restores them.
+    await page.evaluate(() => { sessionStorage.setItem('fixture-offline', '1'); Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false }); });
     const id = await raise(page);
     const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem('dispatch-exceptions-v1')!).entries[0].event);
     expect(saved.event_id).toBe(id); expect(JSON.stringify(saved)).not.toContain('CANARY'); expect(envelopes).toHaveLength(0);
     await page.reload(); expect(envelopes).toHaveLength(0);
+    expect(await page.evaluate(() => navigator.onLine)).toBe(false);
     await context.setOffline(false);
+    await page.evaluate(() => { sessionStorage.removeItem('fixture-offline'); Reflect.deleteProperty(navigator, 'onLine'); window.dispatchEvent(new Event('online')); });
     await expect.poll(() => envelopes.length).toBe(1);
     expect(envelopes[0]).toMatchObject({ event_id: id, timestamp: saved.timestamp, release: saved.release });
     await page.reload(); await page.evaluate(() => window.diagnosticFixture.flush());

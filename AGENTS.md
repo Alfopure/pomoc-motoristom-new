@@ -23,8 +23,8 @@ pointed at the old one; a custom domain survives the rename.
 
 | | |
 |---|---|
-| Supabase production (`main`) | `ifpaeegaesdmljfkdvcn` |
-| Supabase test (Preview and `dev`) | `nzpnqdstvkfncflgqlny` — Free organization `AlfoSystems` (`rwhghkvusmdnaexjvrum`) |
+| Supabase production (`main`) | `ifpaeegaesdmljfkdvcn` — named `Pomoc motoristom dispečing – PRODUKCIA` |
+| Supabase test (Preview and `dev`) | `nzpnqdstvkfncflgqlny` — named `Pomoc motoristom dispečing – TEST`; permanent TEST project in the Pro organization `AlfoPure` (`reqzkjhaquxbbhhalcmm`), moved from Free `AlfoSystems` (`rwhghkvusmdnaexjvrum`) on 2026-10-30; compute Medium like production |
 | Vercel production | `pomoc-motoristom-dispatching` (`main`, Production, `fra1`) |
 | Vercel stable TEST | `pomoc-motoristom-test` (`dev`, Production, `fra1`) |
 | Hostnames | **`dispecing.linkapomoci.sk`** (production), `dispecing-test.vercel.app` |
@@ -51,9 +51,13 @@ On 2026-10-03 the owner explicitly removed the restriction to individual tester 
 
 ### What this project must never touch
 
-The retired VIPTel original: Supabase `sjcsrygkkmersoczpunh`, Vercel `pomoc-motoristom-dispatching-old`, `dev.dispecing.linkapomoci.sk`, and the previous telephony provider with its listener host.
+On 2026-10-18 the owner had the retired VIPTel original removed: Vercel `pomoc-motoristom-dispatching-old` with `dev.dispecing.linkapomoci.sk`, and its tables in Supabase `sjcsrygkkmersoczpunh`. Its repository `Alfopure/pomoc-motoristom-dispecing` is deprecated and scheduled for deletion. Do not recreate any of them. The previous telephony provider and its listener host stay out of scope. Older documents may still name these resources.
 
-That Supabase project is **not** dormant. It also holds the Watchdog vehicle-handover application — 10 254 `rental_photos` rows and 10 320 files in storage — so it is somebody's live database, not an old copy waiting to be deleted.
+Supabase `sjcsrygkkmersoczpunh` itself was **not** deleted and must not be. It is now only the database of a separate live application of the same client: the Polish vehicle-handover app (`Alfopure/Pomoc-Motoristom`, Vercel `pomoc-motoristom`) with its rentals, about 12 900 photo rows and their files in storage. It is not Watchdog. This application must never read, write or migrate it.
+
+Watchdog (Waze alerts) is another separate application with its own Supabase project `nkhrzdftvskgcwzenfnr`, Vercel project `watch-dog` and repository `Alfopure/watchDog`. It is also out of this application's scope.
+
+The standalone AI-demo Vercel project `pomoc-motoristom-aidemo`, which was connected to the production database, was deleted on 2026-10-18. The AI demo is part of this application. Do not create additional copies of this application that connect to the production database.
 
 ### TEST handoff and owner approval
 
@@ -78,7 +82,7 @@ Use the dev-first deployment workflow by default:
    **Never publish by redeploying an older deployment.** `vercel redeploy <url>` rebuilds *that deployment's source*, not current `main` — on 2026-09-21 this silently rolled production back three commits while picking up an environment variable. To apply new environment variables, deploy `main` afresh.
 7. Telephony (Telnyx) Supabase migrations and seed changes are in scope for this application, but apply them only when the user explicitly requests them and only against the explicitly authorized project: test `nzpnqdstvkfncflgqlny` or production `ifpaeegaesdmljfkdvcn`. Authorization to change test does not authorize production changes. Do not apply seed data on top of a copied snapshot. Do not deploy workers, schedulers, or listeners. The single allowed Vercel cron is `*/5 * * * *` -> `/api/telephony/cron` guarded by `CRON_SECRET`.
 8. Newly built Preview deployments and the dedicated TEST project's `dev`/Production target use test Supabase `nzpnqdstvkfncflgqlny`; production (`main`) uses `ifpaeegaesdmljfkdvcn`. The Vercel Development target was not changed by this isolation work: local developers must explicitly use test credentials and verify their effective project before writing. Test data is shared by stable TEST and all Preview branches. Existing deployment URLs retain their original environment until replaced; do not assume an old Preview is isolated.
-9. The Free test project may pause after 7 days of low activity and requires manual restoration in the Supabase Dashboard. Follow [the test-environment runbook](docs/operations/test-environment.md) for restoration and data refresh, and the [full TEST runbook](docs/operations/full-test-environment.md) for current deployment and integration policy. Ordinary Preview must keep live integrations disabled; stable TEST may enable only the authorized, verified integrations described above. Do not reconnect any TEST environment to production as a fallback when TEST is unavailable.
+9. The TEST project is permanent: since 2026-10-30 it belongs to the same Pro organization as production, so it no longer auto-pauses. It remains a separate project with its own ref, database, keys, Auth and Storage; sharing the organization does not make it part of production. Because the Supabase connector now reaches both projects, name the exact ref before every SQL, migration or configuration write. On the owner's instruction it runs the same compute as production (Medium, 4 GB), so TEST timings are comparable with production. A compute or plan change is the owner's billing decision and briefly restarts the database; do it outside test calls. Follow [the test-environment runbook](docs/operations/test-environment.md) for availability and data refresh, and the [full TEST runbook](docs/operations/full-test-environment.md) for current deployment and integration policy. Ordinary Preview must keep live integrations disabled; stable TEST may enable only the authorized, verified integrations described above. Do not reconnect any TEST environment to production as a fallback when TEST is unavailable.
 
 ### Owner-directed production first / urgent fix
 
@@ -93,3 +97,7 @@ The owner authorized this path on 2026-10-02. A clear instruction such as “daj
 For both release paths, retain separate databases, credentials, integration boundaries and the single existing cron. Database changes need the exact target and SQL scope already authorized by the owner; prepare these together with the release when required. Never apply all pending migrations just because `dev` has them.
 
 The short operating procedure and remaining environment work are in [the release workflow](docs/operations/release-workflow.md).
+
+## Mobile UI standard
+
+Mobile screens follow [the mobile design standard](docs/mobile/design-standard.md): light mode only for now, compact tokens from `mobile/src/design/tokens.ts`, the shell in `mobile/src/shell/` (Prehľad · three of the user's modules · Moduly) and visible, labeled controls for every action (gestures are only shortcuts). A new mobile feature adds its manifest to `mobile/src/shell/modules.ts` and reuses the shared components; it does not introduce its own colors, font sizes, headers or navigation bar. Module visibility in the app is presentation only; the server keeps authorizing every request.

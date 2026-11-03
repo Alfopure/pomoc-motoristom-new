@@ -7,20 +7,22 @@ import { announcementConfigFromMetadata } from "@/lib/telephony/announcements";
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
 import { isArchivedLine } from "../line-archive";
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
-import { sweepOverdueRingSteps } from "../routing/ring-plan";
-import { effectsDeps, ownedSessionWork, runSessionEvent, SessionEventDeferredError, WEBHOOK_LEASE_WAIT_MS, type SessionRunnerDeps } from "../session-runner";
-import { sessionOwnership } from "../ownership";
-import { describeServiceError, SessionLeaseBusyError } from "../service-errors";
-import { recordCallEvent, type CommandOutcome } from "../state/effects";
+import { enforceConcurrentBridgeDeadline, sweepOverdueRingSteps } from "../routing/ring-plan";
+import { effectsDeps, observationOnlyAllowed, ownedSessionWork, runSessionEvent, SessionEventDeferredError, WEBHOOK_LEASE_WAIT_MS, type SessionRunnerDeps } from "../session-runner";
+import { assertOwnership, sessionOwnership } from "../ownership";
+import { describeServiceError, SessionLeaseBusyError, SessionLeaseLostError } from "../service-errors";
+import { recordCallEvent, resumePendingEffects, type CommandOutcome } from "../state/effects";
+import { readPendingEffects } from "../state/continuation";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
-import { lineInboundMode, toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
-import { readMeta } from "../state/types";
+import { DUPLICATE_BRIDGE, lineInboundMode, toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
+import { concurrentBridgeSessionDueAt, readMeta, sessionSipDomain, telnyxSipUri, telnyxSipUris, telnyxSipUsername } from "../state/types";
 import { loadParticipantManifest, observeParticipants } from "../state/participants";
 import { enqueueSavedRecording } from "../recording-jobs";
 import { recordingIntent } from "../state/recording";
-import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, type WebhookClaim } from "./webhook-ledger";
+import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, pendingLedgerControlIds, WEBHOOK_CLAIM_STALE_AFTER_MS, type WebhookClaim } from "./webhook-ledger";
 import { acceptsTestProviderEvent, getTestProviderSafety, hasTestCallProvenance } from "./test-safety";
 import { decodeClientState } from "./client-state";
+import { freezeStartMode, latencyFlagsOf, providerRegionOf, sessionApiRegion } from "../latency-flags";
 
 /**
  * Telnyx webhook processor (design §2.3).
@@ -45,6 +47,8 @@ export type ProcessorDeps = SessionRunnerDeps & {
   sweepAfterEvent?: boolean;
   /** Internal durable replay; never changes the envelope authorization rules. */
   ledgerReplay?: "cron" | "correlation";
+  /** Diagnostics only: a replay from this host's session-inbox drain rather than the cron. */
+  replaySource?: "drain";
   replayCorrelated?: boolean;
   /** Sessions the inline sweep may re-drive (default `INLINE_SWEEP_LIMIT`). */
   sweepLimit?: number;
@@ -52,6 +56,10 @@ export type ProcessorDeps = SessionRunnerDeps & {
   sweepBudgetMs?: number;
   /** The HTTP host retains this work after replying; cron/tests await it inline. */
   deferMaintenance?: (work: () => Promise<void>) => void;
+  /** Internal: this host's own claim on the event, kept across a lease wait (S1.3). Never from a request. */
+  heldClaim?: { eventId: string; claim: WebhookClaim };
+  /** Wall-clock end for the post-processing inbox drain of a held run (S1.3). */
+  replayDeadline?: number;
 };
 
 /** Keep SIP processing fast; the larger route duration also covers after-response push. */
@@ -134,6 +142,31 @@ export function allowedConnectionIds(deps: Pick<ProcessorDeps, "config">): Set<s
   return ids;
 }
 
+/**
+ * Call-speed S5: the TEST guard reads a connection-less conference event's
+ * conference, before correlation and outside any lease, in the region of the
+ * session that created it: by `conference_id`, else the event's own client
+ * state, else the session of the leg the event names (the conference id is
+ * saved only after its create returns). No such session, or one from before
+ * S5, is `us`; for an EU conference that `.com` read fails and the webhook is
+ * answered 5xx, so Telnyx redelivers it once the conference id is saved.
+ */
+async function conferenceEventRegion(deps: ProcessorDeps, event: TelephonyEvent & { conferenceId: string }): Promise<"us" | "eu"> {
+  const signal = AbortSignal.timeout(1_500);
+  const read = (column: "conference_id" | "id", value: string) => deps.admin.from("motorist_call_sessions").select("metadata")
+    .eq("organization_id", deps.organizationId).eq(column, value).abortSignal(signal).maybeSingle();
+  let session = await read("conference_id", event.conferenceId);
+  if (!session.error && !session.data && event.clientState?.sid) session = await read("id", event.clientState.sid);
+  if (!session.error && !session.data && event.callControlId) {
+    const leg = await deps.admin.from("motorist_call_legs").select("session_id").eq("organization_id", deps.organizationId)
+      .eq("telnyx_call_control_id", event.callControlId).abortSignal(signal).maybeSingle();
+    if (leg.error) throw new Error("conference session lookup failed");
+    if (leg.data) session = await read("id", leg.data.session_id);
+  }
+  if (session.error) throw new Error("conference session lookup failed");
+  return sessionApiRegion(session.data?.metadata);
+}
+
 async function findSession(admin: AdminClient, organizationId: string, event: TelephonyEvent): Promise<SessionRow | null> {
   if (event.clientState?.sid) {
     const byId = await admin.from("motorist_call_sessions").select("*").eq("organization_id", organizationId).eq("id", event.clientState.sid).maybeSingle();
@@ -186,42 +219,69 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
       event.direction !== null && event.direction !== "incoming" ||
       event.type === "call.initiated" && (event.direction !== "incoming" || event.state !== "bridging")) return null;
   // Telnyx credential callbacks use the bare username; admit its exact SIP URI
-  // as well, never arbitrary domains, phone numbers, URI parameters or escapes.
+  // on either Telnyx SIP domain as well (S5 SIP-domain spike: what Telnyx sends
+  // for a dial to `@sip.telnyx.eu` is unobserved), never other domains, phone
+  // numbers, URI parameters or escapes.
   const destination = event.to ?? "";
-  const username = /^([a-zA-Z0-9_-]{1,128})$/.exec(destination)?.[1] ??
-    /^sip:([a-zA-Z0-9_-]{1,128})@sip\.telnyx\.com$/.exec(destination)?.[1];
+  const username = /^([a-zA-Z0-9_-]{1,128})$/.exec(destination)?.[1] ?? telnyxSipUsername(destination);
   const occurredAt = Date.parse(event.occurredAt ?? "");
   if (!username || !Number.isFinite(occurredAt)) return null;
-  const sip = `sip:${username}@sip.telnyx.com`;
+  const sipUser: string = username, callControlAppId = config.callControlAppId;
+  // The proof reads the address the session really dialled: its frozen SIP domain.
+  const proven = async (row: { id: string; metadata: unknown }) => {
+    if (!await provenMirror(row.id, telnyxSipUri(sipUser, sessionSipDomain(row.metadata)))) return null;
+    if (sessionSipDomain(row.metadata) === "eu") logSipDomainSpike(deps, event, row.id, "mirror");
+    return row.id;
+  };
   const signal = AbortSignal.timeout(1_500);
   try {
     const candidate = await deps.admin.from("motorist_call_sessions").select("id, metadata")
       .eq("organization_id", deps.organizationId).eq("telnyx_session_id", event.callSessionId)
       .contains("metadata", { environment: deps.environment }).abortSignal(signal).maybeSingle();
-    if (candidate.error || !candidate.data) return null;
-    const sessionId = candidate.data.id;
+    if (candidate.error) return null;
+    if (candidate.data) return await proven(candidate.data);
+    // S6 B′ (`start_mode.farLinkTo: false`): the far dial shares no provider
+    // session with the own leg, so its mirror's session is ours only through
+    // our own state — the operator leg dialled to this SIP address, then the
+    // same exact journal proof (that dial's own `call_session_id`).
+    const recent = await deps.admin.from("motorist_call_legs").select("session_id").eq("organization_id", deps.organizationId)
+      .eq("role", "operator").in("to_number", telnyxSipUris(sipUser)).gte("initiated_at", new Date(occurredAt - MIRROR_UNLINKED_WINDOW_MS).toISOString())
+      .order("initiated_at", { ascending: false }).limit(MIRROR_PROOF_LIMIT).abortSignal(signal);
+    if (recent.error || !recent.data?.length) return null;
+    const unlinked = await deps.admin.from("motorist_call_sessions").select("id, metadata").eq("organization_id", deps.organizationId)
+      .in("id", [...new Set(recent.data.map((leg) => leg.session_id))]).contains("metadata", { environment: deps.environment }).abortSignal(signal);
+    if (unlinked.error) return null;
+    for (const row of unlinked.data ?? []) {
+      if (readMeta(row).start_mode?.farLinkTo !== false) continue;
+      const id = await proven(row);
+      if (id) return id;
+    }
+    return null;
+  } catch { return null; }
+
+  async function provenMirror(sessionId: string, sip: string): Promise<boolean> {
     const [legs, commands, browsers, mobiles] = await Promise.all([
       deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, telnyx_call_leg_id, profile_id, from_number")
         .eq("organization_id", deps.organizationId).eq("session_id", sessionId).eq("role", "operator").eq("to_number", sip)
         .limit(MIRROR_PROOF_LIMIT + 1).abortSignal(signal),
       deps.admin.from("motorist_provider_commands").select("first_dispatched_at, request_payload, result")
         .eq("session_id", sessionId).eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
-        .contains("request_payload", { connection_id: config.callControlAppId, to: sip })
+        .contains("request_payload", { connection_id: callControlAppId, to: sip })
         .limit(MIRROR_PROOF_LIMIT + 1).abortSignal(signal),
       deps.admin.from("motorist_operator_devices").select("profile_id, telnyx_credential_id")
-        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", username)
+        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", sipUser)
         .limit(2).abortSignal(signal),
       deps.admin.from("motorist_operator_mobile_devices").select("profile_id, telnyx_credential_id")
-        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", username)
+        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", sipUser)
         .limit(2).abortSignal(signal),
     ]);
     if ([legs, commands, browsers, mobiles].some(read => read.error) ||
         (legs.data?.length ?? 0) > MIRROR_PROOF_LIMIT || (commands.data?.length ?? 0) > MIRROR_PROOF_LIMIT ||
-        (browsers.data?.length ?? 0) > 1 || (mobiles.data?.length ?? 0) > 1) return null;
+        (browsers.data?.length ?? 0) > 1 || (mobiles.data?.length ?? 0) > 1) return false;
     const enrolled = [...(browsers.data ?? []), ...(mobiles.data ?? [])];
     const identities = new Set(enrolled.map(row => `${row.profile_id}:${row.telnyx_credential_id}`));
-    if (identities.size !== 1 || !enrolled[0]?.profile_id || !enrolled[0].telnyx_credential_id) return null;
-    const proven = (commands.data ?? []).some(command => {
+    if (identities.size !== 1 || !enrolled[0]?.profile_id || !enrolled[0].telnyx_credential_id) return false;
+    return (commands.data ?? []).some(command => {
       const payload = object(command.request_payload), result = object(object(command.result).data);
       const state = decodeClientState(payload.client_state);
       const dispatchedAt = Date.parse(command.first_dispatched_at);
@@ -232,8 +292,58 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
       return (legs.data ?? []).some(leg => leg.telnyx_call_control_id === result.call_control_id &&
         leg.telnyx_call_leg_id === result.call_leg_id && leg.profile_id === state.operatorId && leg.from_number === event.from);
     });
-    return proven ? sessionId : null;
-  } catch { return null; }
+  }
+}
+
+/**
+ * S6 B′: how far back an unlinked far dial's operator leg is looked for when
+ * its mirror arrives. The fallback reads only the `MIRROR_PROOF_LIMIT` (8)
+ * newest operator legs to that SIP address in this window, and shares the
+ * lookup's 1.5 s read budget (typically four sequential reads). A miss —
+ * eight newer legs to the same address, or a slow read — attributes nothing:
+ * the mirror waits for correlation, the session's drain and the cron retry it,
+ * and after 60 s it becomes the ordinary correlation incident.
+ */
+const MIRROR_UNLINKED_WINDOW_MS = 15 * 60_000;
+
+/** A credential's bare username, as Telnyx names it on the credential connection; it has a letter, so a phone number never is one. */
+const BARE_CREDENTIAL = /^(?=.*[a-zA-Z])[a-zA-Z0-9_-]{1,128}$/;
+type SpikeShape = { shape: "number" | "address" | "other"; scheme?: string | null; host?: string | null; hasUser?: boolean; hasParams?: boolean };
+
+/**
+ * What the spike line may show of an address: a credential's own name (its
+ * bare username, or its exact SIP URI on either Telnyx domain) as it is;
+ * anything else only by its shape — scheme, host, whether it has a user part
+ * and parameters — never the user part itself (a customer's number, another
+ * identity).
+ */
+function spikeAddress(value: unknown): string | SpikeShape | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") return { shape: "other" };
+  if (telnyxSipUsername(value) || BARE_CREDENTIAL.test(value)) return value;
+  if (/^\+?[\d\s().-]+$/.test(value)) return { shape: "number" };
+  const parts = /^(?:([a-z][a-z0-9+.-]*):)?(?:[^@]*@)?([^;?]*)([;?].*)?$/i.exec(value);
+  const hasUser = value.includes("@"), host = parts?.[2] ?? "";
+  return { shape: "address", scheme: parts?.[1]?.toLowerCase().slice(0, 16) ?? null,
+    host: hasUser ? /^[a-z0-9.-]{1,253}(:\d{1,5})?$/i.test(host) ? host.toLowerCase() : "other" : null, hasUser, hasParams: Boolean(parts?.[3]) };
+}
+
+/**
+ * S5 SIP-domain spike (TEST): what Telnyx reports as `to` (and as `sip_to`, if
+ * a payload carries one) for the legs of a session that dials its operators on
+ * `sip.telnyx.eu` has not been observed. Every matcher accepts both domains;
+ * this line records the real values, on the session's own events and on its
+ * proven credential mirrors, through `spikeAddress`. An event naming only
+ * phone numbers (a customer's leg) logs nothing.
+ */
+function logSipDomainSpike(deps: ProcessorDeps, event: TelephonyEvent, sessionId: string, source: "session" | "mirror"): void {
+  const to = spikeAddress(event.to), sipTo = spikeAddress(event.payload.sip_to);
+  const telling = (value: string | SpikeShape | null) => value !== null && (typeof value === "string" || value.shape !== "number");
+  if (!telling(to) && !telling(sipTo)) return;
+  try {
+    deps.logger?.({ scope: "sip-domain-spike", eventId: event.id, type: event.type, sessionId, source, connectionId: event.connectionId,
+      direction: event.direction, to, sipTo, payloadKeys: Object.keys(event.payload).sort() });
+  } catch { /* Diagnostic only. */ }
 }
 
 /**
@@ -250,6 +360,7 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
  * `leg.state`, which `onSdkHold` rewrites even on an ended leg.
  */
 async function leaseFreeIgnoreReason(deps: ProcessorDeps, session: SessionRow, event: TelephonyEvent): Promise<string | null> {
+  if (event.type === "call.bridged") return leaseFreeDuplicateBridge(deps, session, event);
   if (!LEASE_FREE_IGNORE_TYPES.has(event.type) || !event.callControlId) return null;
   const leg = await deps.admin.from("motorist_call_legs").select("role, ended_at")
     .eq("organization_id", deps.organizationId).eq("session_id", session.id)
@@ -260,6 +371,28 @@ async function leaseFreeIgnoreReason(deps: ProcessorDeps, session: SessionRow, e
     return event.type === "call.gather.ended" ? `gather in ${session.state}` : `playback ended in ${session.state}`;
   }
   return null;
+}
+
+/**
+ * An exact duplicate `call.bridged` (`bridged_observation_fast`, call-speed
+ * S1.2): the leg already records that bridge and its answer, so the reducer
+ * would only ignore it (`onBridged`). Its monotone facts (`bridged_at`,
+ * `answered_at`) cannot be undone, and the session preconditions are those of
+ * the observation-only path: nothing recorded, pending, terminating, being
+ * cancelled or accounted for callback contact. An `unknown` provider command
+ * keeps the leased path, where this event may be its evidence. The journal is
+ * read only for an actual duplicate, so a first bridge pays one leg read.
+ */
+async function leaseFreeDuplicateBridge(deps: ProcessorDeps, session: SessionRow, event: TelephonyEvent): Promise<string | null> {
+  const flags = latencyFlagsOf(deps);
+  if (!flags.bridged_observation_fast || !event.callControlId || session.writer_contract !== 2 ||
+    !observationOnlyAllowed(session, flags.internal_lean_path)) return null;
+  const leg = await deps.admin.from("motorist_call_legs").select("state, answered_at, bridged_at, ended_at")
+    .eq("organization_id", deps.organizationId).eq("session_id", session.id)
+    .eq("telnyx_call_control_id", event.callControlId).maybeSingle();
+  if (leg.error || !leg.data || leg.data.state !== "bridged" || !leg.data.bridged_at || !leg.data.answered_at || leg.data.ended_at) return null;
+  const unknown = await deps.admin.from("motorist_provider_commands").select("command_id").eq("session_id", session.id).eq("outcome", "unknown").limit(1);
+  return unknown.error || (unknown.data ?? []).length ? null : DUPLICATE_BRIDGE;
 }
 
 async function findLine(deps: ProcessorDeps, environment: string, to: string | null): Promise<LineRow | null> {
@@ -325,7 +458,8 @@ export async function createInboundSession(deps: ProcessorDeps, event: Telephony
       caller_number: callerNumber,
       called_number: calledNumber,
       started_at: event.occurredAt ?? now.toISOString(),
-      metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, announcements: announcementConfigFromMetadata(line?.metadata), ...(lineMode ? { line_inbound_mode: lineMode } : {}), ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}) }),
+      metadata: toJson({ line_label: sourceLine?.label ?? null, partner_name: sourceLine?.partner_name ?? null, environment: deps.environment, announcements: announcementConfigFromMetadata(line?.metadata), ...(lineMode ? { line_inbound_mode: lineMode } : {}), ...(sourceLine && line && sourceLine.id !== line.id ? { return_routing: { source_line_id: sourceLine.id, target_line_id: line.id, original_called_number: calledNumber } } : {}),
+        start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: "inbound", origin: null, providerRegion: providerRegionOf(deps.config) }) }),
     })
     .select("*")
     .single();
@@ -410,7 +544,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     testEventAllowed = false;
     if (event.callControlId) testEventAllowed = await hasTestCallProvenance(boundary, event.callControlId, deps);
     if (event.conferenceId && deps.telnyx) {
-      const response = await deps.telnyx.request<{ data?: { connection_id?: string } }>("GET", `/conferences/${encodeURIComponent(event.conferenceId)}`);
+      const response = await deps.telnyx.request<{ data?: { connection_id?: string } }>("GET", `/conferences/${encodeURIComponent(event.conferenceId)}`,
+        { region: await conferenceEventRegion(deps, { ...event, conferenceId: event.conferenceId }) });
       testEventAllowed = (!event.callControlId || testEventAllowed) && response.data?.connection_id === boundary.callControlAppId;
     }
   }
@@ -419,7 +554,22 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     return done({ ...identity, status: 200, outcome: "unverified_connection" });
   }
 
-  const claim = await claimWebhookEvent(deps.admin, {
+  // Speaker changes have no reducer, recording or call-accounting effects.
+  // During one PARK they generated repeated claim/correlation/audit/finish DB
+  // work competing with the actual control. Keep a bounded runtime observation
+  // after signature (route) and exact connection verification, without a DB
+  // journal or sweep. Existing ledger rows still follow their completion path.
+  if (event.type === "conference.floor.changed" && !deps.ledgerReplay && event.connectionId && allowed.has(event.connectionId)) {
+    try { deps.logger?.({ scope: "voice-activity", code: "conference_floor_changed", eventId: event.id,
+      occurredAt: event.occurredAt, conferenceId: event.conferenceId, callControlId: event.callControlId,
+      sessionHint: event.clientState?.sid ?? null, sessionVerified: false }); }
+    catch { /* Optional observation must not cause provider retries. */ }
+    return done({ ...identity, status: 200, outcome: "ignored", notes: ["voice activity observed without database writes"] });
+  }
+
+  // A claim-holding drain re-enters with the claim it never gave up (S1.3).
+  const held = heldClaimOf(deps, event);
+  const claim = held ? held.claim : await claimWebhookEvent(deps.admin, {
     eventId: event.id,
     eventType: event.type,
     payload: toJson(event.type.includes("recording.") ? { recording_id: event.payload.recording_id ?? null, recording_started_at: event.payload.recording_started_at ?? null,
@@ -438,7 +588,11 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     return done({ ...identity, claim, status: 200, outcome: "unresolved", error: claim.terminalReason });
   }
   if (claim.outcome !== "claimed") {
-    return done({ ...identity, claim, status: claim.outcome === "busy" ? 500 : 200, outcome: claim.outcome });
+    // A redelivery of an event this host already acknowledged and still holds
+    // (S1.3) is answered, not retried: the holder will finish it.
+    const acknowledged = claim.outcome === "busy" && heldOnThisHost(event.id);
+    return done({ ...identity, claim, status: claim.outcome === "busy" && !acknowledged ? 500 : 200, outcome: claim.outcome,
+      ...(acknowledged ? { notes: ["claim held by this host"] } : {}) });
   }
 
   // AI demo legs are not dispatch sessions: they have no operator, no ring plan
@@ -489,8 +643,10 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
   const effects = effectsDeps(deps);
   let session: SessionRow | null = null;
   let processingStarted = false;
+  let runnerStartedAt: string | null = null;
   try {
     session = await findSession(deps.admin, deps.organizationId, event);
+    const correlatedExistingSession = session !== null;
     // Only the call-control application sees real customers. A leg arriving at
     // the credential connection is our own dial reaching an operator's browser:
     // it is "incoming" from that connection's point of view, and turning it
@@ -521,6 +677,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     }
 
     const ownedSession = session;
+    if (sessionSipDomain(ownedSession.metadata) === "eu") logSipDomainSpike(deps, event, ownedSession.id, "session");
 
     // Bookkeeping that writes nothing fenced does not take the session lease.
     //
@@ -537,9 +694,12 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       event.type !== "call.recording.saved" && event.type !== "conference.recording.saved";
     if (leaseFree) {
       processingStarted = true;
+      runnerStartedAt = now().toISOString();
       await recordCallEvent(effectsDeps(deps), { session: ownedSession, event, handledStatus: "processed",
         stateBefore: ownedSession.state, stateAfter: ownedSession.state, notes: ["bookkeeping"], commands: [] });
-      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+      if (await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger })) {
+        logWebhookLatency(deps, event, claim, ownedSession.id, runnerStartedAt, true);
+      }
       const bookkeeping = done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", notes: ["bookkeeping", "lease-free"] });
       if (deps.deferMaintenance) {
         try { deps.deferMaintenance(() => maybeSweep(deps, started)); }
@@ -556,9 +716,12 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     const ignoreReason = eventClass === "control" ? await leaseFreeIgnoreReason(deps, ownedSession, event) : null;
     if (ignoreReason) {
       processingStarted = true;
+      runnerStartedAt = now().toISOString();
       await recordCallEvent(effects, { session: ownedSession, event, handledStatus: "ignored",
         stateBefore: ownedSession.state, stateAfter: ownedSession.state, notes: [ignoreReason, "lease-free"], commands: [] });
-      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
+      if (await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger })) {
+        logWebhookLatency(deps, event, claim, ownedSession.id, runnerStartedAt, true);
+      }
       logResult(deps, event, claim, ownedSession.id, "ignored", [], started, now);
       const ignored = done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "ignored", notes: [ignoreReason, "lease-free"] });
       // Same after-response work as a reducer ignore: this host may drain the
@@ -573,9 +736,26 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
 
     // The durable webhook ledger owns retry. Do not have every simultaneous
     // provider callback poll the same database lease while a control is waiting.
+    if (correlatedExistingSession && deps.deferMaintenance && !deps.ledgerReplay && event.callControlId && DEFERRED_EVENT_RANK[event.type] !== undefined &&
+      ownedSession.writer_contract === 2 && ownedSession.lease_token &&
+      Date.parse(ownedSession.lease_until ?? "") > now().getTime()) {
+      // Correlation just read this owner. Retain the durable fact and let the
+      // shared drain wait read-only instead of issuing eight acquire RPCs for
+      // each callback in the burst. A newly created session is excluded: its
+      // returned snapshot can still carry this invocation's released token.
+      // A stale busy hint only defers to that drain.
+      throw new SessionLeaseBusyError({ leaseWaitMs: 0, polls: 0, waitedMs: 0, eventType: event.type });
+    }
     let failedOwnerReplayEligible = false;
-    const result = await ownedSessionWork({ ...deps, leaseWaitMs: WEBHOOK_LEASE_WAIT_MS }, ownedSession.id, async () => {
+    let setupRecovery: SessionRow | null = null;
+    let observationAudit: (() => Promise<void>) | undefined;
+    // Call-speed S6.2 (N2): a concurrent bridge this event left waiting for its evidence.
+    let pendingBridge: SessionRow | null = null;
+    // A held claim has just seen the lease free; if it is taken again, the
+    // drain goes back to waiting read-only instead of polling the acquire RPC.
+    const result = await ownedSessionWork({ ...deps, leaseWaitMs: held ? 0 : WEBHOOK_LEASE_WAIT_MS }, ownedSession.id, async () => {
       processingStarted = true;
+      runnerStartedAt = now().toISOString();
       if (eventClass === "bookkeeping") {
         if (event.type === "call.recording.saved" || event.type === "conference.recording.saved") {
           const payload = event.payload;
@@ -604,9 +784,17 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "processed", notes: ["bookkeeping"] });
       }
 
-      const run = await runSessionEvent(deps, ownedSession.id, event);
+      // Call-speed S6.2 (N3): a concurrent far leg's hangup whose own
+      // `call.answered` still waits in the ledger was answered: it left (or was
+      // cleared) before the connection, it did not decline.
+      const answeredPending = event.type === "call.hangup" && event.callControlId && ownedSession.state === "ringing" &&
+        readMeta(ownedSession).far_end?.mode === "concurrent" &&
+        (await pendingLedgerControlIds(deps.admin, deps.organizationId, "call.answered", [event.callControlId])).has(event.callControlId);
+      const run = await runSessionEvent(deps, ownedSession.id, answeredPending ? { ...event, answeredPending: true } : event, { deferObservationAudit: true });
+      if (concurrentBridgeSessionDueAt(run.session) !== null) pendingBridge = run.session;
+      observationAudit = run.afterRelease;
       if (["call.bridged", "call.hangup", "conference.participant.joined", "conference.participant.left"].includes(event.type)) {
-        try { await observeParticipants(deps.admin, run.session, event.id, event.occurredAt ?? now().toISOString(), event.type === "call.bridged"); }
+        try { await observeParticipants(deps.admin, run.session, event.id, event.occurredAt ?? now().toISOString(), event.type === "call.bridged", undefined, latencyFlagsOf(deps).internal_lean_path); }
         catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: ownedSession.id, code: "participant_observation_failed" }); }
       }
       if (run.outcome === "ignored") {
@@ -616,6 +804,9 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
 
       if (run.apply.failed) {
         failedOwnerReplayEligible = await markWebhookEventFailed(deps.admin, event.id, run.apply.failure?.error ?? "command failed", { claimedAt: claim.claimedAt, logger: deps.logger });
+        if (!deps.ledgerReplay && !run.apply.failure?.callGone && run.session.writer_contract === 2 &&
+          run.session.direction === "inbound" && !run.session.answered_at && !run.session.ended_at &&
+          ["received", "greeting", "ivr"].includes(run.session.state)) setupRecovery = run.session;
         logResult(deps, event, claim, ownedSession.id, "failed", run.commands, started, now);
         return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "failed", commands: run.commands, notes: run.apply.notes, error: run.apply.failure?.error ?? null });
       }
@@ -626,9 +817,20 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // The fenced transition and audit are complete. Finishing the unfenced
     // inbox claim must not keep the next answer behind one more DB round trip.
     // Failed-owner bookkeeping stays in the scope above for terminal recovery.
+    // An observation-only bridge (S1.2) writes its audit row here, lease-free
+    // (`motorist_call_events` is not fenced), alongside the ledger finish. The
+    // leg fact is committed and released: a failed audit insert is logged, never
+    // turned into a failed delivery, a retry or an incident.
+    const audit = observationAudit?.().catch((auditError: unknown) => {
+      try { deps.logger?.({ level: "warn", scope: "webhook", eventId: event.id, sessionId: ownedSession.id, code: "observation_audit_failed",
+        error: auditError instanceof Error ? auditError.message : String(auditError) }); }
+      catch { /* Diagnostic only. */ }
+    });
     if (result.outcome === "processed" || result.outcome === "ignored") {
-      await markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger });
-    }
+      const [finished] = await Promise.allSettled([markWebhookEventProcessed(deps.admin, event.id, { now, claimedAt: claim.claimedAt, logger: deps.logger }), audit]);
+      if (finished.status === "rejected") throw finished.reason;
+      if (finished.value) logWebhookLatency(deps, event, claim, ownedSession.id, runnerStartedAt, false);
+    } else await audit;
     // The owned scope has exited before optional maintenance. A failed apply
     // may still have durable effects pending; its ledger failure stays truthful.
     // Release can warn without failing the operation; replay must acquire a
@@ -636,10 +838,20 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // Do not hold the next answer/hangup behind incident reporting or another
     // call's sweep. The HTTP host must retain this promise (Next after), never
     // launch untracked work; direct cron/recovery callers still await it.
-    const maintenance = async () => {
+    const maintenance = async (deferred: boolean) => {
       if (result.outcome === "processed" || result.outcome === "ignored") await replayCorrelatedEvents(deps, event, ownedSession);
       else if (failedOwnerReplayEligible && eventClass === "control" && deps.replayCorrelated !== false) {
-        await replayReadySessionEvents(deps, ownedSession, event, true);
+        // A held run (S1.3) carries its drain's window: a failed apply there
+        // must not stretch the customer-terminal drain or the recovery past it.
+        await replayReadySessionEvents(deps, ownedSession, event, true, { deadline: deps.replayDeadline });
+        // The existing retained maintenance gets one prompt recovery, after
+        // queued customer hangups. Never wait five minutes for a pre-dispatch
+        // DB timeout, and never invent a new media/dial command to bypass the
+        // journal's accepted/unknown decision.
+        const setupDeadline = Math.min(ingressWall + INLINE_DRAIN_BUDGET_MS, deps.replayDeadline ?? Number.POSITIVE_INFINITY);
+        if (setupRecovery && Date.now() < setupDeadline) {
+          await recoverInitialSetup(deps, setupRecovery, event.id, setupDeadline);
+        }
       }
       if (eventClass === "control" && result.outcome === "processed") {
         await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.webhook, now());
@@ -650,23 +862,66 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       if (now().getTime() - started < 35_000) {
         await maybeSweep(deps, now().getTime(), ["call.hangup", "call.bridged"].includes(event.type));
       }
+      // N2: the request that left a concurrent bridge waiting enforces its
+      // retry, deadline and verification itself, after the response — only when
+      // this work was really deferred (L2): an inline fallback, or a direct
+      // cron/recovery caller, never holds its response for it. A correlated
+      // replay above may have left the bridge waiting too (L1).
+      if (deferred) {
+        if (pendingBridge) await awaitConcurrentBridge(deps, pendingBridge, started);
+        else if (readMeta(ownedSession).far_end?.mode === "concurrent") await awaitSessionBridge(deps, ownedSession.id, started);
+      }
     };
     if (deps.deferMaintenance) {
-      try { deps.deferMaintenance(maintenance); }
+      try { deps.deferMaintenance(() => maintenance(true)); }
       catch {
         deps.logger?.({ level: "warn", scope: "webhook", message: "maintenance scheduling unavailable" });
-        await maintenance();
+        await maintenance(false);
       }
-    } else await maintenance();
+    } else await maintenance(false);
     return result;
   } catch (error) {
     const message = describeServiceError(error);
-    const deferred = error instanceof SessionEventDeferredError || !processingStarted;
+    const deferred = error instanceof SessionEventDeferredError || error instanceof SessionLeaseLostError || !processingStarted;
     // A busy lease before any work started, on a session whose inbox drain
     // replays this event type: the fact is durable in the ledger and its own
     // host can finish it once the holder releases (see DEFERRED_SELF_DRAIN_WINDOW_MS).
     const selfDrainable = error instanceof SessionLeaseBusyError && !processingStarted && !deps.ledgerReplay &&
       Boolean(session) && Boolean(event.callControlId) && DEFERRED_EVENT_RANK[event.type] !== undefined;
+    // A held claim met a holder again (S1.3): it stays claimed and waits again.
+    if (held && error instanceof SessionLeaseBusyError && !processingStarted) {
+      return done({ ...identity, claim, sessionId: session?.id ?? null, status: 200, outcome: "deferred", error: message, notes: [HELD_CLAIM_WAITING] });
+    }
+    // `claim_holding_drain` (S1.3): keep this claim rather than deferring the
+    // row, whose SQL backoff refuses any re-claim for ≥ 500 ms, and finish the
+    // event under it once the holder releases. Durability is the claim's: a
+    // host that dies leaves it stale after 30 s for the session's next inbox
+    // drain, and the cron's replay behind that.
+    if (selfDrainable && !held && session && deps.deferMaintenance && claim.claimedAt &&
+      latencyFlagsOf(deps).claim_holding_drain && Date.now() - ingressWall <= DEFERRED_ACK_MAX_ELAPSED_MS) {
+      const heldSessionId = session.id;
+      const heldConcurrent = readMeta(session).far_end?.mode === "concurrent";
+      const waiter: HeldClaimWaiter = { event, envelope, claim, ingressWall };
+      const start = holdClaim(deps, heldSessionId, waiter);
+      try {
+        deps.deferMaintenance(async () => {
+          try { await sessionOwnership.exit(start); }
+          catch (drainError) {
+            deps.logger?.({ level: "warn", scope: "webhook", sessionId: heldSessionId, message: "held claim drain failed", error: drainError instanceof Error ? drainError.message : String(drainError) });
+          }
+          // L1: an answer this drain applied may have left a concurrent bridge waiting.
+          if (heldConcurrent) await awaitSessionBridge(deps, heldSessionId, started);
+        });
+        deps.logger?.({ level: "warn", scope: "webhook", eventId: event.id, type: event.type, sessionId: heldSessionId, outcome: "deferred", error: message, retryable: true,
+          ms: now().getTime() - started, deferral: "lease_busy", claim_held: true,
+          ...(error instanceof SessionLeaseBusyError ? { lease_wait_ms: error.details?.waitedMs ?? null, polls: error.details?.polls ?? null } : {}),
+          finished_at: new Date().toISOString(), timing: event.timing, meta: { attempt: event.deliveryAttempt, delivered_to: event.deliveredTo } });
+        return done({ ...identity, claim, sessionId: heldSessionId, status: 200, outcome: "deferred", error: message, notes: ["claim held"] });
+      } catch {
+        // No retained request scope: the ledger deferral below, as before.
+        unholdClaim(deps, heldSessionId, waiter);
+      }
+    }
     let durable = false;
     try {
       durable = await markWebhookEventFailed(deps.admin, event.id, error, { claimedAt: claim.claimedAt, logger: deps.logger, releaseForRetry: deferred });
@@ -677,7 +932,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // must not delay releasing an unexecuted answer for immediate redelivery.
     if (!deferred) await recordTelephonyIncident(deps.admin, { job: TELEPHONY_INCIDENT_JOBS.webhook, error, context: { eventId: event.id, type: event.type, sessionId: session?.id ?? null } });
     deps.logger?.({ level: deferred ? "warn" : "error", scope: "webhook", eventId: event.id, type: event.type, sessionId: session?.id ?? null, outcome: "failed", error: message, retryable: deferred, ms: now().getTime() - started,
-      deferral: error instanceof SessionLeaseBusyError ? "lease_busy" : error instanceof SessionEventDeferredError ? error.code : null,
+      deferral: error instanceof SessionLeaseBusyError ? "lease_busy" : error instanceof SessionLeaseLostError ? "lease_lost" : error instanceof SessionEventDeferredError ? error.code : null,
       ...(error instanceof SessionLeaseBusyError ? { lease_wait_ms: error.details?.waitedMs ?? null, polls: error.details?.polls ?? null } : {}),
       finished_at: new Date().toISOString(),
       timing: event.timing, meta: { attempt: event.deliveryAttempt, delivered_to: event.deliveredTo } });
@@ -686,7 +941,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // happened to answer 200 (17 of 58 in the 22 Sep recheck); the rest waited
     // for the cron. The deferring host drains it itself once the response is
     // out and the holder has released, honouring the ledger's SQL backoff. The
-    // HTTP answer stays 500: the fact is not applied yet. Without a host
+    // Without a retained drain the HTTP answer stays 500. Without a host
     // (cron/replay callers pass no `deferMaintenance`) nothing is scheduled,
     // and the drain is never run inline: the 500 must go out at once so the
     // redelivery is not delayed, and an inline drain would sit on the lease it
@@ -695,6 +950,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     let drainScheduled = false;
     if (deferred && session && deps.deferMaintenance) {
       const deferredSessionId = session.id;
+      const deferredConcurrent = readMeta(session).far_end?.mode === "concurrent";
       try {
         deps.deferMaintenance(async () => {
           try {
@@ -704,6 +960,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
           } catch (drainError) {
             deps.logger?.({ level: "warn", scope: "webhook", sessionId: deferredSessionId, message: "deferred drain failed", error: drainError instanceof Error ? drainError.message : String(drainError) });
           }
+          // L1: the replayed answer may have left a concurrent bridge waiting.
+          if (deferredConcurrent) await awaitSessionBridge(deps, deferredSessionId, started);
         });
         drainScheduled = true;
       } catch {
@@ -731,33 +989,250 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
  * as soon as this event is no longer deferred (processed here, by the holder's
  * own post-release drain, by a redelivery or by the cron) or the window ends.
  */
+type DeferredDeliveryDrain = { events: Set<string>; deadline: number; work: Promise<void> };
+const deferredDeliveryDrains = new Map<string, DeferredDeliveryDrain>();
+
 export async function drainDeferredDelivery(deps: ProcessorDeps, sessionId: string, eventId: string, ingressWall: number): Promise<void> {
-  const deadline = ingressWall + DEFERRED_SELF_DRAIN_WINDOW_MS;
+  const key = `${deps.environment}:${deps.organizationId}:${sessionId}`;
+  const existing = deferredDeliveryDrains.get(key);
+  if (existing) {
+    existing.events.add(eventId);
+    return existing.work;
+  }
+  // Every HTTP host retains this same promise. No detached worker/timer, no
+  // cross-process lock: durable claims/fences remain the authority. Concurrent
+  // callbacks on one instance share two reads per round rather than 2*N.
+  const drain: DeferredDeliveryDrain = { events: new Set([eventId]), deadline: ingressWall + DEFERRED_SELF_DRAIN_WINDOW_MS, work: Promise.resolve() };
+  deferredDeliveryDrains.set(key, drain);
+  drain.work = runDeferredDeliveryDrain(deps, sessionId, drain, ingressWall)
+    .finally(() => { if (deferredDeliveryDrains.get(key) === drain) deferredDeliveryDrains.delete(key); });
+  return drain.work;
+}
+
+async function runDeferredDeliveryDrain(deps: ProcessorDeps, sessionId: string, drain: DeferredDeliveryDrain, ingressWall: number): Promise<void> {
+  const { deadline } = drain;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
   for (let round = 0; round < DEFERRED_SELF_DRAIN_MAX_ROUNDS; round += 1) {
+    if (Date.now() >= deadline) break;
     if (round > 0) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       await sleep(Math.min(DEFERRED_SELF_DRAIN_POLL_MS[Math.min(round - 1, DEFERRED_SELF_DRAIN_POLL_MS.length - 1)]!, remaining));
     }
-    const row = await deps.admin.from("motorist_telnyx_webhook_events").select("status, retry_state")
-      .eq("organization_id", deps.organizationId).eq("event_id", eventId).maybeSingle();
-    if (row.error) break;
-    if (!row.data || row.data.status === "processed" || row.data.retry_state !== "deferred") {
-      deps.logger?.({ scope: "webhook", eventId, sessionId, message: "deferred delivery settled", rounds: round, ms: Date.now() - ingressWall });
+    const eventIds = [...drain.events].slice(0, DEFERRED_DRAIN_LIMIT);
+    const rows = await deps.admin.from("motorist_telnyx_webhook_events").select("event_id, status, retry_state")
+      .eq("organization_id", deps.organizationId).in("event_id", eventIds)
+      .abortSignal(AbortSignal.timeout(Math.max(1, Math.min(1_500, deadline - Date.now()))));
+    if (rows.error) break;
+    for (const id of eventIds) {
+      const row = rows.data?.find(row => row.event_id === id);
+      if (!row || row.status === "processed" || row.retry_state !== "deferred") drain.events.delete(id);
+    }
+    if (!drain.events.size) {
+      deps.logger?.({ scope: "webhook", sessionId, message: "deferred delivery settled", rounds: round, ms: Date.now() - ingressWall });
       return;
     }
     if (Date.now() >= deadline) break;
     const session = await deps.admin.from("motorist_call_sessions").select("*")
-      .eq("organization_id", deps.organizationId).eq("id", sessionId).maybeSingle();
+      .eq("organization_id", deps.organizationId).eq("id", sessionId)
+      .abortSignal(AbortSignal.timeout(Math.max(1, Math.min(1_500, deadline - Date.now())))).maybeSingle();
     if (session.error || !session.data) break;
     const leaseUntil = session.data.lease_until ? Date.parse(session.data.lease_until) : Number.NaN;
     // Held: wait read-only. Free: replay the ready inbox (it acquires with the webhook budget).
     if (!(leaseUntil > nowOf(deps)().getTime())) await replayReadySessionEvents(deps, session.data, undefined, false, { deadline, limit: 4 });
   }
   // Left for the next holder's post-release drain and the cron (unchanged recovery).
-  deps.logger?.({ level: "warn", scope: "webhook", eventId, sessionId, message: "deferred delivery left for recovery", ms: Date.now() - ingressWall });
+  deps.logger?.({ level: "warn", scope: "webhook", sessionId, pending: drain.events.size, message: "deferred delivery left for recovery", ms: Date.now() - ingressWall });
 }
+
+/**
+ * Claim-holding drain (`claim_holding_drain`, call-speed S1.3).
+ *
+ * A lease-busy control fact is acknowledged as before, but its host keeps the
+ * webhook claim instead of finishing the row as deferred: `finish_v2` would
+ * set `next_attempt_at` ≥ 500 ms out and the claim RPC refuses the row until
+ * then, so even an immediately free lease cost that floor plus a poll gap.
+ *
+ * Waiting is read-only — one session row per round, shared by every waiter of
+ * the session on this host — every 100, 150, then 250 ms. Once the lease is
+ * free the waiters run in rank order (hangup, answer, bridge, initiated…),
+ * each under its own claim, so the highest-ranked takes the lease first. One
+ * that finds the lease taken again goes back to waiting. A run that processed
+ * its event does the holder's post-release inbox drain, as a delivery would.
+ *
+ * Bounds, as for `drainDeferredDelivery`: no waiter starts later than
+ * `DEFERRED_SELF_DRAIN_WINDOW_MS` after the ingress of the request that
+ * retains the drain (30 s, plus at most `SESSION_WORK_MS` of owned work, is
+ * inside the route's 60 s `maxDuration`), nor `HELD_CLAIM_MAX_MS` after its
+ * own claim (below the ledger's 30 s stale window). A waiter that misses
+ * either, or whose run ends without finishing its row (thrown, refused before
+ * the claim), is given back to the ledger as deferred — visible to every
+ * other drainer, exactly as without the switch.
+ *
+ * If the host dies holding a claim, the claim goes stale after
+ * `WEBHOOK_CLAIM_STALE_AFTER_MS`; from then on any of the session's inbox
+ * drains takes it over (`replayReadySessionEvents`), and the cron's
+ * stalled-event replay remains the backstop. A redelivery meets the fresh
+ * claim (`busy`), so nothing is processed twice.
+ */
+const HELD_CLAIM_POLL_MS: readonly number[] = [100, 150, 250];
+export const HELD_CLAIM_MAX_MS = 25_000;
+/** A guard only: the deadlines end the wait first. */
+const HELD_CLAIM_MAX_ROUNDS = 160;
+/** Note on the result of a held run that found the lease taken again. */
+const HELD_CLAIM_WAITING = "claim held: lease busy";
+/** Results that return before the ledger claim, so nothing finished the held row. */
+const BEFORE_CLAIM_OUTCOMES: ReadonlySet<ProcessorOutcome> = new Set(["malformed", "unverified_connection"]);
+
+type HeldClaimWaiter = { event: TelephonyEvent; envelope: unknown; claim: WebhookClaim; ingressWall: number };
+/** `deadline` is wall time; `slept` also bounds the wait under a test clock. */
+type HeldClaimDrain = { waiters: HeldClaimWaiter[]; work: Promise<void> | null; startedAt: number; deadline: number; slept: number };
+const heldClaimDrains = new Map<string, HeldClaimDrain>();
+
+/** The claim this invocation already holds for exactly this event, if any. */
+function heldClaimOf(deps: ProcessorDeps, event: TelephonyEvent): ProcessorDeps["heldClaim"] | null {
+  return deps.heldClaim?.eventId === event.id ? deps.heldClaim : null;
+}
+
+const heldClaimKey = (deps: ProcessorDeps, sessionId: string) => `${deps.environment}:${deps.organizationId}:${sessionId}`;
+
+function heldOnThisHost(eventId: string): boolean {
+  for (const drain of heldClaimDrains.values()) if (drain.waiters.some(waiter => waiter.event.id === eventId)) return true;
+  return false;
+}
+
+/** Registers the waiter now (a redelivery must see it); the returned start runs after the response. */
+function holdClaim(deps: ProcessorDeps, sessionId: string, waiter: HeldClaimWaiter): () => Promise<void> {
+  const key = heldClaimKey(deps, sessionId);
+  let drain = heldClaimDrains.get(key);
+  // A drain past its window only gives waiters back; a later fact gets its own,
+  // retained by its own request. The old one still finishes what it holds.
+  if (!drain || Date.now() >= drain.deadline) heldClaimDrains.set(key, drain = { waiters: [], work: null, startedAt: Date.now(),
+    deadline: waiter.ingressWall + DEFERRED_SELF_DRAIN_WINDOW_MS, slept: 0 });
+  drain.waiters.push(waiter);
+  return () => {
+    const current = heldClaimDrains.get(key);
+    // Gone: a drain that already ran on this host has finished the waiter.
+    if (!current) return Promise.resolve();
+    // Every retained response awaits this one promise. It loops until no
+    // waiter is left, so one that joins as a pass ends is never stranded.
+    current.work ??= (async () => {
+      try { while (current.waiters.length) await runHeldClaimDrain(deps, sessionId, current); }
+      finally { if (heldClaimDrains.get(key) === current) heldClaimDrains.delete(key); }
+    })();
+    return current.work;
+  };
+}
+
+function unholdClaim(deps: ProcessorDeps, sessionId: string, waiter: HeldClaimWaiter): void {
+  const key = heldClaimKey(deps, sessionId);
+  const drain = heldClaimDrains.get(key);
+  if (!drain) return;
+  drain.waiters = drain.waiters.filter(item => item !== waiter);
+  if (!drain.waiters.length && !drain.work) heldClaimDrains.delete(key);
+}
+
+const heldRank = (waiter: HeldClaimWaiter) => DEFERRED_EVENT_RANK[waiter.event.type] ?? 9;
+const heldOrder = (a: HeldClaimWaiter, b: HeldClaimWaiter) => heldRank(a) - heldRank(b) ||
+  (Date.parse(a.event.occurredAt ?? "") || 0) - (Date.parse(b.event.occurredAt ?? "") || 0) ||
+  Date.parse(a.claim.claimedAt ?? "") - Date.parse(b.claim.claimedAt ?? "");
+
+async function runHeldClaimDrain(deps: ProcessorDeps, sessionId: string, drain: HeldClaimDrain): Promise<void> {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  // Each claim's own age bounds its staleness margin; the retaining request's
+  // window bounds this host's work (wall clock, or the time slept under a test clock).
+  const expired = (waiter: HeldClaimWaiter) => nowOf(deps)().getTime() - Date.parse(waiter.claim.claimedAt ?? "") >= HELD_CLAIM_MAX_MS ||
+    Math.max(Date.now(), drain.startedAt + drain.slept) >= drain.deadline;
+  const release = async (waiter: HeldClaimWaiter, reason: string) => {
+    drain.waiters = drain.waiters.filter(item => item !== waiter);
+    try {
+      await markWebhookEventFailed(deps.admin, waiter.event.id, new SessionLeaseBusyError({ leaseWaitMs: HELD_CLAIM_MAX_MS, polls: 0, eventType: waiter.event.type }),
+        { claimedAt: waiter.claim.claimedAt, logger: deps.logger, releaseForRetry: true });
+    } catch (error) {
+      deps.logger?.({ level: "warn", scope: "webhook", eventId: waiter.event.id, message: "held claim release failed", error: error instanceof Error ? error.message : String(error) });
+    }
+    deps.logger?.({ level: "warn", scope: "webhook", sessionId, eventId: waiter.event.id, type: waiter.event.type, message: "held claim left for recovery", reason });
+  };
+  let step = 0;
+  for (let round = 0; drain.waiters.length && round < HELD_CLAIM_MAX_ROUNDS; round += 1) {
+    const wait = HELD_CLAIM_POLL_MS[Math.min(step++, HELD_CLAIM_POLL_MS.length - 1)]!;
+    await sleep(wait);
+    drain.slept += wait;
+    for (const waiter of [...drain.waiters]) if (expired(waiter)) await release(waiter, "window");
+    if (!drain.waiters.length) break;
+    const row = await deps.admin.from("motorist_call_sessions").select("lease_until")
+      .eq("organization_id", deps.organizationId).eq("id", sessionId).abortSignal(AbortSignal.timeout(1_500)).maybeSingle();
+    if (row.error || !row.data) continue;
+    const leaseUntil = row.data.lease_until ? Date.parse(row.data.lease_until) : Number.NaN;
+    if (leaseUntil > nowOf(deps)().getTime()) continue;
+    // Free. Re-sort after every run: a later joiner may outrank the rest.
+    while (drain.waiters.length) {
+      const next = [...drain.waiters].sort(heldOrder)[0]!;
+      if (expired(next)) { await release(next, "window"); continue; }
+      let result: ProcessorResult | null = null;
+      try {
+        // The run that processes its event holds the lease: it also drains the
+        // session's ready inbox afterwards, bounded by this drain's window.
+        result = await processTelnyxEvent({ ...deps, heldClaim: { eventId: next.event.id, claim: next.claim }, replayDeadline: drain.deadline,
+          sweepAfterEvent: false, deferMaintenance: undefined }, next.envelope);
+      } catch (error) {
+        deps.logger?.({ level: "warn", scope: "webhook", sessionId, eventId: next.event.id, message: "held claim run failed", error: error instanceof Error ? error.message : String(error) });
+      }
+      if (result?.notes.includes(HELD_CLAIM_WAITING)) { step = 0; break; }
+      // Thrown, or refused before the claim: the row is still held. Give it back.
+      if (!result || BEFORE_CLAIM_OUTCOMES.has(result.outcome)) { await release(next, result ? result.outcome : "error"); continue; }
+      // Otherwise the run finished the row: processed, ignored, failed or deferred.
+      drain.waiters = drain.waiters.filter(item => item !== next);
+    }
+  }
+  for (const waiter of [...drain.waiters]) await release(waiter, "rounds");
+}
+
+/** The latest a concurrent bridge's timer may still act, from the webhook's start (`maxDuration` is 60 s). */
+export const CONCURRENT_BRIDGE_TIMER_BUDGET_MS = 45_000;
+
+/**
+ * Call-speed S6.2 (N2): wait for this session's concurrent bridge to fall due
+ * (its 422 retry, its deadline, an extension) and enforce it with the
+ * overdue sweep's evidence, until the call connects, ends or the budget runs
+ * out. A mobile-origin call with no console open would otherwise wait for
+ * another webhook or the five-minute cron.
+ */
+async function awaitConcurrentBridge(deps: ProcessorDeps, session: SessionRow, startedAt: number): Promise<void> {
+  const now = nowOf(deps);
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  let current: SessionRow = session;
+  for (let round = 0; round < 5; round += 1) {
+    const due = concurrentBridgeSessionDueAt(current);
+    if (due === null) return;
+    const wait = Math.max(0, due - now().getTime()) + CONCURRENT_BRIDGE_TIMER_MARGIN_MS;
+    if (now().getTime() + wait - startedAt > CONCURRENT_BRIDGE_TIMER_BUDGET_MS) return;
+    await sleep(wait);
+    try {
+      await enforceConcurrentBridgeDeadline({ admin: deps.admin, organizationId: deps.organizationId, now,
+        runSessionEvent: (sessionId, event, options) => runSessionEvent(deps, sessionId, event, options) }, session.id);
+    } catch (error) {
+      deps.logger?.({ level: "warn", scope: "sweep", sessionId: session.id, code: "concurrent_bridge_timer_failed", error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
+    if (fresh.error || !fresh.data) return;
+    current = fresh.data;
+  }
+}
+
+/** L1: after a drain or replay host applied this session's events, the same timer if a concurrent bridge waits. */
+async function awaitSessionBridge(deps: ProcessorDeps, sessionId: string, startedAt: number): Promise<void> {
+  try {
+    const row = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).maybeSingle();
+    if (!row.error && row.data && concurrentBridgeSessionDueAt(row.data) !== null) await awaitConcurrentBridge(deps, row.data, startedAt);
+  } catch (error) {
+    deps.logger?.({ level: "warn", scope: "sweep", sessionId, code: "concurrent_bridge_timer_failed", error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/** A little after the due time, so the provider's own `call.bridged` usually wins the race. */
+const CONCURRENT_BRIDGE_TIMER_MARGIN_MS = 250;
 
 async function maybeSweep(deps: ProcessorDeps, startedAt: number, waitingFirst = false): Promise<void> {
   if (deps.sweepAfterEvent === false) return;
@@ -787,6 +1262,24 @@ async function maybeSweep(deps: ProcessorDeps, startedAt: number, waitingFirst =
   } catch (error) {
     deps.logger?.({ level: "warn", scope: "sweep", error: error instanceof Error ? error.message : String(error) });
   }
+}
+
+/**
+ * Received → processed for one ledger row: one compact line, written when it
+ * finishes processed. A busy-hint deferral throws before `ownedSessionWork`,
+ * so it never logs a lease wait; this line is what shows the cost.
+ * `deferrals` counts the row's earlier claims (deferrals plus rare failures or
+ * takeovers); the ledger's `deferral_count` is exact. Stamps and counts only.
+ */
+function logWebhookLatency(deps: ProcessorDeps, event: TelephonyEvent, claim: WebhookClaim, sessionId: string, runnerStartedAt: string | null, leaseFree: boolean): void {
+  try {
+    const processedAt = nowOf(deps)();
+    deps.logger?.({ scope: "webhook-latency", eventId: event.id, eventType: event.type, sessionId, receivedAt: claim.receivedAt, runnerStartedAt,
+      processedAt: processedAt.toISOString(), deferrals: Math.max(0, claim.attempts - 1), attempts: claim.attempts,
+      path: deps.ledgerReplay ? deps.replaySource ?? "replay" : heldClaimOf(deps, event) ? "held_claim" : leaseFree ? "lease_free" : "leased",
+      // A held claim never counts as a deferral; this is what its wait cost.
+      ...(heldClaimOf(deps, event) && claim.claimedAt ? { heldMs: Math.max(0, processedAt.getTime() - Date.parse(claim.claimedAt)) } : {}) });
+  } catch { /* Telemetry cannot change acknowledgement policy. */ }
 }
 
 function logResult(deps: ProcessorDeps, event: TelephonyEvent, claim: WebhookClaim, sessionId: string, outcome: string, commands: CommandOutcome[], started: number, now: () => Date): void {
@@ -819,7 +1312,7 @@ export function storedWebhookEnvelope(row: { event_id: string; event_type: strin
 
 async function replayCorrelatedEvents(deps: ProcessorDeps, current: TelephonyEvent, session: SessionRow): Promise<void> {
   if (deps.replayCorrelated === false) return;
-  return replayReadySessionEvents(deps, session, current);
+  return replayReadySessionEvents(deps, session, current, false, { deadline: deps.replayDeadline });
 }
 
 /** Called by an authenticated action's retained after-response work, once its
@@ -841,9 +1334,35 @@ export async function drainCustomerTerminal(deps: ProcessorDeps, session: Sessio
   await replayReadySessionEvents({ ...deps, replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, session, undefined, true);
 }
 
+async function recoverInitialSetup(deps: ProcessorDeps, known: SessionRow, eventId: string, deadline: number): Promise<void> {
+  try {
+    await ownedSessionWork({ ...deps, leaseWaitMs: 0 }, known.id, async () => {
+      const owner = sessionOwnership.getStore();
+      if (!owner || owner.contract !== 2) return;
+      owner.deadline = Math.min(owner.deadline, Date.now() + 8_000, deadline);
+      if (Date.now() >= owner.deadline) return;
+      const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId)
+        .eq("id", known.id).abortSignal(AbortSignal.timeout(3_000)).maybeSingle();
+      const session = fresh.data;
+      if (fresh.error || !session || session.answered_at || session.ended_at || session.termination_requested_at ||
+        !["received", "greeting", "ivr"].includes(session.state)) return;
+      const entries = readPendingEffects(session).entries;
+      if (entries.length !== 1 || entries[0].id !== eventId || !entries[0].commands.length ||
+        !entries[0].commands.every(command => ["answer", "playback_start", "gather"].includes(command.kind))) return;
+      await resumePendingEffects({ ...effectsDeps(deps), renewLease: () => assertOwnership() }, session);
+    }, { known, eventType: "setup_recovery" });
+  } catch {
+    // No second timer/worker and no recursive maintenance. The same durable
+    // effects and failed ledger remain for provider facts and the existing cron.
+    deps.logger?.({ level: "warn", scope: "webhook", sessionId: known.id, code: "setup_recovery_pending" });
+  }
+}
+
 async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow, current?: TelephonyEvent, customerTerminalOnly = false,
   options: { deadline?: number; limit?: number } = {}): Promise<void> {
   const deadline = Math.min(options.deadline ?? Number.POSITIVE_INFINITY, Date.now() + DEFERRED_DRAIN_DEADLINE_MS);
+  // A spent window (a held run's drain, S1.3) replays nothing; skip its reads too.
+  if (Date.now() >= deadline) return;
   const limit = options.limit ?? 2;
   try {
     if (customerTerminalOnly && !session.customer_leg_id) return;
@@ -862,12 +1381,33 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
     // known. Draining that ready ledger entry after the owner releases avoids
     // waiting for provider exponential redelivery or the five-minute cron.
     // A shared provider session ID is never enough to select another leg.
-    const deferred = controlIds.size ? await deps.admin.from("motorist_telnyx_webhook_events").select("*")
-      .eq("organization_id", deps.organizationId).eq("retry_state", "deferred")
-      .in("call_control_id", [...controlIds]).in("event_type", customerTerminalOnly ? ["call.hangup"] : DEFERRED_DRAIN_TYPES)
-      .lte("next_attempt_at", new Date(nowOf(deps)().getTime() + 5_000).toISOString()).neq("event_id", current?.id ?? "")
-      .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null };
+    const drainTypes = customerTerminalOnly ? ["call.hangup"] : DEFERRED_DRAIN_TYPES;
+    const [deferred, staleHeld, unlinkedDials] = await Promise.all([
+      controlIds.size ? deps.admin.from("motorist_telnyx_webhook_events").select("*")
+        .eq("organization_id", deps.organizationId).eq("retry_state", "deferred")
+        .in("call_control_id", [...controlIds]).in("event_type", drainTypes)
+        .lte("next_attempt_at", new Date(nowOf(deps)().getTime() + 5_000).toISOString()).neq("event_id", current?.id ?? "")
+        .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null },
+      // `claim_holding_drain` (S1.3): a fact whose host died holding its claim
+      // is never deferred. Once the claim is stale — the takeover the claim RPC
+      // grants anyone — this drain finishes it instead of leaving it to the cron.
+      controlIds.size && latencyFlagsOf(deps).claim_holding_drain ? deps.admin.from("motorist_telnyx_webhook_events").select("*")
+        .eq("organization_id", deps.organizationId).eq("retry_state", "ready").in("status", ["queued", "failed"])
+        .in("call_control_id", [...controlIds]).in("event_type", drainTypes)
+        .lt("claimed_at", new Date(nowOf(deps)().getTime() - WEBHOOK_CLAIM_STALE_AFTER_MS).toISOString()).neq("event_id", current?.id ?? "")
+        .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null },
+      // S6 B′ (`start_mode.farLinkTo: false`): an unlinked colleague dial has
+      // its own provider call session, named only by our journal of that dial.
+      !customerTerminalOnly && deps.config.configured && readMeta(session).start_mode?.farLinkTo === false
+        ? deps.admin.from("motorist_provider_commands").select("result").eq("session_id", session.id)
+          .eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
+          .contains("request_payload", { connection_id: deps.config.callControlAppId }).limit(MIRROR_PROOF_LIMIT) : { data: [], error: null },
+    ]);
     if (deferred.error) throw new Error(deferred.error.message);
+    if (staleHeld.error) throw new Error(staleHeld.error.message);
+    // A failed journal read only leaves the far mirrors to the cron.
+    const mirrorSessions = [...new Set([session.telnyx_session_id, ...(unlinkedDials.error ? [] : unlinkedDials.data ?? [])
+      .map(row => object(object(row.result).data).call_session_id)].filter((id): id is string => typeof id === "string" && id.length > 0))];
     // The customer may hang up before inbound creation saves its leg. A failed
     // answer still releases an owner with that exact leg now durable; recover
     // the early fact here, before the ledger's unchanged 60-second expiry.
@@ -885,13 +1425,13 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       session.telnyx_session_id && session.organization_id === deps.organizationId && object(session.metadata).environment === deps.environment
       ? await deps.admin.from("motorist_telnyx_webhook_events").select("*")
         .eq("organization_id", deps.organizationId).eq("retry_state", "awaiting_correlation")
-        .eq("call_session_id", session.telnyx_session_id).eq("connection_id", deps.config.credentialConnectionId)
+        .in("call_session_id", mirrorSessions).eq("connection_id", deps.config.credentialConnectionId)
         .in("event_type", [...CREDENTIAL_MIRROR_TYPES]).neq("event_id", current?.id ?? "")
         .order("received_at", { ascending: true }).limit(4) : { data: [], error: null };
     if (mirrors.error) throw new Error(mirrors.error.message);
     const occurredAt = (row: { occurred_at: string | null; received_at: string | null }) => Date.parse(row.occurred_at ?? row.received_at ?? "") || 0;
     const rows = [
-      ...(deferred.data ?? []).sort((a, b) => (DEFERRED_EVENT_RANK[a.event_type] ?? 9) - (DEFERRED_EVENT_RANK[b.event_type] ?? 9) || occurredAt(a) - occurredAt(b)),
+      ...[...(deferred.data ?? []), ...(staleHeld.data ?? [])].sort((a, b) => (DEFERRED_EVENT_RANK[a.event_type] ?? 9) - (DEFERRED_EVENT_RANK[b.event_type] ?? 9) || occurredAt(a) - occurredAt(b)),
       ...(earlyCustomer.data ?? []),
       ...(mirrors.data ?? []),
       ...(correlation.data ?? []),
@@ -923,7 +1463,7 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       // lifecycle facts a separate cap, retaining the ordinary two-event drain.
       // Leave room for both bounded proof reads (selection and claimed replay).
       const mirror = !exactLeg && !customerTerminalOnly && mirrorsReplayed < 4 && Date.now() + 3_000 < deadline &&
-        waiting.callSessionId === session.telnyx_session_id && await credentialMirrorSession(deps, waiting) === session.id;
+        mirrorSessions.includes(waiting.callSessionId ?? "") && await credentialMirrorSession(deps, waiting) === session.id;
       if (!exactLeg && !mirror || exactLeg && replayed >= limit) continue;
       // A terminal fact can be deferred just before the prior owner releases.
       // Retain the SQL backoff instead of missing it until the five-minute cron.
@@ -933,8 +1473,8 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       if (Date.now() + waitMs >= deadline) break;
       if (waitMs) await (deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(waitMs);
       if (Date.now() >= deadline) break;
-      const replay = await processTelnyxEvent({ ...deps, ledgerReplay: row.retry_state === "deferred" ? "cron" : "correlation",
-        replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined }, envelope);
+      const replay = await processTelnyxEvent({ ...deps, ledgerReplay: row.retry_state === "awaiting_correlation" ? "correlation" : "cron",
+        replaySource: "drain", replayCorrelated: false, sweepAfterEvent: false, deferMaintenance: undefined, heldClaim: undefined, replayDeadline: undefined }, envelope);
       if (mirror) mirrorsReplayed++; else replayed++;
       if (customerTerminalOnly && replayed >= limit) break;
       if (replay.outcome === "busy" || replay.error?.includes("SessionLeaseBusyError")) break;

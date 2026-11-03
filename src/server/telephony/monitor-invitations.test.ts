@@ -3,6 +3,7 @@ import { createTelephonyHarness, PROFILES, ORG, NUMBERS, type TelephonyHarness }
 import { completeAnnouncedAction } from "@/test/complete-call-announcements";
 import { addCallParty, blindTransfer, holdCall, hangupCall, inviteCallMonitor, revokeCallMonitorInvitation, superviseCall, stopSupervisingCall, createRateLimiter, type CallActor } from "./call-actions";
 import { listMonitorInvitations } from "./monitor-invitations";
+import { canInviteMonitor } from "@/lib/telephony/monitor-invitations";
 import { runSessionEvent, effectsDeps } from "./session-runner";
 import { applyReduceResult } from "./state/effects";
 import { emptyTransition, type AppEvent, type Command, type SessionMeta, type SessionRow } from "./state/types";
@@ -186,6 +187,26 @@ describe("invited receive-only monitoring", () => {
     expect(h.telnyx.of("dial")).toHaveLength(before + 1);
     await h.legEvent(customer, "call.hangup");
     await expect(superviseCall(h.deps, trainee, id, "monitor", invitation.id)).rejects.toMatchObject({ status: 409 });
+  });
+  it("refuses to invite a listener to a colleague call before any further read", async () => {
+    const { h, id } = await talking();
+    h.db.update("motorist_call_sessions", { direction: "internal" }, row => row.id === id);
+    const from = h.db.log.length;
+    await expect(invite(h, id)).rejects.toMatchObject({ status: 409, code: "not_supported_internal" });
+    expect(h.db.log.slice(from).some(row => row.table === "motorist_profiles" || row.table === "motorist_operator_devices")).toBe(false);
+    expect(entries(h, id)).toEqual([]);
+    expect(canInviteMonitor({ direction: "internal" })).toBe(false);
+    expect(canInviteMonitor({ direction: "inbound" })).toBe(true);
+    expect(canInviteMonitor(null)).toBe(false);
+  });
+  it("refuses an invitation that predates the colleague-call refusal without reserving or dialling", async () => {
+    const { h, id } = await talking(); const invitation = await invite(h, id);
+    h.db.update("motorist_call_sessions", { direction: "internal" }, row => row.id === id);
+    const presence = h.presence(trainee.profileId), dials = h.telnyx.of("dial").length;
+    await expect(superviseCall(h.deps, trainee, id, "monitor", invitation.id)).rejects.toMatchObject({ status: 409, code: "not_supported_internal" });
+    expect(h.telnyx.of("dial")).toHaveLength(dials);
+    expect(h.presence(trainee.profileId)).toMatchObject({ status: presence.status, current_session_id: presence.current_session_id ?? null });
+    expect(entries(h, id).find(entry => entry.id === invitation.id)?.acceptedAt).toBeUndefined();
   });
   it("reducer rejects escalation and provider boundary rejects a bypassed mode/unmute command", async () => {
     const { h, id } = await talking(); const invitation = await invite(h, id);

@@ -28,7 +28,7 @@ export async function lookupVehicle(query: VehicleQuery, actor: MotoristActor): 
   } : undefined;
   const queryHash = createHash("sha256").update(JSON.stringify(query.country === "CZ"
     ? [query.kind, query.value, query.country, query.checkedForDate, 5, czechProviders]
-    : [query.kind, query.value, query.country, query.checkedForDate, 4, databazaEnabled])).digest("hex");
+    : [query.kind, query.value, query.country, query.checkedForDate, 5, databazaEnabled])).digest("hex");
   const { data, error } = await admin.rpc("motorist_vehicle_lookup_claim", { p_organization_id: actor.organizationId, p_profile_id: actor.profileId, p_query_hash: queryHash });
   if (error || !data) throw new VehicleLookupError("Dohľadávanie je dočasne nedostupné. Údaje môžete vyplniť ručne.");
   const claim = data as unknown as Claim;

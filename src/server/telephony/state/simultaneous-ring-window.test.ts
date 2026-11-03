@@ -178,7 +178,7 @@ describe("one offer window per simultaneous ring step", () => {
     const original = h.db.takeInjectedError.bind(h.db);
     let auditFailed = false;
     const failure = vi.spyOn(h.db, "takeInjectedError").mockImplementation((table, operation) => {
-      if (!auditFailed && table === "motorist_call_events" && operation === "insert" && h.telnyx.of("dial").length > 0) {
+      if (!auditFailed && table === "motorist_call_events" && operation === "upsert" && h.telnyx.of("dial").length > 0) {
         auditFailed = true;
         return { code: "XX000", message: "routing audit temporarily unavailable", details: null, hint: null };
       }

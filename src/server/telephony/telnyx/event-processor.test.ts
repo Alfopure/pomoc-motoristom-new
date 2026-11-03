@@ -4,10 +4,10 @@ import { withRequestMetrics } from "@/server/request-metrics";
 import { CONNECTION_ID, createTelephonyHarness, LINES, NUMBERS, ORG, PROFILES, type TelephonyHarness } from "@/test/telephony-harness";
 
 import { sessionOwnership } from "../ownership";
-import { WEBHOOK_LEASE_POLL_MS } from "../session-runner";
 import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { encodeClientState } from "./client-state";
-import { INLINE_DRAIN_BUDGET_MS, processTelnyxEvent, replayDeferredSessionEvents } from "./event-processor";
+import { drainDeferredDelivery, INLINE_DRAIN_BUDGET_MS, processTelnyxEvent, replayDeferredSessionEvents } from "./event-processor";
+import { defaultLatencyFlags, latencyFlagsOf } from "../latency-flags";
 
 // A pass-through spy: every inline sweep still runs the real sweep, its call
 // shape is just observable.
@@ -28,7 +28,12 @@ describe("processTelnyxEvent", () => {
     expect(audit?.normalized_payload).toMatchObject({ timing: { request_id: response.headers.get("x-request-id"), ingress_at: expect.any(String),
       claimed_at: expect.any(String), lease_acquired_at: expect.any(String), first_command_at: h.now().toISOString(),
       meta: { attempt: 2, delivered_to: "https://example.test/webhook" } } });
-    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "lease-timing", outcome: "finished", release_confirmed: true, request_id: response.headers.get("x-request-id") }));
+    // The holder of the lease: route and event type.
+    expect(h.logs).toContainEqual(expect.objectContaining({ scope: "lease-timing", outcome: "finished", release_confirmed: true, request_id: response.headers.get("x-request-id"),
+      route: "call.webhook", eventType: "call.initiated" }));
+    expect(h.logs.filter(entry => entry.scope === "webhook-latency")).toEqual([{ scope: "webhook-latency", eventId: "timed-delivery", eventType: "call.initiated",
+      sessionId: result.sessionId, receivedAt: expect.any(String), runnerStartedAt: h.now().toISOString(), processedAt: h.now().toISOString(),
+      deferrals: 0, attempts: 1, path: "leased" }]);
     await h.process(envelope);
     expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook-delivery", outcome: "duplicate", meta: { attempt: 2, delivered_to: "https://example.test/webhook" } }));
   });
@@ -58,7 +63,9 @@ describe("processTelnyxEvent", () => {
     const replayReads = () => h.db.log.filter(entry => entry.table === "motorist_telnyx_webhook_events" && entry.operation === "select");
     expect(replayReads()).toHaveLength(0);
     await queued[0]();
-    expect(replayReads()).toHaveLength(3); // deferred, exact correlation and credential mirrors
+    // Deferred, exact correlation and credential mirrors; with `claim_holding_drain`
+    // also the stale held claims of the session's legs (S1.3).
+    expect(replayReads()).toHaveLength(latencyFlagsOf(h.deps).claim_holding_drain ? 4 : 3);
     expect(h.telnyx.of("answer")).toHaveLength(1);
   });
 
@@ -182,7 +189,7 @@ describe("processTelnyxEvent", () => {
     // event whose whole handling is one row in an unfenced table.
     expect(h.db.log.slice(from).filter((row) => row.table.includes("lease"))).toEqual([]);
 
-    h.db.failNext("motorist_call_events", "insert", "disk full");
+    h.db.failNext("motorist_call_events", "upsert", "disk full");
     const failed = await h.legEvent(call.callControlId, "call.speak.started", {});
     expect(failed).toMatchObject({ status: 500, outcome: "failed" });
     expect(h.rows("motorist_telnyx_webhook_events").at(-1)).toMatchObject({ status: "failed", error: expect.stringContaining("disk full") });
@@ -412,6 +419,8 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
   it("drains its own deferred row after the holder releases", async () => {
     // A talking call under the fenced contract; the customer's hangup is the deferred fact.
     const { h, call } = await talkingCall({ writerContract: 2, sweepAfterEvent: false });
+    // The ledger deferral itself (`claim_holding_drain` off; S1.3 has its own suite).
+    h.deps.latencyFlags = defaultLatencyFlags();
     // The poll loop measures `Date.now()`, so a clock-only sleep would spin.
     let draining = false;
     let drainSleeps = 0;
@@ -438,8 +447,7 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
     expect(ledgerRow(h, "deferred-hangup")).toMatchObject({ retry_state: "deferred", delivery_count: 1, deferral_count: 1, attempts: 1 });
     expect(ledgerRow(h, "deferred-hangup").error).toContain("deferral=lease_busy");
     expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook", eventId: "deferred-hangup", deferral: "lease_busy", polls: expect.any(Number), lease_wait_ms: expect.any(Number) }));
-    expect(acquires(h) - beforeDeferral).toBeGreaterThan(1);
-    expect(acquires(h) - beforeDeferral).toBeLessThanOrEqual(WEBHOOK_LEASE_POLL_MS.length + 1);
+    expect(acquires(h) - beforeDeferral).toBe(0);
     expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).toBeNull();
     // The deferring host retained its own drain and ran nothing inline.
     expect(queued).toHaveLength(1);
@@ -457,6 +465,10 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
     expect(ledgerRow(h, "deferred-hangup")).toMatchObject({ status: "processed", attempts: 2, delivery_count: 1, deferral_count: 1 });
     expect(customerLeg(h, call.sessionId, call.callControlId).ended_at).toBe(ledgerRow(h, "deferred-hangup").occurred_at);
     expect(h.session(call.sessionId)).toMatchObject({ state: "wrap_up", lease_token: null });
+    // The busy hint never logged a lease wait; received → processed shows what it cost.
+    const latency = h.logs.filter(entry => entry.scope === "webhook-latency" && entry.eventId === "deferred-hangup");
+    expect(latency).toEqual([{ scope: "webhook-latency", eventId: "deferred-hangup", eventType: "call.hangup", sessionId: call.sessionId, path: "drain", attempts: 2, deferrals: 1,
+      receivedAt: ledgerRow(h, "deferred-hangup").received_at, runnerStartedAt: expect.any(String), processedAt: expect.any(String) }]);
   });
 
   it("waits read-only while the holder keeps the lease, then finishes the acknowledged delivery itself", async () => {
@@ -506,6 +518,29 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
     }, "unretained-hangup"));
     expect(result).toMatchObject({ status: 500, outcome: "failed" });
     expect(ledgerRow(h, "unretained-hangup")).toMatchObject({ retry_state: "deferred" });
+  });
+
+  it("shares read-only waiting across a callback burst, including a late joiner, and releases the shared drain", async () => {
+    const { h, call } = await talkingCall({ writerContract: 2, sweepAfterEvent: false });
+    h.db.rpcHandlers.get("motorist_session_lease_acquire_v2")!({ p_session_id: call.sessionId, p_token: "holder", p_ttl_ms: 30_000 }, h.db);
+    const ids = Array.from({ length: 10 }, (_, i) => `burst-${i}`);
+    h.db.seed("motorist_telnyx_webhook_events", ids.map(event_id => ({ ...deferredTemplate(h, call), event_id, event_type: "call.bridged", payload: {} })));
+    let wake!: () => void;
+    let waiting!: () => void;
+    const asleep = new Promise<void>(resolve => { waiting = resolve; });
+    h.deps.sleep = async () => { waiting(); await new Promise<void>(resolve => { wake = resolve; }); };
+    const beforeReads = ledgerSelects(h), beforeAcquires = acquires(h);
+    const leader = drainDeferredDelivery(h.deps, call.sessionId, ids[0], Date.now());
+    await asleep;
+    const followers = ids.slice(1).map(id => drainDeferredDelivery(h.deps, call.sessionId, id, Date.now()));
+    // A different invocation settles the inbox while these hosts retain their wait.
+    h.db.update("motorist_telnyx_webhook_events", { status: "processed", retry_state: null }, row => ids.includes(String(row.event_id)));
+    wake();
+    await Promise.all([leader, ...followers]);
+    expect(ledgerSelects(h) - beforeReads).toBe(2);
+    expect(acquires(h)).toBe(beforeAcquires);
+    await drainDeferredDelivery(h.deps, call.sessionId, ids[0], Date.now());
+    expect(ledgerSelects(h) - beforeReads).toBe(3);
   });
 
   it("replays gather/playback/initiated after hangup/answered/bridged", async () => {

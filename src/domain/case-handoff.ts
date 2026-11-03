@@ -16,23 +16,34 @@ export type HandoffPublished = {
   caseCreatedAt?: string | null; firstCallAt?: string | null;
 };
 export type HandoffEvent = { id: string; action: string; comment: string; actor: string; createdAt: string };
+export type HandoffDeliveryMember = { id: string; displayName: string; lastPhone: string | null };
+export type HandoffApp = { memberId: string; lastPosition: { lat: number; lng: number; accuracy: number | null; recordedAt: string } | null };
 export type CaseHandoff = {
   id: string; status: HandoffState; revision: number; publishedVersion: number;
   recipientName: string; recipientPhone?: string; expiresAt: string; createdAt: string;
   canRenew?: boolean;
   recoverable?: boolean; tokenGeneration?: number; createdBy?: string; publishedAt?: string | null;
   openedAt: string | null; eta: string | null; published: HandoffPublished | null; events: HandoffEvent[];
+  app?: HandoffApp | null;
 };
-export type HandoffContext = { preview: HandoffPublished; previewVersion: string; handoffs: CaseHandoff[]; enhanced?: boolean };
+export type HandoffContext = { preview: HandoffPublished; previewVersion: string; handoffs: CaseHandoff[]; enhanced?: boolean; delivery?: { members: HandoffDeliveryMember[] } };
 export type HandoffCommand = { action: string; commandId: string; expectedRevision?: number; publishedVersion?: number; comment?: string; eta?: string | null; [key: string]: unknown };
-export type HandoffReceipt = { handoff: CaseHandoff; commandId?: string; committedRevision?: number; tokenAccepted?: boolean; url?: string };
+export type HandoffReceipt = { handoff: CaseHandoff; commandId?: string; committedRevision?: number; tokenAccepted?: boolean; url?: string; linkWarning?: "link_unavailable"; delivery?: { status: "sent" | "failed"; memberId: string } };
+export type HandoffDeliveryReceipt = { commandId: string; handoffId: string; memberId: string; sent: true; currentRevision: number };
+export function isHandoffDeliveryReceipt(value: unknown, command: HandoffCommand): value is HandoffDeliveryReceipt {
+  if (!value || typeof value !== "object" || command.action !== "deliver") return false;
+  const receipt = value as Partial<HandoffDeliveryReceipt>;
+  return receipt.commandId === command.commandId && receipt.handoffId === command.handoffId && receipt.memberId === command.recipientMemberId
+    && receipt.sent === true && Number.isSafeInteger(receipt.currentRevision) && Number(receipt.currentRevision) >= Number(command.expectedRevision);
+}
 export function isHandoffReceipt(value: unknown, command: HandoffCommand): value is HandoffReceipt {
   if (!value || typeof value !== "object") return false;
   const receipt = value as Partial<HandoffReceipt>, handoff = receipt.handoff;
   return !!handoff && receipt.commandId === command.commandId && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(handoff.id)
     && (!command.handoffId || handoff.id === command.handoffId) && Number.isSafeInteger(receipt.committedRevision) && Number(receipt.committedRevision) >= 1
     && Number.isSafeInteger(handoff.revision) && handoff.revision >= Number(receipt.committedRevision) && Number.isSafeInteger(handoff.publishedVersion) && handoff.publishedVersion >= 1
-    && handoffStates.includes(handoff.status);
+    && handoffStates.includes(handoff.status)
+    && (!(command.action === "issue" && command.recipientMemberId) || (receipt.delivery?.memberId === command.recipientMemberId && ["sent", "failed"].includes(receipt.delivery.status)));
 }
 export function handoffIsActive(handoff: Pick<CaseHandoff, "status" | "expiresAt">): boolean {
   return ["offered", "accepted", "en_route", "arrived"].includes(handoff.status) && Date.parse(handoff.expiresAt) > Date.now();

@@ -26,7 +26,8 @@ type ExpandedCasePanelProps = {
   partnerDirectory: PartnerDirectoryEntry[];
   priceRule?: PriceRule;
   onBackToCockpit: () => void;
-  onCaseCreated: (dispatchData: DispatchData, caseId: string, notice?: string) => void;
+  onCaseCreated: (dispatchData: DispatchData, caseId: string, notice?: string, openHandoff?: boolean) => void;
+  openHandoff?: boolean;
   onDataChange?: (dispatchData: DispatchData) => void;
   onCaseChange?: (caseDetail: CaseDetailData) => void;
   /** Click-to-call from the case card; absent while telephony is not configured. */
@@ -53,6 +54,7 @@ export function ExpandedCasePanel({
   operators,
   onBackToCockpit,
   onCaseCreated,
+  openHandoff,
   onDataChange,
   onCaseChange,
   onDial,
@@ -117,6 +119,7 @@ export function ExpandedCasePanel({
           <div className={`${styles.scrollRegion} h-full min-w-0 overflow-y-auto overscroll-contain`} data-case-detail-scroll-region>
             <CaseDetail
               active={active}
+              openHandoff={openHandoff}
               renderTaskWorkflow={renderTaskWorkflow}
               onEditorControlsChange={setEditorControls}
               key={caseItem.id}

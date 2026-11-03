@@ -2,6 +2,7 @@ import "server-only";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { MutationError } from "@/server/mutation-error";
+import { createTransientReadRetry } from "@/server/transient-read";
 
 const DEFAULT_ORGANIZATION_SLUG = "pomoc-motoristom";
 
@@ -22,7 +23,9 @@ export async function resolveDefaultOrganizationId() {
   const cached = resolvedBySlug.get(slug);
   if (cached) return cached;
   const admin = createSupabaseAdminClient();
-  const { data, error } = await admin.from("motorist_organizations").select("id").eq("slug", slug).eq("active", true).maybeSingle();
+  const read = createTransientReadRetry();
+  const { data, error } = await read(signal => admin.from("motorist_organizations")
+    .select("id").eq("slug", slug).eq("active", true).abortSignal(signal).maybeSingle());
 
   if (error) {
     throw new MutationError("Organizáciu sa nepodarilo overiť.", 500);

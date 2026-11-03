@@ -9,7 +9,7 @@ describe("browser call observations", () => {
     const body = JSON.stringify({ deviceSessionId: "current", registrationState: "registered" });
     const prepared = prepareBrowserCallHeartbeat(body, () => { throw new Error("crypto unavailable"); });
     expect(prepared.body).toBe(body);
-    expect(() => prepared.acknowledge()).not.toThrow();
+    expect(prepared).not.toHaveProperty("acknowledge");
   });
   it("allowlists finite data, bounds batches, strips arbitrary private text and deduplicates IDs", () => {
     expect(readBrowserCallObservations([{ ...observation, token: "secret", phone: "+421900111111", outcome: "arbitrary" }, observation]))
@@ -60,5 +60,38 @@ describe("browser call observations", () => {
       queue.acknowledge(batch);
     }
     expect(all).toHaveLength(64);
+    expect(queue.droppedCount()).toBe(936);
+  });
+  it("retains distinct answer attempts on the same leg so human retry waiting cannot masquerade as latency", () => {
+    let now=1000; const queue=new BrowserCallTelemetry(()=>now);
+    queue.record("control","answer_requested",{answerMode:"manual"});
+    now=61000; queue.record("control","answer_requested",{answerMode:"manual"});
+    now=61500; queue.record("control","sdk_active"); queue.record("control","sdk_active");
+    expect(queue.batch().map(row=>[row.phase,row.atMs])).toEqual([
+      ["answer_requested",1000],["answer_requested",61000],["sdk_active",61500],
+    ]);
+    expect(queue.batch().every(row=>row.clientBuild)).toBe(true);
+  });
+
+  it("counts observations which expired before correlation instead of silently losing them", () => {
+    let now = 0;
+    const queue = new BrowserCallTelemetry(() => now);
+    queue.record("old", "sdk_invite");
+    now = 600_001;
+    queue.record("current", "sdk_invite");
+    expect(queue.batch().map(entry => entry.callControlId)).toEqual(["current"]);
+    expect(queue.droppedCount()).toBe(1);
+    queue.acknowledgeDropped(1);
+    expect(queue.droppedCount()).toBe(0);
+  });
+
+  it("expires by enqueue time, preserving a first UI observation from a long waiting call", () => {
+    let now = 0;
+    const queue = new BrowserCallTelemetry(() => now);
+    queue.observeVisible([{ sessionId: "waiting" }]);
+    now = 900_000;
+    queue.observeVisible([{ sessionId: "waiting", browserIncomingCallControlIds: ["new-leg"] }]);
+    expect(queue.batch()[0]).toMatchObject({ phase: "ui_first_seen", atMs: 0 });
+    expect(queue.droppedCount()).toBe(0);
   });
 });

@@ -9,13 +9,14 @@ import { requestTimingContext } from "@/server/request-metrics";
 
 export const SERVER_SENTRY_LIMITS = { transportMs: 1000, eventWaitMs: 1500, eventsPerMinute: 10, eventBytes: 24 * 1024, frames: 20 } as const;
 const classes = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "AbortError", "TimeoutError", "UnknownError", "MutationError", "CallActionError", "SessionEventDeferredError", "SessionLeaseLostError", "TelnyxCommandError", "PresenceServiceError", "OperatorDeviceError"]);
-const codes = new Set(["ABORT_ERR", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "DIAGNOSTIC_TEST_CANARY", "session_event_deferred", "session_lease_unavailable", "session_checkpoint_failed", "provider_outcome_unknown", "timeout", "network", "deadline", "invalid_response", "recording_ack_invalid"]);
+const codes = new Set(["ABORT_ERR", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "DIAGNOSTIC_TEST_CANARY", "session_event_deferred", "session_lease_unavailable", "session_checkpoint_failed", "provider_outcome_unknown", "timeout", "network", "deadline", "invalid_response", "recording_ack_invalid", "57014", "53300", "57P01", "08006", "PGRST000", "PGRST001", "PGRST002", "PGRST003", "webhook_processing_failed", "webhook_unresolved"]);
 type ServerFrame = { filename: string; abs_path: string; lineno: number; colno: number; in_app: true };
-export type ServerErrorContext = { requestId?: string; route?: string; status?: number; source?: "next" | "telephony" | "cron" | "canary" };
+export type ServerErrorContext = { requestId?: string; route?: string; status?: number; source?: "next" | "telephony" | "cron" | "canary"; callSessionId?: string; eventId?: string; commandId?: string; retryable?: boolean; attempt?: number; databaseTimeouts?: number };
 export type PrivateServerEvent = {
   type: undefined; event_id: string; timestamp: number; platform: "node"; level: "error"; release: string; environment: "production" | "test";
   exception: { values: Array<{ type: string; value: string; stacktrace?: { frames: ServerFrame[] } }> };
-  tags: { diagnostic_error_id: string; runtime: "server"; source: string; request_id?: string; route?: string; http_status?: string; error_code?: string };
+  tags: { diagnostic_error_id: string; runtime: "server"; source: string; request_id?: string; route?: string; http_status?: string; error_code?: string; call_session_id?: string; provider_event_id?: string; command_id?: string; retryable?: string; attempt?: string; database_timeouts?: string };
+  contexts?: { failure: { causes: Array<{ type: string; code?: string; status?: number }> } };
 };
 type ServerConfiguration = { dsn: string; environment: "production" | "test"; release: string };
 
@@ -44,11 +45,11 @@ export function serverSentryConfiguration(env: Record<string, string | undefined
   } catch { return null; }
 }
 
-function ownString(value: unknown, key: string): string | undefined {
+function ownValue(value: unknown, key: string): unknown {
   try {
     if (!value || typeof value !== "object") return;
     const result = Object.getOwnPropertyDescriptor(value, key)?.value;
-    return typeof result === "string" ? result : undefined;
+    return result;
   } catch { return; }
 }
 
@@ -59,6 +60,19 @@ function ownedFrame(filename: unknown, line: unknown, column: unknown): ServerFr
   if (!relative || relative.length > 240 || !/^[a-zA-Z0-9_./\[\]()-]+\.js$/.test(relative) || relative.split("/").some(part => !part || part === "." || part === "..")) return null;
   const canonical = `app:///server/${relative}`;
   return { filename: canonical, abs_path: canonical, lineno: Number(line), colno: Number(column), in_app: true };
+}
+
+function causalDetails(error: unknown): Array<{ type: string; code?: string; status?: number }> {
+  const result: Array<{ type: string; code?: string; status?: number }> = [];
+  const seen = new Set<unknown>();
+  for (let cause = error; cause && typeof cause === "object" && !seen.has(cause) && result.length < 4; cause = ownValue(cause, "cause")) {
+    seen.add(cause);
+    const name = diagnosticErrorText(cause, "name"), rawCode = ownValue(cause, "code"), status = ownValue(cause, "status");
+    const type = classes.has(name) ? name : "UnknownError";
+    const code = typeof rawCode === "string" && (codes.has(rawCode) || type === "TelnyxCommandError" && /^[0-9]{3,5}$/.test(rawCode)) ? rawCode : undefined;
+    result.push({ type, ...(code ? { code } : {}), ...(Number.isInteger(status) && Number(status) >= 400 && Number(status) <= 599 ? { status: Number(status) } : {}) });
+  }
+  return result;
 }
 
 export function sanitizeServerError(error: unknown, context: ServerErrorContext, configuration: Pick<ServerConfiguration, "environment" | "release">, id = randomUUID().replaceAll("-", "")): PrivateServerEvent | null {
@@ -72,12 +86,16 @@ export function sanitizeServerError(error: unknown, context: ServerErrorContext,
     if (frame) frames.push(frame);
     if (frames.length >= SERVER_SENTRY_LIMITS.frames) break;
   }
-  const rawCode = ownString(error, "code");
-  const code = rawCode && (codes.has(rawCode) || type === "TelnyxCommandError" && /^[0-9]{3,5}$/.test(rawCode)) ? rawCode : undefined;
+  const rawCode = ownValue(error, "code");
+  const code = typeof rawCode === "string" && (codes.has(rawCode) || type === "TelnyxCommandError" && /^[0-9]{3,5}$/.test(rawCode)) ? rawCode : undefined;
   return sanitizeOutboundServerEvent({ event_id: id, timestamp: Date.now() / 1000, platform: "node", level: "error", ...configuration,
     exception: { values: [{ type, value: code ? `${type}: ${code}` : type, ...(frames.length ? { stacktrace: { frames: frames.reverse() } } : {}) }] },
     tags: { diagnostic_error_id: id, runtime: "server", source: context.source ?? "next", request_id: context.requestId,
-      route: context.route, http_status: context.status === undefined ? undefined : String(context.status), error_code: code },
+      route: context.route, http_status: context.status === undefined ? undefined : String(context.status), error_code: code,
+      call_session_id: context.callSessionId, provider_event_id: context.eventId, command_id: context.commandId,
+      retryable: context.retryable === undefined ? undefined : String(context.retryable), attempt: context.attempt === undefined ? undefined : String(context.attempt),
+      database_timeouts: context.databaseTimeouts === undefined ? undefined : String(context.databaseTimeouts) },
+    contexts: { failure: { causes: causalDetails(error) } },
   });
 }
 
@@ -98,10 +116,18 @@ export function sanitizeOutboundServerEvent(value: unknown): PrivateServerEvent 
     if (typeof input.tags?.route === "string" && /^[a-zA-Z0-9_./\[\]()-]{1,160}$/.test(input.tags.route) && !input.tags.route.includes("..")) tags.route = input.tags.route;
     if (/^5[0-9]{2}$/.test(input.tags?.http_status ?? "")) tags.http_status = input.tags.http_status;
     if (errorCode) tags.error_code = errorCode;
+    for (const key of ["call_session_id", "provider_event_id", "command_id"] as const) if (isDiagnosticUuid(input.tags?.[key])) tags[key] = input.tags[key];
+    if (["true", "false"].includes(input.tags?.retryable ?? "")) tags.retryable = input.tags.retryable;
+    for (const key of ["attempt", "database_timeouts"] as const) if (/^(?:0|[1-9][0-9]{0,3})$/.test(input.tags?.[key] ?? "")) tags[key] = input.tags[key];
+    const causes = (Array.isArray(input.contexts?.failure?.causes) ? input.contexts.failure.causes : []).slice(0, 4).flatMap(cause => {
+      if (!cause || !classes.has(cause.type)) return [];
+      const code = typeof cause.code === "string" && (codes.has(cause.code) || cause.type === "TelnyxCommandError" && /^[0-9]{3,5}$/.test(cause.code)) ? cause.code : undefined;
+      return [{ type: cause.type, ...(code ? { code } : {}), ...(Number.isInteger(cause.status) && Number(cause.status) >= 400 && Number(cause.status) <= 599 ? { status: cause.status } : {}) }];
+    });
     return { type: undefined, event_id: input.event_id, timestamp: Number.isFinite(input.timestamp) && input.timestamp > 0 && input.timestamp <= Date.now() / 1000 + 60 ? input.timestamp : Date.now() / 1000,
       platform: "node", level: "error", release: input.release, environment: input.environment,
       exception: { values: [{ type: exception.type, value: errorCode ? `${exception.type}: ${errorCode}` : exception.type,
-        ...(frames.length ? { stacktrace: { frames } } : {}) }] }, tags };
+        ...(frames.length ? { stacktrace: { frames } } : {}) }] }, tags, ...(causes.length ? { contexts: { failure: { causes } } } : {}) };
   } catch { return null; }
 }
 
@@ -166,27 +192,36 @@ export async function getServerSentryClient(): Promise<LightNodeClient | null> {
 let attempts: number[] = [];
 const recent = new Map<string, { at: number; id: string }>();
 export type ServerErrorReceipt = { eventId: string | null; accepted: boolean };
+function reportOutcome(outcome: "disabled" | "invalid" | "deduplicated" | "limited" | "accepted" | "unacknowledged" | "unretained", event?: PrivateServerEvent): void {
+  try { console.info(JSON.stringify({ scope: "diagnostics-delivery", transport: "sentry-server", outcome,
+    ...(event ? { eventId: event.event_id, release: event.release, requestId: event.tags.request_id, route: event.tags.route, callSessionId: event.tags.call_session_id } : {}) })); } catch { /* no-throw */ }
+}
 export async function captureServerError(error: unknown, context: ServerErrorContext = {}): Promise<ServerErrorReceipt> {
   const unavailable = { eventId: null, accepted: false };
   try {
     if (process.env.DIAGNOSTICS_SERVER_ERRORS_ENABLED !== "true") return unavailable;
     const configuration = serverSentryConfiguration();
-    if (!configuration) return unavailable;
-    const safe = sanitizeServerError(error, { ...context, requestId: context.requestId ?? requestTimingContext()?.request_id }, configuration);
-    if (!safe) return unavailable;
+    if (!configuration) { reportOutcome("disabled"); return unavailable; }
+    const timing = requestTimingContext();
+    const safe = sanitizeServerError(error, { ...context, route: context.route ?? timing?.route, requestId: context.requestId ?? timing?.request_id, databaseTimeouts: context.databaseTimeouts ?? timing?.database_timeouts }, configuration);
+    if (!safe) { reportOutcome("invalid"); return unavailable; }
     const now = Date.now();
     attempts = attempts.filter(at => at > now - 60_000);
-    const fingerprint = JSON.stringify([safe.release, safe.exception, safe.tags.route, safe.tags.source]);
+    const fingerprint = JSON.stringify([safe.release, safe.exception, safe.tags.route, safe.tags.source, safe.tags.call_session_id, safe.tags.command_id, safe.contexts?.failure, safe.tags.database_timeouts]);
     const duplicate = recent.get(fingerprint);
-    if (duplicate && duplicate.at > now - 60_000) return { eventId: duplicate.id, accepted: false };
-    if (attempts.length >= SERVER_SENTRY_LIMITS.eventsPerMinute) return unavailable;
+    if (duplicate && duplicate.at > now - 60_000) { reportOutcome("deduplicated", { ...safe, event_id: duplicate.id }); return { eventId: duplicate.id, accepted: false }; }
+    if (attempts.length >= SERVER_SENTRY_LIMITS.eventsPerMinute) { reportOutcome("limited", safe); return unavailable; }
     attempts.push(now); recent.set(fingerprint, { at: now, id: safe.event_id });
     while (recent.size > 100) recent.delete(recent.keys().next().value!);
     // The timeout includes a cold SDK import; no detached retry loop is created.
     return await new Promise<ServerErrorReceipt>(resolve => {
       let done = false;
       let unsubscribe = () => {};
-      const finish = (accepted: boolean) => { if (done) return; done = true; clearTimeout(timer); unsubscribe(); resolve({ eventId: safe.event_id, accepted }); };
+      const finish = (accepted: boolean) => { if (done) return; done = true; clearTimeout(timer); unsubscribe();
+        // A failed representative must not suppress the next real occurrence.
+        if (!accepted && recent.get(fingerprint)?.id === safe.event_id) recent.delete(fingerprint);
+        reportOutcome(accepted ? "accepted" : "unacknowledged", safe);
+        resolve({ eventId: safe.event_id, accepted }); };
       const timer = setTimeout(() => finish(false), SERVER_SENTRY_LIMITS.eventWaitMs);
       void getServerSentryClient().then(active => {
         if (!active || done) { finish(false); return; }
@@ -201,7 +236,9 @@ export async function captureServerError(error: unknown, context: ServerErrorCon
 export function deferServerError(error: unknown, context: ServerErrorContext = {}): void {
   if (process.env.DIAGNOSTICS_SERVER_ERRORS_ENABLED !== "true") return;
   try {
-    const requestId = context.requestId ?? requestTimingContext()?.request_id;
-    after(async () => { await captureServerError(error, { ...context, requestId }); });
-  } catch { /* No request lifecycle: do not launch an unretained task. */ }
+    const timing = requestTimingContext();
+    const requestId = context.requestId ?? timing?.request_id;
+    const frozen = { ...context, requestId, route: context.route ?? timing?.route, databaseTimeouts: context.databaseTimeouts ?? timing?.database_timeouts };
+    after(async () => { await captureServerError(error, frozen); });
+  } catch { reportOutcome("unretained"); /* No request lifecycle: do not launch an unretained task. */ }
 }

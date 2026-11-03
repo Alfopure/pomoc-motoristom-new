@@ -46,8 +46,16 @@ export function recordingReadiness(policy: RecordingPolicyDocument, env: NodeJS.
   const transcription = processing && env.TRANSCRIPTS_ENABLED === "true" && Boolean(env.ELEVENLABS_API_KEY && env.ELEVENLABS_SCRIBE_WEBHOOK_ID && env.ELEVENLABS_SCRIBE_WEBHOOK_SECRET);
   const analysis = processing && env.AI_TRANSCRIPT_ENABLED === "true" && Boolean(env.OPENAI_API_KEY) && ["gpt-5.6-luna", "gpt-5.6-terra"].includes(env.OPENAI_CALL_ANALYSIS_MODEL?.trim() || "gpt-5.6-luna");
   if (!recording) reasons.push("Nahrávanie čaká na dokončenie a overenie telefonického zapojenia.");
-  if (!transcription) reasons.push("Prepis čaká na zapojenie služby a overeného spätného oznámenia.");
-  if (!analysis) reasons.push("Automatická analýza ešte nie je prevádzkovo zapnutá.");
+  if (!transcription) {
+    if (!processing || env.TRANSCRIPTS_ENABLED !== "true") reasons.push("Časový prepis je v tomto prostredí prevádzkovo vypnutý.");
+    if (!env.ELEVENLABS_API_KEY) reasons.push("Prepis nemá nastavený prístup k službe rozpoznávania reči.");
+    if (!env.ELEVENLABS_SCRIBE_WEBHOOK_ID || !env.ELEVENLABS_SCRIBE_WEBHOOK_SECRET) reasons.push("Prepisu chýba overené spätné oznámenie o dokončení. Zapojenie musí dokončiť správca prostredia.");
+  }
+  if (!analysis) {
+    if (!processing || env.AI_TRANSCRIPT_ENABLED !== "true") reasons.push("Automatická analýza je v tomto prostredí prevádzkovo vypnutá.");
+    if (!env.OPENAI_API_KEY) reasons.push("Automatická analýza nemá nastavený prístup k službe AI.");
+    if (!["gpt-5.6-luna", "gpt-5.6-terra"].includes(env.OPENAI_CALL_ANALYSIS_MODEL?.trim() || "gpt-5.6-luna")) reasons.push("Automatická analýza nemá nastavený podporovaný model.");
+  }
   if (!policy.approvedAt) reasons.push("Pred zapnutím potvrď účely, informovanie a lehoty uchovania.");
   return { recording, transcription, analysis, reasons };
 }

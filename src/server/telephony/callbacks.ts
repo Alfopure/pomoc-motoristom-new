@@ -13,7 +13,7 @@ import { taskWorkspaceSystemEnabled } from "../task-system-gate";
 import { telephonyStabilityEnabled } from "./stability";
 import { writeCallAudit } from "./audit";
 import { findInitialCallByRequest, readInitialCallPlan } from "./initial-call-operation";
-import { CallActionError, startOutboundCall, type StartOutboundInput, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
+import { CallActionError, startOutboundCall, type EarlyStart, type StartOutboundInput, type CallActionDeps, type CallActor, type StartOutboundResult } from "./call-actions";
 import { toJson, type LineRow } from "./state/types";
 
 /**
@@ -121,8 +121,8 @@ export async function loadCallbackQueue(
       .eq("organization_id", organizationId).in("status", ["done", "cancelled"])
       .gte("resolved_at", since).order("resolved_at", { ascending: false }).limit(20),
   ]);
-  if (openResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${openResult.error.message}`, 500);
-  if (resolvedResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${resolvedResult.error.message}`, 500);
+  if (openResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${openResult.error.message}`, 500, undefined, { cause: openResult.error });
+  if (resolvedResult.error) throw new CallActionError(`Frontu spätných volaní sa nepodarilo načítať: ${resolvedResult.error.message}`, 500, undefined, { cause: resolvedResult.error });
   const page = readPriorityPage(openResult.data, organizationId);
   const entries = page.entries.slice(0, CALLBACK_QUEUE_LIMIT);
   const openRows = entries.map(entry => entry.request);
@@ -143,7 +143,7 @@ export async function loadCallbackQueue(
       ? admin.from("motorist_call_sessions").select("id, metadata").eq("organization_id", organizationId).in("id", sessionIds)
       : Promise.resolve({ data: [], error: null }),
   ]);
-  if (sessions.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${sessions.error.message}`, 500);
+  if (sessions.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${sessions.error.message}`, 500, undefined, { cause: sessions.error });
   const lineById = new Map((lines.data ?? []).map((line) => [line.id, line]));
   const nameById = new Map((profiles.data ?? []).map((profile) => [profile.id, profile.display_name]));
   const metadataById = new Map((sessions.data ?? []).map((session) => [session.id, session.metadata]));
@@ -231,7 +231,7 @@ async function loadRequest(deps: CallbackQueueDeps, id: string): Promise<Callbac
     .eq("organization_id", deps.organizationId)
     .eq("id", id)
     .maybeSingle();
-  if (error) throw new CallActionError(`Požiadavku sa nepodarilo načítať: ${error.message}`, 500);
+  if (error) throw new CallActionError(`Požiadavku sa nepodarilo načítať: ${error.message}`, 500, undefined, { cause: error });
   if (!data) throw new CallActionError("Požiadavka na spätné volanie sa nenašla.", 404, "not_found");
   return data;
 }
@@ -249,7 +249,7 @@ async function present(deps: CallbackQueueDeps, row: CallbackRow): Promise<Callb
   const session = row.session_id
     ? await deps.admin.from("motorist_call_sessions").select("metadata").eq("organization_id", deps.organizationId).eq("id", row.session_id).maybeSingle()
     : null;
-  if (session?.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${session.error.message}`, 500);
+  if (session?.error) throw new CallActionError(`Voľbu volajúceho sa nepodarilo overiť: ${session.error.message}`, 500, undefined, { cause: session.error });
   return toCallbackPayload(row, { line, claimedByName: await claimantName(deps, row.claimed_by), sessionMetadata: session?.data?.metadata });
 }
 
@@ -322,7 +322,7 @@ export async function claimCallbackRequest(deps: CallbackQueueDeps, actor: CallA
   // Takeover targets the claimant we just read, so it is equally conditional:
   // whoever claims in between wins and the takeover is answered with 409.
   const claimed = await (row.claimed_by ? query.eq("claimed_by", row.claimed_by) : query.is("claimed_by", null)).select("*");
-  if (claimed.error) throw new CallActionError(`Prevzatie požiadavky zlyhalo: ${claimed.error.message}`, 500);
+  if (claimed.error) throw new CallActionError(`Prevzatie požiadavky zlyhalo: ${claimed.error.message}`, 500, undefined, { cause: claimed.error });
   const updated = (claimed.data ?? [])[0] as CallbackRow | undefined;
   if (!updated) {
     const fresh = await loadRequest(deps, id);
@@ -374,7 +374,7 @@ export async function resolveCallbackRequest(
   // to two dispatchers, one of whom then rings a person the queue already
   // records as settled.
   const updated = await (row.claimed_by ? query.eq("claimed_by", row.claimed_by) : query.is("claimed_by", null)).select("*");
-  if (updated.error) throw new CallActionError(`Uzavretie požiadavky zlyhalo: ${updated.error.message}`, 500);
+  if (updated.error) throw new CallActionError(`Uzavretie požiadavky zlyhalo: ${updated.error.message}`, 500, undefined, { cause: updated.error });
   const result = (updated.data ?? [])[0] as CallbackRow | undefined;
   if (!result) {
     const fresh = await loadRequest(deps, id);
@@ -409,7 +409,8 @@ async function closeCallbackTask(deps: CallbackQueueDeps, actor: CallActor, case
  * The request stays open: the call being placed is not proof that the caller
  * was reached. The operator closes it with `done` or `cancel`.
  */
-export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id: string, verificationId?: string, operationId?: string): Promise<CallbackCallResult> {
+export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id: string, verificationId?: string, operationId?: string,
+  early?: EarlyStart<CallbackCallResult>): Promise<CallbackCallResult> {
   const queueDeps: CallbackQueueDeps = { admin: deps.admin, organizationId: deps.organizationId, now: deps.now, logger: deps.logger };
   const row = await loadRequest(queueDeps, id);
   if (operationId) {
@@ -430,7 +431,7 @@ export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id
   if (row.claimed_by !== actor.profileId) await claimCallbackRequest(queueDeps, actor, id);
 
   if (alternate) await approveCallbackTarget(deps.admin, deps.organizationId, actor.profileId, id, verificationId!);
-  const call = await startOutboundCall(deps, actor, {
+  const input: StartOutboundInput = {
     ...(operationId ? { requestId: operationId } : {}),
     to: row.caller_number,
     ...(alternate ? { callbackTargetVerificationId: verificationId } : {}),
@@ -440,11 +441,30 @@ export async function callBackRequest(deps: CallActionDeps, actor: CallActor, id
     // they know shows on their phone. A line switched off since then would make
     // `startOutboundCall` refuse the call, so the operator's default is used.
     lineId: await activeLineId(queueDeps, row.line_id),
-  });
-
-  const linked = enhanced || await linkCallToRequest(deps, await loadRequest(queueDeps, id), { sessionId: call.sessionId, actor });
-  const fresh = await loadRequest(queueDeps, id);
-  return { request: await present(queueDeps, fresh), call, linked };
+  };
+  const settle = async (call: StartOutboundResult): Promise<CallbackCallResult> => {
+    const linked = enhanced || await linkCallToRequest(deps, await loadRequest(queueDeps, id), { sessionId: call.sessionId, actor });
+    const fresh = await loadRequest(queueDeps, id);
+    return { request: await present(queueDeps, fresh), call, linked };
+  };
+  if (!early) return settle(await startOutboundCall(deps, actor, input));
+  // Call-speed S2.3: the request row is settled here, outside the call's
+  // lease, as soon as the own leg is dialled; the rest of the start runs on.
+  let dialled!: (call: StartOutboundResult) => void;
+  const proven = new Promise<StartOutboundResult>((resolve) => { dialled = resolve; });
+  const work = startOutboundCall(deps, actor, input, (call) => dialled(call));
+  const first = await Promise.race([proven.then(call => ({ call, early: true })), work.then(call => ({ call, early: false }))]);
+  let result: CallbackCallResult;
+  try { result = await settle(first.call); }
+  catch (error) {
+    // As before the switch: the error answers once the start has finished.
+    if (first.early) await work.catch(() => undefined);
+    throw error;
+  }
+  if (!first.early) return result;
+  early(result);
+  await work;
+  return result;
 }
 
 async function activeLineId(deps: CallbackQueueDeps, lineId: string | null): Promise<string | null> {

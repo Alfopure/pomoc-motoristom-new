@@ -1,6 +1,7 @@
 import { measureRequestStep, withRequestMetrics } from "@/server/request-metrics";
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
-import { callColleague } from "@/server/telephony/call-actions";
+import { callColleague, type StartOutboundResult } from "@/server/telephony/call-actions";
+import { respondWhenDialled } from "@/server/telephony/early-start";
 import {
   createTelephonyDeps,
   readJsonBody,
@@ -13,8 +14,10 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/** Covers the bookkeeping that may follow an early response (`respondWhenDialled`). */
+export const maxDuration = 60;
 
-/** Internal call between two operators (both legs are WebRTC). */
+/** Internal call between two operators (both legs are WebRTC); see `respondWhenDialled` for the early 201. */
 export async function POST(request: Request) {
   return withRequestMetrics("call.start", async () => {
     try {
@@ -25,12 +28,12 @@ export async function POST(request: Request) {
 
       const body = await readJsonBody<{ targetProfileId?: unknown; requestId?: unknown }>(request);
       const deps = await createTelephonyDeps({ organizationId: actor.organizationId, deviceKind: request.headers.get("x-pm-phone-kind") === "mobile" ? "mobile" : "web" });
-      const result = await callColleague(deps, toCallActor(actor), { targetProfileId: readString(body.targetProfileId) ?? "",
-        ...(readString(body.requestId) ? { requestId: readString(body.requestId)! } : {}) });
+      const result = await respondWhenDialled<StartOutboundResult>(deps, (...early) => callColleague(deps, toCallActor(actor), { targetProfileId: readString(body.targetProfileId) ?? "",
+        ...(readString(body.requestId) ? { requestId: readString(body.requestId)! } : {}) }, ...early));
 
       return Response.json({ ok: true, ...result }, { status: 201 });
     } catch (error) {
       return telephonyErrorResponse(error, "Interný hovor sa nepodarilo vytočiť.");
     }
-  });
+  }, { operation: "call.internal" });
 }

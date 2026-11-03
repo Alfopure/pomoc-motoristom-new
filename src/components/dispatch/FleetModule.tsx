@@ -1,4 +1,5 @@
 "use client";
+import dynamic from "next/dynamic";
 import { requestFleetRefresh } from "./fleet-refresh-client";
 import type { FleetData } from "@/data/dispatch-types";
 
@@ -47,6 +48,7 @@ import {
 } from "@/lib/fleet-presentation";
 
 type FleetMode = "replacement" | "tow" | "gps";
+const FleetOperationsPanel = dynamic(() => import("@/components/operations/OperationsModule").then(module => module.FleetOperationsPanel));
 type FilterValue = "all" | string;
 
 // Zladené s GPS_STALE_AFTER_MINUTES (dispatch-repository) — po tomto veku je Commander GPS sync „staršie".
@@ -427,6 +429,7 @@ export function FleetModule({
           {message && <div className="mb-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-900">{message}</div>}
 
           {selectedAsset && <FleetSourceDetails asset={selectedAsset} />}
+          {selectedAsset && <FleetOperationsPanel key={selectedAsset.id} fleetAssetId={selectedAsset.id} />}
           <details key={draft.id ?? "new"} open={editorOpen} onToggle={(event) => setEditorOpen(event.currentTarget.open)}>
           <summary className="mb-3 cursor-pointer text-xs font-semibold text-zinc-600">{draft.id ? "Upraviť interné údaje vozidla" : "Základné údaje"}</summary>
 

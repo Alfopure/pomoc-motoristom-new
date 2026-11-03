@@ -1,0 +1,19 @@
+import { requireMobileActor } from "@/server/mobile/auth";
+import { readMobileJsonBody } from "@/server/mobile/body";
+import { mobileError, mobileJson, mobileScope } from "@/server/mobile/http";
+import { nativeVoiceDeps } from "@/server/mobile/voice";
+import { transferNativeCall } from "@/server/mobile/voice-call-actions";
+
+export const runtime = "nodejs";
+export const maxDuration = 30;
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
+  try {
+    const actor = await requireMobileActor(request);
+    const deps = await nativeVoiceDeps(actor);
+    const body = await readMobileJsonBody(request);
+    const { id } = await context.params;
+    return mobileJson({ ...mobileScope(actor), ...await transferNativeCall(deps, actor, id, body) });
+  } catch (error) {
+    return mobileError(error, "Prepojenie hovoru sa nepodarilo potvrdiť.");
+  }
+}

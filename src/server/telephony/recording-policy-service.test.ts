@@ -30,3 +30,16 @@ describe('recording policy approval boundary',()=>{
   expect(fake.db.log.some(x=>x.kind==='rpc')).toBe(false);
  });
 });
+
+it('explains missing deployment prerequisites without blocking independent recording or exposing keys',async()=>{
+ const {recordingReadiness}=await import('./recording-policy-service');
+ const ready=recordingReadiness({...DEFAULT_RECORDING_POLICY,approvedAt:'2026-10-15T00:00:00Z'}, {
+  NODE_ENV:'test',RECORDING_PROCESSING_ENABLED:'true',TELNYX_RECORDING_ENABLED:'true',TELNYX_RECORDING_CONTRACT_VERIFIED:'true',
+  TRANSCRIPTS_ENABLED:'false',ELEVENLABS_API_KEY:'private-asr-key',AI_TRANSCRIPT_ENABLED:'false',OPENAI_API_KEY:'private-ai-key',OPENAI_CALL_ANALYSIS_MODEL:'unsupported',
+ });
+ expect(ready).toMatchObject({recording:true,transcription:false,analysis:false});
+ expect(ready.reasons.join(' ')).toContain('spätné oznámenie');
+ expect(ready.reasons.join(' ')).toContain('podporovaný model');
+ expect(ready.reasons.join(' ')).toContain('prevádzkovo vypnutá');
+ expect(JSON.stringify(ready)).not.toContain('private-');
+});

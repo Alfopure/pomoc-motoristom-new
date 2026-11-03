@@ -3,6 +3,10 @@
 # dependencies
 /node_modules
 **/node_modules/
+mobile/.expo/
+mobile/dist/
+mobile/ios/
+mobile/android/
 apps/**/.next/
 apps/**/test-results/
 apps/**/playwright-report/
@@ -31,6 +35,13 @@ __pycache__/
 # misc
 .DS_Store
 *.pem
+# Apple signing (EAS local credentials, App Store Connect and APNs keys) stays outside Git.
+credentials.json
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+*.certSigningRequest
 .context/
 .omc/
 supabase/.temp/

@@ -30,6 +30,8 @@ export const WEBPHONE_RECONNECT_MAX_MS = 60_000;
 /** SDK reconnects itself; the application only bounds an unsuccessful recovery. */
 export const WEBPHONE_RECOVERY_TIMEOUT_MS = 60_000;
 export const WEBPHONE_MAX_CONNECT_FAILURES = 5;
+/** Retry on the default edge after the EU edge failed before login (call-speed S5); not a connect failure. */
+export const WEBPHONE_EDGE_FALLBACK_RETRY_MS = 250;
 /** A dial we started stops being interesting after this long without an invite. */
 export const EXPECTED_LEG_TTL_MS = 90_000;
 
@@ -57,6 +59,13 @@ export type WebphoneCredentials = {
   expiresAt: string;
   deviceSessionId: string;
   sipUsername: string;
+  /**
+   * Latency switches for a new SDK client (call-speed S5), present only when
+   * on. A client already connected ignores them: a change applies at the next
+   * client creation, never to the socket carrying a call.
+   */
+  webRtcRegion?: "auto" | "eu";
+  webPrefetchIce?: boolean;
 };
 
 export type WebphoneState = {
@@ -77,7 +86,8 @@ export type WebphoneEvent =
   | { type: "client_ready" }
   | { type: "client_recovering"; message?: string | null }
   | { type: "recovery_failed"; message?: string | null }
-  | { type: "client_error"; message?: string | null; authFailure?: boolean }
+  /** `edgeFallback`: the EU edge failed before login (call-speed S5); the phone itself did not. */
+  | { type: "client_error"; message?: string | null; authFailure?: boolean; edgeFallback?: boolean }
   | { type: "socket_closed" }
   /** The refresh timer fired: mint a new token for the same registration. */
   | { type: "token_expiring" }
@@ -267,6 +277,14 @@ export function reduceWebphone(
 
     case "client_error": {
       if (state.status === "idle" || isTerminalWebphoneStatus(state.status)) return { state, effects: [] };
+      if (event.edgeFallback) {
+        // Not counted towards the attempt limit: the same blip on the default
+        // edge would have stayed in recovery, so the fallback must not end in `failed`.
+        return {
+          state: { ...state, status: "reconnecting", message: event.message ?? "Spojenie telefónu vypadlo, obnovujem ho." },
+          effects: [{ kind: "clear_timers" }, { kind: "disconnect" }, { kind: "retry_after", delayMs: WEBPHONE_EDGE_FALLBACK_RETRY_MS }],
+        };
+      }
       const attempts = state.attempts + 1;
       const message =
         (event.type === "client_error" ? event.message : null) ?? "Spojenie telefónu vypadlo, obnovujem ho.";
@@ -431,4 +449,60 @@ export function matchAutoAnswer(
   if (!inviteHasAutoAnswerHeader(invite)) return null;
   const pending = pruneExpectedLegs(expected, now);
   return pending.length === 1 ? pending[0] : null;
+}
+
+// --- early accept of the own leg (call-speed S3) ------------------------------
+
+/** How long an armed start request may still answer its own leg from the invite. */
+export const EXPECTED_REQUEST_TTL_MS = 30_000;
+
+export type ExpectedOperatorRequest = {
+  /** The start POST's own `requestId`: a UUID this tab generated for one attempt. */
+  requestId: string;
+  timingOperationId?: string;
+  /** Epoch ms when the request was armed. */
+  at: number;
+};
+
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function pruneExpectedRequests(expected: readonly ExpectedOperatorRequest[], now: number): ExpectedOperatorRequest[] {
+  return expected.filter((entry) => now - entry.at < EXPECTED_REQUEST_TTL_MS);
+}
+
+/** Only a well-formed request id is armed; anything else could never be the server's header. */
+export function rememberExpectedRequest(
+  expected: readonly ExpectedOperatorRequest[],
+  next: ExpectedOperatorRequest,
+  now: number,
+): ExpectedOperatorRequest[] {
+  const kept = pruneExpectedRequests(expected, now).filter((entry) => entry.requestId !== next.requestId);
+  return REQUEST_ID.test(next.requestId) ? [...kept, next] : kept;
+}
+
+/** The invite's single `X-PM-Request` value; a missing or repeated header is no identity. */
+export function inviteRequestId(invite: InviteIdentity): string | null {
+  const values = (invite.customHeaders ?? []).filter((header) => header?.name?.toLowerCase() === "x-pm-request");
+  return values.length === 1 ? values[0]?.value?.trim() || null : null;
+}
+
+/**
+ * The own leg of a start request this tab is still waiting for, recognised
+ * before the response names its call-control id. The server sets
+ * `X-PM-Request` only on that request's own-leg dial (`own_leg_request_header`),
+ * and the id is an unguessable UUID this tab generated for that one attempt,
+ * so no inbound offer, pickup, colleague call or other tab's call can carry
+ * it. Both headers are required, a colleague's call never matches, the caller
+ * consumes the match (single use) and the start response still verifies the
+ * exact leg.
+ */
+export function matchExpectedRequest(
+  expected: readonly ExpectedOperatorRequest[],
+  invite: InviteIdentity,
+  now: number,
+): ExpectedOperatorRequest | null {
+  if (!inviteHasAutoAnswerHeader(invite) || inviteIsColleagueCall(invite)) return null;
+  const requestId = inviteRequestId(invite);
+  if (!requestId) return null;
+  return pruneExpectedRequests(expected, now).find((entry) => entry.requestId === requestId) ?? null;
 }

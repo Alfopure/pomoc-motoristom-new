@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { channel } from "node:diagnostics_channel";
 
-import { measureControlStage, measureRequestStep, observeDatabaseTimeout, recordRequestStep, registerDatabaseOrigin, requestStepCount, withBackgroundRequestMetrics, withRequestMetrics, type ControlStage } from "./request-metrics";
+import { measureControlStage, measureRequestStep, observeDatabaseTimeout, recordRequestStep, registerDatabaseOrigin, registerTelnyxOrigin, requestStepCount, withBackgroundRequestMetrics, withRequestMetrics, type ControlStage } from "./request-metrics";
 
 describe("request metrics", () => {
   it("starts independent after counters with the response request identity", async () => {
@@ -53,8 +53,34 @@ describe("request metrics", () => {
       finished.abort();
       return Response.json({});
     }, { logger });
-    expect(logger.mock.calls[0][0]).toMatchObject({ dbConnects: 1, dbConnectsScope: "instance-window", dbAborts: 1 });
-    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private-project|secret|telnyx/);
+    expect(logger.mock.calls[0][0]).toMatchObject({ dbConnects: 1, dbConnectsScope: "instance-window", dbAborts: 1, telnyxConnects: 0 });
+    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private-project|secret|telnyx\.example/);
+  });
+
+  it("logs a frequent poll only when it is slow or fails, and keeps its timing headers", async () => {
+    const logger = vi.fn();
+    let time = 0;
+    const run = (ms: number, status: number) => withRequestMetrics("call.action", async () => { time += ms; return Response.json({}, { status }); },
+      { logger, now: () => time, operation: "mobile.call-status", quietBelowMs: 1_000 });
+    const quick = await run(80, 200);
+    expect(quick.headers.get("server-timing")).toMatch(/^total;dur=80\.0/);
+    expect(logger).not.toHaveBeenCalled();
+    await run(1_200, 200);
+    await run(10, 503);
+    expect(logger.mock.calls.map(([entry]) => [entry.ms, entry.status])).toEqual([[1_200, 200], [10, 503]]);
+  });
+
+  it("counts new Telnyx API sockets separately, without logging the host", async () => {
+    const logger = vi.fn();
+    await withRequestMetrics("call.action", async () => {
+      registerTelnyxOrigin("https://api.private-telnyx.example/v2");
+      channel("undici:client:connected").publish({ connectParams: { hostname: "api.private-telnyx.example" } });
+      channel("undici:client:connected").publish({ connectParams: { hostname: "api.private-telnyx.example" } });
+      channel("undici:client:connected").publish({ connectParams: { hostname: "unregistered.example" } });
+      return Response.json({});
+    }, { logger });
+    expect(logger.mock.calls[0][0]).toMatchObject({ telnyxConnects: 2, dbConnects: 0 });
+    expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private-telnyx|unregistered/);
   });
 
   it("counts an already expired caller deadline but not cancellation or a completed request", async () => {
@@ -74,6 +100,23 @@ describe("request metrics", () => {
     expect(logger.mock.calls[0][0]).toMatchObject({ dbAborts: 1 });
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private|deadline|cancellation/);
   });
+  it.each([
+    "un-owned read exceeded 10000 ms",
+    "Read verification exceeded its deadline",
+    "Incident recovery read expired",
+  ])("counts the internal AbortError deadline without logging its reason: %s", async message => {
+    const logger = vi.fn();
+    await withRequestMetrics("call.active", async () => {
+      const controller = new AbortController();
+      const detach = observeDatabaseTimeout(controller.signal);
+      controller.abort(new DOMException(message, "AbortError"));
+      detach();
+      return Response.json({});
+    }, { logger });
+    expect(logger.mock.calls[0][0]).toMatchObject({ dbAborts: 1 });
+    expect(JSON.stringify(logger.mock.calls)).not.toContain(message);
+  });
+
   it("keeps overlapping requests isolated and never records request or response data", async () => {
     const logger = vi.fn();
     let release!: () => void;
@@ -242,4 +285,20 @@ describe("request metrics", () => {
     expect(logger.mock.calls[0][0]).toMatchObject({ steps: {} });
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/private|provider ID/);
   });
+});
+
+it("retains operation and TEST identity on failures and accepted work without mixing background duration", async () => {
+  vi.stubEnv("MOTORIST_APP_ENV", "test"); vi.stubEnv("VERCEL_ENV", "production");
+  try {
+    const logger=vi.fn(); let background!:()=>Promise<void>; let time=0;
+    await withRequestMetrics("call.action",async()=>{
+      background=withBackgroundRequestMetrics(async()=>{time=100;});
+      time=10; return Response.json({}, {status:202});
+    },{logger,now:()=>time,operation:"call.hangup"});
+    await background();
+    expect(logger.mock.calls[0][0]).toMatchObject({environment:"test",operation:"call.hangup",outcome:"accepted",phase:"response",ms:10,sampleRate:1});
+    expect(logger.mock.calls[1][0]).toMatchObject({operation:"call.hangup",phase:"after",ms:90});
+    await withRequestMetrics("call.action",async()=>{time=0;return Response.json({});},{logger,now:()=>time});
+    expect(logger.mock.calls[2][0].ms).toBeNull();
+  } finally { vi.unstubAllEnvs(); }
 });

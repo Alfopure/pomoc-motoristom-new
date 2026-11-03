@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 
 import type { Database } from "@/lib/supabase/database.types";
 import { isDestinationAllowed } from "@/lib/telephony/destinations";
@@ -28,8 +29,11 @@ import {
   type PresenceRow,
   type SessionRow,
   type TelephonyEnvironment,
+  type ConcurrentBridgeJournal,
+  concurrentBridgeSessionDueAt,
   TERMINAL_STATES,
 } from "../state/types";
+import { pendingLedgerControlIds } from "../telnyx/webhook-ledger";
 import { evaluateMemberEligibility, type EligibilityDevice, type EligibilityPresence, type IneligibilityReason } from "./eligibility";
 
 /**
@@ -267,14 +271,17 @@ export function toEligibilityPresence(rows: PresenceRow[]): EligibilityPresence[
   return rows.map((row) => ({ profileId: row.profile_id, status: row.status, currentSessionId: row.current_session_id, wrapUpUntil: row.wrap_up_until, pauseReturn: row.pause_return }));
 }
 
-export function toEligibilityDevices(rows: DeviceRow[]): EligibilityDevice[] {
-  return rows.map((row) => ({ profileId: row.profile_id, deviceSeenAt: row.device_seen_at, registrationState: row.registration_state, sipUsername: row.sip_username }));
+export function toEligibilityDevices(rows: DeviceRow[], nativeMobileNow?: Date): EligibilityDevice[] {
+  return rows.map((row) => ({ profileId: row.profile_id, deviceSeenAt: row.device_seen_at, registrationState: row.registration_state, sipUsername: row.sip_username,
+    ...(nativeMobileNow ? { nativePushReachable: nativeMobilePushReachable(row, nativeMobileNow) } : {}) }));
 }
 
 export type RingStepPlanInput = {
   /** Existing v1 sessions may finish during rollback; new owned PSTN stays gated. */
   ownedPstnEnabled?: boolean;
   sessionId: string;
+  /** An inbound caller must never receive a simultaneous PSTN offer to itself. */
+  callerNumber?: string | null;
   now: Date;
   presence: EligibilityPresence[];
   devices: EligibilityDevice[];
@@ -287,7 +294,7 @@ export type RingStepPlanInput = {
   activeLegCount?: number;
 };
 
-export type RingStepSkip = { member: FrozenRingMember; reason: IneligibilityReason | "attempted" | "duplicate" | "capacity" | "fanout" | "feature_disabled" };
+export type RingStepSkip = { member: FrozenRingMember; reason: IneligibilityReason | "attempted" | "duplicate" | "capacity" | "fanout" | "feature_disabled" | "caller_loop" };
 
 export type RingStepPlanResult = {
   attempts: AttemptPlan[];
@@ -307,11 +314,16 @@ export function planRingStep(step: FrozenRingStep, input: RingStepPlanInput): Ri
   const skipped: RingStepSkip[] = [];
   const eligible: FrozenRingMember[] = [];
   const eligibleKeys = new Set<string>();
+  const callerNumber = normalizeE164(input.callerNumber);
 
   const endpoints = step.members.flatMap((member): FrozenRingMember[] => member.kind === "operator" && member.application && !member.applicationDevice
     ? [{ ...member, applicationDevice: "web" }, { ...member, applicationDevice: "mobile" }]
     : [member]);
   for (const member of endpoints.sort((left, right) => left.position - right.position)) {
+    if (member.kind === "external_number" && callerNumber && normalizeE164(member.externalNumber) === callerNumber) {
+      skipped.push({ member, reason: "caller_loop" });
+      continue;
+    }
     if (member.kind === "external_number" && (member.ownerProfileId || member.profileId) && !(input.ownedPstnEnabled ?? telephonyStabilityEnabled())) {
       skipped.push({ member, reason: "feature_disabled" });
       continue;
@@ -396,6 +408,80 @@ export function isRingStepOverdue(session: SessionRow, now: Date): boolean {
   return deadline !== null && deadline < now.getTime();
 }
 
+/**
+ * Call-speed S6.2: a concurrent start whose explicit bridge is due — its
+ * one retry after a 422, or its deadline without `call.bridged` evidence
+ * (`concurrentBridgeDueAt`). The sweep reads the evidence first
+ * (`concurrentBridgeEvidence`), then the reducer retries, extends, connects
+ * or ends both legs.
+ */
+export function isConcurrentBridgeOverdue(session: SessionRow, now: Date): boolean {
+  // Ringing: Telnyx's own wait, our retry or deadline. Connected on a 2xx: its verification (M1).
+  const due = concurrentBridgeSessionDueAt(session);
+  return due !== null && due <= now.getTime();
+}
+
+/** Newest ringing sessions read beside the oldest-first overdue scan, so a fresh pending bridge is never starved by older rows (N2). */
+export const RINGING_SCAN_LIMIT = 50;
+
+export type ConcurrentBridgeEvidence = { pendingBridged: boolean; journal: ConcurrentBridgeJournal };
+
+/**
+ * What the provider has already said about each due concurrent bridge, read
+ * before any lease (N1): a `call.bridged` for either open leg still waiting in
+ * the webhook ledger (the sweep yields to it, as to a pending customer
+ * hangup), and the bridge command's journal outcome (the reducer extends an
+ * unknown one once and connects an accepted one).
+ */
+export async function concurrentBridgeEvidence(admin: AdminClient, organizationId: string, sessions: SessionRow[]): Promise<Map<string, ConcurrentBridgeEvidence>> {
+  const out = new Map<string, ConcurrentBridgeEvidence>();
+  const due = sessions.filter((session) => readMeta(session).far_end?.bridge || readMeta(session).far_end?.awaitBridgeUntil);
+  if (due.length === 0) return out;
+  const ids = due.map((session) => session.id);
+  // A far end still waiting for Telnyx's own bridge has no command of ours yet: its journal is "absent".
+  const commandIds = due.map((session) => readMeta(session).far_end?.bridge?.commandId).filter((id): id is string => Boolean(id));
+  const [legs, journal] = await Promise.all([
+    admin.from("motorist_call_legs").select("session_id, telnyx_call_control_id").eq("organization_id", organizationId).in("session_id", ids).is("ended_at", null),
+    commandIds.length ? admin.from("motorist_provider_commands").select("session_id, command_id, outcome").in("session_id", ids).in("command_id", commandIds)
+      : Promise.resolve({ data: [] as Array<{ session_id: string; command_id: string; outcome: string }>, error: null }),
+  ]);
+  if (legs.error) throw new Error(`concurrent bridge legs unavailable: ${legs.error.message}`);
+  if (journal.error) throw new Error(`concurrent bridge journal unavailable: ${journal.error.message}`);
+  const controls = (legs.data ?? []).filter((leg) => leg.telnyx_call_control_id) as Array<{ session_id: string; telnyx_call_control_id: string }>;
+  const pending = await pendingLedgerControlIds(admin, organizationId, "call.bridged", controls.map((leg) => leg.telnyx_call_control_id));
+  for (const session of due) {
+    const commandId = readMeta(session).far_end?.bridge?.commandId;
+    const row = commandId ? (journal.data ?? []).find((entry) => entry.session_id === session.id && entry.command_id === commandId) : undefined;
+    out.set(session.id, {
+      pendingBridged: controls.some((leg) => leg.session_id === session.id && pending.has(leg.telnyx_call_control_id)),
+      journal: (row?.outcome as ConcurrentBridgeJournal | undefined) ?? "absent",
+    });
+  }
+  return out;
+}
+
+/**
+ * N2: the timer of the request that sent a concurrent bridge (or any caller)
+ * enforces that one session's retry or deadline without waiting for another
+ * webhook, a console's poll or the cron: the same evidence, the same yield.
+ */
+export async function enforceConcurrentBridgeDeadline(
+  deps: Pick<SweepDeps, "admin" | "organizationId" | "runSessionEvent" | "now" | "eventId">, sessionId: string,
+): Promise<"swept" | "yielded" | "not_due" | "gone"> {
+  const now = (deps.now ?? (() => new Date()))();
+  const row = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).maybeSingle();
+  if (row.error) throw new Error(`concurrent bridge session unavailable: ${row.error.message}`);
+  if (!row.data) return "gone";
+  if (!isConcurrentBridgeOverdue(row.data, now)) return "not_due";
+  const evidence = (await concurrentBridgeEvidence(deps.admin, deps.organizationId, [row.data])).get(sessionId);
+  if (!evidence) return "not_due";
+  if (evidence.pendingBridged) return "yielded";
+  const id = deps.eventId ? deps.eventId() : `bridge-deadline:${sessionId}:${now.getTime()}`;
+  await deps.runSessionEvent(sessionId, { kind: "app", id, type: "sweep", actorProfileId: null, occurredAt: now.toISOString(),
+    concurrentBridge: { journal: evidence.journal } }, { known: row.data });
+  return "swept";
+}
+
 function isQueueExpired(session: SessionRow, now: Date): boolean {
   const meta = readMeta(session);
   const since = ms(meta.waiting?.since);
@@ -437,18 +523,26 @@ export function isSessionStale(session: SessionRow, now: Date, staleMs: number =
 export const OVERDUE_SCAN_LIMIT = 200;
 
 export async function findOverdueSessions(admin: AdminClient, input: { organizationId: string; now: Date; scanLimit?: number }): Promise<{ greeting: SessionRow[]; ringing: SessionRow[]; waiting: SessionRow[]; stale: SessionRow[]; media: SessionRow[] }> {
-  const { data, error } = await admin
-    .from("motorist_call_sessions")
-    .select("*")
-    .eq("organization_id", input.organizationId)
-    .in("state", ["greeting", "ivr", "after_hours", "callback_offered", "ringing", "waiting", "parked", "wrap_up", "missed", "talking", "held", "consulting", "conference"])
-    .order("updated_at", { ascending: true })
-    .limit(input.scanLimit ?? OVERDUE_SCAN_LIMIT);
-  if (error) throw new Error(`overdue session scan failed: ${error.message}`);
-  const rows = data ?? [];
+  const [scan, fresh] = await Promise.all([
+    admin
+      .from("motorist_call_sessions")
+      .select("*")
+      .eq("organization_id", input.organizationId)
+      .in("state", ["greeting", "ivr", "after_hours", "callback_offered", "ringing", "waiting", "parked", "wrap_up", "missed", "talking", "held", "consulting", "conference"])
+      .order("updated_at", { ascending: true })
+      .limit(input.scanLimit ?? OVERDUE_SCAN_LIMIT),
+    // N2: the scan above is oldest-first and capped; a concurrent bridge due
+    // seconds after its last write is among the newest ringing sessions.
+    admin.from("motorist_call_sessions").select("*").eq("organization_id", input.organizationId).in("state", ["ringing", "talking"])
+      .order("updated_at", { ascending: false }).limit(RINGING_SCAN_LIMIT),
+  ]);
+  if (scan.error) throw new Error(`overdue session scan failed: ${scan.error.message}`);
+  if (fresh.error) throw new Error(`overdue ringing scan failed: ${fresh.error.message}`);
+  const rows = scan.data ?? [];
+  const ringing = [...rows, ...(fresh.data ?? []).filter((row) => !rows.some((seen) => seen.id === row.id))];
   return {
     greeting: rows.filter((row) => isGreetingOverdue(row, input.now)),
-    ringing: rows.filter((row) => isRingStepOverdue(row, input.now)),
+    ringing: ringing.filter((row) => isRingStepOverdue(row, input.now) || isConcurrentBridgeOverdue(row, input.now)),
     waiting: rows.filter((row) => isWaitingTickStale(row, input.now) || isQueueOfferDue(row, input.now))
       .sort((a, b) => (ms(readMeta(a).waiting?.since) ?? ms(a.started_at) ?? 0) - (ms(readMeta(b).waiting?.since) ?? ms(b.started_at) ?? 0)),
     stale: rows.filter((row) => isSessionStale(row, input.now)),
@@ -711,7 +805,11 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
   // before any lease. Greeting and stale candidates are exempt: the stale
   // path is how a marked session gets finalised.
   const yieldable = [...overdue.ringing, ...overdue.waiting, ...overdue.media].filter((session) => session.customer_leg_id);
-  const yieldTo = await pendingCustomerHangups(deps.admin, deps.organizationId, yieldable);
+  // N1: a due concurrent bridge yields to its own pending `call.bridged`, and carries its journal outcome.
+  const [yieldTo, bridges] = await Promise.all([
+    pendingCustomerHangups(deps.admin, deps.organizationId, yieldable),
+    concurrentBridgeEvidence(deps.admin, deps.organizationId, overdue.ringing.filter((session) => isConcurrentBridgeOverdue(session, now))),
+  ]);
   const result: SweepResult = { checked: targets.length, swept: [], deferred: [], errors: [], yielded: [], drained: [] };
   const [noOffer, unchangedRecording] = await Promise.all([
     idleQueueCandidates(deps, overdue.waiting.filter(session => !yieldTo.has(session.id)), now),
@@ -746,9 +844,17 @@ export async function sweepOverdueRingSteps(deps: SweepDeps): Promise<SweepResul
       }
       continue;
     }
+    const bridge = bridges.get(session.id);
+    if (bridge?.pendingBridged) {
+      // Its `call.bridged` exists and its owner will apply it: never decide the pair without it.
+      result.deferred.push(session.id);
+      result.yielded.push(session.id);
+      continue;
+    }
     const id = deps.eventId ? deps.eventId() : `sweep:${session.id}:${now.getTime()}`;
     try {
-      await deps.runSessionEvent(session.id, { kind: "app", id, type: "sweep", actorProfileId: null, occurredAt: now.toISOString(), stale }, { known: session });
+      await deps.runSessionEvent(session.id, { kind: "app", id, type: "sweep", actorProfileId: null, occurredAt: now.toISOString(), stale,
+        ...(bridge ? { concurrentBridge: { journal: bridge.journal } } : {}) }, { known: session });
       result.swept.push(session.id);
     } catch (error) {
       if (error instanceof SessionLeaseBusyError) result.deferred.push(session.id);
@@ -795,6 +901,10 @@ async function idleRecordingCandidates(deps: SweepDeps, sessions: SessionRow[], 
 async function idleQueueCandidates(deps: SweepDeps, sessions: SessionRow[], now: Date): Promise<Set<string>> {
   const candidates = sessions.filter(session => {
     const meta = readMeta(session);
+    // This advisory snapshot contains browser devices only. Explicit mobile
+    // application endpoints must reach the reducer's full device snapshot.
+    const members = [...(meta.ring?.plan?.queueMembers ?? []), ...(meta.ring?.plan?.steps.flatMap(step => step.members) ?? [])];
+    if (members.some(member => member.application || member.applicationDevice === "mobile")) return false;
     return session.state === "waiting" && isQueueOfferDue(session, now) && !isWaitingTickStale(session, now) &&
       !isQueueExpired(session, now) && !isSessionStale(session, now) && !isGatherOverdue(session, now) &&
       !session.termination_requested_at && !session.cancellations_next_attempt_at && !readPendingEffects(session).entries.length &&
@@ -826,7 +936,7 @@ async function idleQueueCandidates(deps: SweepDeps, sessions: SessionRow[], now:
     })) };
     const escalation = settings.data?.queue_escalate_after_seconds ?? DEFAULT_ROUTING_SETTINGS.queueEscalateAfterSeconds;
     if (escalation > 0 && !queue.escalated_at && queue.idle_since && Date.parse(queue.idle_since) + escalation * 1000 <= now.getTime()) continue;
-    const input: RingStepPlanInput = { sessionId: session.id, now, ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(session),
+    const input: RingStepPlanInput = { sessionId: session.id, callerNumber: session.direction === "inbound" ? session.caller_number : null, now, ownedPstnEnabled: telephonyStabilityEnabled() || hasStabilityContract(session),
       presence: toEligibilityPresence(presence.data ?? []), devices: toEligibilityDevices(devices.data ?? []),
       openOffers: (offers.data ?? []).filter(offer => offer.session_id !== session.id).map(offer => offer.profile_id).filter((id): id is string => Boolean(id)),
       attempted: new Set(), activeLegCount: legs.count ?? 0, maxConcurrentLegs: settings.data?.max_concurrent_legs ?? DEFAULT_ROUTING_SETTINGS.maxConcurrentLegs };

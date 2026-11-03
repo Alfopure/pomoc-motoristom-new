@@ -1,6 +1,7 @@
 import "server-only";
 
-import { MutationError } from "./motorist-mutations";
+// The light module: telephony paths use this limiter too.
+import { MutationError } from "./mutation-error";
 
 type RateBucket = {
   count: number;
@@ -23,6 +24,11 @@ export function assertRateLimit(key: string, options: { limit: number; windowMs:
   }
 
   bucket.count += 1;
+}
+
+/** Test seam. */
+export function clearRateLimits() {
+  buckets.clear();
 }
 
 export function rateLimitKey(...parts: Array<string | null | undefined>) {

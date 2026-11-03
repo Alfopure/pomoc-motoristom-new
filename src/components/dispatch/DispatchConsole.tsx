@@ -10,6 +10,7 @@ import { LayoutPreviewProvider, useLayoutPreview } from "./LayoutPreview";
 import { CalendarWidget } from "./CalendarWidget";
 import { VehicleLookupSearch } from "./VehicleLookupSearch";
 import { CallMonitorInvitations } from "./CallMonitorInvitations";
+import { canInviteMonitor } from "@/lib/telephony/monitor-invitations";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -19,6 +20,7 @@ import {
   BarChart3,
   ArrowLeft,
   BellRing,
+  Building2,
   CalendarDays,
   ChevronDown,
   ClipboardCheck,
@@ -64,6 +66,10 @@ import { SmsComposerDialog } from "./SmsComposerDialog";
 import { DashboardPhone } from "./DashboardPhone";
 import type { CaseSortState } from "./CaseTable";
 import { FleetModule } from "./FleetModule";
+import { OperationsModule } from "@/components/operations/OperationsModule";
+import { PartnersModule } from "@/components/partners/PartnersModule";
+import { BranchWorkspace } from "@/components/branches/BranchWorkspace";
+import { requestSharedCaseOpen, subscribeSharedCaseOpen } from "./shared-case-navigation";
 import { mergeFleetData, useFleetRefresh } from "./useFleetRefresh";
 import { IntegrationSettings } from "./IntegrationSettings";
 import type { CustomerLocationMapFocus } from "./DispatchMap";
@@ -110,6 +116,7 @@ import { TaskCaseWorkflowActions } from "./TaskCaseWorkflowActions";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { unavailableWorkspaceCapabilities } from "@/domain/workspace-capabilities";
 import { useDraftEditors, type DraftEditorState } from "./useDraftEditors";
+import { PartnerDraftProvider } from "@/components/partners/PartnerDraftProvider";
 import { createNotificationNavigationReceiver } from "@/components/pwa/notification-navigation";
 import "./workspace-tools.css";
 import "./live-layout-preview.css";
@@ -240,6 +247,7 @@ function DispatchConsoleContent({
   viewerOrganizationId,
   viewerProfileId,
   viewerRole,
+  towingHref,
 }: {
   initialData: DispatchData;
   layoutPreviewEnabled?: boolean;
@@ -251,6 +259,7 @@ function DispatchConsoleContent({
   viewerProfileId?: string;
   /** The signed-in profile's role; only supervision is gated on it in the console. */
   viewerRole?: AppRole;
+  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy" | "/pobocka";
 }) {
   const { mode: layoutMode } = useLayoutPreview();
   const updateAvailable = useAppUpdate(appVersion);
@@ -298,6 +307,7 @@ function DispatchConsoleContent({
   const routingUrlInitialized = useRef(false);
   const [mobilePane, setMobilePane] = useState<"cases" | "workspace">("cases");
   const pushDeepLinkHandled = useRef(false);
+  const sharedCaseRead = useRef<AbortController | null>(null);
   const [attendanceLoaded, setAttendanceLoaded] = useState(source !== "supabase");
   const [attendanceError, setAttendanceError] = useState<string | null>(null);
   useEffect(() => {
@@ -329,6 +339,7 @@ function DispatchConsoleContent({
   const [activeCaseId, setActiveCaseId] = useState(dispatchCases.find(isActiveDispatchCase)?.id ?? "");
   const [workspace, setWorkspace] = useState<DispatchWorkspaceState>({ kind: "cockpit", mode: "split" });
   const [newCaseCall, setNewCaseCall] = useState(incomingCall);
+  const [handoffCaseId, setHandoffCaseId] = useState<string | null>(null);
   const [callStatus, setCallStatus] = useState<CallStatus>(incomingCall.status);
   const [isAssigning, setIsAssigning] = useState(false);
   const [customerLocationFocus, setCustomerLocationFocus] = useState<CustomerLocationMapFocus>();
@@ -475,13 +486,41 @@ function DispatchConsoleContent({
     consoleRef.current?.setAttribute("data-hydrated", "true");
   }, []);
 
+  const openSharedCase = useEffectEvent((caseId: string, writeHistory: boolean) => {
+    sharedCaseRead.current?.abort();
+    const controller = new AbortController();
+    sharedCaseRead.current = controller;
+    const show = () => openCaseDetail(caseId, writeHistory ? () => {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("task"); url.searchParams.delete("call");
+      url.searchParams.set("case", caseId);
+      if (url.href !== window.location.href) window.history.pushState(window.history.state, "", url);
+    } : undefined);
+    if (dispatchCases.some(item => item.id === caseId)) { show(); return; }
+    setMutationNotice("Načítavam prepojený prípad…");
+    void fetch(`/api/cases/${caseId}`, { headers: { "x-case-response": "detail-v2" }, cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]) })
+      .then(async response => {
+        const body = await response.json();
+        if (!response.ok || body.caseDetail?.id !== caseId) throw new Error("Prepojený prípad nie je dostupný.");
+        if (controller.signal.aborted) return;
+        setDispatchData(current => current.dispatchCases.some(item => item.id === caseId)
+          ? mergeCaseDetail(current, body.caseDetail)
+          : { ...current, dispatchCases: [{ ...body.caseDetail, tasks: [] }, ...current.dispatchCases] });
+        setMutationNotice(null); show();
+      }).catch(error => { if (!controller.signal.aborted) setMutationNotice(error instanceof Error ? error.message : "Prepojený prípad sa nepodarilo načítať."); });
+  });
+  useEffect(() => {
+    const unsubscribe = subscribeSharedCaseOpen((id, writeHistory) => openSharedCase(id, writeHistory));
+    return () => { unsubscribe(); sharedCaseRead.current?.abort(); };
+  }, []);
+
   useEffect(() => {
     // Resolve only against data the signed-in viewer is allowed to load.
     // A push link survives the login form because it keeps the current URL.
     if (pushDeepLinkHandled.current) return;
     const frame = window.requestAnimationFrame(() => {
       const url = new URL(window.location.href);
-      if (!url.searchParams.has("task") && !url.searchParams.has("call")) return;
+      if (!url.searchParams.has("task") && !url.searchParams.has("call") && !url.searchParams.has("case")) return;
       pushDeepLinkHandled.current = true;
       handleInitialPushOpen(url.href);
     });
@@ -726,7 +765,7 @@ function DispatchConsoleContent({
   );
 
   const callsByCaseId = useMemo(() => latestCallByCaseId(visibleCallCenterCalls), [visibleCallCenterCalls]);
-  const effectiveCaseFilters = useMemo(() => caseSearch.trim() && !caseFilters.statusTouched && caseFilters.status === "active" ? { ...caseFilters, status: "all" as const } : caseFilters, [caseFilters, caseSearch]);
+  const effectiveCaseFilters = useMemo(() => caseSearch.trim() ? { ...caseFilters, status: "all" as const } : caseFilters, [caseFilters, caseSearch]);
   const filteredCases = useMemo(() => {
     const branchesById = new Map(branches.map((branch) => [branch.id, branch]));
     const assetsById = new Map(fleetAssets.map((asset) => [asset.id, asset]));
@@ -749,7 +788,7 @@ function DispatchConsoleContent({
   const activeCasesTotal = useMemo(() => dispatchCases.filter(isActiveDispatchCase).length, [dispatchCases]);
   const activeFilterCount = [
     caseSearch.trim(),
-    caseFilters.status !== "all",
+    effectiveCaseFilters.status !== "all",
     caseFilters.priority !== "all",
     caseFilters.ownerId !== "all",
     caseFilters.sourceType !== "all",
@@ -847,12 +886,16 @@ function DispatchConsoleContent({
     if (source !== "supabase" || activeView !== "call-center") return;
     const initialHistoryRead = window.setTimeout(() => void refreshCallHistory(), 0);
     // History is the least time-critical read here: a call that ended while the
-    // tab was hidden is equally interesting a few seconds later.
+    // tab was hidden is equally interesting a few seconds later. A hidden tab
+    // stops here (the history panel keeps its own leased poll) and the
+    // visibility handler below reads at once when it is shown again.
     let cancelled = false;
     let timeoutId: number | undefined;
     const schedule = () => {
       if (cancelled) return;
       timeoutId = window.setTimeout(async () => {
+        timeoutId = undefined;
+        if (document.visibilityState === "hidden") return;
         await refreshCallHistory();
         schedule();
       }, supportPollDelayMs({ documentHidden: document.visibilityState === "hidden" }));
@@ -882,6 +925,9 @@ function DispatchConsoleContent({
     { group: "daily", icon: Headphones, label: "Ústredňa", shortLabel: "Ústredňa", view: "call-center" },
     { group: "operations", icon: CalendarDays, label: "Dochádzka", shortLabel: "Doch.", view: "attendance" },
     { group: "operations", icon: Truck, label: "Flotila", shortLabel: "Flotila", view: "fleet" },
+    { group: "operations", icon: Building2, label: "Pobočky", shortLabel: "Pobočky", view: "branches" },
+    { group: "operations", icon: MapPinned, label: "Výjazdy a odvozy", shortLabel: "Výjazdy", view: "operations" },
+    { group: "operations", icon: ClipboardCheck, label: "Partneri", shortLabel: "Partneri", view: "partners" },
     { group: "management", icon: BarChart3, label: "Reporty", shortLabel: "Reporty", view: "reports" },
     { group: "management", icon: Settings2, label: "Nastavenia", shortLabel: "Nastav.", view: "settings" },
   ];
@@ -1135,6 +1181,7 @@ function DispatchConsoleContent({
   }
 
   function selectCase(caseId: string) {
+    sharedCaseRead.current?.abort();
     return requestNavigation(() => {
       observeCaseOpen(caseId);
       setCenterView("map");
@@ -1147,6 +1194,7 @@ function DispatchConsoleContent({
   }
 
   function openCase(caseId: string) {
+    sharedCaseRead.current?.abort();
     requestNavigation(() => {
       observeCaseOpen(caseId);
       setCenterView("map");
@@ -1161,7 +1209,7 @@ function DispatchConsoleContent({
     });
   }
 
-  function openCaseDetail(caseId: string) {
+  function openCaseDetail(caseId: string, afterNavigate?: () => void) {
     requestNavigation(() => {
       observeCaseOpen(caseId);
       setCenterView("map");
@@ -1172,6 +1220,7 @@ function DispatchConsoleContent({
       returnViewRef.current = activeView;
       setActiveView("dispatch");
       setWorkspace({ kind: "detail", mode: "expanded" });
+      afterNavigate?.();
     });
   }
 
@@ -1214,6 +1263,11 @@ function DispatchConsoleContent({
   }
 
   const handleInitialPushOpen = useEffectEvent((rawUrl: string) => {
+    const linkedCase = new URL(rawUrl, window.location.origin).searchParams.get("case");
+    if (linkedCase && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(linkedCase)) {
+      openSharedCase(linkedCase, false);
+      return;
+    }
     const target = notificationTarget(rawUrl, window.location.origin);
     if (!target || target.kind === "settings") return;
     if (target.kind === "call") { openCallNotification(target.id); return; }
@@ -1707,6 +1761,7 @@ function DispatchConsoleContent({
   }
 
   function switchView(view: View) {
+    sharedCaseRead.current?.abort();
     if (view === "tools") { toggleTools(); return; }
     const navigate = () => {
       setToolsOpen(false);
@@ -1821,8 +1876,9 @@ function DispatchConsoleContent({
     });
   }
 
-  function handleCaseCreated(nextData: DispatchData, caseId: string, notice?: string) {
+  function handleCaseCreated(nextData: DispatchData, caseId: string, notice?: string, openHandoff = false) {
     setDispatchData(nextData);
+    setHandoffCaseId(openHandoff ? caseId : null);
     setActiveCaseId(caseId);
     setActiveView("dispatch");
     setCenterView("map");
@@ -2174,6 +2230,7 @@ function DispatchConsoleContent({
   return (
     <CaseCollaborationProvider actorKey={actorKey} viewerProfileId={viewerProfileId} enabled={source === "supabase"}
       initialCases={dispatchCases} onCasesChange={handleCollaborativeCases} onNotificationsChange={handleCollaborativeNotifications} onStateChange={handleCollaborationState}>
+    <PartnerDraftProvider key={actorKey} registerDraft={registerDraft}>
     <NotebookProvider actorKey={actorKey} viewerProfileId={viewerProfileId} enabled={capabilities.notes} onEditorStateChange={handleNotebookEditor}>
     <TaskWorkspaceProvider actorKey={actorKey} enabled={capabilities.tasks} initialTasks={dispatchData.tasks} viewerProfileId={viewerProfileId} onEditorStateChange={handleTaskEditor} onTasksChange={handleWorkspaceTasks}>
     <TaskFocusBridge requestVersion={taskOpenVersion} taskId={focusedTaskId} enabled={capabilities.tasks} />
@@ -2200,6 +2257,7 @@ function DispatchConsoleContent({
           displayName={signedInName}
           email={viewerEmail}
           role={viewerRole}
+          towingHref={towingHref}
           signingOut={isSigningOut}
           onSignOut={requestSignOut}
           onRefresh={requestAppRefresh}
@@ -2329,7 +2387,7 @@ function DispatchConsoleContent({
       )}
 
       {telephonyConfigured && <CallMonitorInvitations key={actorKey} sessionId={telephony.phoneBar.active?.sessionId ?? null}
-        listeningSessionId={telephony.phoneBar.supervising?.sessionId ?? null}
+        inviteAllowed={canInviteMonitor(telephony.phoneBar.active)} listeningSessionId={telephony.phoneBar.supervising?.sessionId ?? null}
         onStop={sessionId => void telephony.stopSupervise(sessionId)} onAccept={telephony.acceptMonitorInvitation} />}
 
       <div className={activeView === "tasks" ? "hidden" : "mobile-workspace-heading flex min-h-16 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-4 py-2.5 lg:hidden"}>
@@ -2391,6 +2449,7 @@ function DispatchConsoleContent({
             onOpenCase={openCase}
             onResumeAudio={telephony.resumeAudio}
             outboundPending={telephony.outboundPending}
+            onRefresh={telephony.refresh}
           />
         )}
 
@@ -2560,6 +2619,7 @@ function DispatchConsoleContent({
             onAssignAsset={(assetId) => void handleAssignAsset(assetId)}
             onBackToCockpit={returnToCockpit}
             onCaseCreated={handleCaseCreated}
+            openHandoff={handoffCaseId === activeCaseId}
             onCollapse={collapseWorkspace}
             onDataChange={setDispatchData}
             onCaseChange={(detail) => setDispatchData(current => mergeCaseDetail(current, detail))}
@@ -2634,6 +2694,15 @@ function DispatchConsoleContent({
 
       {activeView === "attendance" && (attendanceLoaded ? <AttendanceModule attendance={attendance} operators={effectiveOperators} onDataChange={setDispatchData} /> : <p role="status">{attendanceError ?? "Načítavam dochádzku…"}</p>)}
       {activeView === "reports" && <ReportDashboard />}
+      <main className="dispatch-standalone-workspace" hidden={activeView !== "operations"} inert={activeView !== "operations"}>
+        {activeView === "operations" && <OperationsModule cases={authorizedCases} onOpenCase={requestSharedCaseOpen} />}
+      </main>
+      <main className="dispatch-standalone-workspace" hidden={activeView !== "branches"} inert={activeView !== "branches"}>
+        {activeView === "branches" && <BranchWorkspace cases={authorizedCases} onOpenCase={requestSharedCaseOpen} />}
+      </main>
+      <main className="dispatch-standalone-workspace" hidden={activeView !== "partners"} inert={activeView !== "partners"}>
+        {activeView === "partners" && <PartnersModule />}
+      </main>
       {activeView === "fleet" && (
         <FleetModule
           branches={branches}
@@ -2744,6 +2813,7 @@ function DispatchConsoleContent({
     </div>
     </TaskWorkspaceProvider>
     </NotebookProvider>
+    </PartnerDraftProvider>
     </CaseCollaborationProvider>
   );
 }
@@ -2771,6 +2841,7 @@ function AccountMenu({
   appRelease,
   role,
   signingOut,
+  towingHref,
 }: {
   displayName: string;
   email?: string;
@@ -2781,6 +2852,7 @@ function AccountMenu({
   appRelease: AppRelease;
   role?: AppRole;
   signingOut: boolean;
+  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy" | "/pobocka";
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -2863,6 +2935,7 @@ function AccountMenu({
             </span>
           </div>
           <div className="border-t border-zinc-200 p-2">
+            {towingHref && <a href={towingHref} target="_blank" rel="noreferrer" className="flex min-h-11 items-center rounded-lg px-2.5 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{towingHref === "/moje-jazdy" ? "Moje jazdy" : towingHref === "/pobocka" ? "Pobočka" : "Zákazky odťahovej služby"} ↗</a>}
             {(role === "manager" || role === "admin") && <a href="/monitor" target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)}
               className="flex min-h-11 items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100">Monitor prevádzky <span className="ml-auto text-xs font-normal">↗</span></a>}
             <ReportProblemButton className="min-h-11 w-full rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100" />
@@ -3720,16 +3793,14 @@ function caseMatchesSearch({
     latestTimeline?.body,
   ];
 
-  // Interné číslo prípadu aj externé číslo asistenčnej služby sa hľadajú bez ohľadu na formát
-  // (pomlčky, lomky, medzery) — porovnáva sa iba alfanumerický zvyšok (P-06).
-  const caseNumberQuery = compactSearch(search);
+  // Vehicle and case identifiers match regardless of separators or letter case.
+  const identifierQuery = compactSearch(search);
   const externalReference = caseItem.customerDetails.assistanceReference;
-  const caseNumberMatches =
-    caseNumberQuery.length > 0 &&
-    (compactSearch(caseItem.caseNumber).includes(caseNumberQuery) ||
-      (externalReference ? compactSearch(externalReference).includes(caseNumberQuery) : false));
+  const identifierMatches = identifierQuery.length > 0 &&
+    [caseItem.caseNumber, externalReference, caseItem.vehicle.licensePlate, caseItem.vehicle.vin, asset?.licensePlate]
+      .some(value => Boolean(value && compactSearch(value).includes(identifierQuery)));
 
-  return caseNumberMatches || normalizeSearch(haystack.filter(Boolean).join(" ")).includes(query);
+  return identifierMatches || normalizeSearch(haystack.filter(Boolean).join(" ")).includes(query);
 }
 
 function compareCases(

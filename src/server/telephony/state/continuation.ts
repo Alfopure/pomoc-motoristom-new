@@ -1,10 +1,20 @@
-import { measureRequestStep } from "@/server/request-metrics";
+import { measureControlStage, measureRequestStep } from "@/server/request-metrics";
 import type { Json } from "@/lib/supabase/database.types";
 import type { EffectsDeps } from "./effects";
-import { SessionConflictError, SessionEventDeferredError, SessionLeaseLostError } from "../service-errors";
-import { measureGuard, sessionOwnership } from "../ownership";
+import { isSessionLeaseLost, SessionConflictError, SessionEventDeferredError, SessionLeaseLostError } from "../service-errors";
+import { measureGuard, sessionOwnership, withTelephonyDatabaseBudget } from "../ownership";
 import { isPausedWithoutCall } from "../routing/reservation";
 import { commandKey, readMeta, toJson, type Command, type Compensation, type ReduceResult, type SessionEvent, type SessionRow, type Transition } from "./types";
+
+export type EffectFailureAudit = {
+  /** Absent only on the original singular marker, whose event identity stays unchanged. */
+  commandKey?: string;
+  at: string;
+  stateAfter: string;
+  error: string;
+  commands: Array<{ kind: string; ok: boolean; command_id?: string | null; skipped?: boolean; error?: string }>;
+  recorded?: boolean;
+};
 
 export type EffectContinuation = {
   id: string;
@@ -22,6 +32,10 @@ export type EffectContinuation = {
   attempts: number;
   lastError: string | null;
   auditComplete: boolean;
+  /** Compatibility with the original singular marker. */
+  failureAudit?: EffectFailureAudit;
+  /** At most one immutable failure obligation per original command. */
+  failureAudits?: EffectFailureAudit[];
   /** Captured provider evidence survives a failed atomic accounting stage. */
   verifiedContact?: Json;
 };
@@ -68,7 +82,15 @@ export function criticalDatabaseEffectCount(transition: Transition): number {
 }
 
 export function continuationComplete(entry: EffectContinuation): boolean {
-  return entry.auditComplete && entry.databaseCursor >= databaseEffectCount(entry.transition) && entry.commands.every((command) => entry.completedCommands.includes(commandKey(command)));
+  return entry.auditComplete && failureAuditsComplete(entry) && entry.databaseCursor >= databaseEffectCount(entry.transition) && entry.commands.every((command) => entry.completedCommands.includes(commandKey(command)));
+}
+
+export function failureAudits(entry: EffectContinuation): EffectFailureAudit[] {
+  return [...(entry.failureAudit ? [entry.failureAudit] : []), ...(entry.failureAudits ?? [])];
+}
+
+export function failureAuditsComplete(entry: EffectContinuation): boolean {
+  return failureAudits(entry).every(audit => audit.recorded === true);
 }
 
 function prepared(session: SessionRow, transition: Transition, commands: Command[], compensations: Compensation[], event: SessionEvent, branch: EffectContinuation["branch"], now: string) {
@@ -93,7 +115,7 @@ function stagingFailure(error: unknown): Error {
   const failure = error && typeof error === "object" ? error as { name?: unknown; code?: unknown; message?: unknown } : {};
   const message = typeof failure.message === "string" ? failure.message : String(error);
   const transportError = typeof failure.code !== "string" || failure.code.length === 0;
-  const interrupted = error instanceof SessionLeaseLostError || failure.code === "ABORT_ERR" || transportError && (failure.name === "AbortError" || failure.name === "TimeoutError"
+  const interrupted = isSessionLeaseLost(error) || failure.code === "ABORT_ERR" || transportError && (failure.name === "AbortError" || failure.name === "TimeoutError"
     // postgrest-js can wrap a renew refusal into the staging RPC's error text.
     || /(?:^|:\s*)(?:AbortError|TimeoutError):/.test(message));
   // This event cannot dispatch provider effects before its atomic stage returns.
@@ -120,9 +142,37 @@ export async function stageEffects(deps: EffectsDeps, input: { session: SessionR
   });
   // Reservation and staging are atomic in this RPC; report the combined time.
   let result: Awaited<ReturnType<typeof stage>>;
-  try { result = await (guard ? measureGuard("guard_stage_ms", () => measureRequestStep("guard.stage", stage)) : stage()); }
-  catch (error) { throw stagingFailure(error); }
-  if (result.error) throw stagingFailure(result.error);
+  try {
+    result = await (guard ? measureGuard("guard_stage_ms", () => measureRequestStep("guard.stage", stage)) : stage());
+    if (result.error) throw result.error;
+  } catch (error) {
+    const failure = stagingFailure(error);
+    const owner = sessionOwnership.getStore();
+    // An interactive action has no provider inbox to redeliver it. A timed-out
+    // response can leave its committed intent waiting until the next hangup.
+    // Read back once, under the SAME owner, without repeating the mutation or
+    // extending the normal deadline. Dispatch only the exact durable entry.
+    if (failure instanceof SessionEventDeferredError && !isSessionLeaseLost(error) &&
+      input.event.kind === "app" && ["hold", "unhold", "park"].includes(input.event.type) &&
+      owner?.contract === 2 && owner.admin === deps.admin && owner.sessionId === input.session.id && owner.organizationId === deps.organizationId) {
+      try {
+        const fresh = await withTelephonyDatabaseBudget(1_000, () => measureControlStage("staging_reconcile", async () =>
+          await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", input.session.id).single()));
+        const row = fresh.data;
+        const entry = row && readPendingEffects(row).entries.find(item => item.id === input.event.id);
+        if (!fresh.error && row?.writer_contract === 2 && row.lease_token === owner.token && row.ownership_generation === owner.generation &&
+          row.lease_until && Date.parse(row.lease_until) > deps.now().getTime() && Date.now() < owner.deadline &&
+          !row.ended_at && !row.termination_requested_at && entry?.branch === "main" && entry.generation === main.entry.generation &&
+          effectGeneration(row) === entry.generation && entry.event.kind === "app" && entry.event.type === input.event.type &&
+          entry.event.actorProfileId === input.event.actorProfileId) {
+          try { deps.logger?.({ scope: "effects", code: "staging_response_recovered", sessionId: row.id, eventId: input.event.id }); }
+          catch { /* Optional diagnostics cannot undo proven recovery. */ }
+          return row;
+        }
+      } catch { /* An unavailable/mismatched read is not proof that staging succeeded. */ }
+    }
+    throw failure;
+  }
   const response = result.data as { applied?: boolean; session?: SessionRow } | null;
   if (response?.applied === false) throw new SessionConflictError(input.session.id, input.expectedVersion);
   if (!response?.session) throw new Error("Transition staging returned no session");
@@ -148,6 +198,7 @@ async function checkpointOwnedEffects(deps: CheckpointDeps, sessionId: string, e
   for (let retry = 0; retry < 3; retry += 1) {
     const fresh = retry === 0 && known ? { data: known, error: null }
       : await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).single();
+    if (isSessionLeaseLost(fresh.error)) throw new SessionLeaseLostError(fresh.error!.message);
     if (fresh.error || !fresh.data) throw new Error(`Effects checkpoint read failed: ${fresh.error?.message ?? "missing session"}`);
     const pending = readPendingEffects(fresh.data);
     if (!pending.entries.some((item) => item.id === entryId)) return fresh.data;
@@ -157,6 +208,7 @@ async function checkpointOwnedEffects(deps: CheckpointDeps, sessionId: string, e
       effects_next_attempt_at: entries.length ? new Date(deps.now().getTime() + 30_000).toISOString() : null,
       version: fresh.data.version + 1,
     }).eq("organization_id", deps.organizationId).eq("id", sessionId).eq("version", fresh.data.version).select("*").maybeSingle();
+    if (isSessionLeaseLost(updated.error)) throw new SessionLeaseLostError(updated.error!.message);
     if (updated.error) throw new Error(`Effects checkpoint failed: ${updated.error.message}`);
     if (updated.data) return updated.data;
   }

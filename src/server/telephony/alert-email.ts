@@ -60,7 +60,7 @@ function explain(alert: TelephonyAlert): Explanation {
     },
     ledger: {
       title: "Udalosť sa nepodarilo spracovať",
-      happened: `Počet neúspešne spracovaných udalostí za posledných 24 hodín: ${d.truncated ? "najmenej " : ""}${count(d.failed24h)}. Môže ísť o doručenie alebo následný krok v aplikácii.`,
+      happened: `Počet neúspešne spracovaných udalostí vyžadujúcich kontrolu za posledných 24 hodín: ${d.truncated ? "najmenej " : ""}${count(d.actionableFailures ?? d.failed24h)}. Môže ísť o doručenie alebo následný krok v aplikácii.${typeof d.retrying === "number" && d.retrying > 0 ? ` Ďalšie udalosti čakajú na automatické opakovanie: ${count(d.retrying)}; ich výsledok zatiaľ nie je potvrdený.` : ""}`,
       outcome: "Chyba spracovania udalosti sama nedokazuje, že hovor zlyhal. Aj „call.hangup“ môže znamenať iba ukončenie jednej vetvy súbežného vyzváňania, nie celého rozhovoru.",
       action: "Porovnajte výsledok dotknutého hovoru nižšie s históriou. Technickú správu pošlite na kontrolu spracovania udalosti.",
     },
@@ -105,6 +105,8 @@ function explain(alert: TelephonyAlert): Explanation {
   if (alert.check === "connections") {
     const outcomes = entries(alert).map((entry) => entry.outcome);
     const descriptions = [
+      outcomes.includes("setup_failed") ? "Hovor skončil po chybe úvodnej fázy bez doloženého obnovenia úvodného príkazu alebo smerovania na operátora." : "",
+      outcomes.includes("setup_recovered") ? "Úvodná fáza po chybe postúpila k operátorovi; tento údaj sám nepotvrdzuje kvalitu zvuku." : "",
       outcomes.includes("pending") ? "Najmenej jedno spojenie alebo prepojenie stále čaká na potvrdenie." : "",
       outcomes.includes("ended_without_confirmation") ? "Niektorý hovor už skončil bez potvrdenia opravy; to nedokazuje, že nikdy nebol spojený." : "",
       outcomes.includes("confirmed_after_failure") ? "Pri časti záznamov bolo spojenie po chybe následne potvrdené." : "",
@@ -119,7 +121,7 @@ function explain(alert: TelephonyAlert): Explanation {
 function hasUnresolvedConnection(call: AlertCallEvidence, alerts: TelephonyAlert[]): boolean {
   return call.pendingConnection || alerts.some((alert) => entries(alert)
     .some((entry) => entry.sessionId === call.sessionId && (entry.reason === "connection_unconfirmed" || alert.check === "connections" &&
-      ["pending", "ended_without_confirmation", "unknown", "command_recovered"].includes(String(entry.outcome)))));
+      ["pending", "ended_without_confirmation", "setup_failed", "unknown", "command_recovered"].includes(String(entry.outcome)))));
 }
 
 function callVerdict(call: AlertCallEvidence, alerts: TelephonyAlert[]): string {

@@ -107,7 +107,7 @@ describe("createTelnyxClient", () => {
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer KEYtest");
     expect(calls[0].init.signal).toBeInstanceOf(AbortSignal);
     expect(calls[0].body).toEqual({ call_control_id: "v3:xyz", play_ringtone: true, ringtone: "cz", command_id: "cmd-1" });
-    expect(logs).toEqual([{ method: "POST", path: "/calls/v3%3Aabc%2Fdef/actions/bridge", status: 200, ms: expect.any(Number), commandId: "cmd-1", retried: false, error: null,
+    expect(logs).toEqual([{ method: "POST", path: "/calls/v3%3Aabc%2Fdef/actions/bridge", region: "us", status: 200, ms: expect.any(Number), commandId: "cmd-1", retried: false, error: null,
       cached: false, attempts: [{ startedAtMs: expect.any(Number), dispatchAfterMs: expect.any(Number), headersMs: expect.any(Number), ms: expect.any(Number), status: 200 }] }]);
   });
 

@@ -47,3 +47,10 @@ it("does not shorten a server delay longer than its wait budget", async () => {
   await expect(requestVehicleLookup(input, new AbortController().signal, vi.fn())).rejects.toThrow("Busy");
   expect(request).toHaveBeenCalledTimes(1);
 });
+it.each(["network", "html", "invalid_snapshot"])("shows a readable failure for %s instead of technical exception text", async failure => {
+  if (failure === "network") request.mockRejectedValue(new TypeError("Failed to fetch"));
+  else if (failure === "html") request.mockResolvedValue(new Response("<html>Bad Gateway</html>", { status: 502 }));
+  else request.mockResolvedValue(Response.json({ snapshot: null }));
+  await expect(requestVehicleLookup(input, new AbortController().signal, vi.fn())).rejects.toThrow("Overenie vozidla sa nepodarilo dokončiť.");
+  expect(request).toHaveBeenCalledTimes(1);
+});

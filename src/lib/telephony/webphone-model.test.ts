@@ -5,8 +5,13 @@ import type { Call, TelnyxRTC } from "@telnyx/webrtc";
 import type { WebphoneSdkCall, WebphoneSdkClient } from "./telnyx-webphone";
 import {
   EXPECTED_LEG_TTL_MS,
+  EXPECTED_REQUEST_TTL_MS,
   heartbeatRegistrationState,
+  inviteRequestId,
+  matchAutoAnswer,
   matchExpectedLeg,
+  matchExpectedRequest,
+  rememberExpectedRequest,
   inviteHasAutoAnswerHeader,
   inviteIsColleagueCall,
   reduceWebphone,
@@ -16,7 +21,9 @@ import {
   TOKEN_REFRESH_MIN_MS,
   webphoneRegistrationView,
   webphoneRetryDelayMs,
+  WEBPHONE_EDGE_FALLBACK_RETRY_MS,
   WEBPHONE_INITIAL_STATE,
+  WEBPHONE_MAX_CONNECT_FAILURES,
   WEBPHONE_RECONNECT_MAX_MS,
   type WebphoneCredentials,
   type WebphoneEvent,
@@ -132,6 +139,16 @@ describe("connect lifecycle", () => {
     expect(failed.state.credentials).toBeNull();
     expect(failed.effects).toContainEqual({ kind: "disconnect" });
   });
+
+  it("retries an EU-edge fallback at once without counting it towards the attempt limit (call-speed S5)", () => {
+    const fourFailures: WebphoneState = { status: "connecting", attempts: WEBPHONE_MAX_CONNECT_FAILURES - 1, credentials: credentials(), message: null };
+    const fallback = reduceWebphone(fourFailures, { type: "client_error", edgeFallback: true }, { now: NOW });
+    expect(fallback.state).toMatchObject({ status: "reconnecting", attempts: WEBPHONE_MAX_CONNECT_FAILURES - 1, credentials: credentials() });
+    expect(fallback.effects).toEqual([{ kind: "clear_timers" }, { kind: "disconnect" }, { kind: "retry_after", delayMs: WEBPHONE_EDGE_FALLBACK_RETRY_MS }]);
+    // The same state without the marker is the phone's fifth failure.
+    expect(reduceWebphone(fourFailures, { type: "client_error" }, { now: NOW }).state.status).toBe("failed");
+    expect(reduceWebphone({ ...fourFailures, status: "failed" }, { type: "client_error", edgeFallback: true }, { now: NOW }).effects).toEqual([]);
+  });
 });
 
 describe("terminal states", () => {
@@ -204,6 +221,49 @@ describe("auto-answer correlation", () => {
     expect(inviteIsColleagueCall({})).toBe(false);
     // The header alone never identifies a session, so it cannot match a leg.
     expect(matchExpectedLeg([], { customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] }, NOW)).toBeNull();
+  });
+});
+
+describe("early accept correlation (call-speed S3)", () => {
+  const REQUEST = "6f1c2a4e-8b3d-4c5e-9f60-7a8b9c0d1e2f";
+  const OTHER = "0b7e5d3c-1a2f-4e6d-8c9b-a0b1c2d3e4f5";
+  const armed = rememberExpectedRequest([], { requestId: REQUEST, timingOperationId: REQUEST, at: NOW }, NOW);
+  const own = (requestId = REQUEST, extra: Array<{ name: string; value: string }> = []) =>
+    ({ telnyxCallControlId: "cc-own", customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }, { name: "X-PM-Request", value: requestId }, ...extra] });
+
+  it("matches the own leg only by its exact request id together with the auto-answer header", () => {
+    expect(matchExpectedRequest(armed, own(), NOW)?.requestId).toBe(REQUEST);
+    expect(matchExpectedRequest(armed, { customHeaders: [{ name: "x-pm-auto-answer", value: "1" }, { name: "x-pm-request", value: REQUEST }] }, NOW)?.requestId).toBe(REQUEST);
+    expect(matchExpectedRequest(armed, own(OTHER), NOW)).toBeNull();
+    expect(matchExpectedRequest(armed, own(REQUEST.toUpperCase()), NOW)).toBeNull();
+    // The request header without the server's auto-answer header is no permission.
+    expect(matchExpectedRequest(armed, { customHeaders: [{ name: "X-PM-Request", value: REQUEST }] }, NOW)).toBeNull();
+    // An ordinary auto-answer leg (pickup, supervision) carries no request identity.
+    expect(matchExpectedRequest(armed, { customHeaders: [{ name: "X-PM-Auto-Answer", value: "1" }] }, NOW)).toBeNull();
+    expect(matchExpectedRequest(armed, { telnyxCallControlId: "cc-own" }, NOW)).toBeNull();
+  });
+
+  it("never matches a colleague's call, a repeated header, an expired or an unarmed request", () => {
+    expect(matchExpectedRequest(armed, own(REQUEST, [{ name: "X-PM-Colleague-Call", value: "1" }]), NOW)).toBeNull();
+    expect(matchExpectedRequest(armed, own(REQUEST, [{ name: "X-PM-Request", value: REQUEST }]), NOW)).toBeNull();
+    expect(inviteRequestId(own(REQUEST, [{ name: "X-PM-Request", value: OTHER }]))).toBeNull();
+    expect(matchExpectedRequest(armed, own(), NOW + EXPECTED_REQUEST_TTL_MS - 1)?.requestId).toBe(REQUEST);
+    expect(matchExpectedRequest(armed, own(), NOW + EXPECTED_REQUEST_TTL_MS)).toBeNull();
+    expect(matchExpectedRequest([], own(), NOW)).toBeNull();
+  });
+
+  it("arms only a well-formed request id, once per id", () => {
+    expect(rememberExpectedRequest([], { requestId: "", at: NOW }, NOW)).toEqual([]);
+    expect(rememberExpectedRequest([], { requestId: "not-a-uuid", at: NOW }, NOW)).toEqual([]);
+    expect(rememberExpectedRequest(armed, { requestId: REQUEST, at: NOW + 1 }, NOW + 1)).toEqual([{ requestId: REQUEST, at: NOW + 1 }]);
+    expect(rememberExpectedRequest(armed, { requestId: OTHER, at: NOW + EXPECTED_REQUEST_TTL_MS }, NOW + EXPECTED_REQUEST_TTL_MS))
+      .toEqual([{ requestId: OTHER, at: NOW + EXPECTED_REQUEST_TTL_MS }]);
+  });
+
+  it("leaves the existing leg correlation untouched by a request header", () => {
+    // No armed leg: the request header satisfies neither the call-control id match nor the tiebreaker.
+    expect(matchExpectedLeg([], own(), NOW)).toBeNull();
+    expect(matchAutoAnswer([], own(), NOW)).toBeNull();
   });
 });
 

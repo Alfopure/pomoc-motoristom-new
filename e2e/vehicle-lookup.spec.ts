@@ -218,6 +218,7 @@ for (const width of [1280, 390]) {
     await expect(page.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("Fixture poisťovňa");
     await expect(page.getByLabel("Rok výroby", { exact: true })).toHaveValue("");
     expect(api.writes).toHaveLength(0);
+    if (width === 1280) await page.screenshot({ path: ".context/vehicle-lookup-confirmed.png", fullPage: true });
     const bounds = await control.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
@@ -473,6 +474,48 @@ test("VIN-only lookup explicitly fills a missing plate and leaves the entered VI
   await expect(page.getByLabel("VIN", { exact: true })).toHaveValue(syntheticVin);
   expect(api.writes).toHaveLength(0);
 });
+
+test("exact plate PZP accepts a policy without VIN and fills the main insurer field after confirmation", async ({ page }) => {
+  const api = await sandboxApi(page, async input => {
+    const response = lookupResponse(input);
+    response.snapshot.result.sources = [response.snapshot.result.sources[0]];
+    delete response.snapshot.result.sources[0].facts.vin;
+    return response;
+  });
+  await openDashboard(page); await openNewCase(page);
+  const control = page.getByTestId("vehicle-lookup");
+  await control.getByLabel("EČV", { exact: true }).fill(plateA);
+  await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+  await expect(page.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("");
+  await control.getByRole("button", { name: acceptName }).click();
+  await expect(page.getByLabel("Poisťovňa PZP", { exact: true })).toHaveValue("Fixture poisťovňa");
+  await expect(control.getByLabel("VIN", { exact: true })).toHaveValue("");
+  await expect(control.getByRole("button", { name: /Uložené overenie vozidla/ })).toContainText("PZP: POISTENÉ");
+  await expect(control.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Uložiť rozpracované", exact: true }).click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(api.writes[0].body).toMatchObject({ licensePlate: plateA, vin: "", vehicleInsurer: "Fixture poisťovňa" });
+});
+
+for (const failure of ["network", "html"] as const) {
+  test(`lookup ${failure} failure shows a friendly reason and permits manual saving`, async ({ page }) => {
+    const api = await sandboxApi(page);
+    await page.route("**/api/vehicles/lookup", route => failure === "network"
+      ? route.abort("failed")
+      : route.fulfill({ status: 502, contentType: "text/html", body: "<html>Bad Gateway</html>" }));
+    await openDashboard(page); await openNewCase(page);
+    const control = page.getByTestId("vehicle-lookup");
+    await control.getByLabel("EČV", { exact: true }).fill(plateA);
+    await control.getByRole("button", { name: "Dohľadať podľa EČV", exact: true }).click();
+    await expect(control.getByRole("alert")).toContainText("Overenie vozidla sa nepodarilo dokončiť");
+    await expect(control.getByRole("alert")).toContainText("údaje môžete vyplniť ručne");
+    await expect(control).not.toContainText(/Failed to fetch|Unexpected token|Bad Gateway/);
+    await page.getByLabel("Poisťovňa PZP", { exact: true }).fill("Ručne overená poisťovňa");
+    await page.getByRole("button", { name: "Uložiť rozpracované", exact: true }).click();
+    await expect.poll(() => api.writes.length).toBe(1);
+    expect(api.writes[0].body).toMatchObject({ vehicleInsurer: "Ručne overená poisťovňa", vehicleLookup: null });
+  });
+}
 
 test("challenge and unavailable sources do not imply missing insurance or block manual saving", async ({ page }) => {
   const api = await sandboxApi(page, async (input) => {

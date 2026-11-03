@@ -9,6 +9,7 @@ import { buildQualitySource, dateMilliseconds, jsonObject, loadRecordingSourceRo
 import { summarizeSessionRecording } from "./state/recording-types";
 import { readMeta } from "./state/types";
 import { readRecordingPolicy } from "./recording-policy-service";
+import { auditRecordingRead } from "./recording-read-audit";
 
 type Admin = SupabaseClient<Database>;
 export function recordingError(message: string, status = 400, code = "recording_invalid"): never { throw new ConfigServiceError(message, status, code); }
@@ -159,6 +160,7 @@ export async function getCallRecordingDetail(admin: Admin, actor: MotoristActor,
         review: { ...o.review!, criteria: o.review!.criteria.map((c) => ({ ...c, evidence: [] })) } })) } : null;
     result.state = approved.length ? "ready" : "pending";
     result.transcript.status = "disabled";
+    if (result.analysis) await auditRecordingRead(admin, actor, { kind: "own_review", callId, sourceRevision: call.recording_source_revision });
     return result;
   }
   result.metrics = communicationMetrics(source);
@@ -176,6 +178,7 @@ export async function getCallRecordingDetail(admin: Admin, actor: MotoristActor,
       : source.spans.length ? "partial" : transcripts.some((t) => t.status === "failed") ? "failed" : "processing" };
   result.capabilities.canRetry = permissions.manager && Boolean(call.ended_at) && Boolean(jobs.data?.some((j) => j.state === "failed"))
     && !jobs.data?.some((j) => j.state === "submission_unknown" || j.paid_submit_started && ["queued", "processing", "waiting"].includes(j.state));
+  await auditRecordingRead(admin, actor, { kind: "detail", callId, sourceRevision: call.recording_source_revision });
   return result;
 }
 

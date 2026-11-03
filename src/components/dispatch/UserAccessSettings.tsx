@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { KeyRound, Mail, Power, RefreshCw, Save, Trash2, UserPlus, Users } from "lucide-react";
+import { KeyRound, Mail, PhoneOff, Power, RefreshCw, Save, Trash2, UserPlus, Users } from "lucide-react";
 import type { DispatchData } from "@/data/dispatch-types";
 import type { AccessStatus, AccessUser, AppRole } from "@/domain/types";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
@@ -140,6 +140,12 @@ export function UserAccessSettings({ onDataChange, onNotice, users: initialUsers
       method: "PATCH",
       body: { active },
     });
+  }
+
+  /** Repeats the deactivation of an inactive user: the server revokes the iPhone's access again
+   * and its notice says whether there was anything to take away. */
+  async function revokePhoneAgain(user: AccessUser) {
+    await runUserAction(user, "revoke-phone", `/api/users/${user.id}`, "Deaktivácia je zopakovaná.", { method: "PATCH", body: { active: false } });
   }
 
   /**
@@ -341,6 +347,15 @@ export function UserAccessSettings({ onDataChange, onNotice, users: initialUsers
                       disabled={pendingAction === `disable-${user.id}` || pendingAction === `reactivate-${user.id}`}
                       onClick={() => void setUserActive(user, user.accessStatus === "disabled" || !user.active)}
                     />
+                    {(user.accessStatus === "disabled" || !user.active) ? (
+                      // A deactivation whose phone revocation failed is repeated without reactivating the user.
+                      <UserActionButton
+                        icon={PhoneOff}
+                        label="Zrušiť prístup k telefónu znova"
+                        disabled={pendingAction === `revoke-phone-${user.id}`}
+                        onClick={() => void revokePhoneAgain(user)}
+                      />
+                    ) : null}
                     {canDelete ? (
                       <UserActionButton
                         icon={Trash2}

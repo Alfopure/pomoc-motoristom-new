@@ -72,7 +72,7 @@ export async function POST(request: Request) {
     const observations = readBrowserCallObservations(body.callTimings);
     if (observations.length) {
       try {
-        after(() => logBrowserCallObservations(deps, actor.profileId, observations));
+        after(async () => { await logBrowserCallObservations(deps, actor.profileId, observations); });
       } catch { /* Scheduling diagnostics must not fail a successful heartbeat. */ }
     }
     return Response.json({ ok: true, seenAt: result.device.device_seen_at, registrationState: result.device.registration_state });

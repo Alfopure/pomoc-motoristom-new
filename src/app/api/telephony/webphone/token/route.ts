@@ -1,5 +1,6 @@
 import { assertSameOriginRequest, requireDefaultMotoristActor } from "@/server/api-auth";
-import { issueWebphoneToken } from "@/server/telephony/operator-devices";
+import { latencyFlagsOf, webCallTuning } from "@/server/telephony/latency-flags";
+import { issueWebphoneToken, refuseIfAccessLost } from "@/server/telephony/operator-devices";
 import { createTelephonyDeps, readJsonBody, TELEPHONY_ROUTE_ROLES, telephonyConfiguredOrResponse, telephonyErrorResponse } from "@/server/telephony/runtime";
 
 export const runtime = "nodejs";
@@ -24,8 +25,9 @@ export async function POST(request: Request) {
 
     const body = await readJsonBody<{ takeover?: unknown; handoff?: unknown; deviceKind?: unknown; deviceSessionId?: unknown }>(request).catch(() => ({}) as { takeover?: unknown; handoff?: unknown; deviceKind?: unknown; deviceSessionId?: unknown });
     const deps = await createTelephonyDeps({ organizationId: actor.organizationId });
+    const device = { admin: deps.admin, telnyx: deps.telnyx, environment: deps.environment, deviceKind: body.deviceKind === "mobile" ? "mobile" as const : "web" as const };
     const token = await issueWebphoneToken(
-      { admin: deps.admin, telnyx: deps.telnyx, environment: deps.environment, deviceKind: body.deviceKind === "mobile" ? "mobile" : "web" },
+      device,
       {
         organizationId: deps.organizationId,
         profileId: actor.profileId,
@@ -36,8 +38,13 @@ export async function POST(request: Request) {
         deviceSessionId: typeof body?.deviceSessionId === "string" ? body.deviceSessionId : null,
       },
     );
+    // A deactivation or removal that landed during the mint revokes this enrollment instead.
+    await refuseIfAccessLost(device, { organizationId: deps.organizationId, profileId: actor.profileId }, token);
 
-    return Response.json(token, { headers: { "Cache-Control": "private, no-store" } });
+    // Connect-time switches (call-speed S5): the browser creates every new SDK
+    // client right after a mint, so its first socket already follows them.
+    const { webRtcRegion, webPrefetchIce } = webCallTuning(latencyFlagsOf(deps));
+    return Response.json({ ...token, webRtcRegion, webPrefetchIce }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return telephonyErrorResponse(error, "Prihlasovací token pre telefón sa nepodarilo vydať.");
   }

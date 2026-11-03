@@ -1,7 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { measureControlStage, requestStepCount, requestTimingContext } from "@/server/request-metrics";
-import { assertOwnership, firstProviderDispatchAt, guardTiming, measureGuard, ownershipRpc, sessionOwnership, type Ownership } from "../ownership";
+import { assertOwnership, firstProviderDispatchAt, guardTiming, measureGuard, ownershipRpc, sessionOwnership, withTelephonyDatabaseBudget, type Ownership } from "../ownership";
 import { payloadFingerprint } from "../provider-journal";
+import { reportCommandSettled } from "../command-settlement";
 import { isDeepStrictEqual } from "node:util";
 
 import type { Database, Json } from "@/lib/supabase/database.types";
@@ -10,15 +11,16 @@ import { readAnnouncementConfig, resolveAnnouncement, resolveCombinedInboundIntr
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
+import { pendingLedgerControlIds } from "../telnyx/webhook-ledger";
 import { addTelephonyUsage } from "../usage";
 import { advanceRingStep, resolvePersonalRingMembers } from "../routing/ring-plan";
 import { authorizeOperatorDispatch, isPausedWithoutCall, reserveAnsweredOperator, transitionPresence } from "../routing/reservation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
-import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
+import { checkpointEffects, commandStillApplies, continuationComplete, criticalDatabaseEffectCount, effectGeneration, failureAudits, failureAuditsComplete, readPendingEffects, stageEffects, type EffectContinuation } from "./continuation";
 import { encodeClientState } from "../telnyx/client-state";
 import { commandId } from "../telnyx/command-id";
-import { isCallGoneError, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
-import { pendingAudioStillOwned, recordingCommandOutcome, recordingIntent } from "./recording";
+import { confirmEuLegEnded, isCallGoneError, isSessionCallGoneError, TELNYX_CALL_ENDED_CODE, TELNYX_CALL_GONE_CODES, TelnyxCommandError, type DialParams, type DialResult, type TelnyxClient } from "../telnyx/client";
+import { pendingAudioStillOwned, recordingCommandOutcome, recordingFrozenOff, recordingIntent } from "./recording";
 import { RECORDING_START_SETTLE_MS } from "./recording-types";
 import { observeParticipants } from "./participants";
 import { attachContactOperations, bindContactConference, contactOperationIntent, readContactHistory, verifyConferenceContact, type ContactProof } from "../contact-proof";
@@ -26,6 +28,7 @@ import { createCallbackObligation, reconcileCallbackContact } from "../callback-
 import { cancelRevokedOffers } from "./cancelled-offers";
 import { SessionConflictError, SessionLeaseLostError } from "../service-errors";
 export { SessionConflictError } from "../service-errors";
+import { latencyFlagsOf, type LatencyFlags } from "../latency-flags";
 import {
   ACTIVE_SESSION_STATES,
   DEFAULT_TTS_VOICE,
@@ -127,7 +130,48 @@ export type EffectsDeps = {
   /** Existing inbound hangups awaiting exact terminal proof. The owned runner
    * derives this on every invocation, including late HTTP acknowledgements. */
   deferredCommandIds?: ReadonlySet<string>;
+  /** Request-local: legs this invocation knows have ended, keyed by call
+   * control id → the accepted hangup's command id, or null when Telnyx answered
+   * 90018. Never persisted; a call control id is never reused. */
+  endedLegs?: Map<string, string | null>;
+  /** Resolved by `createTelephonyDeps`; absent means env defaults (`latencyFlagsOf`). */
+  latencyFlags?: LatencyFlags;
 };
+
+/**
+ * Call-speed S2: the startup entry a start request staged a moment ago under
+ * its own lease, for the own leg its reservation token already authorizes
+ * (`initializeOutgoingSession`). Honoured only on that entry's first attempt
+ * under a contract-2 owner; a resume by cron or a webhook never carries it.
+ */
+export type InitialDispatch = {
+  entryId: string;
+  commandId: string;
+  /**
+   * `start_fast_path`: history follows the dial (the call row is still written
+   * before the entry retires), and the dial skips what this invocation has
+   * just established: the replay-adoption leg read, the validity read, the
+   * pause read and the reused offer claim with its checkpoint. `prepare_v2`
+   * still refuses after a termination, which the entry then compensates.
+   */
+  fast: boolean;
+  /**
+   * `start_early_response`: the tail behind the response is compacted. The
+   * leg bookkeeping and the offer-revocation read run together, the
+   * command-done checkpoint folds into the final one (the leg row is the
+   * adoption evidence until then) and the incident read moves after the lease
+   * (the caller runs it). The audit stays ahead of the final checkpoint, so a
+   * failed insert keeps the entry for the next resume or cron.
+   */
+  compact: boolean;
+  /** Fires once the own leg's dial is settled: journal result, leg row, revoked-offer check. */
+  onSettled?: (settled: { callControlId: string; callSessionId: string | null; legOpen: boolean }) => void;
+};
+
+/** `internal_lean_path` (call-speed S1.1): colleague calls take the recording-frozen-off paths. */
+function leanInternal(deps: Pick<EffectsDeps, "latencyFlags" | "logger">): boolean {
+  return latencyFlagsOf(deps).internal_lean_path;
+}
 
 export type CommandOutcome = {
   key: string;
@@ -221,7 +265,10 @@ export async function persistTransition(
   // way, so an entry staged by one writer stays resumable by the other.
   const folded = input.phase === "critical" && sessionOwnership.getStore()?.contract === 2 &&
     (input.continuation?.databaseCursor ?? 0) === 0 &&
-    input.transition.legs.length + input.transition.attempts.length > 0;
+    input.transition.legs.length + input.transition.attempts.length > 0 &&
+    // The folded RPC only updates existing legs. An answer can precede the
+    // dial response/initiated webhook, so its identity must use the insert path.
+    !input.transition.legs.some(leg => leg.createIfMissing);
   if (input.phase === "projection") {
     // Audio/recorder acknowledgements can advance the session after the
     // critical phase. History retries must never restore its older snapshot.
@@ -262,6 +309,8 @@ export async function persistTransition(
   // no provider HTTP — the commands run only after this returns. Anything that
   // is not idempotent (the callback INSERT) keeps its own checkpoint, and the
   // batch is retired first so a replay cannot repeat it after the INSERT.
+  // Eligible media controls run their state-only leg projection after commands;
+  // those commands already have durable outcomes in the provider journal.
   let batchPending = false;
   const flushBatch = async () => {
     if (!input.continuation || !batchPending) return;
@@ -329,7 +378,8 @@ export async function persistTransition(
   // checkpoint. Its cursor still advances in memory; a crash replays the same
   // projection and fingerprint-unique audit. Other effects keep their cursor.
   await effect(() => upsertCallRow(deps, session, callOverrides), false, false, Boolean(deferCallCheckpoint));
-  // The critical batch must be durable before any provider command runs.
+  // Retire the batch before continuing (before commands on the prerequisite
+  // path, after their journalled completion on the media-control path).
   await flushBatch();
   return session;
 }
@@ -374,11 +424,15 @@ async function applyLegPatch(deps: EffectsDeps, session: SessionRow, patch: LegP
 /** Links a ring attempt (natural key) to its leg row once the leg exists. */
 async function linkAttemptToLeg(deps: EffectsDeps, session: SessionRow, legId: string, clientState: Json, profileId: string | null, toNumber: string | null): Promise<void> {
   const state = clientState && typeof clientState === "object" && !Array.isArray(clientState) ? (clientState as Record<string, unknown>) : null;
-  if (!state || state.intent !== "ring" || typeof state.step !== "number") return;
+  if (!state || (state.intent !== "ring" && !(state.intent === "internal" && readMeta(session).internal?.endpoints?.length)) || typeof state.step !== "number") return;
   let query = deps.admin.from("motorist_ring_attempts").update({ leg_id: legId }).eq("session_id", session.id).eq("step_index", state.step).is("leg_id", null);
   query = state.role === "external"
     ? query.eq("member_kind", "external_number").eq("external_number", toNumber ?? "")
     : query.eq("member_kind", "operator").eq("profile_id", profileId ?? "").is("external_number", null);
+  // Separate application endpoints share a profile, never an attempt identity.
+  if (state.role !== "external") query = state.applicationDevice === "mobile"
+    ? query.eq("application_device", "mobile")
+    : query.or("application_device.is.null,application_device.eq.web");
   const result = await query;
   if (result.error) fail("attempt link failed", result.error);
 }
@@ -664,6 +718,7 @@ export async function recordCallEvent(
     commands: Array<{ kind: string; ok: boolean; command_id?: string | null; skipped?: boolean; started_at?: string; effect_ms?: number; phase?: string }>;
     error?: string | null;
     timing?: EventTiming;
+    failureAt?: string;
   },
 ): Promise<void> {
   const { admin } = deps;
@@ -678,7 +733,11 @@ export async function recordCallEvent(
   const rawPayload = event.kind === "telnyx" ? toJson(event.type.includes("recording.")
     ? { recording_id: event.payload.recording_id ?? null, recording_started_at: event.payload.recording_started_at ?? null, recording_ended_at: event.payload.recording_ended_at ?? null, channels: event.payload.channels ?? null }
     : event.payload) : toJson({ type: event.type, actor: event.actorProfileId, target, ...(event.monitorInvitation ? { invitationId: event.monitorInvitation.id, recipientProfileId: event.monitorInvitation.recipientProfileId, expiresAt: event.monitorInvitation.expiresAt } : {}), ...(event.invitationId || event.supervisor?.invitationId ? { invitationId: event.invitationId ?? event.supervisor?.invitationId } : {}) });
-  const inserted = await admin.from("motorist_call_events").insert({
+  // Redelivered webhooks and replayed audits reuse the event id. ON CONFLICT DO
+  // NOTHING on the table's unique key (foundation schema) keeps that a quiet
+  // no-op instead of a 23505 (logged by Postgres, 409 from PostgREST) that the
+  // code then ignores.
+  const inserted = await admin.from("motorist_call_events").upsert({
     organization_id: deps.organizationId,
     call_id: callId,
     provider: "telnyx",
@@ -699,6 +758,7 @@ export async function recordCallEvent(
       ...(input.routing?.length ? { routing: input.routing } : {}),
       commands: input.commands,
       error: input.error ?? null,
+      ...(input.failureAt ? { failure_at: input.failureAt } : {}),
       ...(measuredTiming || event.kind === "telnyx" ? { timing: {
         ...requestTimingContext(), ...guardTiming(), first_command_at: firstProviderDispatchAt(),
         lease_acquired_at: sessionOwnership.getStore() ? new Date(sessionOwnership.getStore()!.acquiredAt).toISOString() : null,
@@ -711,8 +771,28 @@ export async function recordCallEvent(
     handled_status: input.handledStatus,
     provider_timestamp: event.occurredAt,
     received_at: deps.now().toISOString(),
-  });
+  }, { onConflict: "organization_id,provider,event_fingerprint", ignoreDuplicates: true });
   if (inserted.error && !isDuplicate(inserted.error)) fail("call event insert failed", inserted.error);
+}
+
+/** The original event can finish later; each failed command has its own immutable identity. */
+async function flushFailureAudit(deps: EffectsDeps, session: SessionRow, entry: EffectContinuation): Promise<void> {
+  for (const failure of failureAudits(entry)) {
+    if (failure.recorded) continue;
+    try {
+      const id = `${entry.id}:failure${failure.commandKey ? `:${failure.commandKey}` : ""}`;
+      await recordCallEvent(deps, { session, event: { ...entry.event, id }, handledStatus: "failed",
+        stateBefore: entry.stateBefore, stateAfter: failure.stateAfter, notes: ["durable command failure"],
+        commands: failure.commands, error: failure.error, failureAt: failure.at });
+      failure.recorded = true;
+    } catch (error) {
+      if (error instanceof SessionLeaseLostError) throw error;
+      // Audio and urgent teardown may proceed, but retirement must wait. Stop
+      // after one failed INSERT rather than exhausting the lease on audits.
+      deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "failure_audit_pending" });
+      return;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -727,6 +807,10 @@ type ExecutionContext = {
   continuation?: EffectContinuation;
   /** Memoised `motorist_call_legs` rows for this session, loaded at most once. */
   legs?: LegRow[];
+  /** Call-speed S2: this entry is the start request's own first attempt. */
+  initial?: InitialDispatch;
+  /** Set by `settleDial` for `initial`'s command: whether its leg row is open. */
+  initialLegOpen?: boolean;
 };
 
 /**
@@ -745,13 +829,11 @@ type ExecutionContext = {
  * A presence change keyed to the command keeps it sequential, so the "presence
  * after this command" ordering is untouched.
  */
-function commandMayOverlap(command: Command, session: SessionRow, transition: Transition): boolean {
+function commandMayOverlap(command: Command, session: SessionRow, transition: Transition, lean: boolean): boolean {
   if (!["hangup", "playback_stop", "gather_stop"].includes(command.kind) || !command.bestEffort) return false;
   const key = commandKey(command);
   if (transition.presence.some((change) => change.afterCommandId === key)) return false;
-  const meta = readMeta(session);
-  return meta.recording?.policy.enabled === false && !meta.recording.recorders.length &&
-    !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence;
+  return recordingFrozenOff(session, lean);
 }
 
 /** `prepare_v2` lets these through after a termination; everything else it refuses. */
@@ -779,12 +861,10 @@ function isTerminationBlocked(error: unknown): boolean {
  * Recording is excluded: it keeps its own live view of `pendingAudio` and
  * `commandStillApplies` inspects live recorder state for `recording_start`.
  */
-function providerReadCanReuseSession(session: SessionRow): boolean {
+function providerReadCanReuseSession(session: SessionRow, lean: boolean): boolean {
   const owner = sessionOwnership.getStore();
   if (owner?.contract !== 2 || owner.sessionId !== session.id) return false;
-  const meta = readMeta(session);
-  return meta.recording?.policy.enabled === false && !meta.recording.recorders.length &&
-    !meta.recording.barrier && !meta.recording.pendingAudio && !meta.announcement_sequence;
+  return recordingFrozenOff(session, lean);
 }
 
 async function sessionLegs(deps: EffectsDeps, ctx: ExecutionContext): Promise<LegRow[]> {
@@ -798,6 +878,8 @@ async function sessionLegs(deps: EffectsDeps, ctx: ExecutionContext): Promise<Le
 /** A command whose execution can need a `dial` result: the dial itself, or a reference to one. */
 function referencesDial(command: Command): boolean {
   if (command.kind === "dial") return true;
+  // A colleague fan-out started with the caller's own dial links to its leg (S6.1).
+  if (command.kind === "ring_fanout") return command.dials.some((dial) => dial.linkTo !== null && typeof dial.linkTo === "object");
   for (const value of Object.values(command as Record<string, unknown>)) {
     if (value && typeof value === "object" && "fromDial" in value) return true;
     if (Array.isArray(value) && value.some((item) => item && typeof item === "object" && "fromDial" in item)) return true;
@@ -817,9 +899,103 @@ function requireTelnyx(deps: EffectsDeps): TelnyxClient {
   return deps.telnyx;
 }
 
-/** A hangup for a leg Telnyx no longer knows (404) or refuses to touch because it ended (422). */
+/**
+ * A hangup for a leg Telnyx no longer knows (404) or refuses to touch because
+ * it ended (422). In an EU session (call-speed S5) only Telnyx's own call-gone
+ * codes count: a bare 404/422 there may be the answer of the wrong region (an
+ * older build, a changed base URL) for a call that is still connected, so it
+ * takes the ordinary failure path instead of closing the leg.
+ */
 function isLegAlreadyGone(error: unknown): boolean {
-  return error instanceof TelnyxCommandError && (error.status === 404 || error.status === 422);
+  if (!(error instanceof TelnyxCommandError) || (error.status !== 404 && error.status !== 422)) return false;
+  return sessionOwnership.getStore()?.providerRegion !== "eu" || TELNYX_CALL_GONE_CODES.has(String(error.code));
+}
+
+/**
+ * A 422 for a bridge whose pair Telnyx may have bridged itself
+ * (`bridge_on_answer`). Its wording is not evidence either way ("already
+ * bridged", "Call is currently in a bridge", …; TEST spike S6.0/4 records the
+ * real one), so it never decides the outcome by itself: a concurrent bridge
+ * waits for `call.bridged`, any other bridge for the target leg's own
+ * `call.bridged`. A call that is gone is not this: its bridge failed.
+ */
+export function isUnprovenBridgeRefusal(error: unknown): boolean {
+  return error instanceof TelnyxCommandError && error.status === 422 && !isSessionCallGoneError(error);
+}
+
+/**
+ * Whether this leg has reported `call.bridged`: its row says so, or (N6) its
+ * `call.bridged` is in the webhook ledger, not yet processed — it waits for the
+ * very lease this invocation holds, so the row alone rarely shows it.
+ */
+async function legReportedBridged(deps: EffectsDeps, ctx: ExecutionContext, callControlId: string): Promise<boolean> {
+  const [leg, pending] = await Promise.all([
+    deps.admin.from("motorist_call_legs").select("bridged_at").eq("organization_id", deps.organizationId)
+      .eq("session_id", ctx.session.id).eq("telnyx_call_control_id", callControlId).maybeSingle(),
+    pendingLedgerControlIds(deps.admin, deps.organizationId, "call.bridged", [callControlId]).catch(() => null),
+  ]);
+  if (leg.error || !pending) throw new EffectsError("bridge target evidence unavailable");
+  return Boolean((leg.data as { bridged_at?: string | null } | null)?.bridged_at) || pending.has(callControlId);
+}
+
+/**
+ * The refusal Telnyx gives for a leg that has ended (90018), raised locally
+ * instead of sending another command to a leg this invocation already knows
+ * ended. Every existing call-gone branch (tolerant hangup, gather/greeting
+ * metadata, no incident, compensation) behaves as for the provider's answer.
+ */
+class KnownCallGoneError extends TelnyxCommandError {
+  constructor(readonly callControlId: string) {
+    super({ code: TELNYX_CALL_ENDED_CODE, status: 422, detail: "Call has already ended (reported earlier; command not sent)" });
+    this.name = "KnownCallGoneError";
+  }
+}
+
+/**
+ * What an earlier answer in this invocation lets a command skip.
+ *
+ * `media` (audio and its stops) is skipped after a 90018 or an accepted
+ * hangup. Every other command is skipped only after an accepted hangup with a
+ * different command id: a 90018 alone still lets `hangup` and `recording_stop`
+ * reach the provider, because that hangup is the safety net for an inbound
+ * customer leg. The replay of the very hangup that ended a leg still goes
+ * through, so its journalled answer and audit outcome stay unchanged.
+ */
+type LegUse = "media" | "control";
+
+function legEnded(deps: EffectsDeps, leg: string, use: LegUse, replayOf?: string): boolean {
+  const endedBy = deps.endedLegs?.get(leg);
+  if (endedBy === undefined) return false;
+  if (endedBy === null) return use === "media";
+  return !(replayOf && endedBy === replayOf);
+}
+
+function assertLegsLive(deps: EffectsDeps, legs: readonly string[], use: LegUse, replayOf?: string): void {
+  const ended = legs.find((leg) => legEnded(deps, leg, use, replayOf));
+  if (ended) throw new KnownCallGoneError(ended);
+}
+
+/**
+ * Only that exact code on a `/calls/{leg}/actions/*` command marks the leg
+ * ended. Prose matches, other call-gone codes, conference and multi-leg
+ * refusals (which leg?) stay ordinary failures for later commands.
+ */
+function rememberEndedLeg(deps: EffectsDeps, leg: string, error: unknown): void {
+  if (error instanceof TelnyxCommandError && !(error instanceof KnownCallGoneError) &&
+    String(error.code) === TELNYX_CALL_ENDED_CODE && !deps.endedLegs?.has(leg)) deps.endedLegs?.set(leg, null);
+}
+
+/** One call action on one leg; `hangupCommandId` marks the leg ended once Telnyx accepts it. */
+async function toLeg<T>(deps: EffectsDeps, leg: string, use: LegUse, send: () => Promise<T>, hangupCommandId?: string): Promise<T> {
+  assertLegsLive(deps, [leg], use, hangupCommandId);
+  try {
+    const result = await send();
+    if (hangupCommandId && typeof deps.endedLegs?.get(leg) !== "string") deps.endedLegs?.set(leg, hangupCommandId);
+    return result;
+  } catch (error) {
+    rememberEndedLeg(deps, leg, error);
+    throw error;
+  }
 }
 
 function resolvePrompt(deps: EffectsDeps, ctx: ExecutionContext, media: MediaRef | null) {
@@ -853,6 +1029,16 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
   // renews/fences at dispatch. Renewing again at each wrapper does not add a
   // stronger boundary, but serializes several DB requests ahead of each call.
   if (sessionOwnership.getStore()?.contract !== 2) await assertOwnership();
+  if (command.nativeHold && !["hangup", "recording_stop", "conference_leave"].includes(command.kind)) {
+    const { assertNativeHoldAuthority, readNativeHoldAuthorityRows } = await import("../native-hold-authority");
+    // `hold_mobile_dedupe` (call-speed S7a.2): the same three fresh reads in one wave.
+    const [fresh, rows] = await Promise.all([
+      deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle(),
+      latencyFlagsOf(deps).hold_mobile_dedupe ? readNativeHoldAuthorityRows(deps, command.nativeHold.profileId, ctx.session.id) : null,
+    ]);
+    if (fresh.error || !fresh.data) throw new EffectsError("Native hold authority unavailable");
+    await assertNativeHoldAuthority(deps, fresh.data, command.nativeHold, rows && !rows.legs.error ? rows.legs.data ?? [] : undefined, rows?.device);
+  }
   const telnyx = requireTelnyx(deps);
   // Defense at the provider boundary: even a replayed/stale command cannot
   // promote an invited leg to audible audio or remove its provider mute.
@@ -873,23 +1059,31 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
     if (ctx.continuation) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
   switch (command.kind) {
-    case "answer":
-      await telnyx.answer({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, clientState: encodeClientState(command.clientState) });
+    case "answer": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "control", () => telnyx.answer({ callControlId: leg, commandId: command.commandId, clientState: encodeClientState(command.clientState) }));
       return { skipped: false };
-    case "hangup":
+    }
+    case "hangup": {
+      let leg: string | null = null;
       try {
-        await telnyx.hangup({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId });
+        leg = resolveLeg(ctx, command.leg);
+        const target = leg;
+        await toLeg(deps, target, "control", () => telnyx.hangup({ callControlId: target, commandId: command.commandId }), command.commandId);
       } catch (error) {
         // The leg is already gone (the far end hung up a moment earlier): that
         // is exactly the outcome we asked for, not a failed transition. Without
         // this, an operator pressing "Ukončiť" on a call the caller just ended
-        // gets a 502 for a session that is already terminal.
-        if (!isLegAlreadyGone(error)) throw error;
-        return { skipped: true, detail: { reason: command.reason, alreadyGone: true } };
+        // gets a 502 for a session that is already terminal. In an EU session
+        // a refusal without a call-gone code is confirmed first (S5).
+        if (!isLegAlreadyGone(error) && !(leg && await confirmEuLegEnded(telnyx, leg, error))) throw error;
+        return { skipped: true, detail: { reason: command.reason, alreadyGone: true, ...(error instanceof KnownCallGoneError ? { notSent: true } : {}) } };
       }
       return { skipped: false, detail: { reason: command.reason } };
+    }
     case "bridge": {
       if (command.recordingConferenceName) return executeRecordedConnection(deps, ctx, command);
+      assertLegsLive(deps, [resolveLeg(ctx, command.leg), resolveLeg(ctx, command.target)], "control");
       let clientState: string | undefined;
       if (telephonyStabilityEnabled() || hasStabilityContract(ctx.session)) {
         const sourceId = resolveLeg(ctx, command.leg);
@@ -907,17 +1101,29 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         const previous = source.client_state as { offerToken?: string } | null;
         clientState = encodeClientState({ sid: ctx.session.id, role: source.role,
           ...(source.profile_id ? { operatorId: source.profile_id } : {}),
-          ...(previous?.offerToken ? { offerToken: previous.offerToken } : {}), intent: contactOperationIntent(command.commandId) });
+          ...(previous?.offerToken ? { offerToken: previous.offerToken } : {}), intent: contactOperationIntent(command.contactCommandId ?? command.commandId) });
       }
-      await telnyx.bridge({
-        callControlId: resolveLeg(ctx, command.leg),
-        targetCallControlId: resolveLeg(ctx, command.target),
-        commandId: command.commandId,
-        parkAfterUnbridge: command.parkAfterUnbridge,
-        playRingtone: command.playRingtone,
-        ringtone: command.playRingtone ? "cz" : undefined,
-        clientState,
-      });
+      try {
+        await telnyx.bridge({
+          callControlId: resolveLeg(ctx, command.leg),
+          targetCallControlId: resolveLeg(ctx, command.target),
+          commandId: command.commandId,
+          parkAfterUnbridge: command.parkAfterUnbridge,
+          playRingtone: command.playRingtone,
+          ringtone: command.playRingtone ? "cz" : undefined,
+          clientState,
+        });
+      } catch (error) {
+        if (isUnprovenBridgeRefusal(error)) {
+          // Call-speed S6.2: a concurrent start's bridge is settled by
+          // `call.bridged` or by its deadline, never by a refusal (M1).
+          if (command.concurrentBridge) return { skipped: true, detail: { reason: "awaiting_bridged_evidence" } };
+          // S6.3: Telnyx bridged this pair itself only if the target leg says
+          // so; a caller bridged to another leg answers with the same 422.
+          if (command.alreadyBridgedOk && await legReportedBridged(deps, ctx, resolveLeg(ctx, command.target))) return { skipped: true, detail: { reason: "already_bridged" } };
+        }
+        throw error;
+      }
       return { skipped: false };
     }
     case "recording_start": {
@@ -938,15 +1144,28 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         if (admission.error || admission.data !== true) throw new EffectsError("recording_admission_denied");
       });
       await deps.renewLease?.();
-      const recording = await telnyx.recordingStart({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, maxLength: command.maxLength,
-        clientState: encodeClientState({ sid: ctx.session.id, role: "customer", intent: recordingIntent(command.recorderId) }) });
+      const leg = resolveLeg(ctx, command.leg);
+      const recording = await toLeg(deps, leg, "control", () => telnyx.recordingStart({ callControlId: leg, commandId: command.commandId, maxLength: command.maxLength,
+        clientState: encodeClientState({ sid: ctx.session.id, role: "customer", intent: recordingIntent(command.recorderId) }) }));
       return { skipped: false, detail: { providerRecordingId: recording.recordingId } };
     }
-    case "recording_stop":
+    case "recording_stop": {
       await deps.renewLease?.();
-      try { await telnyx.recordingStop({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId }); }
-      catch (error) { if (!isCallGoneError(error)) throw error; }
+      let leg: string | null = null;
+      try {
+        leg = resolveLeg(ctx, command.leg);
+        const target = leg;
+        await toLeg(deps, target, "control", () => telnyx.recordingStop({ callControlId: target, commandId: command.commandId }));
+      } catch (error) {
+        // After our own accepted hangup the capture ends with the leg; say so
+        // instead of reporting a STOP that was never sent. A leg that has
+        // ended stopped its capture with it (in an EU session only on a
+        // call-gone code, or a refusal confirmed by its status, S5).
+        if (error instanceof KnownCallGoneError) return { skipped: true, detail: { reason: "call_gone", notSent: true } };
+        if (!isSessionCallGoneError(error) && !(leg && await confirmEuLegEnded(telnyx, leg, error))) throw error;
+      }
       return { skipped: false };
+    }
     case "playback_start": {
       const prompt = resolvePrompt(deps, ctx, command.media);
       const common = {
@@ -957,8 +1176,9 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         clientState: encodeClientState(command.clientState ?? { sid: ctx.session.id, role: "customer", intent: "playback" }),
       };
       if (prompt.url && !command.forceSpeech) {
+        const audioUrl = prompt.url;
         try {
-          await telnyx.playbackStart({ ...common, audioUrl: prompt.url, loop: command.loop });
+          await toLeg(deps, common.callControlId, "media", () => telnyx.playbackStart({ ...common, audioUrl, loop: command.loop }));
           return { skipped: false, detail: { url: prompt.url } };
         } catch (error) {
           if (!canRecoverMediaFailure(ctx.session, error) || !prompt.text || isCallGoneError(error)) throw error;
@@ -968,14 +1188,17 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         }
       }
       if (prompt.text) {
-        await telnyx.speak({ ...common, payload: prompt.text, voice: prompt.voice });
+        const payload = prompt.text;
+        await toLeg(deps, common.callControlId, "media", () => telnyx.speak({ ...common, payload, voice: prompt.voice }));
         return { skipped: false, detail: { tts: true } };
       }
       return { skipped: true, detail: { reason: "no media base url" } };
     }
-    case "playback_stop":
-      await telnyx.playbackStop({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId, stop: "all" });
+    case "playback_stop": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "media", () => telnyx.playbackStop({ callControlId: leg, commandId: command.commandId, stop: "all" }));
       return { skipped: false };
+    }
     case "gather": {
       const leg = resolveLeg(ctx, command.leg);
       const prompt = resolvePrompt(deps, ctx, command.spec.media);
@@ -1000,7 +1223,7 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
       // its fallback text may describe an older menu.
       if (url && !command.spec.forceSpeech && !(prompt.text && invalid?.text && !invalid.url)) {
         try {
-          await telnyx.gatherUsingAudio({ ...common, audioUrl: url, invalidAudioUrl: invalid?.url ?? undefined });
+          await toLeg(deps, leg, "media", () => telnyx.gatherUsingAudio({ ...common, audioUrl: url, invalidAudioUrl: invalid?.url ?? undefined }));
           return { skipped: false, detail: { url, purpose: command.spec.purpose } };
         } catch (error) {
           // Only managed prompts have text proven to match their recording.
@@ -1012,25 +1235,28 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         }
       }
       if (text) {
-        await telnyx.gatherUsingSpeak({ ...common, payload: text, voice: prompt.voice ?? DEFAULT_TTS_VOICE, invalidPayload: invalid?.text ?? undefined });
+        await toLeg(deps, leg, "media", () => telnyx.gatherUsingSpeak({ ...common, payload: text, voice: prompt.voice ?? DEFAULT_TTS_VOICE, invalidPayload: invalid?.text ?? undefined }));
         return { skipped: false, detail: { tts: true, purpose: command.spec.purpose, gatherId } };
       }
       if (command.spec.media === null) {
         // Silent gather: the waiting-room tick, which must not interrupt the
         // `playback_start` loop that carries the music.
-        await telnyx.gather(common);
+        await toLeg(deps, leg, "media", () => telnyx.gather(common));
         return { skipped: false, detail: { silent: true, purpose: command.spec.purpose } };
       }
       throw new EffectsError("gather has no usable audio or text");
     }
-    case "gather_stop":
-      await telnyx.gatherStop({ callControlId: resolveLeg(ctx, command.leg), commandId: command.commandId });
+    case "gather_stop": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "media", () => telnyx.gatherStop({ callControlId: leg, commandId: command.commandId }));
       return { skipped: false };
+    }
     case "dial":
       return executeDial(deps, ctx, command);
-    case "transfer":
-      await telnyx.transfer({
-        callControlId: resolveLeg(ctx, command.leg),
+    case "transfer": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "control", () => telnyx.transfer({
+        callControlId: leg,
         commandId: command.commandId,
         to: command.to,
         from: command.from ?? undefined,
@@ -1040,8 +1266,9 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         sipRegion: "Europe",
         mediaEncryption: command.to.startsWith("sip:") ? "SRTP" : undefined,
         parkAfterUnbridge: "self",
-      });
+      }));
       return { skipped: false, detail: { to: command.to } };
+    }
     case "conference_create": {
       const conference = await createOrFindConference(telnyx, command.commandId, resolveLeg(ctx, command.leg), command.name);
       ctx.conferenceId = conference.id;
@@ -1059,6 +1286,10 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         call_control_id: resolveLeg(ctx, command.leg),
         supervisor_role: command.supervisorRole,
         whisper_call_control_ids: command.whisper?.map((leg) => resolveLeg(ctx, leg)),
+        // Call-speed S7b: the participant joins held. Telnyx documents
+        // `hold_audio_url` for conferences created without starting; TEST
+        // spike S7.0 decides whether ours (started on create) plays it.
+        ...(command.holdOnJoin ? { hold: true, hold_audio_url: mediaUrl(deps.mediaBaseUrl, command.holdOnJoin.media) ?? undefined } : {}),
         commandId: command.commandId,
       });
       return { skipped: false, ...(command.supervisorRole ? { detail: { supervisorRole: command.supervisorRole } } : {}) };
@@ -1070,9 +1301,11 @@ async function executeCommand(deps: EffectsDeps, ctx: ExecutionContext, command:
         commandId: command.commandId,
       });
       return { skipped: false, detail: { supervisorRole: command.supervisorRole } };
-    case "supervisor_role_switch":
-      await telnyx.switchSupervisorRole({ callControlId: resolveLeg(ctx, command.leg), role: command.supervisorRole, commandId: command.commandId });
+    case "supervisor_role_switch": {
+      const leg = resolveLeg(ctx, command.leg);
+      await toLeg(deps, leg, "control", () => telnyx.switchSupervisorRole({ callControlId: leg, role: command.supervisorRole, commandId: command.commandId }));
       return { skipped: false, detail: { supervisorRole: command.supervisorRole } };
+    }
     case "conference_leave":
       await telnyx.conferenceAction(requireConference(ctx, command), "leave", { call_control_id: resolveLeg(ctx, command.leg), commandId: command.commandId });
       return { skipped: false };
@@ -1233,6 +1466,15 @@ async function claimOperatorForDial(deps: EffectsDeps, ctx: ExecutionContext, co
 async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, options?: { planOnly?: boolean }): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   await assertOwnership();
   const telnyx = requireTelnyx(deps);
+  if (ctx.initial?.fast && ctx.initial.commandId === command.commandId && !options?.planOnly) {
+    // Call-speed S2.2: the first attempt of the entry this invocation staged.
+    // Nothing can have dispatched it (no journal row, no leg to adopt), the
+    // operator is reserved on this session with exactly this token, which the
+    // staged command already holds durably: `claimOperatorForDial` would only
+    // answer `reused`, and an operator cannot pause while `on_call`.
+    const result = await telnyx.dial(dialParams(command, ctx));
+    return settleDial(deps, ctx, command, result, true);
+  }
   const adopted = ctx.dialResults.get(command.commandId);
   if (adopted && ctx.dialFingerprints?.get(command.commandId) === payloadFingerprint(command)) {
     return { skipped: false, detail: { callControlId: adopted.callControlId, adopted: true } };
@@ -1279,22 +1521,26 @@ async function executeDial(deps: EffectsDeps, ctx: ExecutionContext, command: Di
     if (ctx.continuation && !options?.planOnly) ctx.session = await checkpointEffects(deps, ctx.session.id, ctx.continuation, ctx.continuation.id, ctx.session);
   }
   if (options?.planOnly) return { skipped: false, detail: { planned: true, stable } };
-  const result = await telnyx.dial(dialParams(command));
+  const result = await telnyx.dial(dialParams(command, ctx));
   return settleDial(deps, ctx, command, result, stable);
 }
 
 /** Tells the browser an invite is a colleague call; see `inviteIsColleagueCall`. */
 const COLLEAGUE_CALL_HEADER = "X-PM-Colleague-Call";
 
-/** Exactly what `dial` is called with, apart so a whole ring step can be sent at once. */
-function dialParams(command: DialCommand): DialParams {
+/**
+ * Exactly what `dial` is called with, apart so a whole ring step can be sent at
+ * once. A `link_to` naming an earlier dial of the entry (S6.1) resolves to the
+ * leg that dial created, or refuses before anything is sent.
+ */
+function dialParams(command: DialCommand, ctx: ExecutionContext): DialParams {
   const isSip = command.to.startsWith("sip:");
   return {
     commandId: command.commandId,
     to: command.to,
     from: command.from,
     clientState: encodeClientState(command.clientState),
-    linkTo: command.linkTo ?? undefined,
+    linkTo: command.linkTo == null ? undefined : typeof command.linkTo === "string" ? command.linkTo : resolveLeg(ctx, command.linkTo),
     bridgeOnAnswer: command.bridgeOnAnswer,
     preventDoubleBridge: command.preventDoubleBridge,
     extra: command.parkAfterUnbridge ? { park_after_unbridge: command.parkAfterUnbridge } : undefined,
@@ -1303,7 +1549,8 @@ function dialParams(command: DialCommand): DialParams {
     sipRegion: "Europe",
     mediaEncryption: isSip ? "SRTP" : undefined,
     customHeaders: command.colleagueCall ? [{ name: COLLEAGUE_CALL_HEADER, value: "1" }]
-      : command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" }] : undefined,
+      : command.autoAnswer ? [{ name: "X-PM-Auto-Answer", value: "1" },
+        ...(command.requestHeader ? [{ name: "X-PM-Request", value: command.requestHeader }] : [])] : undefined,
     fromDisplayName: command.fromDisplayName,
     // Supervision attaches to a live call at dial time; the caller's bridge is
     // never touched. `supervisor_role` is only meaningful together with it.
@@ -1312,24 +1559,56 @@ function dialParams(command: DialCommand): DialParams {
   };
 }
 
+/**
+ * `Promise.all` that lets every write finish before reporting the first
+ * failure, so nothing is still in flight when the caller's failure path
+ * checkpoints or releases the lease.
+ */
+async function settledAll<T extends readonly unknown[]>(work: { [K in keyof T]: Promise<T[K]> | T[K] }): Promise<T> {
+  const settled = await Promise.allSettled(work as readonly unknown[]);
+  for (const outcome of settled) if (outcome.status === "rejected") throw outcome.reason;
+  return settled.map(outcome => (outcome as PromiseFulfilledResult<unknown>).value) as unknown as T;
+}
+
 /** The bookkeeping behind one dial, whether it was sent alone or as part of a step. */
 async function settleDial(deps: EffectsDeps, ctx: ExecutionContext, command: DialCommand, result: DialResult, stable: boolean): Promise<{ skipped: boolean; detail?: Record<string, unknown> }> {
   ctx.dialResults.set(command.commandId, result);
-  await upsertDialedLeg(deps, ctx.session, command, result);
+  const initial = ctx.initial?.commandId === command.commandId ? ctx.initial : undefined;
   // This read stays fresh deliberately. The plan proposed taking the
   // tombstones from the snapshot when it shows none, to save a round trip per
   // operator rung; `dispatch-pause-boundaries` refuses it. An operator can be
   // paused while their own dial is in flight, and the fresh row is what
   // discovers that tombstone in time to hang the revoked leg up — waiting for
   // the next event lets it be answered first.
-  if (stable && command.profileId) await cancelRevokedOffers(deps, ctx.session, { callControlId: result.callControlId, clientState: command.clientState });
+  const revoked = () => stable && command.profileId
+    ? cancelRevokedOffers(deps, ctx.session, { callControlId: result.callControlId, clientState: command.clientState, dialed: true }) : null;
+  let leg: LegRow | null;
+  if (initial?.compact) {
+    // Call-speed S2.3: the revocation read is still after the dial, so a
+    // tombstone written while it was in flight is found; the arriving leg is
+    // named explicitly, so the check does not need its row.
+    [leg] = await settledAll([upsertDialedLeg(deps, ctx.session, command, result, { knownNew: true }), revoked()]);
+    // The row this invocation carries on (projection, audit, final
+    // checkpoint) gains the identity just written; that write keeps `version`.
+    if (!ctx.session.telnyx_session_id && result.callSessionId) ctx.session = { ...ctx.session, telnyx_session_id: result.callSessionId };
+  } else {
+    leg = await upsertDialedLeg(deps, ctx.session, command, result);
+    await revoked();
+  }
+  if (initial) ctx.initialLegOpen = Boolean(leg && !leg.ended_at);
   return { skipped: false, detail: { callControlId: result.callControlId, to: command.to } };
 }
 
-export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, command: DialCommand, result: DialResult): Promise<LegRow | null> {
+export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, command: DialCommand, result: DialResult,
+  options: { knownNew?: boolean } = {}): Promise<LegRow | null> {
   const { admin } = deps;
   const now = deps.now().toISOString();
-  const prior = await admin.from("motorist_call_legs").select("id, initiated_at, metadata").eq("telnyx_call_control_id", result.callControlId).maybeSingle();
+  // Call-speed S2.3 (`knownNew`): the start's own first dial, settled under the
+  // lease that staged it. Telnyx issued this call control id a moment ago and
+  // every event that could record it waits for that lease, so there is no
+  // earlier row to keep `initiated_at` from or to count usage against.
+  const prior = options.knownNew ? { data: null, error: null }
+    : await admin.from("motorist_call_legs").select("id, initiated_at, metadata").eq("telnyx_call_control_id", result.callControlId).maybeSingle();
   if (prior.error) fail("dialed leg identity unavailable", prior.error);
   const values = {
     organization_id: session.organization_id,
@@ -1344,11 +1623,25 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
     client_state: toJson(command.clientState),
     metadata: toJson({ intent: command.clientState.intent ?? null, attempt: command.attempt ?? null, dial_command_id: command.commandId, dial_command_fingerprint: payloadFingerprint(command), ...(command.monitorInvitationId ? { monitor_invitation_id: command.monitorInvitationId, supervisor_mode: "monitor" } : {}) }),
   };
-  const upserted = await admin.from("motorist_call_legs").upsert(values, { onConflict: "telnyx_call_control_id" }).select("*").single();
-  if (upserted.error) fail("dialed leg upsert failed", upserted.error);
-  const leg = upserted.data;
+  const write = async () => {
+    const upserted = await admin.from("motorist_call_legs").upsert(values, { onConflict: "telnyx_call_control_id" }).select("*").single();
+    if (upserted.error) fail("dialed leg upsert failed", upserted.error);
+    return upserted.data;
+  };
   // Every dial is a billable leg: count it for the daily soft cap (best effort).
-  if (!prior.data) await addTelephonyUsage(admin, { organizationId: session.organization_id, now: deps.now(), legs: 1, logger: deps.logger });
+  const usage = async () => { if (!prior.data) await addTelephonyUsage(admin, { organizationId: session.organization_id, now: deps.now(), legs: 1, logger: deps.logger }); };
+  const sessionIdentity = async () => {
+    if (!session.telnyx_session_id && result.callSessionId) {
+      await admin.from("motorist_call_sessions").update({ telnyx_session_id: result.callSessionId }).eq("id", session.id).is("telnyx_session_id", null);
+    }
+  };
+  // With no earlier row these three writes are independent of each other.
+  if (options.knownNew && !command.attempt) {
+    const [leg] = await settledAll([write(), usage(), sessionIdentity()]);
+    return leg;
+  }
+  const leg = await write();
+  await usage();
   if (command.attempt) {
     let query = admin
       .from("motorist_ring_attempts")
@@ -1364,9 +1657,7 @@ export async function upsertDialedLeg(deps: EffectsDeps, session: SessionRow, co
     const linked = await query;
     if (linked.error) fail("attempt link failed", linked.error);
   }
-  if (!session.telnyx_session_id && result.callSessionId) {
-    await admin.from("motorist_call_sessions").update({ telnyx_session_id: result.callSessionId }).eq("id", session.id).is("telnyx_session_id", null);
-  }
+  await sessionIdentity();
   return leg;
 }
 
@@ -1425,16 +1716,29 @@ function overlappedAction(ctx: ExecutionContext, command: Command): { callContro
  */
 async function executeOverlappedRun(deps: EffectsDeps, ctx: ExecutionContext, run: readonly Command[]): Promise<Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>> {
   const actions = run.map((command) => overlappedAction(ctx, command));
-  const results = await requireTelnyx(deps).callActionMany(actions.filter((action): action is NonNullable<typeof action> => Boolean(action)));
+  // A leg already reported ended gets its local refusal, not another request.
+  const live = actions.flatMap((action, index) =>
+    action && !(action.action === "hangup" ? legEnded(deps, action.callControlId, "control", action.commandId) : legEnded(deps, action.callControlId, "media"))
+      ? [{ action, index }] : []);
+  const sent = live.length ? await requireTelnyx(deps).callActionMany(live.map(({ action }) => action)) : [];
+  const results = new Map<number, PromiseSettledResult<void>>(live.map(({ index }, position) => [index, sent[position]]));
   const out = new Map<string, Promise<{ skipped: boolean; detail?: Record<string, unknown> }>>();
   for (const [index, command] of run.entries()) {
-    const outcome = results[index];
+    const action = actions[index];
+    const outcome: PromiseSettledResult<void> | undefined = results.get(index) ??
+      (action ? { status: "rejected", reason: new KnownCallGoneError(action.callControlId) } : undefined);
     const reason = command.kind === "hangup" ? (command as { reason?: string }).reason : undefined;
-    if (!outcome) continue;
+    if (!outcome || !action) continue;
+    if (outcome.status === "rejected") rememberEndedLeg(deps, action.callControlId, outcome.reason);
+    else if (action.action === "hangup" && typeof deps.endedLegs?.get(action.callControlId) !== "string") deps.endedLegs?.set(action.callControlId, action.commandId);
     if (outcome.status === "fulfilled") {
       out.set(commandKey(command), Promise.resolve({ skipped: false, ...(reason ? { detail: { reason } } : {}) }));
-    } else if (command.kind === "hangup" && isLegAlreadyGone(outcome.reason)) {
-      out.set(commandKey(command), Promise.resolve({ skipped: true, detail: { reason, alreadyGone: true } }));
+    } else if (command.kind === "hangup") {
+      const refusal: unknown = outcome.reason;
+      const gone = { skipped: true, detail: { reason, alreadyGone: true, ...(refusal instanceof KnownCallGoneError ? { notSent: true } : {}) } };
+      // In an EU session a refusal without a call-gone code is confirmed first (S5).
+      out.set(commandKey(command), isLegAlreadyGone(refusal) ? Promise.resolve(gone)
+        : confirmEuLegEnded(deps.telnyx, action.callControlId, refusal).then((ended) => { if (!ended) throw refusal; return gone; }));
     } else {
       out.set(commandKey(command), Promise.reject(outcome.reason));
     }
@@ -1589,7 +1893,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
     sendable.push({ index, dial: dials[index] });
     return outcome;
   });
-  const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial)));
+  const results = await requireTelnyx(deps).dialMany(sendable.map(({ dial }) => dialParams(dial, ctx)));
   await Promise.all(results.map(async (result, position) => {
     const { index, dial } = sendable[position];
     if (result.status === "rejected") { dialled[index] = result; return; }
@@ -1655,6 +1959,7 @@ async function executeRingFanout(deps: EffectsDeps, ctx: ExecutionContext, comma
   if (retryPending) throw new EffectsError("ring fanout awaiting the original dial outcome");
 
   if (command.attempts.length > 0 && succeeded === 0) {
+    if (command.internal) throw new CommandPrerequisiteRejectedError("all colleague endpoints unavailable");
     // Nobody is ringing (every dial failed, or every member was already offered
     // in a concurrent session), so no Telnyx event will advance the step:
     // make it overdue so the next sweep or webhook moves on immediately.
@@ -1688,6 +1993,18 @@ async function loadCompensationState(deps: EffectsDeps, sessionId: string): Prom
   return { session: session.data, legs: legs.data ?? [] };
 }
 
+/**
+ * The startup entry's refusal transition, for a dial a committed termination
+ * stopped before it reached the provider: the operator hung up first. Its
+ * presence release (session- and token-guarded) is the only thing that frees
+ * the operator the entry reserved.
+ */
+function cancelledBeforeDial(next: Transition | null | undefined): Transition | null {
+  if (!next) return null;
+  return { ...next, session: { ...next.session, state: "ended" }, call: { ...next.call, status: "ended", end_reason: "cancelled_before_dial" },
+    presence: next.presence.map(change => ({ ...change, reason: "cancelled before dial" })), notes: [...next.notes, "initial dial cancelled before dispatch"] };
+}
+
 function compensationWouldReopenCall(next: Transition | null | undefined, current: { session: SessionRow; legs: LegRow[] }): boolean {
   if (!next?.session.state || !ACTIVE_SESSION_STATES.has(next.session.state)) return false;
   if (current.session.ended_at || !ACTIVE_SESSION_STATES.has(current.session.state)) return true;
@@ -1697,9 +2014,13 @@ function compensationWouldReopenCall(next: Transition | null | undefined, curren
 
 async function executeReduceResult(
   deps: EffectsDeps,
-  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean; urgentStamps?: UrgentDispatchStamps },
+  input: { session: SessionRow; result: ReduceResult; event: SessionEvent; expectedVersion: number; continuation?: EffectContinuation; databaseOnly?: boolean; urgentStamps?: UrgentDispatchStamps; projectionRecovery?: boolean; initialDispatch?: InitialDispatch },
 ): Promise<ApplyResult> {
   const { result } = input;
+  // Call-speed S2: only the start request's own first attempt of its entry.
+  const initial = input.initialDispatch && input.continuation?.id === input.initialDispatch.entryId && input.continuation.attempts === 0 &&
+    !input.databaseOnly && sessionOwnership.getStore()?.contract === 2 && sessionOwnership.getStore()?.sessionId === input.session.id
+    ? input.initialDispatch : undefined;
   let branch: "main" | "rejected" = "main";
   let transition = result.next;
   let commands = result.commands;
@@ -1770,9 +2091,29 @@ async function executeReduceResult(
   // Commit ownership, recorder intent and privacy barriers before commands.
   // History and fairness are recoverable projections for recorded calls too.
   // START separately ensures the call identity needed for recording admission.
-  const deferProjections = Boolean(input.continuation && !input.databaseOnly && readMeta(input.session).recording);
+  const recording = readMeta(input.session).recording;
+  const lean = leanInternal(deps);
+  // A colleague call never records (S1.1): its history may follow audio too.
+  // So may the start's own dial (S2.2): its call row is still written before
+  // the entry retires, which `recoverInitialDial` relies on.
+  const deferProjections = Boolean(input.continuation && !input.databaseOnly && (recording || recordingFrozenOff(input.session, lean) || initial?.fast));
+  const owner = sessionOwnership.getStore();
+  // These controls already durably staged the session intent under ownership.
+  // Their remaining leg patches merely project held/bridged/answered state;
+  // they do not authorize a provider operation. Apply them after media, keeping
+  // the original durable cursor and the provider journal on every command.
+  // Recorder/privacy, reservations, new legs, callbacks and legacy writers
+  // retain their existing prerequisite-first path.
+  const mediaBeforeLegProjection = Boolean(input.continuation && !input.databaseOnly &&
+    input.session.writer_contract === 2 && input.continuation.generation === effectGeneration(input.session) &&
+    input.event.kind === "app" && ["hold", "unhold", "park"].includes(input.event.type) &&
+    owner?.contract === 2 && owner.admin === deps.admin && owner.sessionId === input.session.id && owner.organizationId === deps.organizationId &&
+    recording?.policy.enabled === false && !recording.recorders.length && !recording.barrier && !recording.pendingAudio &&
+    !readMeta(input.session).announcement_sequence && !Object.keys(transition.session).length &&
+    transition.legs.every(leg => !leg.createIfMissing && Object.keys(leg.values).every(key => key === "state")) &&
+    !transition.attempts.length && !transition.callbacks.length && transition.presence.every(change => Boolean(change.afterCommandId)));
   let projectionError: string | null = null;
-  let session = await persistTransition(deps, { session: input.session, transition, expectedVersion: input.continuation ? null : input.expectedVersion,
+  let session = mediaBeforeLegProjection ? input.session : await persistTransition(deps, { session: input.session, transition, expectedVersion: input.continuation ? null : input.expectedVersion,
     event: input.event, continuation: input.continuation, ...(deferProjections ? { phase: "critical" as const } : {}) });
   if (input.event.kind === "app" && ["recording_stop", "recording_retry_stop"].includes(input.event.type) && readMeta(session).recording?.suppressionReason === "objection") {
     const restricted = await deps.admin.rpc("motorist_recording_restrict_session", { p_organization_id: deps.organizationId, p_session_id: session.id });
@@ -1782,12 +2123,14 @@ async function executeReduceResult(
   }
   // A transition can clear the persisted conference while its effects still
   // need to leave the old one (park / blind transfer).
-  const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: input.continuation?.previousConferenceId ?? session.conference_id ?? input.session.conference_id, continuation: input.continuation };
+  const ctx: ExecutionContext = { session, dialResults: new Map(), dialFingerprints: new Map(), conferenceId: input.continuation?.previousConferenceId ?? session.conference_id ?? input.session.conference_id, continuation: input.continuation,
+    ...(initial ? { initial } : {}) };
   // Only a continuation that can reference a dial needs the correlation table;
   // a hold, transfer or hangup without one was paying for a read it never used.
+  // Nor does the start's own first attempt (S2.2): no leg can carry its dial yet.
   const needsDialResults = commands.some(referencesDial) ||
     compensations.some((compensation) => compensation.commands.some(referencesDial));
-  if (input.continuation && commands.length && needsDialResults) {
+  if (input.continuation && commands.length && needsDialResults && !initial?.fast) {
     const legs = await sessionLegs(deps, ctx);
     for (const leg of legs) {
       const metadata = leg.metadata as { dial_command_id?: string; dial_command_fingerprint?: string } | null;
@@ -1798,6 +2141,19 @@ async function executeReduceResult(
   const outcomes: CommandOutcome[] = [];
   const compensated: string[] = [];
   let failure: ApplyResult["failure"] = null;
+  const rememberFailure = () => {
+    if (!input.continuation || !failure) return;
+    const failedKey = failure.command;
+    const command = commands.find(command => commandKey(command) === failedKey);
+    if (!command) return;
+    const id = "commandId" in command ? command.commandId : null;
+    if (failureAudits(input.continuation).some(audit => audit.commandKey === failedKey ||
+      !audit.commandKey && audit.commands.some(item => !item.ok && item.kind === command.kind && id && item.command_id === id))) return;
+    const outcome = outcomes.findLast(item => item.key === failedKey && !item.ok);
+    (input.continuation.failureAudits ??= []).push({ commandKey: failedKey, at: deps.now().toISOString(), stateAfter: session.state, error: failure.error,
+      commands: outcome ? auditCommandOutcomes([outcome]) : [{ kind: command.kind, ok: false, command_id: id, error: failure.error }] });
+    return true;
+  };
   // Provider calls of an overlapping run, started early and awaited in order.
   // Only the HTTP overlaps: validity, outcomes, checkpoints and every failure
   // branch below run exactly as they did when each call waited its turn.
@@ -1811,6 +2167,7 @@ async function executeReduceResult(
   // write, the replay re-issues them and `prepare_v2` answers every one from
   // its recorded outcome — zero provider calls, same results.
   let banked = 0;
+  let foldedCheckpoint = false;
   let nextValidity: { session: SessionRow; owner: Ownership } | null = null;
   const rememberCommand = (key: string) => {
     if (!input.continuation) return;
@@ -1829,6 +2186,57 @@ async function executeReduceResult(
     if (!input.continuation) return;
     rememberCommand(key);
     await writeCheckpoint();
+  };
+  // A hangup can commit its termination between the startup's reservation and
+  // its own dial. Retiring that dial as superseded skipped the compensation,
+  // which nothing else replaces: `appHangup` needs legs, the sweep needs a
+  // customer and presence recovery needs an ended session. Run it instead.
+  const compensateCancelledInitialDial = async (command: Command, key: string, refusedByJournal: boolean): Promise<boolean> => {
+    const continuation = input.continuation;
+    // Only the entry's own-leg dial: a concurrent start's far-end dial (S6.1)
+    // refused after a termination is retired with the entry, and the
+    // termination hangs up the own leg that exists by then.
+    if (continuation?.id !== `initial:${command.kind === "dial" ? command.commandId : ""}` || command.kind !== "dial" || sessionOwnership.getStore()?.contract !== 2) return false;
+    const refused = compensations.find(candidate => candidate.forCommand === key)?.next;
+    if (!refused) return false;
+    // `prepare_v2` refuses only a command it would dispatch now, so its
+    // refusal proves the provider never took this dial. After the validity
+    // read, ask the journal: an earlier attempt's accepted or unknown dial
+    // keeps today's path (termination hangs up its leg, whose own hangup ends
+    // the call), a recorded refusal keeps its end reason, and an unreadable
+    // journal changes nothing.
+    let outcome: string | null = null;
+    if (!refusedByJournal) {
+      try {
+        const journal = await ownershipRpc<{ outcome?: string } | null>(deps.admin, "motorist_provider_command_lookup_v2",
+          { p_session_id: session.id, p_command_id: command.commandId });
+        outcome = journal ? String(journal.outcome ?? "unknown") : null;
+      } catch (error) {
+        if (error instanceof SessionLeaseLostError) throw error;
+        deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, code: "initial_cancellation_unverified" });
+        return false;
+      }
+      if (outcome !== null && outcome !== "rejected" && outcome !== "rate_limited") return false;
+    }
+    const next = outcome === "rejected" ? refused : cancelledBeforeDial(refused);
+    if (!next) return false;
+    const current = await loadCompensationState(deps, session.id);
+    session = current.session;
+    ctx.session = session;
+    if (!current.session.termination_requested_at || current.session.ended_at || !ACTIVE_SESSION_STATES.has(current.session.state)) return false;
+    outcomes.push({ key, kind: command.kind, commandId: command.commandId, ok: true, skipped: true, bestEffort: Boolean(command.bestEffort),
+      error: null, ms: 0, detail: { reason: "cancelled before dial" } });
+    const compensationEvent: SessionEvent = { ...input.event, id: `${input.event.id}:compensate:${key}` };
+    const compensationResult: ReduceResult = { next, commands: [], compensations: [], guard: null, ignored: null };
+    attachContactOperations(current, compensationResult, compensationEvent, true);
+    const stagedCompensation = await stageEffects(deps, { session, expectedVersion: session.version, event: compensationEvent, result: compensationResult });
+    continuation.completedCommands = commands.map(commandKey).filter(id => !deps.deferredCommandIds?.has(id));
+    session = await checkpointEffects(deps, stagedCompensation.id, continuation, continuation.id, stagedCompensation);
+    const compensatedResult = await resumePendingEffects(deps, session);
+    if (compensatedResult) session = compensatedResult.session;
+    ctx.session = session;
+    compensated.push(outcome === "rejected" ? "release refused initial dial" : "initial dial cancelled before dispatch");
+    return true;
   };
   // The original command remains part of the durable obligation. A cached
   // late 2xx is not terminal evidence: only the dedicated recovery path can
@@ -1851,7 +2259,10 @@ async function executeReduceResult(
         if (checkpointValidity && sessionOwnership.getStore() === checkpointValidity.owner) {
           ctx.session = checkpointValidity.session;
           validitySession = checkpointValidity.session;
-        } else if (!providerReadCanReuseSession(ctx.session)) {
+        } else if (!providerReadCanReuseSession(ctx.session, lean) && !(initial?.fast && "commandId" in command && command.commandId === initial.commandId)) {
+          // The start's own dial (S2.2) is checked against the row it staged
+          // under this lease; a termination committed since is refused by
+          // `prepare_v2` and compensated below, as on the reused-row path.
           const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).single();
           if (fresh.error) throw new EffectsError("effect validity read failed");
           ctx.session = fresh.data;
@@ -1859,6 +2270,7 @@ async function executeReduceResult(
           if (owner?.contract === 2 && owner.admin === deps.admin && owner.organizationId === deps.organizationId && owner.sessionId === session.id) validitySession = fresh.data;
         }
         if (!commandStillApplies(ctx.session, input.continuation, command)) {
+          if (ctx.session.termination_requested_at && await compensateCancelledInitialDial(command, key, false)) break;
           await checkpointCommand(key);
           outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: true, bestEffort: Boolean(command.bestEffort), error: null, ms: 0, detail: { reason: "superseded continuation" } });
           continue;
@@ -1895,11 +2307,11 @@ async function executeReduceResult(
       // Contract 2 only: `prepare_v2` fences each command on its own
       // generation, so a lease lost while the run is in flight cannot let a
       // stale command through. Contract 1 has no journal to do that.
-      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition) && !overlapped.has(key)) {
+      if (sessionOwnership.getStore()?.contract === 2 && commandMayOverlap(command, ctx.session, transition, lean) && !overlapped.has(key)) {
         const run: Command[] = [command];
         for (let next = index + 1; next < dispatchList.length; next += 1) {
           const sibling = dispatchList[next];
-          if (!commandMayOverlap(sibling, ctx.session, transition)) break;
+          if (!commandMayOverlap(sibling, ctx.session, transition, lean)) break;
           if (input.continuation?.completedCommands.includes(commandKey(sibling))) continue;
           run.push(sibling);
         }
@@ -1917,8 +2329,31 @@ async function executeReduceResult(
         throw new CommandPrerequisiteRejectedError(String(executed.detail?.reason ?? "dial no longer authorized"));
       }
       providerExecuted = true;
+      if (initial?.onSettled && command.kind === "dial" && command.commandId === initial.commandId && typeof executed.detail?.callControlId === "string") {
+        // Call-speed S2.3: `settleDial` has returned, so the journal result,
+        // the leg row and the revoked-offer check are all done.
+        try {
+          initial.onSettled({ callControlId: executed.detail.callControlId,
+            callSessionId: ctx.dialResults.get(command.commandId)?.callSessionId ?? null, legOpen: ctx.initialLegOpen === true });
+        } catch { /* The response hook cannot change the call. */ }
+      }
       if (input.continuation) for (const change of transition.presence) {
         if (change.afterCommandId === key) await applyPresenceChange(deps, ctx.session, change);
+      }
+      const refused = executed.skipped && executed.detail?.reason === "awaiting_bridged_evidence";
+      if (command.kind === "bridge" && command.concurrentBridge && (!executed.skipped || refused)) {
+        // Call-speed S6.2: Telnyx accepted the explicit concurrent bridge (the
+        // runner then connects the call with `concurrent_bridge_accepted`, and
+        // a lost follow-up still connects at the deadline), or refused it with
+        // a non-call-gone 422 (the sweep retries it once, about 2 s later).
+        const meta = readMeta(ctx.session), bridge = meta.far_end?.bridge;
+        if (meta.far_end && bridge?.commandId === command.commandId && !bridge.acceptedAt) {
+          const at = deps.now().toISOString();
+          const outcome = emptyTransition();
+          outcome.session.metadata = toJson({ ...meta, far_end: { ...meta.far_end, bridge: { ...bridge, ...(refused ? { refusedAt: at } : { acceptedAt: at }) } } });
+          session = await persistTransition(deps, { session: ctx.session, transition: outcome, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
+          ctx.session = session;
+        }
       }
       const ivrOutcome = ivrDispatchOutcome(ctx.session, command, executed, dispatchedAt);
       if (ivrOutcome) {
@@ -2014,7 +2449,7 @@ async function executeReduceResult(
       if (!awaitingAudio && ["bridge", "conference_join", "conference_leave", "conference_hold", "conference_unhold", "recording_stop", "recording_start"].includes(command.kind)) {
         const provenConference = Boolean(readMeta(ctx.session).recording?.policy.conferenceVerified &&
           (["conference_join", "conference_unhold"].includes(command.kind) || command.kind === "bridge" && executed.detail?.conferenceId));
-        try { await measureControlStage("participants", () => observeParticipants(deps.admin, ctx.session, commandKey(command), deps.now().toISOString(), provenConference, () => callIdentity(deps, ctx.session))); }
+        try { await measureControlStage("participants", () => observeParticipants(deps.admin, ctx.session, commandKey(command), deps.now().toISOString(), provenConference, () => callIdentity(deps, ctx.session), lean)); }
         catch { deps.logger?.({ level: "warn", scope: "recording", sessionId: session.id, code: "participant_observation_failed" }); }
       }
       outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: true, skipped: executed.skipped, bestEffort: Boolean(command.bestEffort), error: null, ms: deps.now().getTime() - started, detail: executed.detail });
@@ -2023,16 +2458,28 @@ async function executeReduceResult(
       // all of them. Any other branch below writes immediately, and so does
       // the end of the loop.
       const following = index + 1 < dispatchList.length ? commandKey(dispatchList[index + 1]) : null;
-      if (!following || !overlapped.has(following)) {
+      if (!following && initial?.compact && command.kind === "dial" && command.commandId === initial.commandId) {
+        // Call-speed S2.3: the final checkpoint records this completion. Until
+        // then a resume adopts the dial from its leg row (`dial_command_id`),
+        // which `settleDial` wrote before anything else could observe it.
+        foldedCheckpoint = true;
+        session = ctx.session;
+      } else if (!following || !overlapped.has(following)) {
         const checkpointed = await writeCheckpoint();
         const owner = sessionOwnership.getStore();
         if (checkpointed?.writer_contract === 2 && owner?.contract === 2 && owner.admin === deps.admin &&
           owner.organizationId === deps.organizationId && owner.sessionId === session.id &&
           checkpointed.id === session.id && checkpointed.organization_id === deps.organizationId) nextValidity = { session: checkpointed, owner };
+        // Call-speed S7a.5: the provider took this media-first control's
+        // command and its cursor is durable, so a watching route may answer;
+        // what remains is the leg projection, history and audit.
+        if (mediaBeforeLegProjection && checkpointed && !executed.skipped) reportCommandSettled(() => ({ eventId: input.event.id,
+          last: index === dispatchList.length - 1, state: checkpointed.state, commands: outcomes.map(({ kind, ok, error }) => ({ kind, ok, error })) }));
       }
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
       if (input.continuation && !providerExecuted && !TEARDOWN_KINDS.has(command.kind) && isTerminationBlocked(error)) {
+        if (await compensateCancelledInitialDial(command, key, true)) break;
         // A termination committed by another invocation — the one fact the
         // reused row can be stale about. The validity read would have skipped
         // this command *and every one behind it*, so retiring only this one
@@ -2064,7 +2511,7 @@ async function executeReduceResult(
           const latest = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", ctx.session.id).maybeSingle();
           if (latest.error || !latest.data) throw new EffectsError("recording state checkpoint unavailable");
           ctx.session = latest.data;
-          const changed = recordingCommandOutcome(ctx.session, command, false, deps.now().toISOString(), isCallGoneError(error), error instanceof EffectsError && error.message === "recording_admission_denied" || command.kind === "recording_start" && isCallGoneError(error));
+          const changed = recordingCommandOutcome(ctx.session, command, false, deps.now().toISOString(), isSessionCallGoneError(error), error instanceof EffectsError && error.message === "recording_admission_denied" || command.kind === "recording_start" && isSessionCallGoneError(error));
           const update = emptyTransition();
           update.session.metadata = changed.metadata;
           session = await persistTransition(deps, { session: ctx.session, transition: update, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
@@ -2111,13 +2558,24 @@ async function executeReduceResult(
         session = await persistTransition(deps, { session: ctx.session, transition: checkpoint, expectedVersion: ctx.session.version, event: input.event });
         ctx.session = session;
       }
-      outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: false, skipped: false, bestEffort: Boolean(command.bestEffort), error: message, ms: deps.now().getTime() - started });
+      // Not sent: the provider already reported this leg ended in this invocation.
+      const knownGone = error instanceof KnownCallGoneError;
+      outcomes.push({ key, kind: command.kind, commandId: "commandId" in command ? command.commandId : null, ok: false, skipped: knownGone, bestEffort: Boolean(command.bestEffort), error: message, ms: deps.now().getTime() - started,
+        ...(knownGone ? { detail: { reason: "call_gone", notSent: true } } : {}) });
       if (command.bestEffort) {
-        deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, command: command.kind, error: message, bestEffort: true });
-        if (input.continuation && (isCallGoneError(error) || command.kind !== "recording_start" && command.kind !== "hangup" && command.kind !== "recording_stop")) await checkpointCommand(key);
+        // The first refusal for the leg was logged; its follow-ups are retired quietly.
+        if (!knownGone) deps.logger?.({ level: "warn", scope: "effects", sessionId: session.id, command: command.kind, error: message, bestEffort: true });
+        if (input.continuation && (isSessionCallGoneError(error) || command.kind !== "recording_start" && command.kind !== "hangup" && command.kind !== "recording_stop")) await checkpointCommand(key);
         continue;
       }
-      failure = { command: key, error: message, callGone: isCallGoneError(error), ...(error instanceof CommandPrerequisiteRejectedError ? { prerequisiteRejected: true } : {}) };
+      failure = { command: key, error: message, callGone: isSessionCallGoneError(error), ...(error instanceof CommandPrerequisiteRejectedError ? { prerequisiteRejected: true } : {}) };
+      if (input.continuation) {
+        rememberFailure();
+        // A compensation recursively resumes and can retire this entry. Its
+        // failure obligation must be durable before that successor can run.
+        session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
+        ctx.session = session;
+      }
       if (failure.callGone) {
         // The far end hung up a moment before the operator pressed the button.
         // Nothing is broken: the `call.hangup` webhook is already on its way (and
@@ -2212,12 +2670,28 @@ async function executeReduceResult(
     }
   }
   // Anything still banked belongs to a run that ended with the list.
-  await writeCheckpoint();
+  if (!foldedCheckpoint) await writeCheckpoint();
+
+  if (mediaBeforeLegProjection && !failure) {
+    session = await measureControlStage("state_projection", () => persistTransition(deps, {
+      session: ctx.session, transition, expectedVersion: null, event: input.event, continuation: input.continuation, phase: "critical",
+    }));
+    ctx.session = session;
+  }
+
+  // Provider results and the critical cursor are durable now. History/audit
+  // must not hold the next HOLD/PARK behind a series of 4 s database waits.
+  // An interrupted projection keeps its existing durable recovery obligation.
+  // Recovery gets more room so a healthy-but-slower history write does not
+  // starve forever behind the interactive limit. Its owned deadline still applies.
+  const projectionDeadline = Date.now() + (input.projectionRecovery ? 4_000 : 1_000);
+  const project = <T>(work: () => Promise<T>): Promise<T> => deferProjections
+    ? withTelephonyDatabaseBudget(Math.max(0, projectionDeadline - Date.now()), work) : work();
 
   if (deferProjections && !failure) {
     try {
-      session = await measureControlStage("projection", () => persistTransition(deps, { session: ctx.session, transition, expectedVersion: null, event: input.event,
-        continuation: input.continuation, phase: "projection", deferCallProjectionCheckpoint: true }));
+      session = await project(() => measureControlStage("projection", () => persistTransition(deps, { session: ctx.session, transition, expectedVersion: null, event: input.event,
+        continuation: input.continuation, phase: "projection", deferCallProjectionCheckpoint: true })));
       ctx.session = session;
     } catch (error) {
       if (error instanceof SessionLeaseLostError) throw error;
@@ -2227,6 +2701,11 @@ async function executeReduceResult(
   }
 
   if (input.continuation && !input.databaseOnly) {
+    if (rememberFailure()) {
+      session = await checkpointEffects(deps, session.id, input.continuation, input.continuation.id, session);
+      ctx.session = session;
+    }
+    await flushFailureAudit(deps, session, input.continuation);
     if (!failure && !projectionError) {
       const history = readContactHistory(session);
       for (const operation of history.operations) {
@@ -2244,8 +2723,8 @@ async function executeReduceResult(
     if (!failure && !projectionError && !input.continuation.auditComplete && input.continuation.commands.every((command) => input.continuation!.completedCommands.includes(commandKey(command)))) {
       try {
         const continuation = input.continuation;
-        await measureControlStage("audit", () => recordCallEvent(deps, { session, event: continuation.event, handledStatus: "processed", stateBefore: continuation.stateBefore, stateAfter: session.state,
-          notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) }));
+        await project(() => measureControlStage("audit", () => recordCallEvent(deps, { session, event: continuation.event, handledStatus: "processed", stateBefore: continuation.stateBefore, stateAfter: session.state,
+          notes: [...transition.notes, "durable effects completed"], routing: transition.routing, commands: auditCommandOutcomes(outcomes) })));
         input.continuation.auditComplete = true;
       } catch (error) {
         if (!deferProjections || error instanceof SessionLeaseLostError) throw error;
@@ -2266,8 +2745,9 @@ async function executeReduceResult(
       const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("id", session.id).maybeSingle();
       if (fresh.data) session = fresh.data;
     }
-    // Clean transition: close the open command incident (throttled per instance).
-    await recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, deps.now());
+    // Clean transition: close the open command incident (throttled per
+    // instance). The start's caller does it after the lease (S2.3).
+    if (!initial?.compact) await withTelephonyDatabaseBudget(250, () => recoverTelephonyIncidentThrottled(deps.admin, TELEPHONY_INCIDENT_JOBS.commands, deps.now()));
   }
 
   return { session, branch, commands: outcomes, compensations: compensated, failed: failure !== null, failure,
@@ -2338,7 +2818,7 @@ async function dispatchUrgentTeardown(deps: EffectsDeps, session: SessionRow): P
   return stamps;
 }
 
-export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps; deferContactChecks?: boolean; contactChecksOnly?: boolean } = {}): Promise<ApplyResult | null> {
+export async function resumePendingEffects(deps: EffectsDeps, session: SessionRow, options: { databaseOnly?: boolean; skipCompletedProjections?: boolean; priorityEntryId?: string; teardownPrepared?: boolean; urgentStamps?: UrgentDispatchStamps; deferContactChecks?: boolean; contactChecksOnly?: boolean; projectionRecovery?: boolean; initialDispatch?: InitialDispatch } = {}): Promise<ApplyResult | null> {
   let latest: ApplyResult | null = null;
   let requested: ApplyResult | null = null;
   const stamps: UrgentDispatchStamps = new Map(options.urgentStamps ?? []);
@@ -2376,6 +2856,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     const current = readPendingEffects(fresh.data).entries.find((item) => item.id === entry.id);
     if (!current) continue;
     if ((options.skipCompletedProjections || options.priorityEntryId && current.id !== options.priorityEntryId) &&
+      failureAuditsComplete(current) &&
       !current.transition.contactChecks?.length &&
       current.databaseCursor >= criticalDatabaseEffectCount(current.transition) &&
       current.commands.every((command) => current.completedCommands.includes(commandKey(command)))) continue;
@@ -2405,7 +2886,7 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
           // The provider fact is now committed with its accounting obligation;
           // a failure below cannot lose it when the call subsequently ends.
           await executeReduceResult(deps, { session: saved, expectedVersion: saved.version, event: proofEvent,
-            result: { next: proofEntry.transition, commands: [], compensations: [], guard: null, ignored: null }, continuation: proofEntry });
+            result: { next: proofEntry.transition, commands: [], compensations: [], guard: null, ignored: null }, continuation: proofEntry, projectionRecovery: options.projectionRecovery });
         } else if (!verified.retry) await checkpointEffects(deps, session.id, null, current.id, fresh.data);
         else {
           current.attempts += 1;
@@ -2428,8 +2909,13 @@ export async function resumePendingEffects(deps: EffectsDeps, session: SessionRo
     try {
       latest = await executeReduceResult(deps, { session: fresh.data, expectedVersion: fresh.data.version, event: current.event,
         result: { next: current.transition, commands: current.commands, compensations: current.compensations, guard: null, ignored: null },
-        continuation: current, databaseOnly: options.databaseOnly, urgentStamps: stamps });
+        continuation: current, databaseOnly: options.databaseOnly, urgentStamps: stamps, projectionRecovery: options.projectionRecovery,
+        // Only the row the caller staged; never an entry read back from the database.
+        ...(index === 0 && reusable && options.initialDispatch?.entryId === current.id ? { initialDispatch: options.initialDispatch } : {}) });
     } catch (error) {
+      // The durable entry and provider journal already own recovery. Another
+      // checkpoint with an expired owner only hides the original refusal.
+      if (error instanceof SessionLeaseLostError) throw error;
       current.attempts += 1;
       current.lastError = describeError(error);
       await checkpointEffects(deps, session.id, current, current.id, fresh.data);
@@ -2463,6 +2949,7 @@ export async function applyReduceResult(deps: EffectsDeps, input: { session: Ses
       event: current.event, continuation: current, phase: "critical" });
   }
   const result = await resumePendingEffects(deps, staged, { priorityEntryId: input.event.id, teardownPrepared: prepareFacts, urgentStamps,
+    projectionRecovery: input.event.kind === "app" && input.event.type === "sweep",
     deferContactChecks: input.session.writer_contract === 2 && input.event.kind === "app" && input.event.type !== "sweep" });
   if (!result) throw new EffectsError("staged transition missing its continuation");
   return result;

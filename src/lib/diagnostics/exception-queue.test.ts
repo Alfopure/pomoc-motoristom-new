@@ -25,7 +25,7 @@ describe('bounded exception delivery', () => {
         expect(f.send).not.toHaveBeenCalled();
         expect(JSON.stringify(f.saved())).not.toMatch(/CANARY|example.com|421901|token|FUNCTION/);
         const restored = f.restore(); f.online(); f.advance(120000); await restored.flush();
-        expect(f.send).toHaveBeenCalledExactlyOnceWith(captured);
+        expect(f.send).toHaveBeenCalledExactlyOnceWith({ ...captured, tags: expect.objectContaining({ ...captured.tags, captured_offline: 'true', restored_from_storage: 'true', delivery_attempt: '1', delivery_delay_ms: expect.any(String) }) });
         expect(f.saved().entries).toHaveLength(0);
     });
     it('deduplicates a repeated error before and after acknowledgement and reload', async () => {
@@ -91,4 +91,33 @@ describe('bounded exception delivery', () => {
         const blocked = fixture(); vi.spyOn(blocked.storage, 'getItem').mockImplementation(() => { throw Error('blocked'); }); vi.spyOn(blocked.storage, 'setItem').mockImplementation(() => { throw Error('full'); });
         expect(() => blocked.queue.enqueue(event())).not.toThrow(); blocked.online(); await blocked.queue.flush(); expect(blocked.send).toHaveBeenCalledTimes(1);
     });
+    it('never suppresses distinct canonical error IDs with identical stacks across calls', () => {
+        const f = fixture(); const first = event();
+        const second = { ...first, event_id: 'b'.repeat(32), tags: { ...first.tags, diagnostic_error_id: 'b'.repeat(32), call_session_id: crypto.randomUUID() } };
+        expect(f.queue.enqueue(first)).toBe('enqueued');
+        expect(f.queue.enqueue(second)).toBe('enqueued');
+        expect(f.queue.enqueue(first)).toBe('deduplicated');
+        expect(f.queue.snapshot()).toMatchObject({ pending: 2, counters: { sentry_enqueued: 2, sentry_deduplicated: 1 } });
+    });
+    it('counts observed overflow, expiry, acknowledgement, rejection and retry exhaustion across reloads', async () => {
+        const f = fixture(); for (let i = 1; i <= 10; i++) f.queue.enqueue(event(i));
+        expect(f.queue.snapshot()).toMatchObject({ pending: 8, counters: { sentry_enqueued: 10, sentry_overflow: 2 } });
+        f.advance(EXCEPTION_QUEUE_LIMITS.ttlMs); const restored = f.restore();
+        expect(restored.snapshot()).toMatchObject({ pending: 0, counters: { sentry_expired: 8, sentry_overflow: 2 } });
+        const failed = fixture(); failed.online(); failed.send.mockResolvedValue({ statusCode: 503 }); failed.queue.enqueue(event());
+        await failed.queue.flush(); failed.advance(60000); await failed.restore().flush(); failed.advance(120000); const last = failed.restore(); await last.flush();
+        expect(last.snapshot()).toMatchObject({ pending: 0, counters: { sentry_retry_exhausted: 1 } });
+        const accepted = fixture(); accepted.online(); accepted.queue.enqueue(event()); await accepted.queue.flush();
+        accepted.send.mockResolvedValue({ statusCode: 400 }); accepted.queue.enqueue(event(2)); await accepted.queue.flush();
+        expect(accepted.queue.snapshot()).toMatchObject({ pending: 0, counters: { sentry_delivered: 1, sentry_rejected: 1 } });
+    });
+    it('retains aggregate deltas until the existing collector accepts them and never resubmits them after reload', () => {
+        const f = fixture(); f.queue.enqueue(event());
+        f.queue.reportCounters(() => false);
+        expect(f.restore().snapshot().counters.sentry_enqueued).toBe(1);
+        const report = vi.fn(() => true); f.queue.reportCounters(report);
+        expect(report).toHaveBeenCalledWith('sentry_enqueued', 1);
+        expect(f.restore().snapshot().counters.sentry_enqueued ?? 0).toBe(0);
+    });
+
 });

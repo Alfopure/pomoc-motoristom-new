@@ -1,7 +1,7 @@
 import "server-only";
 import type { Json } from '@/lib/supabase/database.types';
 import type { TelephonyCronJobResult } from './cron-jobs';
-import { checkpointRecordingJob, record, RecordingProcessingError, type RecordingAdmin, type RecordingJob, type RecordingJobContext, type RecordingJobOutcome, type RecordingPolicy } from './recording-jobs';
+import { checkpointRecordingJob, fetchTelnyxRecording, record, RecordingProcessingError, type RecordingAdmin, type RecordingJob, type RecordingJobContext, type RecordingJobOutcome, type RecordingPolicy } from './recording-jobs';
 import { deleteRecordingStorage, processRecordingImport } from './recording-storage';
 import { processRecordingAsrJob, processScribeCleanupJob } from './recording-asr';
 import { assertRecordingProviderAccess } from './recording-provider-safety';
@@ -36,7 +36,7 @@ export async function deleteRecordingJob(ctx: RecordingJobContext): Promise<Reco
   const id = ctx.recording.provider_recording_id, key = process.env.TELNYX_API_KEY?.trim();
   if (id && providerProof !== null) {
     if (!key) throw new RecordingProcessingError('recording_provider_not_configured', true);
-    const response = await fetch(`https://api.telnyx.com/v2/recordings/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${key}` }, cache: 'no-store', redirect: 'error', signal: ctx.signal });
+    const response = await fetchTelnyxRecording(ctx, id, { method: 'DELETE', headers: { Authorization: `Bearer ${key}` }, cache: 'no-store', redirect: 'error', signal: ctx.signal });
     if (!response.ok && response.status !== 404) throw new RecordingProcessingError('recording_provider_delete_unconfirmed', true);
   }
   const result = await ctx.admin.from('motorist_call_recordings').update({ status: 'deleted', storage_path: null, metadata: { deleted: true } }).eq('id', ctx.recording.id).eq('organization_id', ctx.organizationId).not('deleted_at', 'is', null).abortSignal(ctx.signal);

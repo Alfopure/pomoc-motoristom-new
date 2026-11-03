@@ -69,6 +69,31 @@ describe("bounded relevant telephony alert evidence", () => {
     expect(evidence.calls).toHaveLength(0);
   });
 
+  it("attributes an S6 B′ colleague dial's own provider session through that dial's accepted journal row", async () => {
+    const h = fixture();
+    const unlinked = { start_mode: { concurrent: true, autoBridge: false, farLinkTo: false } };
+    h.db.seed("motorist_call_sessions", [
+      { id: "unlinked-call", organization_id: ORG, state: "talking", direction: "internal", started_at: NOW, telnyx_session_id: "caller-session", metadata: unlinked },
+      { id: "linked-call", organization_id: ORG, state: "talking", direction: "internal", started_at: NOW, telnyx_session_id: "linked-session", metadata: { start_mode: { concurrent: true } } },
+      { id: "foreign-unlinked", organization_id: "another-org", state: "talking", direction: "internal", started_at: NOW, metadata: unlinked },
+      { id: "old-unlinked", organization_id: ORG, state: "ended", direction: "internal", started_at: "2026-10-04T10:00:00Z", metadata: unlinked },
+    ]);
+    const dial = (session_id: string, call_session_id: string, outcome = "accepted") => ({ session_id, command_id: `dial-${call_session_id}`, method: "POST", path: "/calls", outcome,
+      result: { data: { call_control_id: `control-${call_session_id}`, call_session_id } } });
+    h.db.seed("motorist_provider_commands", [dial("unlinked-call", "far-session"), dial("unlinked-call", "refused-session", "rejected"),
+      dial("linked-call", "linked-dial-session"), dial("foreign-unlinked", "foreign-session"), dial("old-unlinked", "old-session")]);
+    const sessions = ["far-session", "refused-session", "linked-dial-session", "foreign-session", "old-session"];
+    h.db.seed("motorist_telnyx_webhook_events", sessions.map((id) => ({ event_id: `mirror-${id}`, organization_id: ORG, event_type: "call.answered",
+      call_session_id: id, call_control_id: "browser-counterpart", received_at: "2026-10-04T11:00:05Z" })));
+    const evidence = await loadTelephonyAlertEvidence({ admin: h.admin, organizationId: ORG,
+      alerts: [{ key: "ledger", check: "ledger", status: "fail", detail: { failedIds: sessions.map((id) => `mirror-${id}`) } }] });
+    expect(evidence.events.find((event) => event.eventId === "mirror-far-session")?.sessionIds).toEqual(["unlinked-call"]);
+    expect(evidence.calls.map((call) => call.sessionId)).toEqual(["unlinked-call"]);
+    // Refused, linked, foreign and out-of-window dials name no session.
+    for (const id of sessions.slice(1)) expect(evidence.errors).toContain(`ledger_session_unknown: mirror-${id}`);
+    expect(h.db.log.every((entry) => entry.operation === "select")).toBe(true);
+  });
+
   it("preserves cancellation and classifies the failure without copying error bodies or pending commands", async () => {
     const h = fixture();
     h.db.update("motorist_call_sessions", { state: "ended", ended_at: NOW, answered_at: null,

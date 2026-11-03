@@ -50,7 +50,7 @@ describe("explicit private server Sentry", () => {
     const input = Object.assign(error(), { code: "DIAGNOSTIC_TEST_CANARY" });
     const safe = sanitizeServerError(input, { source: "telephony", requestId: "11111111-1111-4111-8111-111111111111", route: "/api/calls/[id]/hold", status: 502 }, { release: "release", environment: "test" }, eventId)!;
     expect(safe.exception.values[0]).toEqual({ type: "TypeError", value: "TypeError: DIAGNOSTIC_TEST_CANARY", stacktrace: { frames: [{ filename: "app:///server/chunks/[root-of-the-server]__abc._.js", abs_path: "app:///server/chunks/[root-of-the-server]__abc._.js", lineno: 12, colno: 24, in_app: true }] } });
-    const outbound = sanitizeOutboundServerEvent({ ...safe, request: { headers: { authorization: "SECRET" } }, user: { email: "private@example.test" }, contexts: { runtime: "PRIVATE" }, extra: { token: "SECRET" }, breadcrumbs: ["SECRET"], server_name: "PRIVATE" });
+    const outbound = sanitizeOutboundServerEvent({ ...safe, request: { headers: { authorization: "SECRET" } }, user: { email: "private@example.test" }, contexts: { ...safe.contexts, runtime: "PRIVATE" }, extra: { token: "SECRET" }, breadcrumbs: ["SECRET"], server_name: "PRIVATE" });
     expect(outbound).toEqual(safe);
     expect(JSON.stringify(outbound)).not.toMatch(/SECRET|421901|dangerousFunction|node_modules|private@example/);
     expect(sanitizeServerError(Object.assign(error(), { code: "customer_private_value" }), { route: "/api/call?phone=SECRET" }, { release: "release", environment: "test" })?.tags).not.toHaveProperty("error_code");
@@ -138,4 +138,38 @@ describe("explicit private server Sentry", () => {
     for (let line = 100; line < 112; line++) await captureServerError(error(line));
     expect(fetch).toHaveBeenCalledTimes(10);
   });
+  it("keeps a bounded cause chain and opaque call context while rejecting secret fields", async () => {
+    const { sanitizeServerError, sanitizeOutboundServerEvent } = await import("./server-errors");
+    const cause = Object.assign(new Error("private SQL and phone"), { code: "57014", status: 504 });
+    const outer = Object.assign(error(), { cause });
+    const callSessionId = "11111111-1111-4111-8111-111111111111";
+    const safe = sanitizeServerError(outer, { callSessionId, eventId: callSessionId, retryable: true, attempt: 2, databaseTimeouts: 1 }, { release: "release", environment: "test" })!;
+    expect(safe.contexts?.failure.causes).toEqual([{ type: "TypeError" }, { type: "Error", code: "57014", status: 504 }]);
+    expect(safe.tags).toMatchObject({ call_session_id: callSessionId, provider_event_id: callSessionId, retryable: "true", attempt: "2", database_timeouts: "1" });
+    expect(JSON.stringify(safe)).not.toMatch(/private SQL|phone|password|SECRET/);
+    const injected = sanitizeOutboundServerEvent({ ...safe, contexts: { failure: { causes: [{ type: "Error", code: "PRIVATE_SQL", status: 999, message: "SECRET" }] }, private: "SECRET" } });
+    expect(injected?.contexts?.failure.causes).toEqual([{ type: "Error" }]);
+    const getter = vi.fn(); Object.defineProperty(outer, "cause", { get: getter }); sanitizeServerError(outer, {}, { release: "release", environment: "test" }); expect(getter).not.toHaveBeenCalled();
+  });
+
+  it("does not let a failed send suppress the next occurrence, and logs the missing ACK", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      vi.mocked(fetch).mockResolvedValueOnce(new Response("", { status: 503 }));
+      const { captureServerError } = await import("./server-errors");
+      const first = await captureServerError(error());
+      const second = await captureServerError(error());
+      expect(first.accepted).toBe(false); expect(second.accepted).toBe(true); expect(second.eventId).not.toBe(first.eventId);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)).outcome)).toEqual(["unacknowledged", "accepted"]);
+    } finally { log.mockRestore(); }
+  });
+
+  it("retains distinct affected call IDs instead of deduplicating their representative stacks", async () => {
+    const { captureServerError } = await import("./server-errors");
+    const first = await captureServerError(error(), { callSessionId: "11111111-1111-4111-8111-111111111111" });
+    const second = await captureServerError(error(), { callSessionId: "22222222-2222-4222-8222-222222222222" });
+    expect(second.eventId).not.toBe(first.eventId); expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
 });

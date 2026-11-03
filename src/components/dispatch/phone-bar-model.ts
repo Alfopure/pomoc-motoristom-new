@@ -143,6 +143,10 @@ export function phoneBarCapabilities(input: {
     };
   }
 
+  if (call.controlPending) {
+    return { ...NO_CAPABILITIES, hangup: true, mute: input.browserCallActive, dtmf: input.browserCallActive, newCase: true, linkCase: true };
+  }
+
   if (call.kind === "waiting") {
     return { ...NO_CAPABILITIES, pickup: true, newCase: true, linkCase: true };
   }
@@ -225,7 +229,47 @@ export function callElapsedSeconds(call: Pick<PhoneBarCall, "timerSince">, now: 
 
 export type PhoneBarStateLabel = { label: string; tone: "live" | "hold" | "ring" | "wait" };
 
-export function phoneBarStateLabel(call: PhoneBarCall): PhoneBarStateLabel {
+/** Call-speed S6.4: how long an answering colleague's bar trusts its own media before the server confirms. */
+export const LOCAL_FIRST_TALKING_MS = 3_000;
+
+/**
+ * Call-speed S6.4 (`targetLocalFirst`): the colleague who answered an
+ * auto-bridged colleague call (Telnyx bridges it at answer) may show
+ * "Prebieha" from its own browser call being active, before the server's
+ * `talking` arrives. Only once the caller's own phone has answered (before
+ * that no audio is possible) and while the server still shows the call
+ * ringing for this browser leg; the bar falls back to "Spájam…" after
+ * `LOCAL_FIRST_TALKING_MS` and on anything the server says otherwise.
+ */
+export function localFirstCandidate(call: PhoneBarCall | null, browserCall: WebphoneCallView | null, enabled: boolean): boolean {
+  return Boolean(enabled && call && browserCall?.active && !browserCall.ringing && call.direction === "internal" && call.autoBridge &&
+    call.callerAnswered && call.state === "ringing" && (call.connecting || call.kind === "offer") && phoneBarCallMatchesBrowser(call, browserCall));
+}
+
+/**
+ * Call-speed S6.4: whether the bar shows its own "Prebieha" for the local-first
+ * candidate `candidateId`. Only for `LOCAL_FIRST_TALKING_MS` (`expiredId` is
+ * the candidate whose time ran out), unless this call's remote audio is
+ * playing (`remoteAudioPlaying`, N4): then the bar does not flip back to
+ * "Spájam…" and only the server's next state changes it. That flag is the
+ * answered leg's own media, which Telnyx sends before any bridge: it does not
+ * prove the far party is audible, so `targetLocalFirst` stays off (not usable
+ * yet, L4).
+ */
+export function localFirstTalking(candidateId: string | null, expiredId: string | null, remoteAudioPlaying: boolean | undefined): boolean {
+  return Boolean(candidateId && (expiredId !== candidateId || remoteAudioPlaying === true));
+}
+
+export function phoneBarStateLabel(call: PhoneBarCall, options: { localTalking?: boolean } = {}): PhoneBarStateLabel {
+  if (options.localTalking) return { label: "Prebieha", tone: "live" };
+  // S6.2: answered, waiting for the caller's own phone to connect.
+  if (call.connecting) return { label: "Spájam…", tone: "wait" };
+  if (call.controlPending) {
+    const labels = call.controlPending.failed
+      ? { hold: "Podržanie nepotvrdené", unhold: "Obnovenie hovoru nepotvrdené", park: "Presun do čakárne nepotvrdený" }
+      : { hold: "Podržiavam…", unhold: "Obnovujem hovor…", park: "Presúvam do čakárne…" };
+    return { label: labels[call.controlPending.action], tone: "wait" };
+  }
   if (call.direction === "outbound" && call.state === "received") return { label: "Pripájam telefón…", tone: "wait" };
   if (call.direction === "outbound" && call.state === "ringing") return { label: "Vytáčam", tone: "ring" };
   if (call.kind === "offer") return { label: "Zvoní", tone: "ring" };
@@ -258,6 +302,7 @@ export function browserCallStateLabel(call: WebphoneCallView): PhoneBarStateLabe
 }
 
 export function phoneBarTimerLabel(call: PhoneBarCall): string {
+  if (call.connecting) return "Čas pripájania";
   if (call.audioConnection && call.audioConnection.status !== "connected") return "Čas pripájania zvuku";
   if (call.direction === "outbound" && !call.answered) return call.state === "received" ? "Čas pripájania telefónu" : "Čas vytáčania";
   if (call.kind === "offer" || call.kind === "waiting") return "Čas čakania";

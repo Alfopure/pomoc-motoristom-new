@@ -336,6 +336,14 @@ class Contracts(unittest.TestCase):
     connected=[leg for leg in timeline['legs'] if leg['id'] in (operator,customer)]
     self.assertEqual(len(connected),2)
     self.assertTrue(all(leg['bridgedAt'] is not None for leg in connected))
+ def test_delivery_and_startup_observations_need_no_migration_or_false_drop_incident(self):
+    rows=[event(type='exception_delivery',module='app',operation='app.refresh',sampled=False,sampleRate=1,reason=reason,count=3,outcome=outcome) for reason,outcome in [('sentry_delivered','ok'),('sentry_retry_exhausted','unknown'),('sentry_deduplicated','ok')]]
+    rows.extend(event(type='page_lifecycle',module='app',operation='app.refresh',sampled=False,sampleRate=1,reason=reason,outcome=outcome) for reason,outcome in [('startup_started','unknown'),('startup_ready','ok'),('startup_timeout','timeout')])
+    result=ingest(self.c,rows)
+    self.assertEqual(set(result['acceptedIds']),set(row['id'] for row in rows))
+    self.assertEqual(self.c.execute('select count(*) from motorist_diagnostic_events').fetchone()[0],6)
+    self.assertEqual(self.c.execute('select count(*) from motorist_diagnostic_incidents').fetchone()[0],0)
+    self.assertEqual(self.c.execute("select dropped from motorist_diagnostic_counters where key='org'").fetchone()[0],0)
  def test_read_samples_and_status(self):
     ev=event(type='operation',outcome='failed',callSessionId=CALL);ingest(self.c,[ev,event(sampled=False,durationMs=80000)])
     payload=self.c.execute("select motorist_diagnostics_read(%s,%s,'test','overview')",(ORG,MANAGER)).fetchone()[0]

@@ -50,6 +50,23 @@ function actionAnnouncementsEnabled(): boolean {
   return process.env.TELNYX_CALL_ACTION_ANNOUNCEMENTS_ENABLED === "true";
 }
 
+/**
+ * A call that can never record: no capture state to keep in step with its
+ * audio, so it may take the lean paths (no continuation, deferred projections,
+ * a reused validity row, overlapping teardown, no participant intervals).
+ *
+ * Either its frozen policy is off with nothing left of earlier capture, or —
+ * with `internal_lean_path` (call-speed S1.1) — it is a colleague call, which
+ * `policyState`/`eligible` never record and which never freezes a policy.
+ */
+export function recordingFrozenOff(session: Pick<SessionRow, "direction" | "metadata">, leanInternal = false): boolean {
+  const meta = readMeta(session);
+  if (meta.announcement_sequence) return false;
+  const recording = meta.recording;
+  if (recording) return recording.policy.enabled === false && !recording.recorders.length && !recording.barrier && !recording.pendingAudio;
+  return leanInternal && session.direction === "internal";
+}
+
 /** A global recording switch alone cannot make a silent call require a media lease. */
 export function requiresRecordingLease(session: SessionRow, context: RoutingContext): boolean {
   const state = policyState(session, context);
@@ -86,6 +103,7 @@ function mergeMetadata(result: ReduceResult, session: SessionRow): ReduceResult 
 function sequenceCommand(session: SessionRow, sequence: AnnouncementSequence): Command {
   const id = commandId({ sessionId: session.id, legId: sequence.callControlId, step: sequence.id, intent: `sequence:${sequence.index}:${sequence.speechRetry ? "tts" : "audio"}` });
   return { kind: "playback_start", commandId: id,
+    ...(sequence.continuation?.kind === "app" && sequence.continuation.nativeHold ? { nativeHold: sequence.continuation.nativeHold } : {}),
     leg: { callControlId: sequence.callControlId }, media: { key: sequence.keys[sequence.index] }, forceSpeech: sequence.speechRetry,
     clientState: { sid: session.id, role: "customer", intent: `seq:${id.replaceAll("-", "").slice(0, 24)}` } };
 }
@@ -196,6 +214,16 @@ function startBeforeAudio(result: ReduceResult, session: SessionRow, legs: LegRo
 
 /** Wrapper around the existing routing reducer. Only correlated media completions release audio. */
 export function reduceRecording(session: SessionRow, legs: LegRow[], attempts: AttemptRow[], event: SessionEvent, context: RoutingContext, core: Core, reject: Reject, resumed = false): ReduceResult {
+  const result = reduceRecordingCore(session, legs, attempts, event, context, core, reject, resumed);
+  // Recording and announcement continuations can add commands after the core
+  // builder. Retain the original mobile endpoint fence on those commands too.
+  if (event.kind === "app" && event.nativeHold) {
+    result.commands = result.commands.map(command => ({ ...command, nativeHold: event.nativeHold }));
+  }
+  return result;
+}
+
+function reduceRecordingCore(session: SessionRow, legs: LegRow[], attempts: AttemptRow[], event: SessionEvent, context: RoutingContext, core: Core, reject: Reject, resumed = false): ReduceResult {
   let current = session;
   const state = policyState(session, context);
   if (state) current = patched(current, { recording: state });

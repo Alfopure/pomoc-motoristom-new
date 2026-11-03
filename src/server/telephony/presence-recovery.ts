@@ -39,8 +39,8 @@ async function recoverEndedSessionPresence(
     .eq("organization_id", deps.organizationId).in("status", ["ringing", "on_call"])
     .not("current_session_id", "is", null);
   if (options.profileId) query = query.eq("profile_id", options.profileId);
-  const candidates = await query.order("status_since").limit(Math.max(1, Math.min(100, options.limit)));
-  if (candidates.error) throw new Error(`stale presence lookup failed: ${candidates.error.message}`);
+  const candidates = await query.order("status_since").limit(Math.max(1, Math.min(100, options.limit))).abortSignal(AbortSignal.timeout(4_000));
+  if (candidates.error) throw new Error(`stale presence lookup failed: ${candidates.error.message}`, { cause: candidates.error });
   const result: PresenceRecoveryResult = { scanned: candidates.data?.length ?? 0, released: 0, skipped: 0, errors: [] };
   for (const presence of candidates.data ?? []) {
     const sessionId = presence.current_session_id!;

@@ -2,6 +2,8 @@
 
 Tento repozitár používa dev-first workflow. Trvalá vývojová vetva je `dev`; `main` je produkčný release branch aplikácie na `dispecing.linkapomoci.sk`. Stabilný TEST má samostatný Vercel projekt `pomoc-motoristom-test` a adresu `https://test.dispecing.linkapomoci.sk`. Vyradený VIPTel projekt a jeho Supabase sa nemenia.
 
+Lokálnu prípravu, verzie nástrojov a testovanie bez credentials opisuje [vývojový postup](docs/development.md).
+
 ## Bežná zmena
 
 1. Aktualizuj lokálnu vetvu `dev` bez prepisovania histórie:
@@ -18,17 +20,11 @@ Tento repozitár používa dev-first workflow. Trvalá vývojová vetva je `dev`
 5. Po merge počkaj na nový deployment `dev` v dedikovanom TEST projekte (Production target). Na `https://test.dispecing.linkapomoci.sk` over live/ready health, zhodu deployment ID a Git commitu a zmenené správanie. Generovaný `dev` Preview alias je iba obmedzený fallback.
 6. Majiteľovi odovzdaj TEST URL, nasadený commit, zmenu, postup skúšky a overený/neoverený rozsah. Počkaj na výslovné schválenie produkčného rozsahu.
 
-Preview, `dev` aj `main` spúšťajú rovnakú Vercel build gate (`pnpm exec vitest run && pnpm run typecheck && pnpm run build`). Automatické GitHub CI na push ani PR nepoužívame. Rozšírenú sadu lint, typecheck, test a build možno podľa potreby spustiť ručne cez GitHub Actions workflow **Full CI (manual)**.
+Preview, `dev` aj `main` spúšťajú gate z `vercel.json`: `pnpm test && pnpm typecheck && node scripts/diagnostics-browser-check.mjs && node scripts/diagnostics-vercel-build.mjs`. Testy zahŕňajú Vitest aj Node testy; build wrapper spustí Next.js build a podľa konfigurácie spracuje súkromné source mapy. **Mobile checks** sa automaticky spúšťa pri dotknutých mobilných, zdieľaných a backendových kontraktoch. Webový lint, typecheck, test a build navyše ponúka **Full CI (manual)**; lint nie je súčasťou Vercel gate.
 
 ## Produkčný release
 
-Bežná produkcia sa vydáva pull requestom `dev -> main` po overení na stabilnom TESTE a výslovnom schválení majiteľa. Pred merge porovnaj celý release diff s odovzdaným TEST commitom; novšie neoverené zmeny nie sú súčasťou pôvodného súhlasu. Merge do `main` spustí tú istú gate:
-
-```bash
-pnpm exec vitest run
-pnpm run typecheck
-pnpm run build
-```
+Bežná produkcia sa vydáva pull requestom `dev -> main` po overení na stabilnom TESTE a výslovnom schválení majiteľa. Pred merge porovnaj celý release diff s odovzdaným TEST commitom; novšie neoverené zmeny nie sú súčasťou pôvodného súhlasu. Merge do `main` spustí tú istú gate z `vercel.json`.
 
 Vercel priradí produkčnú doménu `https://dispecing.linkapomoci.sk` úspešnému deploymentu projektu `pomoc-motoristom-dispatching`; pri zlyhaní ostáva aktívny predchádzajúci deployment. `main` aj `dev` vyžadujú PR, aktuálnu vetvu a úspešný check `Vercel – pomoc-motoristom-dispatching`, aj pre administrátorov. Ochrany zachovaj. Over canonical health, nasadený commit a dotknutú funkciu; nepublikuj redeployom historického deploymentu.
 
@@ -44,14 +40,16 @@ Majiteľ môže schváliť iba identifikovanú podmnožinu alebo výslovne žiad
 - Jediný povolený Vercel cron je `*/5 * * * *` na `/api/telephony/cron` (bearer `CRON_SECRET`); iné cron definície nepridávaj.
 - Google Maps credentials majú byť oddelené podľa prostredia a obmedzené na potrebné API/domény. Produkčný serverový kľúč nepatrí do Preview. Obmedzenia kľúčov neoslabuj.
 
-## Lokálne overenie produkčnej gate
+## Lokálne overenie
 
 Pred produkčným PR spusti:
 
 ```bash
-pnpm exec vitest run
-pnpm run typecheck
-pnpm run build
+pnpm lint
+pnpm test
+pnpm typecheck
+node scripts/diagnostics-browser-check.mjs
+pnpm build
 ```
 
-Úplnú sadu vrátane lint a `node --test tests/*.test.mjs` spúšťaj zámerne cez **Full CI (manual)** alebo lokálne.
+Toto overí aplikáciu bez publikovania source máp. Nasadzovací wrapper a jeho podmienené uploady sa riadia konfiguráciou konkrétneho Vercel projektu; nekopíruj produkčné secrets do lokálneho prostredia.
