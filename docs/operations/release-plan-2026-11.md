@@ -156,11 +156,11 @@ Realtime messages that the old broadcast stored before #24 hold full rows and ca
   set local transaction_timeout = '30s';  -- PostgreSQL 17 (production runs 17.6)
   -- the migration file, without its own top-level begin; and commit; (20 of the 26 have them)
   insert into supabase_migrations.schema_migrations (version, name, statements)
-  values ('<repo version>', '<repo name>', array['<file text>']);
+  values ('<repo version>', '<repo name>', array[$mig$<file text>$mig$]);
   commit;
   ```
 
-  There is no `statement_timeout`: `transaction_timeout` already bounds the whole file.
+  The file text goes into the ledger dollar-quoted (`$mig$`), because the migrations contain single quotes. None of the 26 files contains `$mig$`. There is no `statement_timeout`: `transaction_timeout` already bounds the whole file.
 - **Precedent.** Production `20261001071403 operations_diagnostics_index_bounded_20261001` ran after a recorded preflight with `lock_timeout` 50 ms, `statement_timeout` 100 ms and `transaction_timeout` 250 ms, for a single index. These files are larger DDL, hence 1 s and 30 s.
 - **Preflight** before every file. It must be **run immediately before** the call-path and storage files #2, #6, #7, #15, #23 and #25 (their locks are in part 2.2). Every value must be 0:
 
@@ -173,7 +173,7 @@ Realtime messages that the old broadcast stored before #24 hold full rows and ca
   ```
 
   The role needs `pg_read_all_stats` to see other sessions' `xact_start`. The read-only role has it, so the preflight can also run through `prod_ro.py`.
-- **Retries.** A lock or transaction timeout (`55P03`, `25P04`) rolls back the whole file, ledger row included. Wait 30 s, rerun the preflight, and retry. Stop after 3 attempts and report. Never raise the limits, and never retry while a call is live.
+- **Retries.** A lock or transaction timeout (`55P03`, `25P04`) rolls back the whole file, ledger row included. On PostgreSQL 17, `transaction_timeout` raises FATAL `25P04` and **closes the connection**. A retry must therefore open a new connection (a new `psql` run or a new API request); it cannot continue in the old session. Wait 30 s, rerun the preflight, and retry. Stop after 3 attempts and report. Never raise the limits, and never retry while a call is live.
 - **After each file**, check its main object with `to_regclass` or `pg_proc`.
 - **After #7**, `legacy_slot and status in` must appear exactly twice in the patched function:
 
