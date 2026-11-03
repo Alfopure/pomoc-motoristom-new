@@ -66,11 +66,13 @@ s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť apli
 ## Ďalšie odpovede
 
 - **Šifrovanie:** HTTPS ide cez systém, hovory však šifruje knižnica WebRTC
-  v aplikácii (DTLS-SRTP, BoringSSL). Produkčný build preto má
-  `ITSAppUsesNonExemptEncryption = true` (TEST ostáva `false`) a App Store Connect
-  sa pri builde spýta na šifrovanie: šifrovanie **áno**, typ „štandardné
-  algoritmy namiesto alebo popri šifrovaní systému Apple“, nie vlastné;
-  Francúzsko je z krajín vynechané. Ak App Store Connect vydá kód, pribudne
+  v aplikácii (DTLS-SRTP, BoringSSL), štandardnými algoritmami, nie vlastnými.
+  Apple vyžaduje exportnú dokumentáciu iba pri vlastnej kryptografii alebo pri
+  štandardnej kryptografii v predaji vo Francúzsku. Francúzsko je z krajín
+  vynechané, preto dokumentácia netreba a `ITSAppUsesNonExemptEncryption = false`.
+  Overené 3. 11. 2026: upload s `true` bez kódu Apple odmietol (ITMS-90592) a
+  App Store Connect API vyhlásenie pre túto kombináciu odmietlo vytvoriť.
+  Ak by sa raz pridalo Francúzsko, treba vyhlásenie s dokumentmi a kód
   `ITSEncryptionExportComplianceCode`.
 - **Prihlásenie pre kontrolu Apple (Guideline 2.1):** rozhodnutie majiteľa
   z 3. 11. 2026: samostatný účet len pre kontrolu, **natrvalo aktívny** (Apple
