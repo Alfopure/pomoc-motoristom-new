@@ -1617,7 +1617,8 @@ export { CONCURRENT_BRIDGE_DEADLINE_MS } from "./types";
 
 /**
  * The explicit bridge of S6.2, in today's direction: the operator's leg
- * bridges to the far end and parks itself if that bridge ends. Its 2xx
+ * bridges to the far end and parks itself if that bridge ends (an unlinked
+ * customer is bridged from its own leg, `concurrentBridgeCommand`). Its 2xx
  * connects the call (`concurrent_bridge_accepted`, applied by the runner right
  * after the effect), as does `call.bridged`. A refusal of any wording (Telnyx
  * may have bridged the pair itself), a 5xx or a lost response neither connects
@@ -1635,10 +1636,19 @@ function bridgeConcurrentPair(b: TransitionBuilder, own: LegRow, far: LegRow, fa
   b.note("explicit concurrent bridge sent → waiting for its call.bridged");
 }
 
-/** The explicit concurrent bridge command (first send or the one retry), with the customer dial's contact intent. */
+/**
+ * The explicit concurrent bridge command (first send or the one retry), with the customer dial's contact intent.
+ * An unlinked customer dial (S6 B′) cannot carry `park_after_unbridge`: Telnyx
+ * accepts it only with `link_to` (code 10000), and so does the TEST boundary.
+ * Its bridge is therefore issued from the customer leg, as inbound and
+ * announced outgoing calls are, so an unbridge (conference promotion, a lost
+ * operator, hold, park, transfer) parks the customer instead of hanging up.
+ */
 function concurrentBridgeCommand(b: TransitionBuilder, own: LegRow, far: LegRow, commandId: string): Command {
-  const contact = b.session.direction === "outbound" ? b.meta.outbound_auto_bridge?.commandId : undefined;
-  return { kind: "bridge", commandId, leg: ref(own), target: ref(far), parkAfterUnbridge: "self", concurrentBridge: true, bestEffort: true,
+  const outbound = b.session.direction === "outbound";
+  const contact = outbound ? b.meta.outbound_auto_bridge?.commandId : undefined;
+  const fromCustomer = outbound && b.meta.start_mode?.farLinkTo === false;
+  return { kind: "bridge", commandId, leg: ref(fromCustomer ? far : own), target: ref(fromCustomer ? own : far), parkAfterUnbridge: "self", concurrentBridge: true, bestEffort: true,
     ...(contact ? { contactCommandId: contact } : {}) };
 }
 
@@ -1952,6 +1962,7 @@ function dialFarEnd(b: TransitionBuilder, own: OwnLegRef, intent: string): DialC
       timeoutSecs: OUTBOUND_TIMEOUT_SECS,
     };
     if (canDirectConnectOutbound(b)) {
+      // Unlinked (B′), the server's bridge from the customer leg parks it instead (`concurrentBridgeCommand`).
       if (linked) {
         dial.bridgeOnAnswer = true;
         dial.preventDoubleBridge = true;

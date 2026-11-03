@@ -343,7 +343,8 @@ export function freezeStartMode(flags: LatencyFlags, input: { direction: "inboun
   // Only TEST may freeze it, like the other unproven switches; present only
   // when on, so every other start records exactly what it did before. It also
   // means no auto-bridge for that start: Telnyx has nothing to bridge to.
-  const unlinkedFarDial = concurrent && !flags.concurrent_far_link_to && concurrentStartAllowed();
+  // Colleague calls only, until an outgoing B′ spike passes on TEST.
+  const unlinkedFarDial = concurrent && input.direction === "internal" && !flags.concurrent_far_link_to && concurrentStartAllowed();
   // S7b: the first hold joins the customer already held. Present only when on,
   // so a session started with the switch off records exactly what it did before.
   const holdJoinWithHold = HONOURED_START_SWITCHES.holdJoinWithHold && input.direction !== "internal" && flags.hold_join_with_hold && joinWithHoldAllowed();
