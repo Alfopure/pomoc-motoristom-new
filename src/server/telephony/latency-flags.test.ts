@@ -172,14 +172,20 @@ describe("latency flags", () => {
     errors.mockRestore();
   });
 
-  it("freezes the S6 B′ experiment (no link_to on the concurrent far dial) only on TEST and only for a concurrent start", () => {
+  it("freezes the S6 B′ experiment (no link_to on the concurrent far dial) only on TEST and only for a concurrent colleague start", () => {
     const all = { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } };
     const asked: LatencyFlags = { ...defaultLatencyFlags(), concurrent_dial: all, internal_auto_bridge: true, concurrent_far_link_to: false };
     expect(envLatencyFlags({ TELEPHONY_LATENCY_FLAGS: JSON.stringify({ concurrent_far_link_to: false }) }).concurrent_far_link_to).toBe(false);
     vi.stubEnv("MOTORIST_APP_ENV", "test");
     // No link, so no auto-bridge for that start either: Telnyx has nothing to bridge to.
     expect(freezeStartMode(asked, { direction: "internal", origin: "web", providerRegion: "us" })).toMatchObject({ concurrent: true, autoBridge: false, farLinkTo: false });
-    expect(freezeStartMode(asked, { direction: "outbound", origin: "mobile", providerRegion: "us" })).toMatchObject({ concurrent: true, farLinkTo: false });
+    expect(freezeStartMode(asked, { direction: "internal", origin: "mobile", providerRegion: "us" })).toMatchObject({ concurrent: true, farLinkTo: false });
+    // An outgoing call keeps its linked far dial until an outgoing B′ spike passes.
+    for (const origin of ["web", "mobile"] as const) {
+      const outbound = freezeStartMode(asked, { direction: "outbound", origin, providerRegion: "us" });
+      expect(outbound).toMatchObject({ concurrent: true });
+      expect(outbound).not.toHaveProperty("farLinkTo");
+    }
     // The default (true) is today's start, field and all.
     const linked = freezeStartMode({ ...asked, concurrent_far_link_to: true }, { direction: "internal", origin: "web", providerRegion: "us" });
     expect(linked).toMatchObject({ concurrent: true, autoBridge: true });

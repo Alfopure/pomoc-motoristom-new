@@ -262,6 +262,8 @@ export async function authorizeNativeOffer(deps: TelephonyRuntimeDeps, actor: Mo
  * unanswered operator leg dialed to this phone, whose provider call Telnyx delivered to this SIP
  * user on this deployment's credential connection (signed `call.initiated`). None or two
  * candidates stay unresolved, and the app still pairs an outgoing offer with its own dial.
+ * That provider call is the leg's own dial's: the session's call when linked, and (S6 B′) the
+ * unlinked colleague dial's own call session, which only our journal of that dial records.
  */
 const DELIVERED_OFFER_WINDOW_MS = 60_000;
 async function deliveredLeg(deps: TelephonyRuntimeDeps, actor: MotoristActor, sipUsername: string | null): Promise<LegRow | null> {
@@ -273,12 +275,29 @@ async function deliveredLeg(deps: TelephonyRuntimeDeps, actor: MotoristActor, si
     .is("ended_at", null).is("answered_at", null).gte("created_at", since).limit(2);
   if (error) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
   if (legs?.length !== 1) return null;
-  const { data: session, error: sessionError } = await deps.admin.from("motorist_call_sessions").select("telnyx_session_id")
-    .eq("organization_id", actor.organizationId).eq("id", legs[0].session_id).maybeSingle();
+  const journal = deps.admin.from("motorist_provider_commands").select("result").eq("session_id", legs[0].session_id)
+    .eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
+    .contains("result", { data: { call_control_id: legs[0].telnyx_call_control_id } }).limit(2);
+  const [{ data: session, error: sessionError }, dialRead] = await Promise.all([
+    deps.admin.from("motorist_call_sessions").select("telnyx_session_id")
+      .eq("organization_id", actor.organizationId).eq("id", legs[0].session_id).maybeSingle(),
+    Promise.resolve(journal).catch(() => null),
+  ]);
   if (sessionError) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
-  if (!session?.telnyx_session_id) return null;
+  if (!session) return null;
+  // The journal only adds an unlinked dial's own call session (S6 B′). Without
+  // it a linked or sequential offer still resolves by the session's call; a B′
+  // far leg stays unresolved, as before.
+  if (!dialRead || dialRead.error) deps.logger?.({ level: "warn", scope: "mobile-voice", code: "delivered_offer_journal_unavailable" });
+  const dials = dialRead && !dialRead.error ? dialRead.data ?? [] : [];
+  const dialSessions = dials.map(dial => {
+    const data = dial.result && typeof dial.result === "object" && !Array.isArray(dial.result) ? dial.result.data : null;
+    return data && typeof data === "object" && !Array.isArray(data) ? data.call_session_id : null;
+  });
+  const providerSessions = [...new Set([session.telnyx_session_id, ...dialSessions].filter((id): id is string => typeof id === "string" && id.length > 0))];
+  if (!providerSessions.length) return null;
   const { data: events, error: eventError } = await deps.admin.from("motorist_telnyx_webhook_events").select("connection_id, payload")
-    .eq("organization_id", actor.organizationId).eq("call_session_id", session.telnyx_session_id).eq("event_type", "call.initiated").limit(10);
+    .eq("organization_id", actor.organizationId).in("call_session_id", providerSessions).eq("event_type", "call.initiated").limit(10);
   if (eventError) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
   const delivered = (events ?? []).some(event => {
     const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};

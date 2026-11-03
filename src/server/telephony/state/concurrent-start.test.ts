@@ -11,7 +11,7 @@ import { runPendingEffectRecovery } from "../cron-jobs";
 import { setPresence } from "../presence-service";
 import { effectsDeps, loadRoutingContext, runSessionEvent } from "../session-runner";
 import { findOverdueSessions, sweepOverdueRingSteps } from "../routing/ring-plan";
-import { processTelnyxEvent } from "../telnyx/event-processor";
+import { processTelnyxEvent, replayDeferredSessionEvents } from "../telnyx/event-processor";
 import { cancelRevokedOffers } from "./cancelled-offers";
 import { createTelnyxClient, TelnyxCommandError } from "../telnyx/client";
 import { decodeClientState, encodeClientState } from "../telnyx/client-state";
@@ -21,6 +21,21 @@ import { buildTelnyxEnvelope } from "./events";
 import { planInitialCall } from "./transitions";
 import { CONCURRENT_BRIDGE_DEADLINE_MS, CONCURRENT_BRIDGE_EXTENSION_MS, CONCURRENT_BRIDGE_RETRY_AFTER_MS, CONCURRENT_BRIDGE_WITHOUT_EVIDENCE, CONCURRENT_PROVIDER_BRIDGE_WAIT_MS } from "./types";
 import { readMeta, type AppEvent, type DialCommand, type SessionRow } from "./types";
+
+/**
+ * S6 B′ freezes only colleague calls until an outgoing B′ spike passes on
+ * TEST. `outboundBPrime` freezes an outgoing start as that change would, so
+ * the outgoing unlinked path stays exercised; it is off by default.
+ */
+const seam = vi.hoisted(() => ({ outboundBPrime: false }));
+vi.mock("../latency-flags", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../latency-flags")>();
+  return { ...actual, freezeStartMode: (...args: Parameters<typeof actual.freezeStartMode>) => {
+    const mode = actual.freezeStartMode(...args);
+    const [flags, input] = args;
+    return seam.outboundBPrime && input.direction === "outbound" && mode.concurrent && !flags.concurrent_far_link_to ? { ...mode, farLinkTo: false as const } : mode;
+  } };
+});
 
 /**
  * Call-speed S6: the far end is dialled in the startup entry, right after the
@@ -47,7 +62,7 @@ const NONE = { outbound: { web: false, mobile: false }, internal: { web: false, 
 const ALREADY_BRIDGED = () => new TelnyxCommandError({ code: "90034", status: 422, detail: "Calls are already bridged" });
 const t503 = () => new TelnyxCommandError({ code: "service_unavailable", status: 503, retryable: true });
 
-afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); seam.outboundBPrime = false; });
 
 type World = { h: TelephonyHarness; deps: CallActionDeps; releases: Array<{ sessionId: unknown; profileId: unknown; applied: boolean }> };
 
@@ -137,11 +152,12 @@ async function expectEndedUnanswered(t: World, call: { sessionId: string; own: s
   expect(t.h.presence(actor.profileId)).toMatchObject({ status: "available", current_session_id: null });
   expect(released(t, call.sessionId, actor.profileId)).toBe(1);
 }
-/** Both legs report the bridge, the client state the explicit bridge put on the own leg included. */
+/** Both legs report the bridge, the client state the explicit bridge put on the leg it was issued on (the own leg, or a B′ customer) included. */
 async function bridged(t: World, call: { own: string; far: string }) {
   const bridge = t.h.telnyx.of("bridge").at(-1);
-  await t.h.legEvent(call.own, "call.bridged", bridge ? { client_state: bridge.params.clientState } : {});
-  await t.h.legEvent(call.far, "call.bridged");
+  for (const id of [call.own, call.far]) {
+    await t.h.legEvent(id, "call.bridged", bridge && bridge.params.callControlId === id ? { client_state: bridge.params.clientState } : {});
+  }
 }
 
 describe("S6.1 the far end is dialled in the startup entry", () => {
@@ -1386,10 +1402,12 @@ describe("S6.2 permutations with hangups: a call ends well wherever it is cut, a
     await run(t, call, order, cut, at, [PROFILES.o1, PROFILES.o2]);
   });
 
-  // S6 B′: the unlinked far dial, bridged by the server, ends as well wherever it is cut.
+  // S6 B′: the unlinked far dial, bridged by the server (from the customer leg), ends as well wherever it is cut.
   it.each(cases)("outbound without link_to (B′), delivered %s, cut by %s at step %i", async (order, cut, at) => {
+    seam.outboundBPrime = true;
     const t = world({ concurrent_far_link_to: false });
     const call = await outbound(t, 9402);
+    expect(meta(t, call.sessionId).start_mode?.farLinkTo).toBe(false);
     await t.h.legEvent(call.far, "call.initiated");
     await run(t, call, order, cut, at, [actor.profileId]);
   });
@@ -1480,27 +1498,70 @@ describe("S6 B′: the concurrent far dial without link_to", () => {
   const UNLINKED = { concurrent_far_link_to: false, internal_auto_bridge: true } as const;
   const farDial = (t: World) => t.h.telnyx.of("dial")[1].params;
 
-  it("dials the customer unlinked, frozen so, and bridges explicitly whichever answers first; its 2xx connects", async () => {
-    for (const farFirst of [false, true]) {
+  it("keeps an outgoing call's far dial linked on TEST with the switch off, until an outgoing B′ spike passes", async () => {
+    const t = world(UNLINKED);
+    const call = await outbound(t, 9509);
+    expect(meta(t, call.sessionId).start_mode).toMatchObject({ concurrent: true });
+    expect(meta(t, call.sessionId).start_mode).not.toHaveProperty("farLinkTo");
+    expect(farDial(t)).toMatchObject({ linkTo: call.own, bridgeOnAnswer: true, extra: { park_after_unbridge: "self" } });
+    expect(meta(t, call.sessionId).outbound_auto_bridge).not.toHaveProperty("serverBridged");
+  });
+
+  describe("an outgoing B′ start (frozen as that spike's change would)", () => {
+    it("dials the customer unlinked and bridges it from its own leg, parked after unbridge, whichever answers first; its 2xx connects", async () => {
+      for (const farFirst of [false, true]) {
+        seam.outboundBPrime = true;
+        const t = world(UNLINKED);
+        const call = await outbound(t, farFirst ? 9501 : 9500);
+        expect(meta(t, call.sessionId).start_mode).toMatchObject({ concurrent: true, autoBridge: false, farLinkTo: false });
+        const params = farDial(t);
+        expect(params).not.toHaveProperty("linkTo");
+        for (const key of ["bridgeOnAnswer", "preventDoubleBridge"]) expect(params[key]).toBeUndefined();
+        // Telnyx refuses `park_after_unbridge` without `link_to` (10000), as does the TEST boundary.
+        expect((params.extra as Record<string, unknown> | undefined)?.park_after_unbridge).toBeUndefined();
+        // The callback contact intent stays; only the provider link is gone.
+        expect(decodeClientState(params.clientState)?.intent).toBe(contactOperationIntent(String(params.commandId)));
+        expect(meta(t, call.sessionId).outbound_auto_bridge).toMatchObject({ commandId: params.commandId, serverBridged: true });
+        await answer(t, farFirst ? call.far : call.own);
+        await answer(t, farFirst ? call.own : call.far);
+        // No wait for a provider bridge that cannot come: ours goes at the second answer,
+        // issued on the customer leg so that leg, not the operator's, is parked when the bridge ends.
+        expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.far, targetCallControlId: call.own, parkAfterUnbridge: "self" })]);
+        expect(decodeClientState(t.h.telnyx.of("bridge")[0].params.clientState)).toMatchObject({ sid: call.sessionId, role: "customer", intent: contactOperationIntent(String(params.commandId)) });
+        expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
+        await bridged(t, call);
+        // The bridge carried the customer dial's intent: the callback contact proof is that dial's.
+        expect(readContactHistory(t.h.session(call.sessionId) as SessionRow).proofs).toMatchObject([{ operationId: params.commandId, customerControlId: call.far, operatorControlId: call.own }]);
+      }
+    });
+
+    it("retries a refused bridge from the customer leg too", async () => {
+      seam.outboundBPrime = true;
       const t = world(UNLINKED);
-      const call = await outbound(t, farFirst ? 9501 : 9500);
-      expect(meta(t, call.sessionId).start_mode).toMatchObject({ concurrent: true, autoBridge: false, farLinkTo: false });
-      const params = farDial(t);
-      expect(params).not.toHaveProperty("linkTo");
-      for (const key of ["bridgeOnAnswer", "preventDoubleBridge"]) expect(params[key]).toBeUndefined();
-      expect((params.extra as Record<string, unknown> | undefined)?.park_after_unbridge).toBeUndefined();
-      // The callback contact intent stays; only the provider link is gone.
-      expect(decodeClientState(params.clientState)?.intent).toBe(contactOperationIntent(String(params.commandId)));
-      expect(meta(t, call.sessionId).outbound_auto_bridge).toMatchObject({ commandId: params.commandId, serverBridged: true });
-      await answer(t, farFirst ? call.far : call.own);
-      await answer(t, farFirst ? call.own : call.far);
-      // No wait for a provider bridge that cannot come: ours goes at the second answer.
-      expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far, parkAfterUnbridge: "self" })]);
-      expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
+      const call = await outbound(t, 9510);
+      await answer(t, call.far);
+      t.h.telnyx.failNext("bridge", new TelnyxCommandError({ code: "90053", status: 422, detail: "Call is not answered yet" }));
+      await answer(t, call.own);
+      await sweepAfter(t, CONCURRENT_BRIDGE_RETRY_AFTER_MS + 1);
+      const [first, retry] = t.h.telnyx.of("bridge").map(command => command.params);
+      for (const params of [first, retry]) expect(params).toMatchObject({ callControlId: call.far, targetCallControlId: call.own, parkAfterUnbridge: "self" });
+      expect(retry.commandId).not.toBe(first.commandId);
+      expect(t.h.session(call.sessionId).state).toBe("talking");
+    });
+
+    it("keeps the customer when the operator's leg is lost: waiting room, not hung up", async () => {
+      seam.outboundBPrime = true;
+      const t = world(UNLINKED);
+      const call = await outbound(t, 9511);
+      await answer(t, call.own);
+      await answer(t, call.far);
       await bridged(t, call);
-      // The bridge carried the customer dial's intent: the callback contact proof is that dial's.
-      expect(readContactHistory(t.h.session(call.sessionId) as SessionRow).proofs).toMatchObject([{ operationId: params.commandId, customerControlId: call.far, operatorControlId: call.own }]);
-    }
+      expect(t.h.session(call.sessionId).state).toBe("talking");
+      // The parked customer stays; the reducer treats it as every other parked customer leg.
+      await t.h.legEvent(call.own, "call.hangup", { hangup_cause: "normal_clearing", hangup_source: "unknown" });
+      expect(t.h.session(call.sessionId).state).toBe("waiting");
+      expect(hungUp(t, call.far)).toBe(false);
+    });
   });
 
   it("dials the colleague unlinked even with the auto-bridge switch on, and bridges explicitly", async () => {
@@ -1531,8 +1592,10 @@ describe("S6 B′: the concurrent far dial without link_to", () => {
   });
 
   it.each(["outbound", "colleague"] as const)("ends the unlinked far leg itself when the %s caller's own leg times out (no provider link to tear it down)", async (kind) => {
+    seam.outboundBPrime = kind === "outbound";
     const t = world(UNLINKED);
     const call = kind === "outbound" ? await outbound(t, 9504) : await colleague(t, 9505);
+    expect(meta(t, call.sessionId).start_mode?.farLinkTo).toBe(false);
     if (kind === "outbound") await answer(t, call.far);
     t.h.advance(12_000);
     await t.h.legEvent(call.own, "call.hangup", { hangup_cause: "timeout", sip_hangup_cause: "487" });
@@ -1543,36 +1606,66 @@ describe("S6 B′: the concurrent far dial without link_to", () => {
     expect(released(t, call.sessionId, actor.profileId)).toBe(1);
   });
 
-  it("correlates the unlinked far leg through our own state: its events, and its credential-side browser mirror", async () => {
-    const t = world(UNLINKED);
-    const call = await colleague(t, 9506);
-    const session = t.h.session(call.sessionId);
+  /**
+   * The colleague browser's credential-side counterpart of an unlinked far
+   * dial: the far call's own provider session and no client state. `proof`
+   * adds the real HTTP `/calls` journal row of that dial (the harness journals
+   * its method-level doubles).
+   */
+  function unlinkedMirror(t: World, call: { sessionId: string; far: string }) {
     const far = t.h.db.find("motorist_call_legs", row => row.telnyx_call_control_id === call.far)!;
-    // No shared provider session: the colleague's call has its own.
     const farSession = `tsess-${call.far}`;
-    expect(session.telnyx_session_id).not.toBe(farSession);
-    // Its own events correlate by its client state and leg row.
-    expect(await answer(t, call.far)).toMatchObject({ status: 200, sessionId: call.sessionId });
-    // The browser's credential-side counterpart of that dial carries the far call's session and no client state.
     if (!t.h.deps.config.configured) throw new Error("configured fixture required");
-    t.h.db.insert("motorist_provider_commands", {
-      session_id: call.sessionId, command_id: "unlinked-far-proof", method: "POST", path: "/calls", outcome: "accepted", http_status: 200,
+    const { callControlAppId, credentialConnectionId } = t.h.deps.config;
+    const proof = (outcome = "accepted") => t.h.db.insert("motorist_provider_commands", {
+      session_id: call.sessionId, command_id: "unlinked-far-proof", method: "POST", path: "/calls", outcome, http_status: 200,
       first_dispatched_at: t.h.now().toISOString(),
-      request_payload: { connection_id: t.h.deps.config.callControlAppId, to: far.to_number, from: far.from_number,
+      request_payload: { connection_id: callControlAppId, to: far.to_number, from: far.from_number,
         client_state: encodeClientState({ sid: call.sessionId, role: "operator", operatorId: PROFILES.o2 }) },
       result: { data: { call_control_id: call.far, call_leg_id: far.telnyx_call_leg_id, call_session_id: farSession } },
     });
     const mirror = (type: string, extra: Record<string, unknown> = {}) => t.h.envelope(type, {
-      connection_id: t.h.deps.config.configured ? t.h.deps.config.credentialConnectionId : "", call_session_id: farSession,
+      connection_id: credentialConnectionId, call_session_id: farSession,
       call_control_id: "colleague-browser-counterpart", call_leg_id: "colleague-browser-counterpart-leg", to: "gencred002", from: far.from_number,
       client_state: null, ...(type === "call.initiated" ? { direction: "incoming", state: "bridging" } : {}), ...extra,
     }, `unlinked-mirror-${type}`);
+    return { farSession, proof, mirror };
+  }
+
+  it("correlates the unlinked far leg through our own state: its events, and its credential-side browser mirror", async () => {
+    const t = world(UNLINKED);
+    const call = await colleague(t, 9506);
+    const session = t.h.session(call.sessionId);
+    const { farSession, proof, mirror } = unlinkedMirror(t, call);
+    // No shared provider session: the colleague's call has its own.
+    expect(session.telnyx_session_id).not.toBe(farSession);
+    // Its own events correlate by its client state and leg row.
+    expect(await answer(t, call.far)).toMatchObject({ status: 200, sessionId: call.sessionId });
+    proof();
     for (const type of ["call.initiated", "call.answered", "call.hangup"]) {
       expect(await t.h.process(mirror(type))).toMatchObject({ status: 200, outcome: "ignored", sessionId: call.sessionId, notes: ["verified credential browser mirror"] });
     }
     // A foreign provider session is still no mirror.
     expect((await t.h.process(mirror("call.answered", { call_session_id: "another-call" }))).notes).not.toContain("verified credential browser mirror");
     expect(t.h.rows("motorist_job_incidents").filter(row => row.status === "open")).toEqual([]);
+  });
+
+  it("replays early browser mirrors waiting under the unlinked dial's own call session once that dial's proof is durable", async () => {
+    const t = world(UNLINKED);
+    const call = await colleague(t, 9512);
+    const { proof, mirror } = unlinkedMirror(t, call);
+    // A credential callback can beat the dial's journal result: no proof yet.
+    proof("unknown");
+    const types = ["call.initiated", "call.answered", "call.bridged", "call.hangup"];
+    for (const type of types) expect(await t.h.process(mirror(type))).toMatchObject({ outcome: "awaiting_correlation" });
+    t.h.db.update("motorist_provider_commands", { outcome: "accepted" }, row => row.command_id === "unlinked-far-proof");
+    const session = structuredClone(t.h.session(call.sessionId)), commands = [...t.h.telnyx.calls];
+    // The session's own drain selects them by that call session, not only by the session's.
+    await replayDeferredSessionEvents(t.h.deps, call.sessionId);
+    expect(t.h.rows("motorist_telnyx_webhook_events").filter(row => String(row.event_id).startsWith("unlinked-mirror-")))
+      .toEqual(types.map(type => expect.objectContaining({ event_id: `unlinked-mirror-${type}`, status: "processed", retry_state: "ready" })));
+    expect(t.h.session(call.sessionId)).toEqual(session);
+    expect(t.h.telnyx.calls).toEqual(commands);
   });
 
   it("changes nothing when the switch is off outside TEST, or for a sequential start", async () => {

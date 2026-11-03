@@ -287,7 +287,15 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
   }
 }
 
-/** S6 B′: how far back an unlinked far dial's operator leg is looked for when its mirror arrives. */
+/**
+ * S6 B′: how far back an unlinked far dial's operator leg is looked for when
+ * its mirror arrives. The fallback reads only the `MIRROR_PROOF_LIMIT` (8)
+ * newest operator legs to that SIP address in this window, and shares the
+ * lookup's 1.5 s read budget (typically four sequential reads). A miss —
+ * eight newer legs to the same address, or a slow read — attributes nothing:
+ * the mirror waits for correlation, the session's drain and the cron retry it,
+ * and after 60 s it becomes the ordinary correlation incident.
+ */
 const MIRROR_UNLINKED_WINDOW_MS = 15 * 60_000;
 
 /**
@@ -1325,7 +1333,7 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
     // waiting for provider exponential redelivery or the five-minute cron.
     // A shared provider session ID is never enough to select another leg.
     const drainTypes = customerTerminalOnly ? ["call.hangup"] : DEFERRED_DRAIN_TYPES;
-    const [deferred, staleHeld] = await Promise.all([
+    const [deferred, staleHeld, unlinkedDials] = await Promise.all([
       controlIds.size ? deps.admin.from("motorist_telnyx_webhook_events").select("*")
         .eq("organization_id", deps.organizationId).eq("retry_state", "deferred")
         .in("call_control_id", [...controlIds]).in("event_type", drainTypes)
@@ -1339,9 +1347,18 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
         .in("call_control_id", [...controlIds]).in("event_type", drainTypes)
         .lt("claimed_at", new Date(nowOf(deps)().getTime() - WEBHOOK_CLAIM_STALE_AFTER_MS).toISOString()).neq("event_id", current?.id ?? "")
         .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null },
+      // S6 B′ (`start_mode.farLinkTo: false`): an unlinked colleague dial has
+      // its own provider call session, named only by our journal of that dial.
+      !customerTerminalOnly && deps.config.configured && readMeta(session).start_mode?.farLinkTo === false
+        ? deps.admin.from("motorist_provider_commands").select("result").eq("session_id", session.id)
+          .eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
+          .contains("request_payload", { connection_id: deps.config.callControlAppId }).limit(MIRROR_PROOF_LIMIT) : { data: [], error: null },
     ]);
     if (deferred.error) throw new Error(deferred.error.message);
     if (staleHeld.error) throw new Error(staleHeld.error.message);
+    // A failed journal read only leaves the far mirrors to the cron.
+    const mirrorSessions = [...new Set([session.telnyx_session_id, ...(unlinkedDials.error ? [] : unlinkedDials.data ?? [])
+      .map(row => object(object(row.result).data).call_session_id)].filter((id): id is string => typeof id === "string" && id.length > 0))];
     // The customer may hang up before inbound creation saves its leg. A failed
     // answer still releases an owner with that exact leg now durable; recover
     // the early fact here, before the ledger's unchanged 60-second expiry.
@@ -1359,7 +1376,7 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       session.telnyx_session_id && session.organization_id === deps.organizationId && object(session.metadata).environment === deps.environment
       ? await deps.admin.from("motorist_telnyx_webhook_events").select("*")
         .eq("organization_id", deps.organizationId).eq("retry_state", "awaiting_correlation")
-        .eq("call_session_id", session.telnyx_session_id).eq("connection_id", deps.config.credentialConnectionId)
+        .in("call_session_id", mirrorSessions).eq("connection_id", deps.config.credentialConnectionId)
         .in("event_type", [...CREDENTIAL_MIRROR_TYPES]).neq("event_id", current?.id ?? "")
         .order("received_at", { ascending: true }).limit(4) : { data: [], error: null };
     if (mirrors.error) throw new Error(mirrors.error.message);
@@ -1397,7 +1414,7 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
       // lifecycle facts a separate cap, retaining the ordinary two-event drain.
       // Leave room for both bounded proof reads (selection and claimed replay).
       const mirror = !exactLeg && !customerTerminalOnly && mirrorsReplayed < 4 && Date.now() + 3_000 < deadline &&
-        waiting.callSessionId === session.telnyx_session_id && await credentialMirrorSession(deps, waiting) === session.id;
+        mirrorSessions.includes(waiting.callSessionId ?? "") && await credentialMirrorSession(deps, waiting) === session.id;
       if (!exactLeg && !mirror || exactLeg && replayed >= limit) continue;
       // A terminal fact can be deferred just before the prior owner releases.
       // Retain the SQL backoff instead of missing it until the five-minute cron.

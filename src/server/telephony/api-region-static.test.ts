@@ -39,9 +39,13 @@ describe("Telnyx API hosts", () => {
 
 describe("session start mode", () => {
   it("is written only when a session is created", () => {
-    const writers = files.filter(({ text }) => /\bstart_mode\s*:/.test(text)).map(({ name }) => name).sort();
+    // A `.contains("metadata", { start_mode: … })` read filter writes nothing (the alert evidence finds S6 B′ sessions so).
+    const READ_FILTER = /\.contains\(\s*["']metadata["']\s*,\s*\{\s*start_mode\s*:/;
+    expect(files.filter(({ text }) => READ_FILTER.test(text)).map(({ name }) => name)).toEqual(["server/telephony/alert-evidence.ts"]);
+    const written = files.map(({ name, text }) => ({ name, text: text.replace(new RegExp(READ_FILTER, "g"), ".contains(") }));
+    const writers = written.filter(({ text }) => /\bstart_mode\s*:/.test(text)).map(({ name }) => name).sort();
     expect(writers).toEqual(["server/telephony/call-actions.ts", "server/telephony/telnyx/event-processor.ts"]);
-    for (const { name, text } of files.filter(({ name }) => writers.includes(name))) {
+    for (const { name, text } of written.filter(({ name }) => writers.includes(name))) {
       for (const match of text.matchAll(/\bstart_mode\s*:\s*([^,}]+)/g)) expect(`${name}: ${match[1].trim()}`).toMatch(/: freezeStartMode\(/);
     }
   });

@@ -93,6 +93,37 @@ function projectCall(session: Session, legs: Leg[], checks: string[]): AlertCall
   };
 }
 
+/** How long before a failed event an S6 B′ session may have started. */
+const UNLINKED_DIAL_WINDOW_MS = 15 * 60_000;
+
+/**
+ * S6 B′ (`start_mode.farLinkTo: false`): an unlinked colleague dial has its
+ * own provider call session, which no session row names; only our journal of
+ * that dial does. Read only when some event's provider session matched no
+ * session, and only for B′ sessions started around those events.
+ */
+async function unlinkedDialSessions(deps: { admin: SupabaseClient<Database>; organizationId: string },
+  events: Array<{ received_at: string | null }>, unmatched: string[], evidence: TelephonyAlertEvidence): Promise<Array<{ providerSession: string; sessionId: string }>> {
+  const received = events.map((event) => Date.parse(event.received_at ?? "")).filter(Number.isFinite);
+  if (!unmatched.length || !received.length) return [];
+  const candidates = await deps.admin.from("motorist_call_sessions").select("id").eq("organization_id", deps.organizationId)
+    .contains("metadata", { start_mode: { farLinkTo: false } })
+    .gte("started_at", new Date(Math.min(...received) - UNLINKED_DIAL_WINDOW_MS).toISOString()).lte("started_at", new Date(Math.max(...received)).toISOString())
+    .limit(MAX_EVENTS + 1);
+  if (candidates.error) { evidence.errors.push(`ledger_correlation: ${candidates.error.message}`); return []; }
+  if (!candidates.data?.length) return [];
+  if (candidates.data.length > MAX_EVENTS) evidence.truncated = true;
+  const dials = await deps.admin.from("motorist_provider_commands").select("session_id, result")
+    .in("session_id", candidates.data.slice(0, MAX_EVENTS).map((session) => session.id))
+    .eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted").limit(MAX_LEGS + 1);
+  if (dials.error) { evidence.errors.push(`ledger_correlation: ${dials.error.message}`); return []; }
+  if ((dials.data?.length ?? 0) > MAX_LEGS) evidence.truncated = true;
+  return (dials.data ?? []).flatMap((dial) => {
+    const providerSession = alertObject(alertObject(dial.result).data).call_session_id;
+    return typeof providerSession === "string" && unmatched.includes(providerSession) ? [{ providerSession, sessionId: dial.session_id }] : [];
+  });
+}
+
 /** Bounded, read-only and best effort. A missing diagnostic must never prevent the original alert being sent. */
 export async function loadTelephonyAlertEvidence(deps: { admin: SupabaseClient<Database>; organizationId: string; alerts: TelephonyAlert[] }): Promise<TelephonyAlertEvidence> {
   const evidence = emptyAlertEvidence();
@@ -122,10 +153,13 @@ export async function loadTelephonyAlertEvidence(deps: { admin: SupabaseClient<D
           if (result.error) evidence.errors.push(`ledger_correlation: ${result.error.message}`);
           if ((result.data?.length ?? 0) > MAX_EVENTS) evidence.truncated = true;
         }
+        const unlinked = await unlinkedDialSessions(deps, events.data ?? [],
+          providerSessions.filter((id) => !(sessions.data ?? []).some((session) => session.telnyx_session_id === id)), evidence);
         for (const event of events.data ?? []) {
           const sessionIds = [...new Set([
             ...(legs.data ?? []).filter((leg) => leg.telnyx_call_control_id === event.call_control_id).map((leg) => leg.session_id),
             ...(sessions.data ?? []).filter((session) => session.telnyx_session_id === event.call_session_id).map((session) => session.id),
+            ...unlinked.filter((dial) => dial.providerSession === event.call_session_id).map((dial) => dial.sessionId),
           ])];
           for (const id of sessionIds) add(id, "ledger");
           if (!sessionIds.length) evidence.errors.push(`ledger_session_unknown: ${event.event_id}`);
