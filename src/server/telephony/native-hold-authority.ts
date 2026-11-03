@@ -1,5 +1,5 @@
 import { CallActionError } from './service-errors';
-import { readMeta, telnyxSipUri, type DeviceRow, type LegRow, type NativeHoldGuard, type SessionRow } from './state/types';
+import { isTelnyxSipUriOf, readMeta, type DeviceRow, type LegRow, type NativeHoldGuard, type SessionRow } from './state/types';
 import type { SessionRunnerDeps } from './session-runner';
 type AuthorityDeps = Pick<SessionRunnerDeps, 'admin' | 'organizationId' | 'environment' | 'now'>;
 type DeviceRead = { data: DeviceRow | null; error: unknown };
@@ -46,7 +46,7 @@ export async function assertNativeHoldAuthority(deps: AuthorityDeps, session: Se
         legs = result.data ?? [];
     }
     const own = legs.find(leg => leg.telnyx_call_control_id === accepted && leg.profile_id === identity.profileId && leg.role === 'operator' &&
-        leg.to_number === telnyxSipUri(device.sip_username ?? '') && Boolean(leg.answered_at) && !leg.ended_at);
+        isTelnyxSipUriOf(leg.to_number, device.sip_username ?? '') && Boolean(leg.answered_at) && !leg.ended_at);
     if (!own)
         throw new CallActionError('Hovor nepatrí tomuto telefónu.', 403, 'native_hold_endpoint');
     const customers = legs.filter(leg => leg.role === 'customer');

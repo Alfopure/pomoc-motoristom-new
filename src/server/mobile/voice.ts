@@ -12,7 +12,7 @@ import { mobileColleagueName, requireMobileColleague } from "./voice-colleagues"
 import { MutationError } from "@/server/mutation-error";
 import { getOperatorDevice } from "@/server/telephony/operator-devices";
 import { createTelephonyDeps, toCallActor, type TelephonyRuntimeDeps } from "@/server/telephony/runtime";
-import { readMeta, telnyxSipUri, type DeviceRow, type LegRow, type SessionRow } from "@/server/telephony/state/types";
+import { isTelnyxSipUriOf, readMeta, telnyxSipUris, type DeviceRow, type LegRow, type SessionRow } from "@/server/telephony/state/types";
 import { isProductionLiveDeployment, nativeVoiceEnabled } from "@/lib/app-environment";
 
 export class NativeLeaseError extends MutationError { readonly code = "native_lease_stale"; }
@@ -211,9 +211,10 @@ export async function authorizeNativeOffer(deps: TelephonyRuntimeDeps, actor: Mo
   // The SDK invite can arrive before the provider dial response is persisted.
   // A bounded client retry still has to pass every ownership check below.
   if (!leg) throw new NativeOfferPendingError("Ponuka hovoru sa ešte overuje.", 409);
-  // Outbound operator legs target this exact SIP user; ring legs also carry
-  // the frozen mobile endpoint marker. Neither authorizes a web leg.
-  const targetsThisDevice = Boolean(device.sip_username && leg?.to_number === telnyxSipUri(device.sip_username));
+  // Outbound operator legs target this exact SIP user (on the session's SIP
+  // domain, either one); ring legs also carry the frozen mobile endpoint
+  // marker. Neither authorizes a web leg.
+  const targetsThisDevice = Boolean(device.sip_username && isTelnyxSipUriOf(leg?.to_number, device.sip_username));
   if (leg.role !== "operator" || !targetsThisDevice) {
     throw new MutationError("Táto ponuka hovoru už nie je dostupná.", 409);
   }
@@ -271,7 +272,7 @@ async function deliveredLeg(deps: TelephonyRuntimeDeps, actor: MotoristActor, si
   if (!sipUsername || !connection) return null;
   const since = new Date((deps.now ?? (() => new Date()))().getTime() - DELIVERED_OFFER_WINDOW_MS).toISOString();
   const { data: legs, error } = await deps.admin.from("motorist_call_legs").select("*").eq("organization_id", actor.organizationId)
-    .eq("profile_id", actor.profileId).eq("role", "operator").eq("to_number", telnyxSipUri(sipUsername))
+    .eq("profile_id", actor.profileId).eq("role", "operator").in("to_number", telnyxSipUris(sipUsername))
     .is("ended_at", null).is("answered_at", null).gte("created_at", since).limit(2);
   if (error) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
   if (legs?.length !== 1) return null;
@@ -301,7 +302,10 @@ async function deliveredLeg(deps: TelephonyRuntimeDeps, actor: MotoristActor, si
   if (eventError) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
   const delivered = (events ?? []).some(event => {
     const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload) ? event.payload as Record<string, unknown> : {};
-    return event.connection_id === connection && payload.direction === "incoming" && payload.to === sipUsername;
+    // Telnyx names the credential by its bare username here; what it sends for a dial to
+    // `@sip.telnyx.eu` (S5 SIP-domain spike) is unobserved, so its exact SIP URI on either domain counts too.
+    return event.connection_id === connection && payload.direction === "incoming" &&
+      (payload.to === sipUsername || isTelnyxSipUriOf(payload.to, sipUsername));
   });
   return delivered ? legs[0] : null;
 }
@@ -332,13 +336,13 @@ export async function requireNativeSession(deps: TelephonyRuntimeDeps, actor: Mo
   // resolve the mobile endpoint, including for the caller of an outbound call.
   const device = known ? known.device : await getOperatorDevice({ ...deps, deviceKind: "mobile" }, { organizationId: actor.organizationId, profileId: actor.profileId });
   if (!device?.sip_username) throw new MutationError("Hovor nepatrí vášmu telefónu.", 403);
-  const sip = telnyxSipUri(device.sip_username);
+  const sipUsername = device.sip_username;
   const { data: legs, error: legError } = known
     ? { data: known.legs.data?.filter(leg => leg.organization_id === actor.organizationId && leg.session_id === data.id &&
-      leg.profile_id === actor.profileId && leg.role === "operator" && leg.to_number === sip) ?? null, error: known.legs.error }
+      leg.profile_id === actor.profileId && leg.role === "operator" && isTelnyxSipUriOf(leg.to_number, sipUsername)) ?? null, error: known.legs.error }
     : await deps.admin.from("motorist_call_legs").select("*")
       .eq("organization_id", actor.organizationId).eq("session_id", data.id).eq("profile_id", actor.profileId)
-      .eq("role", "operator").eq("to_number", sip);
+      .eq("role", "operator").in("to_number", telnyxSipUris(sipUsername));
   if (legError) throw new MutationError("Účastníka hovoru sa nepodarilo overiť.", 503);
   if (!legs?.length) throw new MutationError("Hovor nepatrí vášmu telefónu.", 403);
 

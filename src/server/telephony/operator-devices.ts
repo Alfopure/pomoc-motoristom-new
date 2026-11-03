@@ -9,7 +9,7 @@ import { TELEPHONY_NOT_CONFIGURED_MESSAGE } from "@/lib/telephony/not-configured
 import { isDeviceLive } from "./routing/eligibility";
 import { deviceLastOnlineAt, LAST_ONLINE_METADATA_KEY, retainDeviceLastOnline } from "./device-online";
 import { OperatorDeviceError } from "./service-errors";
-import { telnyxSipUri, toJson, type DeviceRow, type TelephonyEnvironment } from "./state/types";
+import { telnyxSipUri, toJson, type DeviceRow, type TelephonyEnvironment, type TelnyxSipDomain } from "./state/types";
 import { TelnyxCommandError, type TelnyxClient } from "./telnyx/client";
 import { MOBILE_TOKEN_CACHE_MARGIN_MS, MOBILE_TOKEN_CACHE_UNTIL, mobileTokenCacheOpen, NATIVE_PUSH_LEASE_MS, nativeMobilePushReachable, nativePushLease,
   PENDING_CREDENTIAL_DELETIONS, pendingCredentialEntries, type PendingCredentialDeletion } from "@/lib/telephony/device-liveness";
@@ -615,6 +615,7 @@ export function deviceIsLive(device: Pick<DeviceRow, "device_seen_at" | "registr
   return isDeviceLive({ deviceSeenAt: device.device_seen_at, registrationState: device.registration_state }, now);
 }
 
-export function deviceSipUri(device: DeviceRow): string | null {
-  return device.sip_username ? telnyxSipUri(device.sip_username) : null;
+/** The device's SIP address on the domain of the session that dials it (`sessionSipDomain`). */
+export function deviceSipUri(device: DeviceRow, domain: TelnyxSipDomain): string | null {
+  return device.sip_username ? telnyxSipUri(device.sip_username, domain) : null;
 }

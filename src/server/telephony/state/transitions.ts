@@ -43,6 +43,7 @@ import {
   readMeta,
   isGatherOverdue,
   gatherTimeoutMs,
+  sessionSipDomain,
   telnyxSipUri,
   type AppEvent,
   type AttemptPatch,
@@ -1209,7 +1210,7 @@ function fanout(b: TransitionBuilder, customer: LegRow, stepIndex: number, plann
     const endpointDevices = attempt.applicationDevice === "mobile" ? mobileDevices : devices;
     const sip = attempt.profileId ? endpointDevices.get(attempt.profileId)?.sip_username : null;
     const external = attempt.memberKind === "external_number";
-    const to = external ? attempt.externalNumber : sip ? telnyxSipUri(sip) : null;
+    const to = external ? attempt.externalNumber : sip ? telnyxSipUri(sip, sessionSipDomain(b.session.metadata)) : null;
     if (!to) {
       b.note(`member ${key} has no dialable address`);
       continue;

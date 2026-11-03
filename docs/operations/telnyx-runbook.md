@@ -105,6 +105,43 @@ For `eu` sessions every "already gone" decision (hangup, recording stop, termina
 - `headersMs` on `.eu` in these runs, next to the earlier TEST baseline on `.com` (not a paired measurement: different runs and times): `POST /calls` 206–385 ms (baseline 390–500); bridge 78–174 ms (263–384); hangup 38–86 ms (213–271); `GET /calls` 23–130 ms (230–330).
 - Still open: the gate decision; hold, consult and transfer (conferences); a recorded call (`recording.saved`, GET/DELETE, `download_urls` host); an inbound call controlled through `.eu`; a token mint through `.eu`; the `anchorsite_override` readbacks; dial → SDK invite.
 
+#### S5.0 SIP-domain spike — dialling credentials on `sip.telnyx.eu` (`sip_domain`, TEST experiment)
+
+**Why.** In an EU session (`apiRegion: "eu"`) Telnyx takes about 1.17 s from "far dial dispatched" to the target browser's SDK invite when the server dials a SIP credential (`to: sip:<username>@sip.telnyx.com`: a colleague, or the operator's own leg). About 0.3 s of that is the `POST /calls` response; the rest is Telnyx delivering the INVITE. The browsers register on the EU RTC edge (`eu.rtc.telnyx.com`). `sip.telnyx.com` is anycast (192.76.120.10, SRV `sip-anycast{1,2}.telnyx.com`); `sip.telnyx.eu` exists too (185.246.41.140, SRV `sip-anycast{1,2}.telnyx.eu`). Hypothesis, plausible but not documented by Telnyx: dialling `@sip.telnyx.eu` keeps the INVITE inside Telnyx's EU SIP infrastructure and delivers it sooner.
+
+**What it changes.** `"sip_domain": "eu"` in `latency_flags` freezes `start_mode.sipDomain = "eu"` into a new session only when that session is also frozen to `apiRegion: "eu"` (so `api_region: "eu"` must be set as well, and an inbound call never gets it), and only where the application environment is exactly `test` (`EU_SIP_DOMAIN_PROVEN` in `latency-flags.ts`). Every SIP-credential dial of such a session then goes to `sip:<username>@sip.telnyx.eu`: the operator's own leg, the colleague's web and mobile endpoints, ring fan-out, pickup, a transfer, consult or added party to a colleague, and supervision. The leg rows, the colleague call's `called_number`, `internal.target_sip` and `internal.endpoints`, the start's `initial_operation` and the provider journal record that address. A session without the field (every session created before this build, and every production session) dials `sip.telnyx.com` for good; the default `"com"` changes nothing.
+
+**Reading addresses back.** What Telnyx reports in a webhook's `to` (or a `sip_to`) for a dial to `@sip.telnyx.eu` has not been observed. Every check that recognises a credential by its address accepts the exact address on either domain, and the bare username where Telnyx has used it so far: the TEST guard (`testSipUsername`), the credential-mirror proof (which then requires the address the session itself dialled, in both the leg and the journal), the iPhone's offer and delivered-offer checks, the native session and native hold checks, the browser's offer status and a native callee's own hangup. Any other host, a port or URI parameters are refused as before. For every webhook of an `eu` session, and every proven mirror of one, a `sip-domain-spike` log line records `to`, `sipTo` and the payload's key names (operator addresses only; a phone number is never logged).
+
+**Enable on TEST.** Supabase `nzpnqdstvkfncflgqlny` only, as an explicitly requested operation. It applies to new calls within the flags' 5 s cache:
+
+```sql
+-- api_region must already be "eu" (S5.0); otherwise sip_domain has no effect.
+select organization_id, latency_flags from public.motorist_telephony_settings;
+
+update public.motorist_telephony_settings
+set latency_flags = latency_flags || '{"sip_domain":"eu"}'
+where organization_id = '<TEST organization id>';
+```
+
+**How.** With `api_region: "eu"` and `sip_domain: "eu"`, run the voice harness 5 times with the same colleague-call scenario as the S5.0 runs and read "far dial dispatched → target invite (SDK)". In the logs, read the `to` (and any `sipTo`) that the `sip-domain-spike` lines report for the dialled legs and for the credential mirrors, and check that every mirror was acknowledged ("verified credential browser mirror"), not left awaiting correlation. Record those values here.
+
+**Pass criterion.** The median of "far dial dispatched → target invite (SDK)" over the 5 harness runs is at least 0.2 s lower than the 1.17 s baseline (at most 0.97 s), with all correctness checks passing.
+
+**If it fails, and rollback.**
+
+```sql
+update public.motorist_telephony_settings
+set latency_flags = latency_flags - 'sip_domain'
+where organization_id = '<TEST organization id>';
+```
+
+This affects only new sessions: a session already frozen to `eu` keeps dialling `sip.telnyx.eu` until it ends. Do not roll TEST back to a build without this change while such a session is live: an older build would dial its transfers, consults and supervisors on `sip.telnyx.com`, and would not recognise its legs' `.eu` addresses (iPhone offers, native hold, credential mirrors).
+
+**Limits until it passes.** Production, a local run (`development`) and an unreadable environment never freeze it, whatever the flags say. Production needs S5 itself first, then a reviewed change of `EU_SIP_DOMAIN_PROVEN` recording this pass.
+
+**Result.** _Not yet run._
+
 ### S6.0 — Concurrent far-end dial and internal auto-bridge (call-speed S6)
 
 **Why.** A session frozen with `concurrent_dial.<outbound|internal>.<web|mobile>` dials the far end (customer or colleague) in the start request, right after the operator's own leg, with `link_to` the own leg; outbound and auto-bridged colleague dials carry `bridge_on_answer`, `prevent_double_bridge` and `park_after_unbridge: "self"`. What Telnyx does when the far end answers while the own leg still rings is not documented. The code is built to be safe in all three outcomes and decides only on provider evidence (a leg's `call.bridged`, the bridge journal, and the provider's `occurred_at` of the two answers), never on the order the webhooks are processed in. The colleague auto-bridge applies only to a colleague with a single endpoint; with web and mobile endpoints the server picks the winner and bridges it explicitly, as before:

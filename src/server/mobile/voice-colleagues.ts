@@ -11,7 +11,7 @@ import { isUuid } from "@/lib/telephony/uuid";
 import type { MotoristActor } from "@/server/api-auth";
 import { MOBILE_ROLES } from "@/server/mobile/auth";
 import { MutationError } from "@/server/mutation-error";
-import { deviceIsLive, deviceSipUri } from "@/server/telephony/operator-devices";
+import { deviceIsLive } from "@/server/telephony/operator-devices";
 import { telephonyStabilityEnabled } from "@/server/telephony/stability";
 
 type Admin = SupabaseClient<Database>;
@@ -81,8 +81,9 @@ export async function getMobileVoiceColleagues(
     if (!reason && settings.data?.find(item => item.profile_id === profile.id)?.delivery_mode === "personal_mobile") reason = "personal_mobile";
     const webDevice = web.data?.find(item => item.profile_id === profile.id);
     const mobileDevice = mobile.data?.find(item => item.profile_id === profile.id);
-    const reachable = Boolean(webDevice && deviceIsLive(webDevice, now) && deviceSipUri(webDevice)
-      || mobileDevice && (deviceIsLive(mobileDevice, now) || nativeMobilePushReachable(mobileDevice, now)) && deviceSipUri(mobileDevice));
+    // A dialable phone: live (or push-reachable) and with a SIP credential, whichever domain a call would dial it on.
+    const reachable = Boolean(webDevice && deviceIsLive(webDevice, now) && webDevice.sip_username
+      || mobileDevice && (deviceIsLive(mobileDevice, now) || nativeMobilePushReachable(mobileDevice, now)) && mobileDevice.sip_username);
     if (!reason && !reachable) reason = "no_phone";
     const status: MobileVoiceColleague["status"] = reason === "busy" || reason === "wrap_up" ? "busy"
       : effective === "available" || effective === "paused" ? effective : "offline";
