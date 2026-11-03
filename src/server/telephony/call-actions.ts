@@ -423,20 +423,25 @@ type StartWave<T> = { rateCount?: Promise<number | null>; guards: Promise<T>; de
 /**
  * Call-speed S5: whether the session a start is about to create will certainly
  * not be recorded, which `api_region: "eu"` needs (recording through the EU
- * API is not proven). A colleague call never is (`policyState`).
- * An outgoing call asks, alongside the other guard reads and only while `eu`
- * may be frozen, for the policy the session runner applies
- * (`resolveSessionRecordingPolicy`: no read while this deployment's recording
- * switches are off); recording enabled for outgoing calls, or a policy that
- * could not be read, may record. A policy switched on between this read and
- * the runner's own can still record an `eu` call; its recording jobs follow
- * the session's region (`recording-jobs.ts`).
+ * API is not proven). Asked only while `eu` may be frozen, alongside the other
+ * guard reads, and answered from what `policyState` will apply:
+ * - a colleague call is never recorded;
+ * - an outgoing call is not recorded when its line has no start announcements
+ *   (the session freezes `announcements` from this same `line`, and without a
+ *   notice there is no capture), or when the policy the session runner applies
+ *   (`resolveSessionRecordingPolicy`: no read while this deployment's recording
+ *   switches are off) does not record outgoing calls. A policy that could not
+ *   be read, or a line that could not be resolved, may record.
+ * A policy switched on between this read and the runner's own can still record
+ * an `eu` call; its recording jobs follow the session's region (`recording-jobs.ts`).
  */
-function startUnrecorded(deps: CallActionDeps, direction: "outbound" | "internal"): Promise<boolean> {
+function startUnrecorded(deps: CallActionDeps, direction: "outbound" | "internal", fromLine?: Promise<{ line: LineRow | null }>): Promise<boolean> {
   if (direction === "internal") return Promise.resolve(true);
-  if (latencyFlagsOf(deps).api_region !== "eu" || !euApiRegionAllowed()) return Promise.resolve(false);
-  return resolveSessionRecordingPolicy(deps.admin, deps.organizationId)
+  if (!fromLine || latencyFlagsOf(deps).api_region !== "eu" || !euApiRegionAllowed()) return Promise.resolve(false);
+  const announced = fromLine.then(({ line }) => announcementConfigFromMetadata(line?.metadata).outboundStartAnnouncements === true, () => true);
+  const policyOff = resolveSessionRecordingPolicy(deps.admin, deps.organizationId)
     .then(policy => policy.reason !== "recording_policy_unavailable" && !(policy.enabled && policy.outbound), () => false);
+  return Promise.all([announced, policyOff]).then(([withNotice, off]) => !withNotice || off);
 }
 
 /**
@@ -473,7 +478,8 @@ function ownDestinationProof(deps: CallActionDeps, device: Promise<{ sipUri: str
 }
 
 function outboundGuards(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput, speculative: boolean) {
-  const unrecorded = startUnrecorded(deps, "outbound");
+  const fromLine = resolveFromLine(deps, actor.profileId, input.lineId, speculative);
+  const unrecorded = startUnrecorded(deps, "outbound", fromLine);
   const sipDomain = startSipDomainOf(deps, "outbound", unrecorded);
   const device = requireLiveDevice(deps, actor.profileId, sipDomain);
   // These reads are independent. Finish every guard before reserving an operator
@@ -483,7 +489,7 @@ function outboundGuards(deps: CallActionDeps, actor: CallActor, input: StartOutb
     loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) }),
     resolveCallbackTarget(deps.admin, deps.organizationId, input.to),
     device,
-    resolveFromLine(deps, actor.profileId, input.lineId, speculative),
+    fromLine,
   ]), device, unrecorded, sipDomain });
 }
 

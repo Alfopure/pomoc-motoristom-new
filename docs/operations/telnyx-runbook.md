@@ -96,7 +96,7 @@ For `eu` sessions every "already gone" decision (hangup, recording stop, termina
 
 **Production unlock (2026-11-03, `EU_API_PROVEN` in `latency-flags.ts`).** A deployment whose application environment is `test` or `production` freezes `eu`; a local run (`development`, even one pointed at production data) and an unreadable environment keep `us` whatever `api_region` says. Recording through `.eu` is not proven, so a start freezes `eu` only for a call it knows will not be recorded, by the same rule on TEST and in production:
 - a colleague call is never recorded and may freeze `eu`;
-- an outbound or callback start reads the policy the session runner applies (`resolveSessionRecordingPolicy`: no read while the deployment's `TELNYX_RECORDING_ENABLED`, `TELNYX_RECORDING_CONTRACT_VERIFIED` and `RECORDING_PROCESSING_ENABLED` are not all `true`, otherwise one row of `motorist_call_recording_policies`), in parallel with its other guard reads. Recording enabled and approved for outgoing calls, or a policy that cannot be read, freezes `us`;
+- an outbound or callback start resolves its line and reads the policy the session runner applies, both in parallel with its other guard reads. The policy read is `resolveSessionRecordingPolicy`: nothing is read while the deployment's `TELNYX_RECORDING_ENABLED`, `TELNYX_RECORDING_CONTRACT_VERIFIED` and `RECORDING_PROCESSING_ENABLED` are not all `true`; otherwise one row of `motorist_call_recording_policies`. It freezes `eu` when the line has no start announcements (no notice, no capture: `policyState`) or the policy does not record outgoing calls. On an announced line, a policy enabled and approved for outgoing calls, or one that cannot be read, freezes `us`; so does a line that cannot be resolved;
 - an inbound call stays `us`;
 - a policy switched on between the start's read and the session runner's first read can still record an `eu` call. Its recording jobs read the session's region in every deployment, production included, so GET and DELETE go to `.eu`.
 
@@ -116,6 +116,7 @@ Before switching recording on in production, either run the recorded-call part o
 - Cross-region probe (session `d5fc6092`, above): a `GET /calls/:id` and a hangup through `.com` also work for a call created through `.eu`.
 - The owner's own iPhone outbound call to his mobile, 3 Nov 06:45 CET (session `326964b0`, `apiRegion: "eu"`): talking, then hold and unhold twice through an EU conference (conference create, join, hold and unhold all answered 200), then a clean hangup.
 - Inbound calls stay `us` by design.
+- Not yet run live on an `eu` session: consult, transfer, add-party, supervise, park and a callback start. They pass the application suites against a fake provider (`api-region.test.ts`, `api-region-flags-on.test.ts`). The first production release checks a consult or transfer on an outbound call in its stage-B smoke test.
 - Not verified: a recorded call through `.eu`. TEST, production and the organisation's policy all have `recording_enabled = false` (read 3 Nov), so this release freezes `eu` only for calls that will not be recorded (see the production unlock above).
 - Unchanged: `EU_SIP_DOMAIN_PROVEN` (the SIP-domain spike below waits for the owner's iPhone test), `CONCURRENT_START_PROVEN`, `JOIN_WITH_HOLD_PROVEN` and `TARGET_LOCAL_FIRST_PROVEN`.
 

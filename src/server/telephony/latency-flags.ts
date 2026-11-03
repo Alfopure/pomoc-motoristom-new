@@ -290,9 +290,11 @@ function joinWithHoldAllowed(): boolean {
  *   (create, join, hold and unhold all 200) and hung up cleanly.
  * Not proven: recording through `.eu`, so a start freezes `eu` only for a call
  * that will not be recorded (`StartRegionInput.unrecorded`); an inbound call
- * stays `us` (`startApiRegion`). A local run (`development`, even one pointed
- * at production data) and an unreadable environment keep `us` whatever
- * `api_region` says.
+ * stays `us` (`startApiRegion`). Not yet run live on an `eu` session (the
+ * harness suites cover them against a fake provider): consult, transfer,
+ * add-party, supervise, park and a callback start. A local run
+ * (`development`, even one pointed at production data) and an unreadable
+ * environment keep `us` whatever `api_region` says.
  */
 const EU_API_PROVEN = true;
 export function euApiRegionAllowed(): boolean {
