@@ -79,7 +79,8 @@ describe("the iOS app as App Store Connect receives it", () => {
     expect(ios.bundleIdentifier).toBe("sk.linkapomoci.dispecing");
     expect([...ios.infoPlist?.UIBackgroundModes ?? []].sort()).toEqual(["audio", "location", "voip"]);
     expect(ios.entitlements).toEqual({ "aps-environment": "production" });
-    expect(ios.infoPlist).toMatchObject({ CFBundleDisplayName: "Dispatching", ITSAppUsesNonExemptEncryption: false, LinkaNativeVoiceEnabled: true });
+    expect(ios.infoPlist).toMatchObject({ CFBundleDisplayName: "Dispečing", CFBundleShortVersionString: "1.0.0", CFBundleDevelopmentRegion: "sk",
+      CFBundleLocalizations: ["sk"], ITSAppUsesNonExemptEncryption: true, LinkaNativeVoiceEnabled: true });
     purposeTexts(ios.infoPlist);
     sceneLifecycle(ios.infoPlist);
   }, 30_000);

@@ -46,6 +46,8 @@ type Props = {
 const ACCOUNT_LINKS = [
   { title: "Ochrana súkromia", path: "/aplikacia/sukromie" },
   { title: "Podpora", path: "/aplikacia/podpora" },
+  // App Review 5.1.1(v): accounts are created and removed by the organization; this shows how to ask.
+  { title: "Zrušenie účtu", path: "/aplikacia/sukromie#rights" },
 ] as const;
 const OFF: SharingState = { status: "off", lastSentAt: null, background: null };
 const idle = { subscribe: () => () => undefined, snapshot: () => OFF };
@@ -169,7 +171,7 @@ export function FieldShell(props: Props) {
 /** The Prehľad card under the status: what dispatch sees now and, with accepted work, what to do about it. */
 export function locationText(location: SharingState, accepted: boolean): string {
   if (location.status === "sharing") return location.background === "always" ? "Dispečer vidí, kde ste, aj pri zamknutom telefóne, kým je práca otvorená."
-    : "Dispečer vidí, kde ste, kým je aplikácia spustená.";
+    : "Dispečer vidí, kde ste, aj pri zamknutom telefóne, kým je práca otvorená a aplikácia nie je úplne zatvorená.";
   if (!accepted) return "Poloha sa posiela až počas práce, ktorú ste prijali.";
   if (location.status === "denied") return "Poloha nie je povolená, dispečer nevidí, kde ste. Povoľte ju v nastaveniach telefónu.";
   if (location.status === "error") return "Polohu sa nepodarilo zapnúť. Otvorte prácu a skúste to znova.";

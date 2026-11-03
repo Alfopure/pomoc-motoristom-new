@@ -7,8 +7,8 @@ describe("photo config preserves the native voice and OTA boundary", () => {
     vi.stubEnv("APP_VARIANT", "test"); vi.stubEnv("EXPO_PUBLIC_APP_ENV", "test"); vi.stubEnv("EXPO_PUBLIC_VOICE_PROOF", voice ? "1" : "0"); vi.stubEnv("MOBILE_EXPO_GO_PREVIEW", "0");
     vi.resetModules(); const config = (await import("../../app.config")).default;
     const picker = config.plugins?.find(value => Array.isArray(value) && value[0] === "expo-image-picker") as [string, Record<string, unknown>];
-    expect(picker[1].microphonePermission).toBe("Aplikácia potrebuje mikrofón na telefonovanie.");
-    expect(config.ios?.infoPlist?.NSMicrophoneUsageDescription).toBe("Aplikácia potrebuje mikrofón na telefonovanie.");
+    expect(picker[1].microphonePermission).toContain("počas hovorov so zákazníkmi a kolegami");
+    expect(config.ios?.infoPlist?.NSMicrophoneUsageDescription).toContain("počas hovorov so zákazníkmi a kolegami");
     expect(config.ios?.infoPlist?.LinkaNativeVoiceEnabled).toBe(voice ? true : undefined);
     expect(picker[1].cameraPermission).toContain("prípadu"); expect(config.android?.blockedPermissions).not.toContain("android.permission.CAMERA");
     expect(config.updates).toEqual({ enabled: false });
@@ -22,6 +22,8 @@ describe("photo config preserves the native voice and OTA boundary", () => {
     expect(config.ios?.infoPlist?.ITSAppUsesNonExemptEncryption).toBe(false);
     const manifest = config.ios?.privacyManifests;
     expect(manifest?.NSPrivacyTracking).toBe(false);
+    // Non-crash error reports (stack and message) go to the own server: Other Diagnostic Data.
+    expect(manifest?.NSPrivacyCollectedDataTypes?.map(item => item.NSPrivacyCollectedDataType)).toContain("NSPrivacyCollectedDataTypeOtherDiagnosticData");
     expect(manifest?.NSPrivacyCollectedDataTypes?.every(item => item.NSPrivacyCollectedDataTypeTracking === false && item.NSPrivacyCollectedDataTypeLinked === true)).toBe(true);
     expect(manifest?.NSPrivacyAccessedAPITypes?.map(item => item.NSPrivacyAccessedAPIType)).toEqual(["NSPrivacyAccessedAPICategoryUserDefaults",
       "NSPrivacyAccessedAPICategoryFileTimestamp", "NSPrivacyAccessedAPICategorySystemBootTime", "NSPrivacyAccessedAPICategoryDiskSpace"]);

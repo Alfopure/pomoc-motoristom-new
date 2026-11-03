@@ -65,6 +65,15 @@
         "ascApiKeyId": "$EXPO_ASC_KEY_ID",
         "ascApiKeyIssuerId": "$EXPO_ASC_ISSUER_ID"
       }
+    },
+    "production": {
+      "ios": {
+        "appleTeamId": "792TJPXTL3",
+        "ascAppId": "6830148973",
+        "ascApiKeyPath": "$EXPO_ASC_API_KEY_PATH",
+        "ascApiKeyId": "$EXPO_ASC_KEY_ID",
+        "ascApiKeyIssuerId": "$EXPO_ASC_ISSUER_ID"
+      }
     }
   }
 }

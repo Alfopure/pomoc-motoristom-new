@@ -35,7 +35,7 @@ describe("call screen", () => {
   });
   it("starts a new call only from a ready phone", () => {
     const phone = {} as DispatchPhone;
-    expect(dialBlockedReason(null, state())).toMatch(/natívnej aplikácii/);
+    expect(dialBlockedReason(null, state())).toMatch(/teraz nie je dostupné/);
     expect(dialBlockedReason(phone, state({ registration: "connecting" } as Partial<PhoneState>))).toMatch(/nie je pripojený/);
     expect(dialBlockedReason(phone, state({ microphonePermission: "denied" } as Partial<PhoneState>))).toMatch(/mikrofónu/);
     expect(dialBlockedReason(phone, state({ call: call() }))).toMatch(/Počas hovoru/);

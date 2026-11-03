@@ -273,7 +273,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
   useEffect(() => { if (active && (verifiedProfile || verifiedMember)) void push.resume(); }, [active, verifiedProfile, verifiedMember, push]);
   const callbackSummary = useQuery({ queryKey: [...key, "callback-summary", identity?.profileId], enabled: active && Boolean(identity),
     queryFn: ({ signal }) => api.callbackSummary(identity!.profileId, signal), refetchInterval: active ? 30_000 : false });
-  const dialBlocked = dialBlockedReason(phone, phoneState, "Zavolať späť z mobilu bude možné v natívnej aplikácii s pripojeným telefónom. V tomto náhľade môžete požiadavky prevziať a uzavrieť.");
+  const dialBlocked = dialBlockedReason(phone, phoneState, "Volanie z mobilu teraz nie je dostupné. Požiadavky môžete prevziať a uzavrieť.");
   const dialer: CallbackDialer = { available: dialBlocked === null, reason: dialBlocked, dial: async (id, value, verificationId) => {
     if (!phone) return "Telefón nie je dostupný.";
     if (!await phone.dialCallback(id, value, verificationId)) return phone.snapshot().error ?? "Telefón práve nie je pripravený na nový hovor. Skúste to znova.";

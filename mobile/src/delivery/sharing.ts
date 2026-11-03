@@ -2,9 +2,11 @@ import type { MobileEnvironment } from "../../../src/lib/mobile-api";
 import type { ReadingQueue, TrackingState, TrackingStore } from "./background";
 
 export type Permission = "granted" | "denied" | "undetermined";
-/** `background`: "always" keeps sending when the app is closed, "whenInUse" only
- * while the app runs (also in the background, with the blue indicator); null in
- * Expo Go and before sharing starts. */
+/** `background`: "always" when the user granted Always themselves in Settings (the app
+ * never asks for it), "whenInUse" otherwise. Both keep sending in the background and
+ * with the phone locked, with the blue indicator, because sharing starts while the app
+ * is open; with "whenInUse" it resumes only after the app is opened again once iOS ended
+ * it. null in Expo Go and before sharing starts. */
 export type SharingState = { status: "off" | "sharing" | "denied" | "error"; lastSentAt: number | null; background: "always" | "whenInUse" | null };
 /** Where the pristavovač is goes to the dispatcher during the delivery they took. */
 export interface LocationSharing {
@@ -25,8 +27,11 @@ export interface LocationSharing {
 
 export type BackgroundSource = {
   permission: () => Promise<Permission>; request: () => Promise<Permission>;
-  backgroundPermission: () => Promise<Permission>; requestBackground: () => Promise<Permission>;
+  /** Read only: App Review wants no Always request for this (owner decision 2026-11-03). */
+  backgroundPermission: () => Promise<Permission>;
   running: () => Promise<boolean>; start: () => Promise<void>; stop: () => Promise<void>;
+  /** Restarts updates that began while the app was in the background, once it is active. */
+  resume: () => Promise<void>;
 };
 type Deps = {
   source: BackgroundSource; store: TrackingStore; queue: ReadingQueue;
@@ -117,13 +122,16 @@ export class BackgroundTracker implements LocationSharing {
       this.update({ status: permission === "denied" ? "denied" : "off", background: null });
       return;
     }
-    let always = await source.backgroundPermission();
-    if (!this.current(generation)) return;
-    if (always === "undetermined" && ask) always = await source.requestBackground();
+    const always = await source.backgroundPermission().catch((): Permission => "undetermined");
     if (!this.current(generation)) return;
     const background = always === "granted" ? "always" as const : "whenInUse" as const;
     const current = stored !== null && this.inScope(stored) && stored.deliveryId === deliveryId && stored.memberId === memberId && Date.parse(stored.expiresAt) > Date.now();
-    if (current && await source.running()) { if (this.current(generation)) this.update({ status: "sharing", background }); return; }
+    if (current && await source.running()) {
+      if (!this.current(generation)) return;
+      await source.resume().catch(() => undefined);
+      if (this.current(generation)) this.update({ status: "sharing", background });
+      return;
+    }
     if (!this.current(generation)) return;
     if (!current) {
       // A new delivery/account/server must never leave the previous tracker
