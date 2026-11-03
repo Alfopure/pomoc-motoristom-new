@@ -1,4 +1,4 @@
-import { Platform } from "react-native";
+import { AppState, Platform } from "react-native";
 import Constants, { ExecutionEnvironment } from "expo-constants";
 import * as Location from "expo-location";
 import * as SecureStore from "expo-secure-store";
@@ -46,16 +46,25 @@ function channel(task: string, stateKey: string, queueName: string, path: string
     clear: async () => { const file = queueFile(); if (file.exists) file.delete(); },
   };
   const running = () => Location.hasStartedLocationUpdatesAsync(task).catch(() => false);
+  // With While Using only, iOS delivers updates started in the foreground. Updates restored
+  // or started while the app runs in the background (e.g. relaunched for a call) are started
+  // once more when the app is next active.
+  let startedInBackground = AppState.currentState !== "active";
+  const start = () => {
+    startedInBackground = AppState.currentState !== "active";
+    return Location.startLocationUpdatesAsync(task, {
+      accuracy: Location.Accuracy.High, distanceInterval: 50, deferredUpdatesInterval: 20_000, pausesUpdatesAutomatically: false,
+      activityType: Location.ActivityType.AutomotiveNavigation, showsBackgroundLocationIndicator: true,
+    });
+  };
   const source: BackgroundSource = {
     permission: async () => status(await Location.getForegroundPermissionsAsync()),
     request: async () => status(await Location.requestForegroundPermissionsAsync()),
     backgroundPermission: async () => status(await Location.getBackgroundPermissionsAsync()),
     running,
     // Driving: precise, every 50 m, sent at most every 20 s; the blue indicator shows it.
-    start: () => Location.startLocationUpdatesAsync(task, {
-      accuracy: Location.Accuracy.High, distanceInterval: 50, deferredUpdatesInterval: 20_000, pausesUpdatesAutomatically: false,
-      activityType: Location.ActivityType.AutomotiveNavigation, showsBackgroundLocationIndicator: true,
-    }),
+    start,
+    resume: async () => { if (startedInBackground && AppState.currentState === "active") await start(); },
     stop: () => Location.stopLocationUpdatesAsync(task),
   };
   let lastSent = 0;

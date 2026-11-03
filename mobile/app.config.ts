@@ -34,8 +34,9 @@ const accessed = [["UserDefaults", "CA92.1"], ["FileTimestamp", "C617.1"], ["Sys
 const microphoneUse = "Aplikácia používa mikrofón počas hovorov so zákazníkmi a kolegami v module Hovory, aby vás druhá strana počula.";
 
 const config: ExpoConfig = {
-  // The store lists production as "Dispečing – Linka pomoci"; the home screen shows "Dispečing".
-  name: variant === "production" ? "Dispečing" : variant === "test" ? "Dispatching TEST" : "Dispatching DEV",
+  // ASCII project/target name (prebuild drops "č"); the home screen of production shows
+  // "Dispečing" through CFBundleDisplayName below, the store "Dispečing – Linka pomoci".
+  name: "Dispatching" + (variant === "production" ? "" : variant === "test" ? " TEST" : " DEV"),
   slug: "linka-pomoci-dispecing",
   owner: "linkapomoci",
   version: "1.0.0",
@@ -46,11 +47,14 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: "sk.linkapomoci.dispecing" + suffix, supportsTablet: false,
     privacyManifests: { NSPrivacyTracking: false, NSPrivacyTrackingDomains: [], NSPrivacyCollectedDataTypes: collected, NSPrivacyAccessedAPITypes: accessed },
-    // Only HTTPS and standard WebRTC call encryption (DTLS-SRTP in the Telnyx library) are used.
     infoPlist: {
-      ITSAppUsesNonExemptEncryption: false,
-      // The interface is Slovak only; App Store Connect lists the app's language from this.
-      CFBundleDevelopmentRegion: "sk",
+      // Calls are encrypted by the bundled WebRTC (DTLS-SRTP, BoringSSL), not only by iOS, so the
+      // App Store build declares encryption and its answers are given in App Store Connect
+      // (standard algorithms, France not offered). TEST TestFlight builds keep the earlier answer.
+      ITSAppUsesNonExemptEncryption: variant === "production",
+      // The interface is Slovak only.
+      CFBundleDevelopmentRegion: "sk", CFBundleLocalizations: ["sk"],
+      ...(variant === "production" ? { CFBundleDisplayName: "Dispečing" } : {}),
       NSMicrophoneUsageDescription: microphoneUse,
       ...(nativeVoice ? { LinkaNativeVoiceEnabled: true, UIBackgroundModes: ["audio", "voip"] } : {}),
     },

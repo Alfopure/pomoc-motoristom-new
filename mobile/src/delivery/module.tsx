@@ -50,7 +50,7 @@ function locationNote(tracking: boolean, location: SharingState, mode: LocationS
   if (location.status === "error") return "Polohu sa nepodarilo zapnúť. Skúste to znova.";
   if (location.status !== "sharing") return "Poloha sa zatiaľ neposiela.";
   if (mode === "foreground") return "Vaša poloha sa posiela dispečingu, kým je pristavenie otvorené a aplikácia zapnutá. V Expo Go sa na pozadí neposiela.";
-  return location.background === "always" ? "Vaša poloha sa posiela dispečingu aj na pozadí a pri zamknutom telefóne, kým je pristavenie otvorené."
+  return location.background === "always" ? "Vaša poloha sa posiela dispečingu aj na pozadí, pri zamknutom telefóne a po zatvorení aplikácie, kým je pristavenie otvorené."
     : "Vaša poloha sa posiela dispečingu aj na pozadí a pri zamknutom telefóne, kým je pristavenie otvorené. Ak aplikáciu úplne zatvoríte, posielanie pokračuje po jej otvorení.";
 }
 

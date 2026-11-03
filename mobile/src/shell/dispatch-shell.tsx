@@ -265,7 +265,7 @@ export function DispatchShell(props: Props) {
   }
   const presence = consoleQuery.data?.presence.status;
   const statusLabel = presence ? (presence === "after_call_work" ? "Po hovore" : presenceLabels[presence]) : consoleQuery.isError ? "Stav neznámy" : "Stav…";
-  const phoneDetail = !phone ? "Volanie v natívnej appke" : phoneState.registration === "registered" ? "Pripojený k ústredni" : phoneState.registration === "connecting" ? "Pripájam…" : "Nepripojený";
+  const phoneDetail = !phone ? "Volanie nie je dostupné" : phoneState.registration === "registered" ? "Pripojený k ústredni" : phoneState.registration === "connecting" ? "Pripájam…" : "Nepripojený";
   const waiting = callbackSummary.data?.counts.open ?? 0;
   const openedInModules = nav.tab === "moduly" && nav.opened !== null && !nav.account;
   const sheetModule = sheet.value && sheet.value.kind !== "edit" ? sheet.value.id : null;

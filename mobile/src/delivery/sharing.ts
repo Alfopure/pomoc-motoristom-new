@@ -30,6 +30,8 @@ export type BackgroundSource = {
   /** Read only: App Review wants no Always request for this (owner decision 2026-11-03). */
   backgroundPermission: () => Promise<Permission>;
   running: () => Promise<boolean>; start: () => Promise<void>; stop: () => Promise<void>;
+  /** Restarts updates that began while the app was in the background, once it is active. */
+  resume: () => Promise<void>;
 };
 type Deps = {
   source: BackgroundSource; store: TrackingStore; queue: ReadingQueue;
@@ -124,7 +126,12 @@ export class BackgroundTracker implements LocationSharing {
     if (!this.current(generation)) return;
     const background = always === "granted" ? "always" as const : "whenInUse" as const;
     const current = stored !== null && this.inScope(stored) && stored.deliveryId === deliveryId && stored.memberId === memberId && Date.parse(stored.expiresAt) > Date.now();
-    if (current && await source.running()) { if (this.current(generation)) this.update({ status: "sharing", background }); return; }
+    if (current && await source.running()) {
+      if (!this.current(generation)) return;
+      await source.resume().catch(() => undefined);
+      if (this.current(generation)) this.update({ status: "sharing", background });
+      return;
+    }
     if (!this.current(generation)) return;
     if (!current) {
       // A new delivery/account/server must never leave the previous tracker

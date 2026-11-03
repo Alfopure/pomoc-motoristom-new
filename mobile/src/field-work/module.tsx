@@ -208,7 +208,7 @@ function positionNote(location: SharingState, mode: LocationSharing["mode"]): st
   if (location.status === "error") return "Polohu sa nepodarilo zapnúť. Skúste to znova.";
   if (location.status !== "sharing") return "Poloha sa počas tejto jazdy zatiaľ neposiela.";
   if (mode === "foreground") return "Vaša poloha sa posiela dispečingu počas tejto jazdy, kým je aplikácia otvorená.";
-  return location.background === "always" ? "Vaša poloha sa posiela dispečingu aj na pozadí a pri zamknutom telefóne, kým je jazda otvorená."
+  return location.background === "always" ? "Vaša poloha sa posiela dispečingu aj na pozadí, pri zamknutom telefóne a po zatvorení aplikácie, kým je jazda otvorená."
     : "Vaša poloha sa posiela dispečingu aj na pozadí a pri zamknutom telefóne, kým je jazda otvorená. Ak aplikáciu úplne zatvoríte, posielanie pokračuje po jej otvorení.";
 }
 

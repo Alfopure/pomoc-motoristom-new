@@ -29,7 +29,7 @@ export function phoneReadiness({ state, configuration, configurationError = fals
   let message = "Príjem pri zamknutí overte skúšobným hovorom. Registrácia sama nepotvrdzuje doručenie hovoru.";
   if (!state.supported) {
     title = "Volanie v aplikácii nie je dostupné"; tone = "muted";
-    message = "Telefonovanie sa v aplikácii nepodarilo spustiť. Ústredňu, históriu a prípady môžete používať ďalej. Ak to trvá, kontaktujte podporu.";
+    message = "Volanie v tejto zostave aplikácie nie je dostupné. Ústredňu, históriu a prípady môžete používať ďalej.";
   } else if (state.termination) {
     title = "Ukončujem hovor…"; tone = "warning"; message = "Čakáme na potvrdenie ústredne. Nový hovor bude dostupný po ukončení.";
   } else if (state.call) {

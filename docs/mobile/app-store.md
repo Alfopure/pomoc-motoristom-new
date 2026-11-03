@@ -9,7 +9,7 @@ formulácie má pred odoslaním skontrolovať majiteľ.
 
 | Pole | Hodnota |
 |---|---|
-| Názov | **Dispečing – Linka pomoci** v obchode; na ploche „Dispečing“ (`name` v `app.config.ts`) |
+| Názov | **Dispečing – Linka pomoci** v obchode; na ploche „Dispečing“ (`CFBundleDisplayName`; `name` ostáva „Dispatching“ ako ASCII názov Xcode projektu) |
 | Podnadpis (do 30 znakov) | Mobilný dispečing asistencie |
 | Bundle ID | `sk.linkapomoci.dispecing` (produkcia), `.test` pre TEST |
 | Kategória | Business; vedľajšia Productivity |
@@ -66,11 +66,12 @@ s používateľom**, **nepoužíva sa na sledovanie**, účel **funkčnosť apli
 ## Ďalšie odpovede
 
 - **Šifrovanie:** HTTPS ide cez systém, hovory však šifruje knižnica WebRTC
-  v aplikácii (DTLS-SRTP, BoringSSL). V App Store Connect preto odpovedať:
-  šifrovanie **áno**, typ „štandardné algoritmy namiesto alebo popri šifrovaní
-  systému Apple“, nie vlastné; Francúzsko je z krajín vynechané. Kľúč
-  `ITSAppUsesNonExemptEncryption` v builde sa upraví podľa výsledku tohto
-  dotazníka (ak App Store Connect vydá kód, pribudne `ITSEncryptionExportComplianceCode`).
+  v aplikácii (DTLS-SRTP, BoringSSL). Produkčný build preto má
+  `ITSAppUsesNonExemptEncryption = true` (TEST ostáva `false`) a App Store Connect
+  sa pri builde spýta na šifrovanie: šifrovanie **áno**, typ „štandardné
+  algoritmy namiesto alebo popri šifrovaní systému Apple“, nie vlastné;
+  Francúzsko je z krajín vynechané. Ak App Store Connect vydá kód, pribudne
+  `ITSEncryptionExportComplianceCode`.
 - **Prihlásenie pre kontrolu Apple (Guideline 2.1):** rozhodnutie majiteľa
   z 3. 11. 2026: samostatný účet len pre kontrolu, **natrvalo aktívny** (Apple
   ho vyžaduje aj pri ďalších verziách), bez MFA, iba v testovacej pobočke

@@ -26,7 +26,7 @@ describe("operator phone readiness", () => {
   it("does not infer native support from enabled backend flags", () => {
     const result = inspect({ supported: false });
     expect(result.canConnect).toBe(false); expect(result.tone).not.toBe("success");
-    expect(result.message).toContain("nepodarilo spustiť");
+    expect(result.message).toContain("v tejto zostave");
   });
   it("distinguishes configured background registration from proven delivery", () => {
     const result = inspect();

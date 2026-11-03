@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { describe, expect, it, vi } from "vitest";
 import type { Reading, TrackingState } from "./background";
 import { BackgroundTracker, type BackgroundSource, type Permission } from "./sharing";
@@ -10,7 +11,7 @@ function setup({ permission = "granted", answer = "granted", always = "undetermi
   const source: BackgroundSource = {
     permission: vi.fn(async () => permission), request: vi.fn(async () => answer),
     backgroundPermission: vi.fn(async () => always),
-    running: vi.fn(async () => active), start: vi.fn(async () => { active = true; }), stop: vi.fn(async () => { active = false; }),
+    running: vi.fn(async () => active), start: vi.fn(async () => { active = true; }), stop: vi.fn(async () => { active = false; }), resume: vi.fn(async () => undefined),
   };
   const issue = vi.fn(async (deliveryId: string) => ({ token: (deliveryId === A ? "a" : "b").repeat(43), expiresAt: "2099-01-01T00:00:00Z" }));
   const revoke = vi.fn(async () => undefined);
@@ -33,7 +34,6 @@ describe("background sharing of the pristavovač's position", () => {
     const asked = setup({ permission: "undetermined" });
     await asked.tracker.follow(A, true);
     expect(asked.source.request).toHaveBeenCalledOnce();
-    expect(asked.source).not.toHaveProperty("requestBackground");
     expect(asked.running()).toBe(true);
     expect(asked.saved()).toMatchObject({ deliveryId: A, memberId: ME, token: "a".repeat(43) });
     expect(asked.tracker.snapshot()).toMatchObject({ status: "sharing", background: "whenInUse" });
@@ -50,6 +50,26 @@ describe("background sharing of the pristavovač's position", () => {
     await refused.tracker.follow(A, true);
     expect(refused.tracker.snapshot().status).toBe("denied");
     expect(refused.issue).not.toHaveBeenCalled();
+  });
+
+  it("lets a running sending restart from the foreground (While Using delivers only updates started there)", async () => {
+    const running = setup({ stored: kept(A), running: true });
+    await running.tracker.follow(A);
+    expect(running.source.resume).toHaveBeenCalledOnce();
+    expect(running.source.start).not.toHaveBeenCalled();
+    expect(running.tracker.snapshot()).toMatchObject({ status: "sharing", background: "whenInUse" });
+  });
+
+  it("never asks for Always anywhere in the app (App Review, owner decision 2026-11-03)", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const root = join(import.meta.dirname, "..", "..");
+    const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(entry =>
+      entry.isDirectory() ? files(join(dir, entry.name)) : /\.(ts|tsx)$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name) ? [join(dir, entry.name)] : []);
+    const sources = [...files(join(root, "src")), join(root, "App.tsx"), join(root, "index.ts")];
+    expect(sources.length).toBeGreaterThan(50);
+    const offenders = sources.filter(file => /requestBackgroundPermissionsAsync|requestAlwaysAuthorization/.test(readFileSync(file, "utf8")));
+    expect(offenders).toEqual([]);
   });
 
   it("goes on with the kept secret after the app was closed, and gets a new one for another delivery", async () => {
