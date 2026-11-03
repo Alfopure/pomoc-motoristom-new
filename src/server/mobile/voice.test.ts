@@ -181,6 +181,27 @@ describe("native voice boundaries", () => {
     h.db.seed("motorist_provider_commands", [dial()]);
     expect(await authorizeNativeOffer(deps, actor, offer)).toMatchObject({ sessionId, callControlId: "exact-native-leg", direction: "internal", role: "callee", displayName: "Kolega" });
   });
+  it("still authorizes a linked call's delivered offer when the journal cannot be read, and logs only that", async () => {
+    const { deps, h } = fixture(); const sdkLeg = "2530AD30-CE3D-11F1-A033-02420A1F0D69";
+    const connection = deps.config?.configured ? deps.config.credentialConnectionId : null;
+    h.db.update("motorist_call_sessions", { direction: "outbound", telnyx_session_id: "provider-session", called_number: "+421900000009", metadata: { environment: deps.environment } }, () => true);
+    h.db.update("motorist_call_legs", { created_at: h.now().toISOString(), answered_at: null }, () => true);
+    const delivered = (callSession: string) => ({ event_id: `evt-${callSession}`, organization_id: ORG, event_type: "call.initiated", call_session_id: callSession,
+      call_leg_id: "2530a204-ce3d-11f1-a1f5-02420a1f0d69", connection_id: connection, payload: { direction: "incoming", to: "native-test" } });
+    h.db.seed("motorist_telnyx_webhook_events", [delivered("provider-session")]);
+    const offer = { deviceSessionId: lease, providerLegId: sdkLeg };
+    h.db.failNext("motorist_provider_commands", "select", "journal unavailable");
+    expect(await authorizeNativeOffer(deps, actor, offer)).toMatchObject({ sessionId, callControlId: "exact-native-leg", direction: "outbound", role: "caller" });
+    expect(h.logs.filter(entry => entry.scope === "mobile-voice")).toEqual([{ level: "warn", scope: "mobile-voice", code: "delivered_offer_journal_unavailable" }]);
+    // An unlinked (B′) far leg delivered only under its own call session falls back to the previous behaviour: not resolved.
+    h.db.delete("motorist_telnyx_webhook_events", () => true);
+    h.db.seed("motorist_telnyx_webhook_events", [delivered("far-session")]);
+    h.db.seed("motorist_provider_commands", [{ session_id: sessionId, command_id: "far-dial", method: "POST", path: "/calls", outcome: "accepted",
+      request_payload: {}, result: { data: { call_control_id: "exact-native-leg", call_session_id: "far-session" } } }]);
+    h.db.failNext("motorist_provider_commands", "select", "journal unavailable");
+    await expect(authorizeNativeOffer(deps, actor, offer)).rejects.toMatchObject({ status: 409, code: "native_offer_pending" });
+    expect(await authorizeNativeOffer(deps, actor, offer)).toMatchObject({ sessionId, callControlId: "exact-native-leg" });
+  });
   it.each(["error", "unregistered"])("allows the current owner to recover from %s without reviving a revoked lease", async registration_state => {
     const { deps, h } = fixture(); h.db.update("motorist_operator_mobile_devices", { registration_state }, () => true);
     await expect(requireNativeLease(deps, actor, lease)).rejects.toMatchObject({ status: 409 });

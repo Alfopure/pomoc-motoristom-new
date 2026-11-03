@@ -275,16 +275,22 @@ async function deliveredLeg(deps: TelephonyRuntimeDeps, actor: MotoristActor, si
     .is("ended_at", null).is("answered_at", null).gte("created_at", since).limit(2);
   if (error) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
   if (legs?.length !== 1) return null;
-  const [{ data: session, error: sessionError }, { data: dials, error: dialError }] = await Promise.all([
+  const journal = deps.admin.from("motorist_provider_commands").select("result").eq("session_id", legs[0].session_id)
+    .eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
+    .contains("result", { data: { call_control_id: legs[0].telnyx_call_control_id } }).limit(2);
+  const [{ data: session, error: sessionError }, dialRead] = await Promise.all([
     deps.admin.from("motorist_call_sessions").select("telnyx_session_id")
       .eq("organization_id", actor.organizationId).eq("id", legs[0].session_id).maybeSingle(),
-    deps.admin.from("motorist_provider_commands").select("result").eq("session_id", legs[0].session_id)
-      .eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
-      .contains("result", { data: { call_control_id: legs[0].telnyx_call_control_id } }).limit(2),
+    Promise.resolve(journal).catch(() => null),
   ]);
-  if (sessionError || dialError) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
+  if (sessionError) throw new MutationError("Ponuku hovoru sa nepodarilo overiť.", 503);
   if (!session) return null;
-  const dialSessions = (dials ?? []).map(dial => {
+  // The journal only adds an unlinked dial's own call session (S6 B′). Without
+  // it a linked or sequential offer still resolves by the session's call; a B′
+  // far leg stays unresolved, as before.
+  if (!dialRead || dialRead.error) deps.logger?.({ level: "warn", scope: "mobile-voice", code: "delivered_offer_journal_unavailable" });
+  const dials = dialRead && !dialRead.error ? dialRead.data ?? [] : [];
+  const dialSessions = dials.map(dial => {
     const data = dial.result && typeof dial.result === "object" && !Array.isArray(dial.result) ? dial.result.data : null;
     return data && typeof data === "object" && !Array.isArray(data) ? data.call_session_id : null;
   });
