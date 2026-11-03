@@ -15,7 +15,7 @@ import { recordCallEvent, resumePendingEffects, type CommandOutcome } from "../s
 import { readPendingEffects } from "../state/continuation";
 import { classifyEventType, parseTelnyxEnvelope, type EventClass } from "../state/events";
 import { DUPLICATE_BRIDGE, lineInboundMode, toJson, type LineRow, type SessionRow, type TelephonyEvent } from "../state/types";
-import { concurrentBridgeDueAt, readMeta } from "../state/types";
+import { concurrentBridgeSessionDueAt, readMeta } from "../state/types";
 import { loadParticipantManifest, observeParticipants } from "../state/participants";
 import { enqueueSavedRecording } from "../recording-jobs";
 import { recordingIntent } from "../state/recording";
@@ -713,7 +713,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         readMeta(ownedSession).far_end?.mode === "concurrent" &&
         (await pendingLedgerControlIds(deps.admin, deps.organizationId, "call.answered", [event.callControlId])).has(event.callControlId);
       const run = await runSessionEvent(deps, ownedSession.id, answeredPending ? { ...event, answeredPending: true } : event, { deferObservationAudit: true });
-      if (run.session.state === "ringing" && concurrentBridgeDueAt(readMeta(run.session)) !== null) pendingBridge = run.session;
+      if (concurrentBridgeSessionDueAt(run.session) !== null) pendingBridge = run.session;
       observationAudit = run.afterRelease;
       if (["call.bridged", "call.hangup", "conference.participant.joined", "conference.participant.left"].includes(event.type)) {
         try { await observeParticipants(deps.admin, run.session, event.id, event.occurredAt ?? now().toISOString(), event.type === "call.bridged", undefined, latencyFlagsOf(deps).internal_lean_path); }
@@ -760,7 +760,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // Do not hold the next answer/hangup behind incident reporting or another
     // call's sweep. The HTTP host must retain this promise (Next after), never
     // launch untracked work; direct cron/recovery callers still await it.
-    const maintenance = async () => {
+    const maintenance = async (deferred: boolean) => {
       if (result.outcome === "processed" || result.outcome === "ignored") await replayCorrelatedEvents(deps, event, ownedSession);
       else if (failedOwnerReplayEligible && eventClass === "control" && deps.replayCorrelated !== false) {
         // A held run (S1.3) carries its drain's window: a failed apply there
@@ -785,17 +785,22 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         await maybeSweep(deps, now().getTime(), ["call.hangup", "call.bridged"].includes(event.type));
       }
       // N2: the request that left a concurrent bridge waiting enforces its
-      // retry and deadline itself, after the response (only an HTTP host that
-      // retains this work; a direct cron/recovery caller never waits here).
-      if (pendingBridge && deps.deferMaintenance) await awaitConcurrentBridge(deps, pendingBridge, started);
+      // retry, deadline and verification itself, after the response — only when
+      // this work was really deferred (L2): an inline fallback, or a direct
+      // cron/recovery caller, never holds its response for it. A correlated
+      // replay above may have left the bridge waiting too (L1).
+      if (deferred) {
+        if (pendingBridge) await awaitConcurrentBridge(deps, pendingBridge, started);
+        else if (readMeta(ownedSession).far_end?.mode === "concurrent") await awaitSessionBridge(deps, ownedSession.id, started);
+      }
     };
     if (deps.deferMaintenance) {
-      try { deps.deferMaintenance(maintenance); }
+      try { deps.deferMaintenance(() => maintenance(true)); }
       catch {
         deps.logger?.({ level: "warn", scope: "webhook", message: "maintenance scheduling unavailable" });
-        await maintenance();
+        await maintenance(false);
       }
-    } else await maintenance();
+    } else await maintenance(false);
     return result;
   } catch (error) {
     const message = describeServiceError(error);
@@ -817,6 +822,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     if (selfDrainable && !held && session && deps.deferMaintenance && claim.claimedAt &&
       latencyFlagsOf(deps).claim_holding_drain && Date.now() - ingressWall <= DEFERRED_ACK_MAX_ELAPSED_MS) {
       const heldSessionId = session.id;
+      const heldConcurrent = readMeta(session).far_end?.mode === "concurrent";
       const waiter: HeldClaimWaiter = { event, envelope, claim, ingressWall };
       const start = holdClaim(deps, heldSessionId, waiter);
       try {
@@ -825,6 +831,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
           catch (drainError) {
             deps.logger?.({ level: "warn", scope: "webhook", sessionId: heldSessionId, message: "held claim drain failed", error: drainError instanceof Error ? drainError.message : String(drainError) });
           }
+          // L1: an answer this drain applied may have left a concurrent bridge waiting.
+          if (heldConcurrent) await awaitSessionBridge(deps, heldSessionId, started);
         });
         deps.logger?.({ level: "warn", scope: "webhook", eventId: event.id, type: event.type, sessionId: heldSessionId, outcome: "deferred", error: message, retryable: true,
           ms: now().getTime() - started, deferral: "lease_busy", claim_held: true,
@@ -864,6 +872,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     let drainScheduled = false;
     if (deferred && session && deps.deferMaintenance) {
       const deferredSessionId = session.id;
+      const deferredConcurrent = readMeta(session).far_end?.mode === "concurrent";
       try {
         deps.deferMaintenance(async () => {
           try {
@@ -873,6 +882,8 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
           } catch (drainError) {
             deps.logger?.({ level: "warn", scope: "webhook", sessionId: deferredSessionId, message: "deferred drain failed", error: drainError instanceof Error ? drainError.message : String(drainError) });
           }
+          // L1: the replayed answer may have left a concurrent bridge waiting.
+          if (deferredConcurrent) await awaitSessionBridge(deps, deferredSessionId, started);
         });
         drainScheduled = true;
       } catch {
@@ -1112,9 +1123,9 @@ export const CONCURRENT_BRIDGE_TIMER_BUDGET_MS = 45_000;
 async function awaitConcurrentBridge(deps: ProcessorDeps, session: SessionRow, startedAt: number): Promise<void> {
   const now = nowOf(deps);
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
-  let meta = readMeta(session);
-  for (let round = 0; round < 4; round += 1) {
-    const due = concurrentBridgeDueAt(meta);
+  let current: SessionRow = session;
+  for (let round = 0; round < 5; round += 1) {
+    const due = concurrentBridgeSessionDueAt(current);
     if (due === null) return;
     const wait = Math.max(0, due - now().getTime()) + CONCURRENT_BRIDGE_TIMER_MARGIN_MS;
     if (now().getTime() + wait - startedAt > CONCURRENT_BRIDGE_TIMER_BUDGET_MS) return;
@@ -1127,8 +1138,18 @@ async function awaitConcurrentBridge(deps: ProcessorDeps, session: SessionRow, s
       return;
     }
     const fresh = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", session.id).maybeSingle();
-    if (fresh.error || !fresh.data || fresh.data.state !== "ringing") return;
-    meta = readMeta(fresh.data);
+    if (fresh.error || !fresh.data) return;
+    current = fresh.data;
+  }
+}
+
+/** L1: after a drain or replay host applied this session's events, the same timer if a concurrent bridge waits. */
+async function awaitSessionBridge(deps: ProcessorDeps, sessionId: string, startedAt: number): Promise<void> {
+  try {
+    const row = await deps.admin.from("motorist_call_sessions").select("*").eq("organization_id", deps.organizationId).eq("id", sessionId).maybeSingle();
+    if (!row.error && row.data && concurrentBridgeSessionDueAt(row.data) !== null) await awaitConcurrentBridge(deps, row.data, startedAt);
+  } catch (error) {
+    deps.logger?.({ level: "warn", scope: "sweep", sessionId, code: "concurrent_bridge_timer_failed", error: error instanceof Error ? error.message : String(error) });
   }
 }
 

@@ -30,7 +30,7 @@ import {
   type SessionRow,
   type TelephonyEnvironment,
   type ConcurrentBridgeJournal,
-  concurrentBridgeDueAt,
+  concurrentBridgeSessionDueAt,
   TERMINAL_STATES,
 } from "../state/types";
 import { pendingLedgerControlIds } from "../telnyx/webhook-ledger";
@@ -416,8 +416,8 @@ export function isRingStepOverdue(session: SessionRow, now: Date): boolean {
  * or ends both legs.
  */
 export function isConcurrentBridgeOverdue(session: SessionRow, now: Date): boolean {
-  if (session.state !== "ringing") return false;
-  const due = concurrentBridgeDueAt(readMeta(session));
+  // Ringing: Telnyx's own wait, our retry or deadline. Connected on a 2xx: its verification (M1).
+  const due = concurrentBridgeSessionDueAt(session);
   return due !== null && due <= now.getTime();
 }
 
@@ -533,7 +533,7 @@ export async function findOverdueSessions(admin: AdminClient, input: { organizat
       .limit(input.scanLimit ?? OVERDUE_SCAN_LIMIT),
     // N2: the scan above is oldest-first and capped; a concurrent bridge due
     // seconds after its last write is among the newest ringing sessions.
-    admin.from("motorist_call_sessions").select("*").eq("organization_id", input.organizationId).eq("state", "ringing")
+    admin.from("motorist_call_sessions").select("*").eq("organization_id", input.organizationId).in("state", ["ringing", "talking"])
       .order("updated_at", { ascending: false }).limit(RINGING_SCAN_LIMIT),
   ]);
   if (scan.error) throw new Error(`overdue session scan failed: ${scan.error.message}`);

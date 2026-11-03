@@ -562,6 +562,129 @@ describe("S6.2 decision table: outbound", () => {
     await expectEndedUnanswered(t, call);
   });
 
+  describe("M1: a call connected on the bridge's 2xx is verified at its deadline", () => {
+    async function connectedOn2xx(t: World) {
+      const call = await outbound(t);
+      await answer(t, call.far);
+      await answer(t, call.own);
+      await explicitFallback(t);
+      expect(t.h.session(call.sessionId).state).toBe("talking");
+      return call;
+    }
+    const warnings = (t: World, sessionId: string) => t.h.logs.filter(entry => entry.code === CONCURRENT_BRIDGE_WITHOUT_EVIDENCE && entry.sessionId === sessionId);
+
+    it("warns once and notes the history when no leg ever reports call.bridged, and never tears the call down", async () => {
+      const t = world();
+      const call = await connectedOn2xx(t);
+      // Not yet: the deadline only verifies.
+      await sweepAfter(t, CONCURRENT_BRIDGE_DEADLINE_MS / 2);
+      expect(warnings(t, call.sessionId)).toEqual([]);
+      await sweepAfterDeadline(t);
+      expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
+      expect(meta(t, call.sessionId).far_end?.bridge?.verification).toMatchObject({ outcome: "no_evidence" });
+      expect(warnings(t, call.sessionId)).toEqual([expect.objectContaining({ level: "warn" })]);
+      expect(t.h.rows("motorist_call_events").some(row => JSON.stringify(row.normalized_payload).includes(CONCURRENT_BRIDGE_WITHOUT_EVIDENCE))).toBe(true);
+      expect(hungUp(t, call.own) || hungUp(t, call.far)).toBe(false);
+      // Verified once: later sweeps say nothing more.
+      await sweepAfterDeadline(t);
+      expect(warnings(t, call.sessionId)).toHaveLength(1);
+    });
+
+    it("settles quietly when a leg reported call.bridged, and waits for one still in the ledger", async () => {
+      const t = world();
+      const call = await connectedOn2xx(t);
+      ledgerPending(t, call.far, "call.bridged");
+      const swept = await sweepAfterDeadline(t);
+      expect(swept.yielded).toContain(call.sessionId);
+      expect(meta(t, call.sessionId).far_end?.bridge?.verification ?? null).toBeNull();
+      // Its owner applies the waiting event.
+      await bridged(t, call);
+      t.h.db.update("motorist_telnyx_webhook_events", { status: "processed", retry_state: null }, row => row.event_id === `pending-call.bridged-${call.far}`);
+      await sweepAfter(t, 1);
+      expect(meta(t, call.sessionId).far_end?.bridge?.verification).toMatchObject({ outcome: "bridged" });
+      expect(warnings(t, call.sessionId)).toEqual([]);
+      expect(t.h.session(call.sessionId).state).toBe("talking");
+    });
+  });
+
+  it("(L3) a second answer processed after Telnyx's wait never sends the bridge itself: the sweep yields to a call.bridged in the ledger", async () => {
+    const t = world();
+    const call = await outbound(t);
+    t.h.telnyx.physical.answered(call.far);
+    t.h.telnyx.physical.answered(call.own);
+    const farAt = later(t, 100), ownAt = later(t, 200);
+    await eventAt(t, call.far, "call.answered", farAt);
+    // The own answer is processed 2 s after it happened, and Telnyx's own bridge already reported (still in the ledger).
+    t.h.advance(2_200);
+    ledgerPending(t, call.far, "call.bridged");
+    await eventAt(t, call.own, "call.answered", ownAt);
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
+    expect(meta(t, call.sessionId).far_end?.awaitBridgeUntil).toEqual(expect.any(String));
+    const swept = await sweepAfter(t, 1);
+    expect(swept.yielded).toContain(call.sessionId);
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
+    await bridged(t, call);
+    expect(t.h.session(call.sessionId).state).toBe("talking");
+    // Without that evidence, the same late answer gets the fallback at the next sweep.
+    const u = world();
+    const late = await outbound(u, 9310);
+    u.h.telnyx.physical.answered(late.far);
+    u.h.telnyx.physical.answered(late.own);
+    const lateFar = later(u, 100), lateOwn = later(u, 200);
+    await eventAt(u, late.far, "call.answered", lateFar);
+    u.h.advance(2_200);
+    await eventAt(u, late.own, "call.answered", lateOwn);
+    expect(u.h.telnyx.of("bridge")).toHaveLength(0);
+    await sweepAfter(u, 1);
+    expect(u.h.telnyx.of("bridge")).toHaveLength(1);
+    expect(u.h.session(late.sessionId).state).toBe("talking");
+  });
+
+  /** The own leg's answer through the webhook processor, as a Next route would host it. */
+  function ownAnswerEnvelope(t: World, call: { sessionId: string; own: string }) {
+    const leg = t.h.db.find("motorist_call_legs", row => row.telnyx_call_control_id === call.own)!;
+    const session = t.h.session(call.sessionId);
+    return buildTelnyxEnvelope({ id: t.h.nextEventId(), type: "call.answered", occurredAt: t.h.now().toISOString(), payload: { connection_id: CONNECTION_ID,
+      call_control_id: call.own, call_leg_id: leg.telnyx_call_leg_id ?? `leg-${call.own}`, call_session_id: session.telnyx_session_id ?? `tsess-${session.id}`,
+      client_state: encodeClientState(t.h.clientStateOf(call.own)), from: leg.from_number, to: leg.to_number } });
+  }
+
+  it("(L2) without after(), the inline fallback answers at once and leaves the bridge to the sweeps", async () => {
+    const t = world();
+    const call = await outbound(t);
+    await answer(t, call.far);
+    t.h.advance(300);
+    t.h.telnyx.physical.answered(call.own);
+    const before = t.h.now().getTime();
+    const result = await processTelnyxEvent({ ...t.h.deps, deferMaintenance: () => { throw new Error("after() unavailable"); } }, ownAnswerEnvelope(t, call));
+    expect(result.status).toBe(200);
+    // No timer ran inline: the clock did not wait for Telnyx's 1.5 s, and nothing was sent.
+    expect(t.h.now().getTime() - before).toBeLessThan(1_500);
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
+    expect(t.h.session(call.sessionId).state).toBe("ringing");
+    await explicitFallback(t);
+    expect(t.h.session(call.sessionId).state).toBe("talking");
+  });
+
+  it("(L1) an own answer deferred behind a busy lease starts the timer in the host that drains it", async () => {
+    const t = world();
+    const call = await outbound(t);
+    await answer(t, call.far);
+    t.h.advance(300);
+    t.h.telnyx.physical.answered(call.own);
+    // Another host holds the session's lease: the answer is deferred to this request's drain.
+    t.h.db.update("motorist_call_sessions", { lease_token: "other-host", lease_until: later(t, 60_000) }, row => row.id === call.sessionId);
+    const jobs: Array<() => Promise<void>> = [];
+    const result = await processTelnyxEvent({ ...t.h.deps, deferMaintenance: (work) => { jobs.push(work); } }, ownAnswerEnvelope(t, call));
+    expect(result.outcome).toBe("deferred");
+    expect(jobs.length).toBeGreaterThan(0);
+    t.h.db.update("motorist_call_sessions", { lease_token: null, lease_until: null }, row => row.id === call.sessionId);
+    for (const job of jobs) await job();
+    // The drain applied the answer, then waited for Telnyx's own bridge and sent the fallback; its 2xx connected.
+    expect(t.h.telnyx.of("bridge")).toHaveLength(1);
+    expect(t.h.session(call.sessionId).state).toBe("talking");
+  });
+
   it("(N2) finds a fresh pending bridge even when older sessions fill the overdue scan", async () => {
     const t = world();
     t.h.db.seed("motorist_call_sessions", [{ id: "00000000-0000-4000-8000-000000009990", organization_id: ORG, direction: "inbound", state: "wrap_up",

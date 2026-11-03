@@ -15,7 +15,7 @@ import { readPendingEffects } from "./continuation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { contactOperationIntent } from "../contact-proof";
 import { CONCURRENT_BRIDGE_DEADLINE_MS, CONCURRENT_BRIDGE_EXTENSION_MS, CONCURRENT_BRIDGE_RETRY_AFTER_MS, CONCURRENT_BRIDGE_RETRY_WAIT_MS,
-  CONCURRENT_BRIDGE_WITHOUT_EVIDENCE, CONCURRENT_PROVIDER_BRIDGE_WAIT_MS, concurrentBridgeDueAt } from "./types";
+  CONCURRENT_BRIDGE_WITHOUT_EVIDENCE, CONCURRENT_PROVIDER_BRIDGE_WAIT_MS, concurrentBridgeDueAt, concurrentBridgeSessionDueAt } from "./types";
 import {
   appendJourneyEvidence,
   type JourneyEvidenceEntry,
@@ -1600,13 +1600,14 @@ function connectConcurrent(b: TransitionBuilder, own: LegRow, far: LegRow, opts:
     // bridge of ours sent meanwhile is also accepted, bridging the pair twice.
     // Wait for its `call.bridged`; ours is only the fallback (B/C), sent by the
     // overdue sweep if nothing reported by then.
+    // An answer processed after that wait (L3) makes the fallback due now,
+    // still through the sweep, which first yields to a `call.bridged` waiting
+    // in the ledger: the answer itself never sends it.
     const ownAt = Date.parse(at.ownAt ?? "");
-    const until = (Number.isFinite(ownAt) ? ownAt : b.ctx.now.getTime()) + CONCURRENT_PROVIDER_BRIDGE_WAIT_MS;
-    if (until > b.ctx.now.getTime()) {
-      b.patchMeta({ far_end: { ...farEnd, answeredAt: farEnd.answeredAt ?? at.farAt ?? b.nowIso, awaitBridgeUntil: new Date(until).toISOString() } });
-      b.note("far end answered first; waiting for Telnyx's own bridge (bridge_on_answer)");
-      return true;
-    }
+    const until = Math.max((Number.isFinite(ownAt) ? ownAt : b.ctx.now.getTime()) + CONCURRENT_PROVIDER_BRIDGE_WAIT_MS, b.ctx.now.getTime());
+    b.patchMeta({ far_end: { ...farEnd, answeredAt: farEnd.answeredAt ?? at.farAt ?? b.nowIso, awaitBridgeUntil: new Date(until).toISOString() } });
+    b.note("far end answered first; waiting for Telnyx's own bridge (bridge_on_answer)");
+    return true;
   }
   bridgeConcurrentPair(b, own, far, at.farAt);
   return true;
@@ -1673,6 +1674,8 @@ function onConcurrentBridgeDeadline(b: TransitionBuilder): ReduceResult | null {
     return b.note("no call.bridged from Telnyx's own bridge in time → explicit bridge").result();
   }
   if (bridge.acceptedAt || evidence.journal === "accepted") {
+    // At the deadline already: this is its verification too, and it found no `call.bridged`.
+    b.patchMeta({ far_end: { ...b.meta.far_end!, bridge: { ...bridge, verification: { at: b.nowIso, outcome: "no_evidence" } } } });
     b.note(CONCURRENT_BRIDGE_WITHOUT_EVIDENCE);
     return connectCall(b, bridge.acceptedAt ?? b.nowIso, "concurrent bridge accepted (2xx) without call.bridged → talking");
   }
@@ -1698,6 +1701,27 @@ function onConcurrentBridgeDeadline(b: TransitionBuilder): ReduceResult | null {
   for (const leg of b.openLegs()) b.cmd(hangupCmd(b, leg, "bridge_failed"));
   releaseTalkingOperators(b, false);
   return b.note("concurrent bridge unproven at its deadline → both legs ended").result();
+}
+
+/**
+ * M1: a call connected on the explicit bridge's 2xx is verified at the
+ * bridge's `deadlineAt` by the overdue sweep (which yields to a `call.bridged`
+ * still waiting in the ledger). A leg that reported itself bridged settles it;
+ * none is a provider anomaly: noted and warned as
+ * `concurrent_bridge_connected_without_evidence`, never torn down — the call
+ * may well be connected and its people talking.
+ */
+function onConcurrentBridgeVerification(b: TransitionBuilder): ReduceResult | null {
+  const farEnd = b.meta.far_end, bridge = farEnd?.bridge;
+  if (!farEnd || !bridge || !concurrentStart(b) || b.session.state === "ringing") return null;
+  const due = concurrentBridgeSessionDueAt({ metadata: b.session.metadata, state: b.session.state, ended_at: b.session.ended_at });
+  if (due === null || due > b.ctx.now.getTime()) return null;
+  if (!(b.event.kind === "app" && b.event.type === "sweep" && b.event.concurrentBridge)) return null;
+  const pair = [concurrentOwnLeg(b), concurrentFarLeg(b)].map((leg) => leg?.telnyx_call_control_id).filter(Boolean);
+  const bridged = b.legs.some((leg) => pair.includes(leg.telnyx_call_control_id) && Boolean(leg.bridged_at));
+  b.patchMeta({ far_end: { ...farEnd, bridge: { ...bridge, verification: { at: b.nowIso, outcome: bridged ? "bridged" : "no_evidence" } } } });
+  if (!bridged) b.note(CONCURRENT_BRIDGE_WITHOUT_EVIDENCE);
+  return b.note(bridged ? "concurrent bridge 2xx verified by call.bridged" : "concurrent bridge 2xx never reported call.bridged by its deadline").result();
 }
 
 /**
@@ -3948,7 +3972,7 @@ function onSweep(b: TransitionBuilder): ReduceResult {
   if (ACTIVE_SESSION_STATES.has(state) && customer && b.legEnded(customer) && b.openLegs().length === 0) {
     return finaliseAlreadyEndedCall(b);
   }
-  const concurrentBridgeDue = onConcurrentBridgeDeadline(b);
+  const concurrentBridgeDue = onConcurrentBridgeDeadline(b) ?? onConcurrentBridgeVerification(b);
   if (concurrentBridgeDue) return concurrentBridgeDue;
   const pickup = b.session.presence_pickup as { v?: number; profileId?: string; offerToken?: string; expiresAt?: string } | null;
   // A colleague who accepted a colleague call in the mobile app talks on it
