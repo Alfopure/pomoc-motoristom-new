@@ -141,6 +141,14 @@ export type WebphoneSnapshot = {
   answering?: boolean;
   /** Remote audio was refused or paused and needs a user gesture to resume. */
   audioBlocked?: boolean;
+  /**
+   * Call-speed S6.4 (N4): the current call's remote audio element is playing
+   * its stream (`playing` seen for this call, no `pause` since). False before
+   * any media, after a pause and for every new call. Telnyx's media for an
+   * answered leg also plays before the far party is bridged, so this says
+   * "audio is flowing", not "the other person can be heard".
+   */
+  remoteAudioPlaying?: boolean;
   /** A call/media failure does not mean that the SIP registration was lost. */
   callError?: string | null;
   /** Last operator-facing error from an SDK/HTTP failure. */
@@ -278,6 +286,7 @@ export class TelnyxWebphone {
   private answeredCallId: string | null = null;
   private callError: string | null = null;
   private audioBlocked = false;
+  private remoteAudioPlaying = false;
   private audioAttempt = 0;
   /** Set by `takeover()`: the next mint may revoke another tab's live device. */
   private takeoverRequested = false;
@@ -310,11 +319,14 @@ export class TelnyxWebphone {
   private readonly boundResume = () => this.onResume();
   private readonly boundAudioReady = () => void this.playRemoteAudio();
   private readonly boundAudioPlaying = () => {
-    if (this.hasRemoteMedia()) { this.finishAudioTiming?.(); this.finishAudioTiming = null; }
+    if (this.hasRemoteMedia()) { this.finishAudioTiming?.(); this.finishAudioTiming = null; this.remoteAudioPlaying = true; }
     this.setAudioBlocked(false);
+    this.publish();
   };
   private readonly boundAudioPause = () => {
+    this.remoteAudioPlaying = false;
     if (this.hasRemoteMedia()) this.setAudioBlocked(true);
+    this.publish();
   };
 
   constructor(options: TelnyxWebphoneOptions = {}) {
@@ -1269,6 +1281,7 @@ export class TelnyxWebphone {
     this.hangupRequestedCallId = null;
     this.audioAttempt += 1;
     this.audioBlocked = false;
+    this.remoteAudioPlaying = false;
     if (!client) return;
     // SDK 2.27.10 iterates its live listener array. A socket event can emit a
     // nested fatal error (reconnect exhaustion); off() inside that callback
@@ -1376,6 +1389,7 @@ export class TelnyxWebphone {
       this.answeredCallId = null;
       this.audioAttempt++;
       this.audioBlocked = false;
+      this.remoteAudioPlaying = false;
     } else if (this.call?.id !== call.id) {
       this.finishInviteTiming?.({ outcome: "cancelled" });
       this.finishAudioTiming?.({ outcome: "cancelled" });
@@ -1391,6 +1405,7 @@ export class TelnyxWebphone {
       this.hangupRequestedCallId = null;
       this.audioAttempt += 1;
       this.audioBlocked = false;
+      this.remoteAudioPlaying = false;
     }
     if (this.call !== call) {
       // SDK warnings contain a call ID but no peer object/generation. After a
@@ -1633,6 +1648,7 @@ export class TelnyxWebphone {
   private disposeAudio(): void {
     this.audioAttempt += 1;
     this.audioBlocked = false;
+    this.remoteAudioPlaying = false;
     this.ringtone?.dispose();
     this.ringtone = null;
     const element = this.remoteAudio;
@@ -1698,6 +1714,7 @@ export class TelnyxWebphone {
     this.answeredCallId = null;
     this.audioAttempt += 1;
     this.audioBlocked = false;
+    this.remoteAudioPlaying = false;
     if (this.mediaRecovering) {
       this.mediaRecovering = false;
       if (this.sdkReady) this.dispatch({ type: "client_ready" });
@@ -1720,6 +1737,7 @@ export class TelnyxWebphone {
       message: this.state.message,
       answering: this.answeringCallId !== null,
       audioBlocked: this.audioBlocked,
+      remoteAudioPlaying: this.remoteAudioPlaying && this.hasRemoteMedia(),
       callError: this.callError,
       pendingOperatorLegs: pruneExpectedLegs(this.expected, this.now()).length,
       call: call

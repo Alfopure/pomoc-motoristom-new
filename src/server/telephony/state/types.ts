@@ -173,6 +173,12 @@ export type TelephonyEvent = {
   conferenceId: string | null;
   customHeaders: Array<{ name: string; value: string }>;
   payload: Record<string, unknown>;
+  /**
+   * Call-speed S6.2 (N3): for a `call.hangup`, this leg's own `call.answered`
+   * is still unprocessed in the webhook ledger (set by the event processor for
+   * a concurrent start only): the leg was answered, its row does not say so yet.
+   */
+  answeredPending?: boolean;
 };
 
 export type TransferTarget =
@@ -203,7 +209,9 @@ export type AppEventType =
   | "invite_monitor"
   | "revoke_monitor"
   | "hangup"
-  | "sweep";
+  | "sweep"
+  /** Call-speed S6.2: the runner's follow-up after Telnyx accepted (2xx) the explicit concurrent bridge. */
+  | "concurrent_bridge_accepted";
 
 /**
  * Telnyx conference supervisor roles (`supervisor_role` on
@@ -247,7 +255,18 @@ export type AppEvent = {
    * writes to `motorist_call_sessions` and therefore refreshes `updated_at`.
    */
   stale?: boolean;
+  /**
+   * For `sweep` (call-speed S6.2): the overdue sweep's evidence for a
+   * concurrent bridge past its deadline, read before the lease
+   * (`ring-plan.ts`): the bridge command's journal outcome. Only a sweep that
+   * carries it may connect or end the pair; a pending `call.bridged` in the
+   * ledger makes the sweep yield instead of sending it.
+   */
+  concurrentBridge?: { journal: ConcurrentBridgeJournal };
 };
+
+/** The provider journal's outcome of a concurrent start's explicit bridge (`motorist_provider_commands.outcome`), or none. */
+export type ConcurrentBridgeJournal = "accepted" | "rejected" | "unknown" | "rate_limited" | "absent";
 
 export type SessionEvent = TelephonyEvent | AppEvent;
 
@@ -376,11 +395,11 @@ export type Command = CommandBase &
        */
       alreadyBridgedOk?: true;
       /**
-       * Call-speed S6.2: the explicit bridge of a concurrent start. The call
-       * connects on `call.bridged` evidence (its 2xx is recorded as
-       * `far_end.bridge.acceptedAt`), never on its answer: a 422, an unknown
-       * outcome or another refusal leaves the pair to that evidence until
-       * `far_end.bridge.deadlineAt`, when the sweep ends both legs.
+       * Call-speed S6.2: the explicit bridge of a concurrent start. Its 2xx
+       * (recorded as `far_end.bridge.acceptedAt`) or `call.bridged` connects
+       * the call; a 422, an unknown outcome or another refusal never does and
+       * leaves the pair to that evidence until `far_end.bridge.deadlineAt`,
+       * when the sweep retries, extends or ends both legs.
        */
       concurrentBridge?: true;
       /**
@@ -752,12 +771,18 @@ export type SessionMeta = {
    * answered (S6.2). `bridge` is the explicit bridge sent when the far end
    * answered first: until its `call.bridged` evidence the call stays
    * `ringing`, and at `deadlineAt` the sweep connects an `acceptedAt` (2xx)
-   * bridge or ends both legs as `bridge_failed`. `busyControlId` is a
+   * bridge or ends both legs as `bridge_failed`. A non-call-gone 422 is
+   * `refusedAt`: about 2 s later the sweep retries the bridge once
+   * (`retried`). A bridge whose journal outcome is still unknown at the
+   * deadline gets one extension (`extended`). `awaitBridgeUntil` comes
+   * first when the far leg carries `bridge_on_answer`: until then the call
+   * waits for Telnyx's own bridge and sends none (outcome A). `busyControlId` is a
    * colleague leg whose answer was refused because they had become busy: its
    * hangup ends the call as `colleague_busy`.
    */
   far_end?: { commandId: string; mode: "concurrent"; dialedAt: string; answeredAt?: string | null;
-    bridge?: { commandId: string; sentAt: string; deadlineAt: string; acceptedAt?: string | null } | null; busyControlId?: string | null } | null;
+    bridge?: { commandId: string; sentAt: string; deadlineAt: string; acceptedAt?: string | null; refusedAt?: string | null; retried?: boolean; extended?: boolean } | null;
+    awaitBridgeUntil?: string | null; busyControlId?: string | null } | null;
   /**
    * Call-speed S6.3, the record of the colleague dials that really carried the
    * auto-bridge (`bridge_on_answer`, Telnyx bridges them to the caller at
@@ -818,6 +843,42 @@ export type SessionMeta = {
   partner_name?: string | null;
   [key: string]: unknown;
 };
+
+/**
+ * Call-speed S6.2: a concurrent start whose far end answered first connects on
+ * Telnyx's own `bridge_on_answer` (outcome A, measured on TEST: about 0.5 s
+ * after the own leg's answer), or on our explicit bridge's 2xx or
+ * `call.bridged` (B). These bound each wait before the overdue sweep
+ * (`ring-plan.ts`) and the reducer (`onConcurrentBridgeDeadline`) act. Shared
+ * by both, so the sweep looks exactly when the reducer would act.
+ */
+
+/** With `bridge_on_answer` on the far leg, how long after the own leg's answer Telnyx gets to report its own bridge before ours is sent. */
+export const CONCURRENT_PROVIDER_BRIDGE_WAIT_MS = 1_500;
+
+/** How long an explicit concurrent bridge waits for its `call.bridged` evidence. */
+export const CONCURRENT_BRIDGE_DEADLINE_MS = 8_000;
+/** One extension at the deadline while the bridge's journal outcome is still unknown (a lost response, a 5xx). */
+export const CONCURRENT_BRIDGE_EXTENSION_MS = 4_000;
+/** A non-call-gone 422 is retried once this long after it… */
+export const CONCURRENT_BRIDGE_RETRY_AFTER_MS = 2_000;
+/** …and the retry gets at least this long for its own evidence. */
+export const CONCURRENT_BRIDGE_RETRY_WAIT_MS = 3_000;
+/** The reducer note, runner warning and harness count for a call connected on a 2xx without any `call.bridged`. */
+export const CONCURRENT_BRIDGE_WITHOUT_EVIDENCE = "concurrent_bridge_connected_without_evidence";
+
+/** When the overdue sweep next has to look at this session's concurrent bridge (Telnyx's own wait, our retry or deadline), or null. */
+export function concurrentBridgeDueAt(meta: SessionMeta): number | null {
+  const bridge = meta.far_end?.bridge;
+  if (!bridge) {
+    const awaiting = Date.parse(meta.far_end?.awaitBridgeUntil ?? "");
+    return Number.isFinite(awaiting) ? awaiting : null;
+  }
+  const deadline = Date.parse(bridge.deadlineAt);
+  const retry = bridge.refusedAt && !bridge.retried && !bridge.acceptedAt ? Date.parse(bridge.refusedAt) + CONCURRENT_BRIDGE_RETRY_AFTER_MS : Number.NaN;
+  const due = [deadline, retry].filter(Number.isFinite);
+  return due.length ? Math.min(...due) : null;
+}
 
 export function readMeta(session: Pick<SessionRow, "metadata">): SessionMeta {
   const value = session.metadata;

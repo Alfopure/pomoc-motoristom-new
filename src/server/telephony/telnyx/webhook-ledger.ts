@@ -172,3 +172,21 @@ export function markWebhookEventFailed(client: AdminClient, eventId: string, fai
 export function describeWebhookClaim(claim: WebhookClaim): string {
   return `${claim.outcome}(${claim.status}#${claim.attempts})`;
 }
+
+/**
+ * The call control ids among `controlIds` with a provider event of `eventType`
+ * that is in the ledger but not processed yet (fresh, claimed by another host,
+ * deferred, failed and retrying): a provider fact that exists and that its
+ * owner (the deferring host, the correlated replay, the cron) will apply.
+ * Dead-letter rows do not count: they will never apply. Call-speed S6.2 reads
+ * a pending `call.bridged` (and `call.answered`) here so a deadline or a 422
+ * never overrules evidence that is merely waiting for the session's lease.
+ */
+export async function pendingLedgerControlIds(client: AdminClient, organizationId: string, eventType: string, controlIds: string[]): Promise<Set<string>> {
+  if (controlIds.length === 0) return new Set();
+  const pending = await client.from("motorist_telnyx_webhook_events").select("call_control_id")
+    .eq("organization_id", organizationId).eq("event_type", eventType)
+    .neq("status", "processed").neq("retry_state", "dead_letter").in("call_control_id", controlIds);
+  if (pending.error) throw new Error(`pending ${eventType} ledger check failed: ${pending.error.message}`);
+  return new Set((pending.data ?? []).map((row) => row.call_control_id).filter((id): id is string => Boolean(id)));
+}

@@ -11,6 +11,7 @@ import { readAnnouncementConfig, resolveAnnouncement, resolveCombinedInboundIntr
 import { normalizeE164 } from "@/lib/telephony/normalize-e164";
 
 import { recordTelephonyIncident, recoverTelephonyIncidentThrottled, TELEPHONY_INCIDENT_JOBS } from "../incidents";
+import { pendingLedgerControlIds } from "../telnyx/webhook-ledger";
 import { addTelephonyUsage } from "../usage";
 import { advanceRingStep, resolvePersonalRingMembers } from "../routing/ring-plan";
 import { authorizeOperatorDispatch, isPausedWithoutCall, reserveAnsweredOperator, transitionPresence } from "../routing/reservation";
@@ -922,12 +923,19 @@ export function isUnprovenBridgeRefusal(error: unknown): boolean {
   return error instanceof TelnyxCommandError && error.status === 422 && !isSessionCallGoneError(error);
 }
 
-/** Whether this leg has reported `call.bridged` (its row, read now, under this session's lease). */
+/**
+ * Whether this leg has reported `call.bridged`: its row says so, or (N6) its
+ * `call.bridged` is in the webhook ledger, not yet processed — it waits for the
+ * very lease this invocation holds, so the row alone rarely shows it.
+ */
 async function legReportedBridged(deps: EffectsDeps, ctx: ExecutionContext, callControlId: string): Promise<boolean> {
-  const leg = await deps.admin.from("motorist_call_legs").select("bridged_at").eq("organization_id", deps.organizationId)
-    .eq("session_id", ctx.session.id).eq("telnyx_call_control_id", callControlId).maybeSingle();
-  if (leg.error) throw new EffectsError("bridge target evidence unavailable");
-  return Boolean((leg.data as { bridged_at?: string | null } | null)?.bridged_at);
+  const [leg, pending] = await Promise.all([
+    deps.admin.from("motorist_call_legs").select("bridged_at").eq("organization_id", deps.organizationId)
+      .eq("session_id", ctx.session.id).eq("telnyx_call_control_id", callControlId).maybeSingle(),
+    pendingLedgerControlIds(deps.admin, deps.organizationId, "call.bridged", [callControlId]).catch(() => null),
+  ]);
+  if (leg.error || !pending) throw new EffectsError("bridge target evidence unavailable");
+  return Boolean((leg.data as { bridged_at?: string | null } | null)?.bridged_at) || pending.has(callControlId);
 }
 
 /**
@@ -2332,15 +2340,18 @@ async function executeReduceResult(
       if (input.continuation) for (const change of transition.presence) {
         if (change.afterCommandId === key) await applyPresenceChange(deps, ctx.session, change);
       }
-      if (command.kind === "bridge" && command.concurrentBridge && !executed.skipped) {
-        // Call-speed S6.2: Telnyx accepted the explicit concurrent bridge. The
-        // call still connects on `call.bridged`; this keeps the deadline sweep
-        // from ending a pair whose evidence is merely late.
+      const refused = executed.skipped && executed.detail?.reason === "awaiting_bridged_evidence";
+      if (command.kind === "bridge" && command.concurrentBridge && (!executed.skipped || refused)) {
+        // Call-speed S6.2: Telnyx accepted the explicit concurrent bridge (the
+        // runner then connects the call with `concurrent_bridge_accepted`, and
+        // a lost follow-up still connects at the deadline), or refused it with
+        // a non-call-gone 422 (the sweep retries it once, about 2 s later).
         const meta = readMeta(ctx.session), bridge = meta.far_end?.bridge;
         if (meta.far_end && bridge?.commandId === command.commandId && !bridge.acceptedAt) {
-          const accepted = emptyTransition();
-          accepted.session.metadata = toJson({ ...meta, far_end: { ...meta.far_end, bridge: { ...bridge, acceptedAt: deps.now().toISOString() } } });
-          session = await persistTransition(deps, { session: ctx.session, transition: accepted, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
+          const at = deps.now().toISOString();
+          const outcome = emptyTransition();
+          outcome.session.metadata = toJson({ ...meta, far_end: { ...meta.far_end, bridge: { ...bridge, ...(refused ? { refusedAt: at } : { acceptedAt: at }) } } });
+          session = await persistTransition(deps, { session: ctx.session, transition: outcome, expectedVersion: ctx.session.version, event: input.event, phase: "critical" });
           ctx.session = session;
         }
       }

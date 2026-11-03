@@ -54,6 +54,7 @@ import type { TelnyxClient } from "./telnyx/client";
 import type { TelnyxClientState } from "./telnyx/client-state";
 import type { TelnyxConfig } from "./telnyx/env";
 import { latencyFlagsOf, sessionApiRegion, type LatencyFlags } from "./latency-flags";
+import { CONCURRENT_BRIDGE_WITHOUT_EVIDENCE } from "./state/types";
 
 /**
  * Runs one event through the per-session pipeline shared by the webhook
@@ -1195,10 +1196,14 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
           const stopReady = needsRecordingContinuation(apply.session);
           const mediaFailed = sequence && Date.parse(sequence.deadlineAt) <= nowOf(deps)().getTime() ||
             meta.gather?.failed && !meta.gather.call_gone && Date.parse(meta.gather.deadline_at) <= nowOf(deps)().getTime();
-          if ((!stopReady && !mediaFailed && !ringFollow) || stopReady && !leaseAcquired) break;
+          // Call-speed S6.2: Telnyx accepted (2xx) the explicit concurrent bridge
+          // this event sent; the call connects now, not at its `call.bridged`.
+          const bridgeAccepted = !apply.failed && apply.session.state === "ringing" && Boolean(meta.far_end?.bridge?.acceptedAt);
+          if ((!stopReady && !mediaFailed && !ringFollow && !bridgeAccepted) || stopReady && !leaseAcquired && !bridgeAccepted) break;
           const fresh = await loadSessionSnapshot(deps, sessionId);
-          const followEvent: SessionEvent = { kind: "app", type: stopReady ? "recording_continue" : "sweep", id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
-          if (followContext.lean || ringFollow) followContext = await loadRoutingContext(deps, fresh.session, followEvent, fresh.legs);
+          const followEvent: SessionEvent = { kind: "app", type: bridgeAccepted ? "concurrent_bridge_accepted" : stopReady ? "recording_continue" : "sweep",
+            id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
+          if (!bridgeAccepted && (followContext.lean || ringFollow)) followContext = await loadRoutingContext(deps, fresh.session, followEvent, fresh.legs);
           if (ringFollow) {
             const skipped = ringFollow.detail?.skippedMembers;
             if (Array.isArray(skipped)) followContext = { ...followContext, openOffers: [...new Set([
@@ -1236,6 +1241,10 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
             // A notification scheduler cannot change the result of a SIP command.
             deps.logger?.({ level: "warn", scope: "call-push", sessionId, message: "notification scheduling unavailable" });
           }
+        }
+        if (apply.notes.includes(CONCURRENT_BRIDGE_WITHOUT_EVIDENCE)) {
+          // Call-speed S6.2 (N5): connected on Telnyx's 2xx alone; no leg ever reported `call.bridged`.
+          deps.logger?.({ level: "warn", scope: "session", sessionId, eventId: event.id, code: CONCURRENT_BRIDGE_WITHOUT_EVIDENCE });
         }
         deps.logger?.({
           scope: "session",

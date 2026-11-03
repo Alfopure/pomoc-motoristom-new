@@ -323,11 +323,12 @@ describe("colleague call capabilities", () => {
     // The moment: until the candidate's time runs out.
     expect(localFirstTalking("call-1", null, undefined)).toBe(true);
     expect(localFirstTalking("call-1", "call-1", undefined)).toBe(false);
-    expect(localFirstTalking("call-1", "call-1", true)).toBe(false);
-    // Remote audio already playing: no flip back to "Spájam…" when the moment ends.
-    expect(localFirstTalking("call-1", "call-1", false)).toBe(true);
+    // N4: nothing playing yet (or paused) reverts to "Spájam…" after the moment.
+    expect(localFirstTalking("call-1", "call-1", false)).toBe(false);
+    // This call's remote audio is playing: no flip back when the moment ends.
+    expect(localFirstTalking("call-1", "call-1", true)).toBe(true);
     // Another candidate, or none, is not held back by an earlier expiry.
     expect(localFirstTalking("call-2", "call-1", undefined)).toBe(true);
-    expect(localFirstTalking(null, null, false)).toBe(false);
+    expect(localFirstTalking(null, null, true)).toBe(false);
   });
 });
