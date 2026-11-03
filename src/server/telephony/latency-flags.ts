@@ -41,6 +41,10 @@ const BOOLEAN_KEYS = [
   // delete the mobile Telnyx credential, so a JWT cached on the old phone can no longer register.
   "mobile_rotate_on_takeover", "mobile_rotate_on_deactivation",
 ] as const;
+// `targetLocalFirst` (call-speed S6.4) is NOT usable yet: the browser has no
+// signal that the far party is audible (`remoteAudioPlaying` turns true on the
+// answered leg's own media, before any bridge), so it can show "Prebieha" for
+// a call that is not connected. Keep it off until a far-party audio signal exists.
 const CLIENT_BOOLEAN_KEYS = ["webEarlyAccept", "webPrefetchIce", "targetLocalFirst", "mobileTokenCache", "mobileTrickleIce",
   "mobileRealtimeStatus", "mobileEarlyAccept", "mobileParallelOffers"] as const;
 const CLIENT_REGION_KEYS = ["webRtcRegion", "mobileRtcRegion"] as const;

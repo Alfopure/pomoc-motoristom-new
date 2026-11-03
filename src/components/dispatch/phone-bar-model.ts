@@ -251,7 +251,10 @@ export function localFirstCandidate(call: PhoneBarCall | null, browserCall: Webp
  * candidate `candidateId`. Only for `LOCAL_FIRST_TALKING_MS` (`expiredId` is
  * the candidate whose time ran out), unless this call's remote audio is
  * playing (`remoteAudioPlaying`, N4): then the bar does not flip back to
- * "Spájam…" and only the server's next state changes it.
+ * "Spájam…" and only the server's next state changes it. That flag is the
+ * answered leg's own media, which Telnyx sends before any bridge: it does not
+ * prove the far party is audible, so `targetLocalFirst` stays off (not usable
+ * yet, L4).
  */
 export function localFirstTalking(candidateId: string | null, expiredId: string | null, remoteAudioPlaying: boolean | undefined): boolean {
   return Boolean(candidateId && (expiredId !== candidateId || remoteAudioPlaying === true));

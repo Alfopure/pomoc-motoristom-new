@@ -398,7 +398,11 @@ export type PhoneBarModel = {
   presence: TelephonyPresenceSnapshot;
   ownPresenceStatus: TelephonyPresenceStatus | null;
   pausedPickupEnabled?: boolean;
-  /** Call-speed S6.4 (`tuning.targetLocalFirst`): an answering colleague trusts its own media first. */
+  /**
+   * Call-speed S6.4 (`tuning.targetLocalFirst`): an answering colleague trusts
+   * its own media first. Not usable yet: there is no far-party audio signal
+   * (see `latency-flags.ts`); keep the switch off.
+   */
   targetLocalFirst?: boolean;
 };
 

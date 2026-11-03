@@ -774,14 +774,19 @@ export type SessionMeta = {
    * bridge or ends both legs as `bridge_failed`. A non-call-gone 422 is
    * `refusedAt`: about 2 s later the sweep retries the bridge once
    * (`retried`). A bridge whose journal outcome is still unknown at the
-   * deadline gets one extension (`extended`). `awaitBridgeUntil` comes
+   * deadline gets one extension (`extended`). After a call connected on the
+   * bridge's 2xx, `deadlineAt` only verifies it: by then a leg should have
+   * reported `call.bridged`, or the sweep records `verification`
+   * `no_evidence` with a warning (it never tears a connected call down).
+   * `awaitBridgeUntil` comes
    * first when the far leg carries `bridge_on_answer`: until then the call
    * waits for Telnyx's own bridge and sends none (outcome A). `busyControlId` is a
    * colleague leg whose answer was refused because they had become busy: its
    * hangup ends the call as `colleague_busy`.
    */
   far_end?: { commandId: string; mode: "concurrent"; dialedAt: string; answeredAt?: string | null;
-    bridge?: { commandId: string; sentAt: string; deadlineAt: string; acceptedAt?: string | null; refusedAt?: string | null; retried?: boolean; extended?: boolean } | null;
+    bridge?: { commandId: string; sentAt: string; deadlineAt: string; acceptedAt?: string | null; refusedAt?: string | null; retried?: boolean; extended?: boolean;
+      verification?: { at: string; outcome: "bridged" | "no_evidence" } | null } | null;
     awaitBridgeUntil?: string | null; busyControlId?: string | null } | null;
   /**
    * Call-speed S6.3, the record of the colleague dials that really carried the
@@ -878,6 +883,20 @@ export function concurrentBridgeDueAt(meta: SessionMeta): number | null {
   const retry = bridge.refusedAt && !bridge.retried && !bridge.acceptedAt ? Date.parse(bridge.refusedAt) + CONCURRENT_BRIDGE_RETRY_AFTER_MS : Number.NaN;
   const due = [deadline, retry].filter(Number.isFinite);
   return due.length ? Math.min(...due) : null;
+}
+
+/**
+ * The same for a whole session: the ringing-phase times above, or — once the
+ * call connected on the bridge's 2xx and is still up — the deadline that
+ * verifies a leg reported `call.bridged` (M1). Null when nothing is due.
+ */
+export function concurrentBridgeSessionDueAt(session: Pick<SessionRow, "metadata" | "state" | "ended_at">): number | null {
+  const meta = readMeta(session);
+  if (session.state === "ringing") return concurrentBridgeDueAt(meta);
+  const bridge = meta.far_end?.bridge;
+  if (session.ended_at || TERMINAL_STATES.has(session.state) || !bridge?.acceptedAt || bridge.verification) return null;
+  const deadline = Date.parse(bridge.deadlineAt);
+  return Number.isFinite(deadline) ? deadline : null;
 }
 
 export function readMeta(session: Pick<SessionRow, "metadata">): SessionMeta {
