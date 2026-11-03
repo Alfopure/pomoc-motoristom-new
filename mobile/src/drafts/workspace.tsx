@@ -297,6 +297,8 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
 const ACCOUNT_LINKS = [
   { title: "Ochrana súkromia", subtitle: "Aké údaje aplikácia spracúva a prečo", path: "/aplikacia/sukromie" },
   { title: "Podpora", subtitle: "Pomoc s prihlásením, telefónom a chybami", path: "/aplikacia/podpora" },
+  // App Review 5.1.1(v): accounts are created and removed by the organization; this shows how to ask.
+  { title: "Zrušenie účtu", subtitle: "Ako požiadať o zrušenie účtu a vymazanie údajov", path: "/aplikacia/sukromie#rights" },
 ] as const;
 function Account(props: Props) {
   const profile = props.identity.profile, busy = props.logoutBusy || props.logoutState.busy;

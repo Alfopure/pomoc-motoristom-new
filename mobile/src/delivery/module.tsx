@@ -50,8 +50,8 @@ function locationNote(tracking: boolean, location: SharingState, mode: LocationS
   if (location.status === "error") return "Polohu sa nepodarilo zapnúť. Skúste to znova.";
   if (location.status !== "sharing") return "Poloha sa zatiaľ neposiela.";
   if (mode === "foreground") return "Vaša poloha sa posiela dispečingu, kým je pristavenie otvorené a aplikácia zapnutá. V Expo Go sa na pozadí neposiela.";
-  return location.background === "always" ? "Vaša poloha sa posiela dispečingu aj na pozadí a pri zamknutom telefóne, kým je pristavenie otvorené."
-    : "Poloha sa posiela, aj keď je aplikácia na pozadí, ale po jej zatvorení sa zastaví. V nastaveniach telefónu povoľte polohu „Vždy“.";
+  return location.background === "always" ? "Vaša poloha sa posiela dispečingu aj na pozadí, pri zamknutom telefóne a po zatvorení aplikácie, kým je pristavenie otvorené."
+    : "Vaša poloha sa posiela dispečingu aj na pozadí a pri zamknutom telefóne, kým je pristavenie otvorené. Ak aplikáciu úplne zatvoríte, posielanie pokračuje po jej otvorení.";
 }
 
 function DeliveryList({ query, commands, active, onOpen }: { query: UseQueryResult<MobileDelivery[]>; commands: DeliveryCommands; active: boolean; onOpen: (id: string) => void }) {
@@ -183,10 +183,11 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, commands, onChange
           onPress={() => { void run("update", { eta: new Date(Date.now() + minutes * 60_000).toISOString() }); }} style={({ pressed }) => [s.chip, pressed && { opacity: 0.6 }]}>
           <Text style={s.chipText}>{"o " + minutes + " min"}</Text></Pressable>)}</View>
       </>}
+      {open && delivery.status === "offered" && <Text style={s.note}>Po prijatí aplikácia požiada o polohu a počas pristavenia ju posiela dispečingu, aby videl, kde ste.</Text>}
       {open && delivery.status !== "offered" && <Text style={s.note}>{locationNote(delivery.tracking, location, tracker.mode)}</Text>}
       {open && delivery.tracking && (location.status === "off" || location.status === "error") && <View style={formLayout.actions}>
         <Button label="Zdieľať polohu s dispečerom" secondary disabled={!commandState.enabled} onPress={() => { void tracker.follow(delivery.id, true); }} /></View>}
-      {open && delivery.tracking && (location.status === "denied" || location.status === "sharing" && location.background === "whenInUse") && <View style={formLayout.actions}>
+      {open && delivery.tracking && location.status === "denied" && <View style={formLayout.actions}>
         <Button label="Otvoriť nastavenia telefónu" secondary onPress={() => { void Linking.openSettings().catch(() => undefined); }} /></View>}
       {card && <>
         <SectionHeader title="Čo treba urobiť" />

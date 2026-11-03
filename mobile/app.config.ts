@@ -20,7 +20,7 @@ if (expoGoPreview && nativeVoice) throw new Error("Native voice proof cannot run
 // Data the app sends to the dispatch service, all for running dispatch work and
 // linked to the signed-in operator; nothing is used for tracking or advertising.
 const collected = ["Name", "EmailAddress", "PhoneNumber", "PhysicalAddress", "PreciseLocation", "PhotosorVideos", "AudioData",
-  "OtherUserContent", "CrashData", "UserID", "DeviceID"].map(kind => ({
+  "OtherUserContent", "CrashData", "OtherDiagnosticData", "UserID", "DeviceID"].map(kind => ({
   NSPrivacyCollectedDataType: "NSPrivacyCollectedDataType" + kind, NSPrivacyCollectedDataTypeLinked: true,
   NSPrivacyCollectedDataTypeTracking: false, NSPrivacyCollectedDataTypePurposes: ["NSPrivacyCollectedDataTypePurposeAppFunctionality"],
 }));
@@ -31,13 +31,15 @@ const accessed = [["UserDefaults", "CA92.1"], ["FileTimestamp", "C617.1"], ["Sys
 
 // The calling module is linked into every iOS build, so App Store Connect wants the
 // microphone text in each one (ITMS-90683); only the voice build asks for it.
-const microphoneUse = "Aplikácia potrebuje mikrofón na telefonovanie.";
+const microphoneUse = "Aplikácia používa mikrofón počas hovorov so zákazníkmi a kolegami v module Hovory, aby vás druhá strana počula.";
 
 const config: ExpoConfig = {
+  // ASCII project/target name (prebuild drops "č"); the home screen of production shows
+  // "Dispečing" through CFBundleDisplayName below, the store "Dispečing – Linka pomoci".
   name: "Dispatching" + (variant === "production" ? "" : variant === "test" ? " TEST" : " DEV"),
   slug: "linka-pomoci-dispecing",
   owner: "linkapomoci",
-  version: "0.1.0",
+  version: "1.0.0",
   icon: variant === "production" ? "./assets/icon.png" : "./assets/icon-" + variant + ".png",
   orientation: "portrait",
   userInterfaceStyle: "light",
@@ -45,9 +47,14 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: "sk.linkapomoci.dispecing" + suffix, supportsTablet: false,
     privacyManifests: { NSPrivacyTracking: false, NSPrivacyTrackingDomains: [], NSPrivacyCollectedDataTypes: collected, NSPrivacyAccessedAPITypes: accessed },
-    // Only HTTPS and standard WebRTC call encryption (DTLS-SRTP in the Telnyx library) are used.
     infoPlist: {
-      ITSAppUsesNonExemptEncryption: false,
+      // Calls are encrypted by the bundled WebRTC (DTLS-SRTP, BoringSSL), not only by iOS, so the
+      // App Store build declares encryption and its answers are given in App Store Connect
+      // (standard algorithms, France not offered). TEST TestFlight builds keep the earlier answer.
+      ITSAppUsesNonExemptEncryption: variant === "production",
+      // The interface is Slovak only.
+      CFBundleDevelopmentRegion: "sk", CFBundleLocalizations: ["sk"],
+      ...(variant === "production" ? { CFBundleDisplayName: "Dispečing" } : {}),
       NSMicrophoneUsageDescription: microphoneUse,
       ...(nativeVoice ? { LinkaNativeVoiceEnabled: true, UIBackgroundModes: ["audio", "voip"] } : {}),
     },
@@ -69,10 +76,12 @@ const config: ExpoConfig = {
     cameraPermission: "Aplikácia potrebuje fotoaparát na odfotografovanie prílohy prípadu a dokladov k jazde, odvozu či odťahu (vozidlo, poškodenie, papierový doklad).",
     microphonePermission: microphoneUse,
   }], ["expo-location", {
-    locationWhenInUsePermission: "Aplikácia použije polohu telefónu na váš pokyn pri výbere miesta zásahu a počas pristavenia, jazdy, odvozu či presunu, ktoré ste prijali, aby dispečer videl, kde ste.",
+    locationWhenInUsePermission: "Aplikácia použije polohu telefónu na váš pokyn pri výbere miesta zásahu a počas pristavenia, jazdy, odvozu či presunu, ktoré ste prijali, aby dispečer videl, kde ste, napríklad koľko vám ešte zostáva k zákazníkovi. Počas takej práce ju posiela aj na pozadí a pri zamknutom telefóne; po jej skončení prestane.",
     locationAlwaysPermission: false,
-    // A field member's position goes on with the app in the background or closed, only while
-    // their accepted delivery or own jazda/odvoz/presun is open; iOS shows the blue location indicator meanwhile.
+    // The app never asks for Always (owner decision 2026-11-03, App Review): sharing starts with
+    // While Using in the foreground and goes on in the background with the blue indicator. The
+    // text stays because expo-location links the Always request API (ITMS-90683); it is shown
+    // only if the user opens the choice in Settings.
     locationAlwaysAndWhenInUsePermission: "Počas pristavenia, jazdy, odvozu či presunu, ktoré ste prijali, posiela aplikácia dispečingu vašu polohu aj na pozadí a pri zamknutom telefóne, aby dispečer videl, kde ste. Po skončení práce prestane.",
     // expo-location links Core Motion; App Store Connect requires this text although the app
     // never asks for motion data (ITMS-90683 on the first TestFlight upload, 22. 10. 2026).

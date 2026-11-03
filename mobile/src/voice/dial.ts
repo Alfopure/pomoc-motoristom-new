@@ -2,7 +2,7 @@ import { createContext, useContext } from "react";
 import type { DispatchPhone, PhoneState } from "./phone";
 
 /** Why a new call cannot start now, or null when the phone is ready. */
-export function dialBlockedReason(phone: DispatchPhone | null, state: PhoneState, missingPhone = "Volanie z mobilu bude možné v natívnej aplikácii s pripojeným telefónom."): string | null {
+export function dialBlockedReason(phone: DispatchPhone | null, state: PhoneState, missingPhone = "Volanie z mobilu teraz nie je dostupné."): string | null {
   if (!phone) return missingPhone;
   if (state.registration !== "registered") return "Telefón nie je pripojený k ústredni. Pripojte ho v Ústredni.";
   if (state.microphonePermission === "denied") return "Na volanie povoľte prístup k mikrofónu.";

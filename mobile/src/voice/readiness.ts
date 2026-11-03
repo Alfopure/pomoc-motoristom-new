@@ -18,7 +18,7 @@ export function phoneReadiness({ state, configuration, configurationError = fals
     && state.microphonePermission === "granted" && !state.diagnosticsError;
   const microphone = { granted: "Povolený", denied: "Zablokovaný", undetermined: "Čaká na povolenie", unknown: "Neoverený" }[state.microphonePermission];
   const checks: Check[] = [
-    { key: "microphone", label: "Mikrofón", value: state.supported ? microphone : "Vyžaduje natívnu aplikáciu", tone: state.supported && state.microphonePermission === "granted" ? "success" : "warning" },
+    { key: "microphone", label: "Mikrofón", value: state.supported ? microphone : "Nedostupný", tone: state.supported && state.microphonePermission === "granted" ? "success" : "warning" },
     { key: "connection", label: "Spojenie s ústredňou", value: !registered ? state.registration === "connecting" ? "Pripájam…" : "Nepripojené" : heartbeat ? "Potvrdené" : "Čaká na overenie", tone: registered && heartbeat ? "success" : "warning" },
     { key: "background", label: "Príjem pri zamknutí", value: !configured ? "Nastavenie neoverené" : !configuration?.backgroundIncomingEnabled ? "Zatiaľ neaktivované" : background ? "Registrácia potvrdená" : "Čaká na registráciu", tone: background ? "success" : "warning" },
   ];
@@ -28,8 +28,8 @@ export function phoneReadiness({ state, configuration, configurationError = fals
   let title = "Telefón je pripojený", tone: Tone = "success";
   let message = "Príjem pri zamknutí overte skúšobným hovorom. Registrácia sama nepotvrdzuje doručenie hovoru.";
   if (!state.supported) {
-    title = "Systémové volanie nie je dostupné"; tone = "muted";
-    message = "Telefonovanie potrebuje natívnu iPhone aplikáciu. V tejto zostave môžete používať ústredňu, históriu a prípady.";
+    title = "Volanie v aplikácii nie je dostupné"; tone = "muted";
+    message = "Volanie v tejto zostave aplikácie nie je dostupné. Ústredňu, históriu a prípady môžete používať ďalej.";
   } else if (state.termination) {
     title = "Ukončujem hovor…"; tone = "warning"; message = "Čakáme na potvrdenie ústredne. Nový hovor bude dostupný po ukončení.";
   } else if (state.call) {
