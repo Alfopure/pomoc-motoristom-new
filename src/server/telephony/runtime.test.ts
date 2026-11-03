@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { Agent } from "undici";
 import { sessionOwnership } from "./ownership";
 
 import { TelephonyNotConfiguredError } from "@/lib/telephony/not-configured";
@@ -113,6 +114,29 @@ describe("telephony runtime", () => {
       region: "us", commandId, status: 200, ms: expect.any(Number), retried: false, errorCode: null, cached: false,
       attempts: [{ startedAtMs: expect.any(Number), dispatchAfterMs: expect.any(Number), headersMs: expect.any(Number), ms: expect.any(Number), status: 200 }] }]]);
     expect(JSON.stringify(logger.mock.calls)).not.toMatch(/PRIVATE_|KEYtest/);
+  });
+
+  it("keeps the plain global fetch, without a dispatcher, at http_keepalive_ms 0 (call-speed S4)", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('{"data":{"result":"ok"}}', { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const deps = await createTelephonyDeps();
+    expect(deps.latencyFlags?.http_keepalive_ms).toBe(0);
+    await deps.telnyx!.answer({ callControlId: "leg", commandId: "bb824028-87c9-442f-bfac-ac527f733493" });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(Object.keys(fetch.mock.calls[0][1]).sort()).toEqual(["body", "headers", "method", "signal"]);
+  });
+
+  it("sends Telnyx requests through one undici Agent when http_keepalive_ms is on (call-speed S4)", async () => {
+    vi.stubEnv("TELEPHONY_LATENCY_FLAGS", JSON.stringify({ http_keepalive_ms: 15_000 }));
+    const fetch = vi.fn().mockImplementation(async () => new Response('{"data":{"result":"ok"}}', { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    for (const commandId of ["bb824028-87c9-442f-bfac-ac527f733493", "2f0c3b0e-61a4-4c55-9e35-8f3bb5bb6a10"]) {
+      const deps = await createTelephonyDeps();
+      await deps.telnyx!.answer({ callControlId: "leg", commandId });
+    }
+    const [first, second] = fetch.mock.calls.map(([, init]) => init.dispatcher);
+    expect(first).toBeInstanceOf(Agent);
+    expect(second).toBe(first);
   });
 
   it("keeps accepted provider commands successful when the runtime logger throws", async () => {

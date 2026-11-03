@@ -80,6 +80,9 @@ importers:
       simple-icons:
         specifier: ^16.20.0
         version: 16.20.0
+      undici:
+        specifier: 7.30.1
+        version: 7.30.1
       web-push:
         specifier: ^3.6.7
         version: 3.6.7

@@ -1,5 +1,6 @@
 import "server-only";
 import { measureRequestStep, registerTelnyxOrigin } from "@/server/request-metrics";
+import { isReusedSocketReset, isReusedSocketTimeout } from "@/server/http/keepalive";
 import { recordProviderDispatch, sessionOwnership, type Ownership } from "../ownership";
 import { SessionLeaseLostError } from "../service-errors";
 import { dispatchJournaled, dispatchJournaledBatch, journalRequest } from "../provider-journal";
@@ -159,6 +160,10 @@ export type TelnyxHttpAttempt = {
   headersMs: number | null;
   ms: number;
   status: number | null;
+  /** Call-speed S4: the request failed, before any response, on a kept-alive socket the far end had reset. Never retried. */
+  reusedSocketReset?: true;
+  /** Call-speed S4: the request timed out, before any response, on a kept-alive socket (a possible silent drop). Never retried. */
+  reusedSocketTimeout?: true;
 };
 
 export type TelnyxRequestLog = {
@@ -662,6 +667,9 @@ export function createTelnyxClient(options: TelnyxClientOptions): TelnyxClient {
       const parsed = await readBody(response);
       return { response, parsed };
     } catch (error) {
+      // Only before any response: a body cut off after the status line is not the S4 stale-socket case.
+      if (timing.status === null && isReusedSocketReset(error)) timing.reusedSocketReset = true;
+      else if (timing.status === null && isReusedSocketTimeout(error)) timing.reusedSocketTimeout = true;
       if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
         throw new TelnyxCommandError({ code: "timeout", status: 504, detail: `No response within ${timeoutMs} ms`, retryable: true, commandId });
       }

@@ -18,6 +18,7 @@ import { getTelnyxConfig, type EnvRecord, type TelnyxConfig } from "./telnyx/env
 import { createTelnyxRequestLogger } from "./telnyx/request-telemetry";
 import type { ProcessorDeps } from "./telnyx/event-processor";
 import { readLatencyFlags } from "./latency-flags";
+import { keepAliveFetch } from "@/server/http/keepalive";
 
 /**
  * Shared wiring for the telephony API routes (design §4 Phase 2).
@@ -118,8 +119,10 @@ export async function createTelephonyDeps(options: CreateTelephonyDepsOptions = 
     readLatencyFlags(admin, organizationId, { logger: options.logger ?? telephonyLogger }),
   ]);
   if (config.configured) {
+    // S4: `undefined` for `http_keepalive_ms: 0`, which keeps the global fetch.
     telnyx = createTelnyxClient({ config, liveGate: resolveTelnyxLiveGate(config, data), testProvenanceContext: { admin, organizationId },
-      onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger), testConferenceSelfProof: latencyFlags.test_conference_self_proof });
+      onRequest: createTelnyxRequestLogger(options.logger ?? telephonyLogger), testConferenceSelfProof: latencyFlags.test_conference_self_proof,
+      fetch: keepAliveFetch(latencyFlags.http_keepalive_ms) });
   }
 
   return {
