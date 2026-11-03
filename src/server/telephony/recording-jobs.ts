@@ -32,9 +32,11 @@ export function record(value: unknown): Record<string, Json | undefined> {
  * (`metadata.start_mode.apiRegion`); no session, or one from before S5, is
  * `us`. Every deployment that is not production reads the session (a local
  * run against the TEST database may process recordings of EU sessions), and
- * so does production once it may freeze `eu` (`euApiRegionAllowed`); until
- * then production, which cannot have an EU session, reads nothing extra. An
- * unreadable environment counts as production. The read is bounded at 1.5 s,
+ * so does production, which may freeze `eu` since S5.0 passed
+ * (`euApiRegionAllowed`): a start freezes `eu` only for a call it knows will
+ * not be recorded, but a policy switched on right after that start can still
+ * record it. An unreadable environment counts as production that may not
+ * freeze `eu`, and reads nothing extra. The read is bounded at 1.5 s,
  * and an unreadable session fails the step for a retry rather than guessing:
  * cleanup would take the wrong region's 404 for "already removed".
  */

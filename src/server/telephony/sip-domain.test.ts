@@ -151,8 +151,8 @@ describe("the sip_domain switch", () => {
 
   it("freezes `eu` only into a session we create in the EU API region, on TEST", () => {
     vi.stubEnv("MOTORIST_APP_ENV", "test");
-    const start = (flags: Partial<LatencyFlags>, direction: "inbound" | "outbound" | "internal") =>
-      freezeStartMode({ ...defaultLatencyFlags(), ...flags }, { direction, origin: direction === "inbound" ? null : "web", providerRegion: "us" });
+    const start = (flags: Partial<LatencyFlags>, direction: "inbound" | "outbound" | "internal", unrecorded = true) =>
+      freezeStartMode({ ...defaultLatencyFlags(), ...flags }, { direction, origin: direction === "inbound" ? null : "web", providerRegion: "us", unrecorded });
     const sequential = { concurrent: false, autoBridge: false, ownLegTimeoutSecs: 30, origin: "web" };
     expect(start(EU, "outbound")).toEqual({ ...sequential, apiRegion: "eu", sipDomain: "eu" });
     expect(start(EU, "internal")).toEqual({ ...sequential, apiRegion: "eu", sipDomain: "eu" });
@@ -163,12 +163,14 @@ describe("the sip_domain switch", () => {
     // The default, with or without `eu`, records exactly what it did before: no field at all.
     expect(start({}, "outbound")).toEqual({ ...sequential, apiRegion: "us" });
     expect(start({ api_region: "eu" }, "internal")).toEqual({ ...sequential, apiRegion: "eu" });
+    // A call that may be recorded stays out of the EU API region, and so off `sip.telnyx.eu`.
+    expect(start(EU, "outbound", false)).toEqual({ ...sequential, apiRegion: "us" });
   });
 
   it("never freezes `eu` from a deployment whose own host is `.eu`: not for an inbound call, nor without `api_region: \"eu\"`", () => {
     vi.stubEnv("MOTORIST_APP_ENV", "test");
-    const start = (flags: Partial<LatencyFlags>, direction: "inbound" | "outbound" | "internal") =>
-      freezeStartMode({ ...defaultLatencyFlags(), ...flags }, { direction, origin: direction === "inbound" ? null : "web", providerRegion: "eu" });
+    const start = (flags: Partial<LatencyFlags>, direction: "inbound" | "outbound" | "internal", unrecorded = true) =>
+      freezeStartMode({ ...defaultLatencyFlags(), ...flags }, { direction, origin: direction === "inbound" ? null : "web", providerRegion: "eu", unrecorded });
     // A test or local `TELNYX_API_BASE_URL` on `.eu` makes every session's region `eu`; the SIP domain still needs both switches and a call we create.
     for (const flags of [{ sip_domain: "eu" }, EU] as const) {
       const inbound = start(flags, "inbound");
@@ -180,26 +182,30 @@ describe("the sip_domain switch", () => {
       expect(start({ sip_domain: "eu" }, direction)).toMatchObject({ apiRegion: "eu" });
       expect(start({ sip_domain: "eu" }, direction)).not.toHaveProperty("sipDomain");
       expect(start(EU, direction)).toMatchObject({ apiRegion: "eu", sipDomain: "eu" });
+      // A call that may be recorded is `eu` only by its host, which is not enough.
+      expect(start(EU, direction, false)).toMatchObject({ apiRegion: "eu" });
+      expect(start(EU, direction, false)).not.toHaveProperty("sipDomain");
     }
   });
 
   it("never freezes `eu` in production, a local run, development or an unreadable environment", () => {
-    const environments: Array<[string, Record<string, string>]> = [
-      ["production", { MOTORIST_APP_ENV: "production" }],
-      ["Vercel production", { MOTORIST_APP_ENV: "", VERCEL_ENV: "production" }],
-      ["development", { MOTORIST_APP_ENV: "development" }],
-      ["a local run", { MOTORIST_APP_ENV: "", VERCEL_ENV: "" }],
-      ["an unreadable environment", { MOTORIST_APP_ENV: "staging" }],
+    // Production may freeze the EU API region (S5.0 passed), never the EU SIP domain.
+    const environments: Array<[string, Record<string, string>, "us" | "eu"]> = [
+      ["production", { MOTORIST_APP_ENV: "production" }, "eu"],
+      ["Vercel production", { MOTORIST_APP_ENV: "", VERCEL_ENV: "production" }, "eu"],
+      ["development", { MOTORIST_APP_ENV: "development" }, "us"],
+      ["a local run", { MOTORIST_APP_ENV: "", VERCEL_ENV: "" }, "us"],
+      ["an unreadable environment", { MOTORIST_APP_ENV: "staging" }, "us"],
     ];
     const flags = { ...defaultLatencyFlags(), ...EU };
-    for (const [name, env] of environments) {
+    for (const [name, env, apiRegion] of environments) {
       vi.unstubAllEnvs();
       for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
       for (const direction of ["outbound", "internal"] as const) {
-        const frozen = freezeStartMode(flags, { direction, origin: "web", providerRegion: "us" });
+        const frozen = freezeStartMode(flags, { direction, origin: "web", providerRegion: "us", unrecorded: true });
         expect(frozen, name).not.toHaveProperty("sipDomain");
-        expect(frozen.apiRegion, name).toBe("us");
-        expect(startSipDomain(flags, { direction, providerRegion: "us" }), name).toBe("com");
+        expect(frozen.apiRegion, name).toBe(apiRegion);
+        expect(startSipDomain(flags, { direction, providerRegion: "us", unrecorded: true }), name).toBe("com");
       }
     }
   });
@@ -211,14 +217,19 @@ describe("the sip_domain switch", () => {
       for (const api_region of ["us", "eu"] as const) for (const sip_domain of ["com", "eu"] as const) {
         const flags = { ...defaultLatencyFlags(), api_region, sip_domain };
         for (const direction of ["inbound", "outbound", "internal"] as const) for (const providerRegion of ["us", "eu"] as const) {
-          const frozen = freezeStartMode(flags, { direction, origin: direction === "inbound" ? null : "web", providerRegion });
-          expect(startSipDomain(flags, { direction, providerRegion })).toBe(frozen.sipDomain ?? "com");
-          if (frozen.sipDomain) expect(frozen.apiRegion).toBe("eu");
-          checked += 1;
+          for (const unrecorded of [true, false, undefined]) {
+            const frozen = freezeStartMode(flags, { direction, origin: direction === "inbound" ? null : "web", providerRegion, unrecorded });
+            expect(startSipDomain(flags, { direction, providerRegion, unrecorded })).toBe(frozen.sipDomain ?? "com");
+            if (frozen.sipDomain) {
+              expect(frozen.apiRegion).toBe("eu");
+              expect(unrecorded).toBe(true);
+            }
+            checked += 1;
+          }
         }
       }
     }
-    expect(checked).toBe(72);
+    expect(checked).toBe(216);
   });
 });
 

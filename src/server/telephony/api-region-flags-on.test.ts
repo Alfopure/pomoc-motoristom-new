@@ -8,7 +8,7 @@ import { envLatencyFlags, sessionApiRegion } from "./latency-flags";
  * The start, recovery, hangup, pause and callback contracts, and the hold,
  * conference, supervision, transfer, termination, reconcile and recording
  * journeys, again with `api_region: "eu"` on a TEST deployment (call-speed
- * S5; only `test` may freeze `eu` until spike S5.0 passes). Every session
+ * S5; `test` and `production` may freeze `eu`, for calls that will not be recorded). Every session
  * these suites create through the application freezes `.eu`, so the state
  * machine runs against the EU base URL, while an inbound call stays `us`.
  *

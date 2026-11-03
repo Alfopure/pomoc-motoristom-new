@@ -57,7 +57,8 @@ import { encodeClientState } from "./telnyx/client-state";
 import { commandId } from "./telnyx/command-id";
 import { CallActionError, SessionLeaseBusyError, SessionLeaseLostError } from "./service-errors";
 import { DATABASE_REQUEST_MS, UNOWNED_READ_MS, ownershipRpc, sessionOwnership, withTelephonyDatabaseBudget } from "./ownership";
-import { freezeStartMode, latencyFlagsOf, providerRegionOf, startSipDomain } from "./latency-flags";
+import { euApiRegionAllowed, freezeStartMode, latencyFlagsOf, providerRegionOf, startSipDomain } from "./latency-flags";
+import { resolveSessionRecordingPolicy } from "./recording-policy-service";
 import { humansOnly } from "@/server/profile-kind";
 import { nativeMobilePushReachable } from "@/lib/telephony/device-liveness";
 import { nativeVoiceEnabled } from "@/lib/app-environment";
@@ -238,9 +239,9 @@ function deviceDeps(deps: CallActionDeps): DeviceDeps {
 }
 
 /** `sipDomain` is the domain of the session that will dial the device (`sessionSipDomain`, or `startSipDomainOf` for a start). */
-async function requireLiveDevice(deps: CallActionDeps, profileId: string, sipDomain: TelnyxSipDomain, message = "Telefón operátora nie je pripojený."): Promise<DeviceRow & { sipUri: string }> {
-  const device = await getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId });
-  return validateLiveDevice(device, nowOf(deps), sipDomain, message);
+async function requireLiveDevice(deps: CallActionDeps, profileId: string, sipDomain: TelnyxSipDomain | Promise<TelnyxSipDomain>, message = "Telefón operátora nie je pripojený."): Promise<DeviceRow & { sipUri: string }> {
+  const [device, domain] = await Promise.all([getOperatorDevice(deviceDeps(deps), { organizationId: deps.organizationId, profileId }), sipDomain]);
+  return validateLiveDevice(device, nowOf(deps), domain, message);
 }
 
 function validateLiveDevice(device: DeviceRow | null, now: Date, sipDomain: TelnyxSipDomain, message = "Telefón operátora nie je pripojený."): DeviceRow & { sipUri: string } {
@@ -413,17 +414,46 @@ export type EarlyStart<T> = (result: T) => void;
 
 /**
  * The guard reads a new start needs, already in flight (call-speed S2.1).
- * `sipDomain` is the domain its SIP URIs were built with (`startSipDomainOf`).
+ * `unrecorded` is `startUnrecorded`; `sipDomain` is the domain its SIP URIs
+ * were built with (`startSipDomainOf`).
  */
-type StartWave<T> = { rateCount?: Promise<number | null>; guards: Promise<T>; device: Promise<{ sipUri: string }>; sipDomain: TelnyxSipDomain };
+type StartWave<T> = { rateCount?: Promise<number | null>; guards: Promise<T>; device: Promise<{ sipUri: string }>;
+  unrecorded: Promise<boolean>; sipDomain: Promise<TelnyxSipDomain> };
+
+/**
+ * Call-speed S5: whether the session a start is about to create will certainly
+ * not be recorded, which `api_region: "eu"` needs (recording through the EU
+ * API is not proven). Asked only while `eu` may be frozen, alongside the other
+ * guard reads, and answered from what `policyState` will apply:
+ * - a colleague call is never recorded;
+ * - an outgoing call is not recorded when its line has no start announcements
+ *   (the session freezes `announcements` from this same `line`, and without a
+ *   notice there is no capture), or when the policy the session runner applies
+ *   (`resolveSessionRecordingPolicy`: no read while this deployment's recording
+ *   switches are off) does not record outgoing calls. A policy that could not
+ *   be read, or a line that could not be resolved, may record.
+ * A policy switched on between this read and the runner's own can still record
+ * an `eu` call; its recording jobs follow the session's region (`recording-jobs.ts`).
+ */
+function startUnrecorded(deps: CallActionDeps, direction: "outbound" | "internal", fromLine?: Promise<{ line: LineRow | null }>): Promise<boolean> {
+  if (direction === "internal") return Promise.resolve(true);
+  if (!fromLine || latencyFlagsOf(deps).api_region !== "eu" || !euApiRegionAllowed()) return Promise.resolve(false);
+  const announced = fromLine.then(({ line }) => announcementConfigFromMetadata(line?.metadata).outboundStartAnnouncements === true, () => true);
+  const policyOff = resolveSessionRecordingPolicy(deps.admin, deps.organizationId)
+    .then(policy => policy.reason !== "recording_policy_unavailable" && !(policy.enabled && policy.outbound), () => false);
+  return Promise.all([announced, policyOff]).then(([withNotice, off]) => !withNotice || off);
+}
 
 /**
  * The SIP domain the session a start is about to create will freeze (S5
  * SIP-domain spike). Its URIs are built before that session exists;
- * `createSession` refuses a frozen domain that differs.
+ * `createSession` refuses a frozen domain that differs. Only an unrecorded
+ * call may take `eu`, so everything else is decided now, before any read; the
+ * recording answer is awaited only where it could keep `eu`.
  */
-function startSipDomainOf(deps: CallActionDeps, direction: "outbound" | "internal"): TelnyxSipDomain {
-  return startSipDomain(latencyFlagsOf(deps), { direction, providerRegion: providerRegionOf(deps.config) });
+function startSipDomainOf(deps: CallActionDeps, direction: "outbound" | "internal", unrecorded: Promise<boolean>): Promise<TelnyxSipDomain> {
+  const domain = startSipDomain(latencyFlagsOf(deps), { direction, providerRegion: providerRegionOf(deps.config), unrecorded: true });
+  return domain === "com" ? Promise.resolve(domain) : unrecorded.then(known => known ? domain : "com");
 }
 
 /** Started promises nobody may await (an identical retry); never an unhandled rejection. */
@@ -448,7 +478,9 @@ function ownDestinationProof(deps: CallActionDeps, device: Promise<{ sipUri: str
 }
 
 function outboundGuards(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput, speculative: boolean) {
-  const sipDomain = startSipDomainOf(deps, "outbound");
+  const fromLine = resolveFromLine(deps, actor.profileId, input.lineId, speculative);
+  const unrecorded = startUnrecorded(deps, "outbound", fromLine);
+  const sipDomain = startSipDomainOf(deps, "outbound", unrecorded);
   const device = requireLiveDevice(deps, actor.profileId, sipDomain);
   // These reads are independent. Finish every guard before reserving an operator
   // or creating a call, but do not add each database round trip to setup latency.
@@ -457,8 +489,8 @@ function outboundGuards(deps: CallActionDeps, actor: CallActor, input: StartOutb
     loadDailyUsage(deps.admin, { organizationId: deps.organizationId, now: nowOf(deps) }),
     resolveCallbackTarget(deps.admin, deps.organizationId, input.to),
     device,
-    resolveFromLine(deps, actor.profileId, input.lineId, speculative),
-  ]), device, sipDomain });
+    fromLine,
+  ]), device, unrecorded, sipDomain });
 }
 
 export async function startOutboundCall(deps: CallActionDeps, actor: CallActor, input: StartOutboundInput, early?: EarlyStart<StartOutboundResult>): Promise<StartOutboundResult> {
@@ -507,7 +539,7 @@ async function startOutboundCallNew(deps: CallActionDeps, actor: CallActor, inpu
     lineId: line?.id ?? null,
     caseId: input.caseId ?? null,
     answeredBy: actor.profileId,
-    sipDomain: started.sipDomain,
+    sipDomain: await started.sipDomain, unrecorded: await started.unrecorded,
     metadata: { ...(input.requestId ? { initial_operation: { ...initialOperationIdentity(actor, "outbound", input)!, request: input, to, from, sipUri: device.sipUri,
       fromDisplayName: actor.displayName?.replace(/[^A-Za-z0-9 \-\_~!.+]/g, "").slice(0, 128) || undefined,
       ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId } : {}) } } : {}), ...(input.callbackRequestId ? { callbackRequestId: input.callbackRequestId, effects_v1: { generation: 0 } } : {}), outbound: { to, by: actor.profileId, from, case_id: input.caseId ?? null }, announcements: announcementConfigFromMetadata(line?.metadata), line_label: line?.label ?? null, partner_name: line?.partner_name ?? null },
@@ -602,17 +634,18 @@ async function resolveColleagueTarget(deps: CallActionDeps, profileId: string, s
 }
 
 function colleagueGuards(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string }, speculative: boolean) {
-  const sipDomain = startSipDomainOf(deps, "internal");
+  const unrecorded = startUnrecorded(deps, "internal");
+  const sipDomain = startSipDomainOf(deps, "internal", unrecorded);
   const device = requireLiveDevice(deps, actor.profileId, sipDomain);
   // Independent reads in one round; failures are reported in a fixed order.
   return inFlight({ guards: Promise.allSettled([
     assertInternalCallBudget(deps),
-    resolveColleagueTarget(deps, input.targetProfileId, sipDomain),
+    sipDomain.then(domain => resolveColleagueTarget(deps, input.targetProfileId, domain)),
     device,
     resolveFromLine(deps, actor.profileId, null, speculative),
     actor.displayName ? Promise.resolve(actor.displayName) : deps.admin.from("motorist_profiles").select("display_name")
       .eq("organization_id", deps.organizationId).eq("id", actor.profileId).maybeSingle().then((result) => result.data?.display_name ?? null),
-  ]), device, sipDomain });
+  ]), device, unrecorded, sipDomain });
 }
 
 async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: { targetProfileId: string; requestId?: string },
@@ -641,7 +674,7 @@ async function callColleagueNew(deps: CallActionDeps, actor: CallActor, input: {
     lineId: line?.id ?? null,
     caseId: null,
     answeredBy: actor.profileId,
-    sipDomain: started.sipDomain,
+    sipDomain: await started.sipDomain, unrecorded: await started.unrecorded,
     metadata: { ...(input.requestId ? { initial_operation: { ...initialOperationIdentity(actor, "internal", input)!, request: input, ...plan } } : {}),
       internal: { target_profile_id: target.value.profileId, target_sip: target.value.sipUri, by: actor.profileId,
         ...(target.value.endpoints.length > 1 ? { endpoints: target.value.endpoints } : {}),
@@ -1506,11 +1539,14 @@ async function createSession(
     answeredBy: string;
     /** The SIP domain every SIP URI in this input was built with (`StartWave.sipDomain`). */
     sipDomain: TelnyxSipDomain;
+    /** S5: the call will certainly not be recorded (`StartWave.unrecorded`); `eu` needs it. */
+    unrecorded: boolean;
     metadata: Record<string, unknown>;
   },
 ): Promise<SessionRow> {
   const metadata = { ...input.metadata, environment: deps.environment,
     start_mode: freezeStartMode(latencyFlagsOf(deps), { direction: input.direction, origin: deps.deviceKind ?? "web", providerRegion: providerRegionOf(deps.config),
+      unrecorded: input.unrecorded,
       // Call-speed S6.1: a callback, or an outgoing call behind start
       // announcements (and with them any recording), stays sequential.
       concurrentEligible: !input.metadata.callbackRequestId && (input.direction === "internal" ||
@@ -1518,7 +1554,7 @@ async function createSession(
       // S6.3: one colleague endpoint only; with web and mobile the server picks the winner.
       autoBridgeEligible: !(input.metadata.internal as { endpoints?: unknown[] } | undefined)?.endpoints?.length }) };
   // S5 SIP-domain spike: the start's URIs were built before this session's
-  // domain was frozen. Both come from the same flags; should they ever differ,
+  // domain was frozen. Both come from the same flags and `unrecorded`; should they ever differ,
   // nothing is created, so no session dials a domain it does not record.
   if (sessionSipDomain(metadata) !== input.sipDomain) throw new CallActionError("Hovor sa nepodarilo založiť.", 500, "start_mode_changed");
   const inserted = await deps.admin

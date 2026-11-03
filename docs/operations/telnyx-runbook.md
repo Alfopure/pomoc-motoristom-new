@@ -70,7 +70,7 @@ Time-boxed verifications that cannot be done offline. Record the outcome (date, 
 
 ### S5.0 — Telnyx EU API (call-speed S5)
 
-**Why.** With `api_region: "eu"` in `latency_flags`, every outbound, colleague and callback session created afterwards on TEST is frozen to `start_mode.apiRegion = "eu"`: its calls, conferences, the TEST guard's conference reads, reconcile reads and recording GET/DELETE go to `api.telnyx.eu`. Telnyx processes a call in the region whose API created it, and conferences cannot span regions, so the region never changes during a call. Inbound sessions stay `us` (no evidence yet which region processes our inbound calls). Credentials, tokens, connections, profiles, numbers and SMS stay on `api.telnyx.com`. The `telnyx-http` log line carries `region`.
+**Why.** With `api_region: "eu"` in `latency_flags`, every outbound, colleague and callback session created afterwards on TEST, and since the production unlock below in production, is frozen to `start_mode.apiRegion = "eu"` when the start knows the call will not be recorded: its calls, conferences, the TEST guard's conference reads, reconcile reads and recording GET/DELETE go to `api.telnyx.eu`. Telnyx processes a call in the region whose API created it, and conferences cannot span regions, so the region never changes during a call. Inbound sessions stay `us` (no evidence yet which region processes our inbound calls). Credentials, tokens, connections, profiles, numbers and SMS stay on `api.telnyx.com`. The `telnyx-http` log line carries `region`.
 
 **One host per region.** `us` is `https://api.telnyx.com/v2` and `eu` is `https://api.telnyx.eu/v2`. `TELNYX_API_BASE_URL` and `TELNYX_EU_API_BASE_URL` override them only outside production (tests, local runs); production ignores them and logs `api_base_url_override_ignored` once. A session's frozen region, and the logged `region`, therefore always name the host its calls really use.
 
@@ -94,7 +94,13 @@ For `eu` sessions every "already gone" decision (hangup, recording stop, termina
 
 **Release check (before every `dev` → `main` release that contains S5).** In the production Vercel project, `TELNYX_API_BASE_URL` and `TELNYX_EU_API_BASE_URL` must be unset or exactly `https://api.telnyx.com/v2` and `https://api.telnyx.eu/v2`. Production ignores any other value (and logs `api_base_url_override_ignored`), but a differing value means someone expects a host production will not use. Read the variable names and values only; change nothing without the owner's production authorization.
 
-**Limits until it passes.** Only a deployment whose application environment is exactly `test` freezes `eu` (`EU_API_PROVEN` in `latency-flags.ts`); production and local runs keep `us` whatever `api_region` says until a reviewed change records the pass. Every non-production deployment (a local run may use the TEST database) reads a recording's session to find its region; production recordings keep `.com` without an extra read until then.
+**Production unlock (2026-11-03, `EU_API_PROVEN` in `latency-flags.ts`).** A deployment whose application environment is `test` or `production` freezes `eu`; a local run (`development`, even one pointed at production data) and an unreadable environment keep `us` whatever `api_region` says. Recording through `.eu` is not proven, so a start freezes `eu` only for a call it knows will not be recorded, by the same rule on TEST and in production:
+- a colleague call is never recorded and may freeze `eu`;
+- an outbound or callback start resolves its line and reads the policy the session runner applies, both in parallel with its other guard reads. The policy read is `resolveSessionRecordingPolicy`: nothing is read while the deployment's `TELNYX_RECORDING_ENABLED`, `TELNYX_RECORDING_CONTRACT_VERIFIED` and `RECORDING_PROCESSING_ENABLED` are not all `true`; otherwise one row of `motorist_call_recording_policies`. It freezes `eu` when the line has no start announcements (no notice, no capture: `policyState`) or the policy does not record outgoing calls. On an announced line, a policy enabled and approved for outgoing calls, or one that cannot be read, freezes `us`; so does a line that cannot be resolved;
+- an inbound call stays `us`;
+- a policy switched on between the start's read and the session runner's first read can still record an `eu` call. Its recording jobs read the session's region in every deployment, production included, so GET and DELETE go to `.eu`.
+
+Before switching recording on in production, either run the recorded-call part of this spike on TEST (`recording.saved`, the import's GET, the cleanup DELETE and the `download_urls` host) or accept that recorded outgoing calls stay on `us`. Production sets the switch only in its own `latency_flags`, after migration `20261031090000_telephony_latency_flags` and the release check above.
 
 **Rollback.** `api_region: "us"` affects only new sessions; sessions already frozen to `eu` finish on `.eu`. Do not roll back to a build without S5 while an EU session has a conference or a recording still stored at Telnyx: an older build would control the conference, and read or delete the recording, through `.com`, where a 404 reads as "already removed" and would leave the EU recording in place. For a plain EU call a GET and a hangup through `.com` worked on TEST (result below); other commands were not tried that way, so avoid it while the call is live.
 
@@ -104,6 +110,15 @@ For `eu` sessions every "already gone" decision (hangup, recording stop, termina
 - Harness: 5 runs with `api_region: "eu"`, all passed.
 - `headersMs` on `.eu` in these runs, next to the earlier TEST baseline on `.com` (not a paired measurement: different runs and times): `POST /calls` 206–385 ms (baseline 390–500); bridge 78–174 ms (263–384); hangup 38–86 ms (213–271); `GET /calls` 23–130 ms (230–330).
 - Still open: the gate decision; hold, consult and transfer (conferences); a recorded call (`recording.saved`, GET/DELETE, `download_urls` host); an inbound call controlled through `.eu`; a token mint through `.eu`; the `anchorsite_override` readbacks; dial → SDK invite.
+
+**Result (2026-11-03): pass for calls that are not recorded; production unlocked by the reviewed change that records it.**
+- Plain colleague calls through `api.telnyx.eu`, voice harness on stable TEST, 2–3 Nov: 5 + 3 + 16 runs, every correctness check passed. `headersMs`: `POST /calls` 206–385 ms against 390–500 ms on `.com`; bridge 78–174 ms against 263–384 ms (the plan's 100 ms per command gate is met).
+- Cross-region probe (session `d5fc6092`, above): a `GET /calls/:id` and a hangup through `.com` also work for a call created through `.eu`.
+- The owner's own iPhone outbound call to his mobile, 3 Nov 06:45 CET (session `326964b0`, `apiRegion: "eu"`): talking, then hold and unhold twice through an EU conference (conference create, join, hold and unhold all answered 200), then a clean hangup.
+- Inbound calls stay `us` by design.
+- Not yet run live on an `eu` session: consult, transfer, add-party, supervise, park and a callback start. They pass the application suites against a fake provider (`api-region.test.ts`, `api-region-flags-on.test.ts`). The first production release checks a consult or transfer on an outbound call in its stage-B smoke test.
+- Not verified: a recorded call through `.eu`. TEST, production and the organisation's policy all have `recording_enabled = false` (read 3 Nov), so this release freezes `eu` only for calls that will not be recorded (see the production unlock above).
+- Unchanged: `EU_SIP_DOMAIN_PROVEN` (the SIP-domain spike below waits for the owner's iPhone test), `CONCURRENT_START_PROVEN`, `JOIN_WITH_HOLD_PROVEN` and `TARGET_LOCAL_FIRST_PROVEN`.
 
 #### S5.0 SIP-domain spike — dialling credentials on `sip.telnyx.eu` (`sip_domain`, TEST experiment)
 
@@ -216,7 +231,12 @@ To run it on TEST, add `"concurrent_far_link_to": false` to the TEST `latency_fl
 
 **Rollback.** `"http_keepalive_ms": 0`. New requests use the global fetch within 5 s; requests in flight finish on the Agent.
 
-**Result.** _Not yet run._
+**Result (2026-11-03, stable TEST, `dev` `575949eb`, ~03:33–03:45 UTC): pass.**
+- `http_keepalive_ms` was 15000, then 60000; TEST keeps 60000.
+- 10 harness calls, all correctness checks passed.
+- `motorist_provider_commands` outcome `unknown`: 0 of 50 after enabling, against 0 of 509 in the previous 24 h.
+- From the third call at 60000, `telnyxConnects` was 0 on the start, the webhooks and the hangup.
+- Provider time of the bridge webhook: 311–345 ms, against 385–460 ms before.
 
 ### S2 — Slovak TTS availability (secondary)
 

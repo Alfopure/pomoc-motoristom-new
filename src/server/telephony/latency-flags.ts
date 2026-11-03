@@ -278,19 +278,30 @@ function joinWithHoldAllowed(): boolean {
 }
 
 /**
- * S5 is implemented, but that every command of a call created through
- * `api.telnyx.eu` works there (and that the gain passes the plan's gate) is
- * TEST spike S5.0 (docs/operations/telnyx-runbook.md). Until the runbook
- * records a pass only a deployment whose application environment is exactly
- * `test` may freeze `eu`: production, a local run (`development`, even one
- * pointed at production data) and an unreadable environment keep `us`
- * whatever `api_region` says. Production needs a reviewed change here.
+ * S5 passed TEST spike S5.0 (docs/operations/telnyx-runbook.md), so `test`
+ * and `production` may freeze `eu`. Evidence, stable TEST, 2–3 Nov 2026:
+ * - plain colleague calls through `api.telnyx.eu`: 5 + 3 + 16 voice-harness
+ *   runs, every correctness check passed; `headersMs` `POST /calls` 206–385 ms
+ *   (`.com` 390–500 ms), bridge 78–174 ms (263–384 ms);
+ * - session d5fc6092: a `GET /calls/:id` and a hangup through `.com` also
+ *   work for a call created through `.eu`;
+ * - session 326964b0 (3 Nov, 06:45 CET): the owner's iPhone called his own
+ *   mobile in `eu`, talked, held and unheld twice through an EU conference
+ *   (create, join, hold and unhold all 200) and hung up cleanly.
+ * Not proven: recording through `.eu`, so a start freezes `eu` only for a call
+ * that will not be recorded (`StartRegionInput.unrecorded`); an inbound call
+ * stays `us` (`startApiRegion`). Not yet run live on an `eu` session (the
+ * harness suites cover them against a fake provider): consult, transfer,
+ * add-party, supervise, park and a callback start. A local run
+ * (`development`, even one pointed at production data) and an unreadable
+ * environment keep `us` whatever `api_region` says.
  */
-const EU_API_PROVEN = false;
+const EU_API_PROVEN = true;
 export function euApiRegionAllowed(): boolean {
-  if (EU_API_PROVEN) return true;
-  try { return resolveAppEnvironment() === "test"; }
-  catch { return false; }
+  try {
+    const environment = resolveAppEnvironment();
+    return environment === "test" || EU_API_PROVEN && environment === "production";
+  } catch { return false; }
 }
 
 /**
@@ -330,33 +341,42 @@ export function sessionApiRegion(metadata: unknown): "us" | "eu" {
   return startMode?.apiRegion === "eu" ? "eu" : "us";
 }
 
-type StartRegionInput = { direction: "inbound" | "outbound" | "internal"; providerRegion: "us" | "eu" };
+type StartRegionInput = {
+  direction: "inbound" | "outbound" | "internal"; providerRegion: "us" | "eu";
+  /**
+   * True only when the start knows its call will not be recorded (call-actions
+   * `startUnrecorded`): recording through `api.telnyx.eu` is not proven, so
+   * anything else, missing included, keeps the session out of `eu`.
+   */
+  unrecorded?: boolean;
+};
 
 /**
  * S5: a session we create is created and controlled in `eu` when the flag asks
- * for it and this deployment may (`euApiRegionAllowed`). Otherwise, and always
- * for an inbound call (Telnyx created it, in a region we have no evidence for
- * on this account; a separate inbound switch would need the S5.0 inbound
- * spike), it is the region of the host it really calls, so the frozen and
- * logged region always match the host.
+ * for it, the call will not be recorded and this deployment may
+ * (`euApiRegionAllowed`). Otherwise, and always for an inbound call (Telnyx
+ * created it, in a region we have no evidence for on this account; a separate
+ * inbound switch would need the S5.0 inbound spike), it is the region of the
+ * host it really calls, so the frozen and logged region always match the host.
  */
 function startApiRegion(flags: LatencyFlags, input: StartRegionInput): "us" | "eu" {
-  return HONOURED_START_SWITCHES.apiRegion && input.direction !== "inbound" && flags.api_region === "eu" && euApiRegionAllowed()
-    ? "eu" : input.providerRegion;
+  return HONOURED_START_SWITCHES.apiRegion && input.direction !== "inbound" && flags.api_region === "eu" && input.unrecorded === true &&
+    euApiRegionAllowed() ? "eu" : input.providerRegion;
 }
 
 /**
  * The SIP domain a new session freezes (S5 SIP-domain spike): `eu` only for a
- * session we create (never an inbound call) that `api_region` itself puts in
- * the `eu` API region, when `sip_domain` asks for it and this deployment may
- * (`euSipDomainAllowed`). A region that merely names the deployment's host (a
- * test or local `TELNYX_API_BASE_URL` on `.eu`) is not enough. A start builds
- * its SIP URIs with this before the session row exists; `freezeStartMode`
- * records the same value from the same flags, and the start refuses to create
- * a session whose frozen domain differs from the one its URIs carry.
+ * session we create (never an inbound call, nor one that may be recorded)
+ * that `api_region` itself puts in the `eu` API region, when `sip_domain` asks
+ * for it and this deployment may (`euSipDomainAllowed`). A region that merely
+ * names the deployment's host (a test or local `TELNYX_API_BASE_URL` on `.eu`)
+ * is not enough. A start builds its SIP URIs with this before the session row
+ * exists; `freezeStartMode` records the same value from the same flags and
+ * `unrecorded`, and the start refuses to create a session whose frozen domain
+ * differs from the one its URIs carry.
  */
 export function startSipDomain(flags: LatencyFlags, input: StartRegionInput): TelnyxSipDomain {
-  return input.direction !== "inbound" && flags.api_region === "eu" && flags.sip_domain === "eu" &&
+  return input.direction !== "inbound" && flags.api_region === "eu" && flags.sip_domain === "eu" && input.unrecorded === true &&
     startApiRegion(flags, input) === "eu" && euSipDomainAllowed() ? "eu" : "com";
 }
 
@@ -373,7 +393,7 @@ export function startSipDomain(flags: LatencyFlags, input: StartRegionInput): Te
  * concurrent start that really ran is `meta.far_end`, the colleague dial that
  * really carried the auto-bridge `meta.internal_auto_bridge`.
  */
-export function freezeStartMode(flags: LatencyFlags, input: { direction: "inbound" | "outbound" | "internal"; origin: Origin | null; providerRegion: "us" | "eu";
+export function freezeStartMode(flags: LatencyFlags, input: StartRegionInput & { origin: Origin | null;
   concurrentEligible?: boolean; autoBridgeEligible?: boolean }): SessionStartMode {
   const concurrent = HONOURED_START_SWITCHES.concurrent && input.direction !== "inbound" && input.origin !== null &&
     input.concurrentEligible !== false && concurrentDialFor(flags, input.direction, input.origin) && concurrentStartAllowed();
