@@ -713,7 +713,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         readMeta(ownedSession).far_end?.mode === "concurrent" &&
         (await pendingLedgerControlIds(deps.admin, deps.organizationId, "call.answered", [event.callControlId])).has(event.callControlId);
       const run = await runSessionEvent(deps, ownedSession.id, answeredPending ? { ...event, answeredPending: true } : event, { deferObservationAudit: true });
-      if (run.session.state === "ringing" && readMeta(run.session).far_end?.bridge) pendingBridge = run.session;
+      if (run.session.state === "ringing" && concurrentBridgeDueAt(readMeta(run.session)) !== null) pendingBridge = run.session;
       observationAudit = run.afterRelease;
       if (["call.bridged", "call.hangup", "conference.participant.joined", "conference.participant.left"].includes(event.type)) {
         try { await observeParticipants(deps.admin, run.session, event.id, event.occurredAt ?? now().toISOString(), event.type === "call.bridged", undefined, latencyFlagsOf(deps).internal_lean_path); }

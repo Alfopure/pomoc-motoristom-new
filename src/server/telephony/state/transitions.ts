@@ -15,7 +15,7 @@ import { readPendingEffects } from "./continuation";
 import { hasStabilityContract, telephonyStabilityEnabled } from "../stability";
 import { contactOperationIntent } from "../contact-proof";
 import { CONCURRENT_BRIDGE_DEADLINE_MS, CONCURRENT_BRIDGE_EXTENSION_MS, CONCURRENT_BRIDGE_RETRY_AFTER_MS, CONCURRENT_BRIDGE_RETRY_WAIT_MS,
-  CONCURRENT_BRIDGE_WITHOUT_EVIDENCE, concurrentBridgeDueAt } from "./types";
+  CONCURRENT_BRIDGE_WITHOUT_EVIDENCE, CONCURRENT_PROVIDER_BRIDGE_WAIT_MS, concurrentBridgeDueAt } from "./types";
 import {
   appendJourneyEvidence,
   type JourneyEvidenceEntry,
@@ -1590,8 +1590,25 @@ function providerBridgesAtAnswer(b: TransitionBuilder, far: LegRow): boolean {
  */
 function connectConcurrent(b: TransitionBuilder, own: LegRow, far: LegRow, opts: { alreadyBridged: boolean }, at: { farAt: string | null; ownAt: string | null }): boolean {
   if (concurrentBridged(own, far, opts)) return false;
-  if (!farAnsweredFirst(at.farAt, at.ownAt) && providerBridgesAtAnswer(b, far)) return false;
-  if (!b.meta.far_end?.bridge) bridgeConcurrentPair(b, own, far, at.farAt);
+  const providerBridges = providerBridgesAtAnswer(b, far);
+  if (!farAnsweredFirst(at.farAt, at.ownAt) && providerBridges) return false;
+  const farEnd = b.meta.far_end!;
+  if (farEnd.bridge || farEnd.awaitBridgeUntil) return true;
+  if (providerBridges) {
+    // Outcome A (TEST spike S6.0/1): Telnyx completes the far leg's
+    // `bridge_on_answer` itself about 0.5 s after the own leg answers, and a
+    // bridge of ours sent meanwhile is also accepted, bridging the pair twice.
+    // Wait for its `call.bridged`; ours is only the fallback (B/C), sent by the
+    // overdue sweep if nothing reported by then.
+    const ownAt = Date.parse(at.ownAt ?? "");
+    const until = (Number.isFinite(ownAt) ? ownAt : b.ctx.now.getTime()) + CONCURRENT_PROVIDER_BRIDGE_WAIT_MS;
+    if (until > b.ctx.now.getTime()) {
+      b.patchMeta({ far_end: { ...farEnd, answeredAt: farEnd.answeredAt ?? at.farAt ?? b.nowIso, awaitBridgeUntil: new Date(until).toISOString() } });
+      b.note("far end answered first; waiting for Telnyx's own bridge (bridge_on_answer)");
+      return true;
+    }
+  }
+  bridgeConcurrentPair(b, own, far, at.farAt);
   return true;
 }
 
@@ -1599,14 +1616,14 @@ export { CONCURRENT_BRIDGE_DEADLINE_MS } from "./types";
 
 /**
  * The explicit bridge of S6.2, in today's direction: the operator's leg
- * bridges to the far end and parks itself if that bridge ends. It is not the
- * connection: `call.bridged` is. A refusal of any wording (Telnyx may have
- * bridged the pair itself), a 5xx or a lost response therefore neither
- * connects the call nor tears it down; the call stays `ringing` until the
- * evidence arrives, and the sweep at `deadlineAt` ends a pair that never
- * proved itself connected (`onConcurrentBridgeDeadline`). The customer's
- * bridge keeps the contact intent of the dial that reached them (callback
- * contact proof).
+ * bridges to the far end and parks itself if that bridge ends. Its 2xx
+ * connects the call (`concurrent_bridge_accepted`, applied by the runner right
+ * after the effect), as does `call.bridged`. A refusal of any wording (Telnyx
+ * may have bridged the pair itself), a 5xx or a lost response neither connects
+ * the call nor tears it down; the call stays `ringing` until evidence arrives,
+ * and the sweep at `deadlineAt` ends a pair that never proved itself
+ * connected (`onConcurrentBridgeDeadline`). The customer's bridge keeps the
+ * contact intent of the dial that reached them (callback contact proof).
  */
 function bridgeConcurrentPair(b: TransitionBuilder, own: LegRow, far: LegRow, farAt: string | null): void {
   const bridgeId = b.cmdId(own.telnyx_call_control_id, "bridge:concurrent");
@@ -1640,7 +1657,7 @@ function concurrentBridgeCommand(b: TransitionBuilder, own: LegRow, far: LegRow,
  */
 function onConcurrentBridgeDeadline(b: TransitionBuilder): ReduceResult | null {
   const bridge = b.meta.far_end?.bridge;
-  if (b.session.state !== "ringing" || !concurrentStart(b) || !bridge) return null;
+  if (b.session.state !== "ringing" || !concurrentStart(b) || !(bridge || b.meta.far_end?.awaitBridgeUntil)) return null;
   const now = b.ctx.now.getTime();
   const due = concurrentBridgeDueAt(b.meta);
   if (due === null || due > now) return null;
@@ -1648,6 +1665,13 @@ function onConcurrentBridgeDeadline(b: TransitionBuilder): ReduceResult | null {
   if (!evidence) return null;
   const own = concurrentOwnLeg(b), far = concurrentFarLeg(b);
   if (own?.bridged_at || far?.bridged_at) return connectCall(b, b.nowIso, "concurrent pair bridged → talking");
+  if (!bridge) {
+    // Telnyx's own bridge did not report in time: ours is the fallback (B/C).
+    if (!own || !far) return null;
+    b.patchMeta({ far_end: { ...b.meta.far_end!, awaitBridgeUntil: null } });
+    bridgeConcurrentPair(b, own, far, b.meta.far_end?.answeredAt ?? null);
+    return b.note("no call.bridged from Telnyx's own bridge in time → explicit bridge").result();
+  }
   if (bridge.acceptedAt || evidence.journal === "accepted") {
     b.note(CONCURRENT_BRIDGE_WITHOUT_EVIDENCE);
     return connectCall(b, bridge.acceptedAt ?? b.nowIso, "concurrent bridge accepted (2xx) without call.bridged → talking");
@@ -1674,6 +1698,18 @@ function onConcurrentBridgeDeadline(b: TransitionBuilder): ReduceResult | null {
   for (const leg of b.openLegs()) b.cmd(hangupCmd(b, leg, "bridge_failed"));
   releaseTalkingOperators(b, false);
   return b.note("concurrent bridge unproven at its deadline → both legs ended").result();
+}
+
+/**
+ * Call-speed S6.2: Telnyx accepted (2xx) the explicit concurrent bridge (the
+ * effect recorded `acceptedAt`); the runner applies this right after the effect
+ * settles. That is the connection: the call goes to `talking` without waiting
+ * for the `call.bridged` webhook.
+ */
+function onConcurrentBridgeAccepted(b: TransitionBuilder): ReduceResult {
+  const bridge = b.meta.far_end?.bridge;
+  if (b.session.state !== "ringing" || !concurrentStart(b) || !bridge?.acceptedAt) return ignoredResult("concurrent bridge acceptance: nothing waits for it");
+  return connectCall(b, bridge.acceptedAt, "explicit concurrent bridge accepted (2xx) → talking");
 }
 
 /**
@@ -3124,6 +3160,7 @@ const INTERNAL_UNSUPPORTED_ACTIONS: ReadonlySet<AppEvent["type"]> = new Set<AppE
 
 function reduceApp(b: TransitionBuilder, event: AppEvent): ReduceResult {
   if (event.type === "sweep") return onSweep(b);
+  if (event.type === "concurrent_bridge_accepted") return onConcurrentBridgeAccepted(b);
   // Ending an invited listener remains valid after the customer/session ends.
   if (event.type === "revoke_monitor") return appRevokeMonitor(b, event);
   if (event.type === "stop_supervise" && event.supervisor?.profileId === event.actorProfileId &&

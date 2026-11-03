@@ -1196,10 +1196,14 @@ async function processOwnedSessionEvent(deps: SessionRunnerDeps, sessionId: stri
           const stopReady = needsRecordingContinuation(apply.session);
           const mediaFailed = sequence && Date.parse(sequence.deadlineAt) <= nowOf(deps)().getTime() ||
             meta.gather?.failed && !meta.gather.call_gone && Date.parse(meta.gather.deadline_at) <= nowOf(deps)().getTime();
-          if ((!stopReady && !mediaFailed && !ringFollow) || stopReady && !leaseAcquired) break;
+          // Call-speed S6.2: Telnyx accepted (2xx) the explicit concurrent bridge
+          // this event sent; the call connects now, not at its `call.bridged`.
+          const bridgeAccepted = !apply.failed && apply.session.state === "ringing" && Boolean(meta.far_end?.bridge?.acceptedAt);
+          if ((!stopReady && !mediaFailed && !ringFollow && !bridgeAccepted) || stopReady && !leaseAcquired && !bridgeAccepted) break;
           const fresh = await loadSessionSnapshot(deps, sessionId);
-          const followEvent: SessionEvent = { kind: "app", type: stopReady ? "recording_continue" : "sweep", id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
-          if (followContext.lean || ringFollow) followContext = await loadRoutingContext(deps, fresh.session, followEvent, fresh.legs);
+          const followEvent: SessionEvent = { kind: "app", type: bridgeAccepted ? "concurrent_bridge_accepted" : stopReady ? "recording_continue" : "sweep",
+            id: `${event.id}:continue:${continuation}`, actorProfileId: null, occurredAt: nowOf(deps)().toISOString() };
+          if (!bridgeAccepted && (followContext.lean || ringFollow)) followContext = await loadRoutingContext(deps, fresh.session, followEvent, fresh.legs);
           if (ringFollow) {
             const skipped = ringFollow.detail?.skippedMembers;
             if (Array.isArray(skipped)) followContext = { ...followContext, openOffers: [...new Set([

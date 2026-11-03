@@ -435,21 +435,23 @@ export type ConcurrentBridgeEvidence = { pendingBridged: boolean; journal: Concu
  */
 export async function concurrentBridgeEvidence(admin: AdminClient, organizationId: string, sessions: SessionRow[]): Promise<Map<string, ConcurrentBridgeEvidence>> {
   const out = new Map<string, ConcurrentBridgeEvidence>();
-  const due = sessions.filter((session) => readMeta(session).far_end?.bridge);
+  const due = sessions.filter((session) => readMeta(session).far_end?.bridge || readMeta(session).far_end?.awaitBridgeUntil);
   if (due.length === 0) return out;
   const ids = due.map((session) => session.id);
-  const commandIds = due.map((session) => readMeta(session).far_end!.bridge!.commandId);
+  // A far end still waiting for Telnyx's own bridge has no command of ours yet: its journal is "absent".
+  const commandIds = due.map((session) => readMeta(session).far_end?.bridge?.commandId).filter((id): id is string => Boolean(id));
   const [legs, journal] = await Promise.all([
     admin.from("motorist_call_legs").select("session_id, telnyx_call_control_id").eq("organization_id", organizationId).in("session_id", ids).is("ended_at", null),
-    admin.from("motorist_provider_commands").select("session_id, command_id, outcome").in("session_id", ids).in("command_id", commandIds),
+    commandIds.length ? admin.from("motorist_provider_commands").select("session_id, command_id, outcome").in("session_id", ids).in("command_id", commandIds)
+      : Promise.resolve({ data: [] as Array<{ session_id: string; command_id: string; outcome: string }>, error: null }),
   ]);
   if (legs.error) throw new Error(`concurrent bridge legs unavailable: ${legs.error.message}`);
   if (journal.error) throw new Error(`concurrent bridge journal unavailable: ${journal.error.message}`);
   const controls = (legs.data ?? []).filter((leg) => leg.telnyx_call_control_id) as Array<{ session_id: string; telnyx_call_control_id: string }>;
   const pending = await pendingLedgerControlIds(admin, organizationId, "call.bridged", controls.map((leg) => leg.telnyx_call_control_id));
   for (const session of due) {
-    const commandId = readMeta(session).far_end!.bridge!.commandId;
-    const row = (journal.data ?? []).find((entry) => entry.session_id === session.id && entry.command_id === commandId);
+    const commandId = readMeta(session).far_end?.bridge?.commandId;
+    const row = commandId ? (journal.data ?? []).find((entry) => entry.session_id === session.id && entry.command_id === commandId) : undefined;
     out.set(session.id, {
       pendingBridged: controls.some((leg) => leg.session_id === session.id && pending.has(leg.telnyx_call_control_id)),
       journal: (row?.outcome as ConcurrentBridgeJournal | undefined) ?? "absent",

@@ -209,7 +209,9 @@ export type AppEventType =
   | "invite_monitor"
   | "revoke_monitor"
   | "hangup"
-  | "sweep";
+  | "sweep"
+  /** Call-speed S6.2: the runner's follow-up after Telnyx accepted (2xx) the explicit concurrent bridge. */
+  | "concurrent_bridge_accepted";
 
 /**
  * Telnyx conference supervisor roles (`supervisor_role` on
@@ -393,11 +395,11 @@ export type Command = CommandBase &
        */
       alreadyBridgedOk?: true;
       /**
-       * Call-speed S6.2: the explicit bridge of a concurrent start. The call
-       * connects on `call.bridged` evidence (its 2xx is recorded as
-       * `far_end.bridge.acceptedAt`), never on its answer: a 422, an unknown
-       * outcome or another refusal leaves the pair to that evidence until
-       * `far_end.bridge.deadlineAt`, when the sweep ends both legs.
+       * Call-speed S6.2: the explicit bridge of a concurrent start. Its 2xx
+       * (recorded as `far_end.bridge.acceptedAt`) or `call.bridged` connects
+       * the call; a 422, an unknown outcome or another refusal never does and
+       * leaves the pair to that evidence until `far_end.bridge.deadlineAt`,
+       * when the sweep retries, extends or ends both legs.
        */
       concurrentBridge?: true;
       /**
@@ -772,13 +774,15 @@ export type SessionMeta = {
    * bridge or ends both legs as `bridge_failed`. A non-call-gone 422 is
    * `refusedAt`: about 2 s later the sweep retries the bridge once
    * (`retried`). A bridge whose journal outcome is still unknown at the
-   * deadline gets one extension (`extended`). `busyControlId` is a
+   * deadline gets one extension (`extended`). `awaitBridgeUntil` comes
+   * first when the far leg carries `bridge_on_answer`: until then the call
+   * waits for Telnyx's own bridge and sends none (outcome A). `busyControlId` is a
    * colleague leg whose answer was refused because they had become busy: its
    * hangup ends the call as `colleague_busy`.
    */
   far_end?: { commandId: string; mode: "concurrent"; dialedAt: string; answeredAt?: string | null;
     bridge?: { commandId: string; sentAt: string; deadlineAt: string; acceptedAt?: string | null; refusedAt?: string | null; retried?: boolean; extended?: boolean } | null;
-    busyControlId?: string | null } | null;
+    awaitBridgeUntil?: string | null; busyControlId?: string | null } | null;
   /**
    * Call-speed S6.3, the record of the colleague dials that really carried the
    * auto-bridge (`bridge_on_answer`, Telnyx bridges them to the caller at
@@ -841,12 +845,16 @@ export type SessionMeta = {
 };
 
 /**
- * Call-speed S6.2: the explicit bridge of a concurrent start is settled by
- * `call.bridged`, never by its HTTP answer. These bound how long the call
- * waits for that evidence before the overdue sweep (`ring-plan.ts`) and the
- * reducer (`onConcurrentBridgeDeadline`) decide without it. Shared by both, so
- * the sweep looks exactly when the reducer would act.
+ * Call-speed S6.2: a concurrent start whose far end answered first connects on
+ * Telnyx's own `bridge_on_answer` (outcome A, measured on TEST: about 0.5 s
+ * after the own leg's answer), or on our explicit bridge's 2xx or
+ * `call.bridged` (B). These bound each wait before the overdue sweep
+ * (`ring-plan.ts`) and the reducer (`onConcurrentBridgeDeadline`) act. Shared
+ * by both, so the sweep looks exactly when the reducer would act.
  */
+
+/** With `bridge_on_answer` on the far leg, how long after the own leg's answer Telnyx gets to report its own bridge before ours is sent. */
+export const CONCURRENT_PROVIDER_BRIDGE_WAIT_MS = 1_500;
 
 /** How long an explicit concurrent bridge waits for its `call.bridged` evidence. */
 export const CONCURRENT_BRIDGE_DEADLINE_MS = 8_000;
@@ -859,10 +867,13 @@ export const CONCURRENT_BRIDGE_RETRY_WAIT_MS = 3_000;
 /** The reducer note, runner warning and harness count for a call connected on a 2xx without any `call.bridged`. */
 export const CONCURRENT_BRIDGE_WITHOUT_EVIDENCE = "concurrent_bridge_connected_without_evidence";
 
-/** When the overdue sweep next has to look at this session's concurrent bridge (its retry or its deadline), or null. */
+/** When the overdue sweep next has to look at this session's concurrent bridge (Telnyx's own wait, our retry or deadline), or null. */
 export function concurrentBridgeDueAt(meta: SessionMeta): number | null {
   const bridge = meta.far_end?.bridge;
-  if (!bridge) return null;
+  if (!bridge) {
+    const awaiting = Date.parse(meta.far_end?.awaitBridgeUntil ?? "");
+    return Number.isFinite(awaiting) ? awaiting : null;
+  }
   const deadline = Date.parse(bridge.deadlineAt);
   const retry = bridge.refusedAt && !bridge.retried && !bridge.acceptedAt ? Date.parse(bridge.refusedAt) + CONCURRENT_BRIDGE_RETRY_AFTER_MS : Number.NaN;
   const due = [deadline, retry].filter(Number.isFinite);

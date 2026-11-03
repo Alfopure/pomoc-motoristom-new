@@ -99,6 +99,8 @@ const BOUND_S6 = {
   // answer reaches `talking` without any bridge (audio was already bridged).
   ownAnswer: { requests: 23 },
   calleeAnswer: { requests: 24, toTalking: 7 },
+  // Without the auto-bridge: the explicit bridge at the sequential answer's wave, `talking` on its 2xx.
+  calleeAnswerExplicit: { requests: 36, toBridge: 11, toTalking: 21 },
 } as const;
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -615,6 +617,37 @@ describe("contract 2 dependent waves", () => {
       expect(BOUND_S6.calleeAnswer.toTalking).toBeLessThanOrEqual(BOUND_S1.internalCalleeAnswer.toTalking);
     });
   });
+
+    // Spike S6.0 (TEST, noauto): 290 ms from the colleague's `call.answered`
+    // webhook to the bridge's dispatch. That is this answer's ordinary chain —
+    // ledger claim, lease, journal reconcile, snapshot, dial observation, the
+    // colleague's presence guard, staging, the critical write, the bridge's
+    // source identity, `prepare_v2` — exactly as many waves as the sequential
+    // answer (S1), with no pending startup entry and the lease free: neither
+    // the start's `after()` tail nor its lease is involved. What the
+    // concurrent call added was the wait for `call.bridged` after the bridge;
+    // its 2xx now connects the call.
+    it("bridges the colleague who answers second explicitly without the auto-bridge, in as many waves as the sequential answer, and its 2xx connects", async () => {
+      const h = harness();
+      vi.stubEnv("MOTORIST_APP_ENV", "test");
+      h.deps.latencyFlags = { ...defaultLatencyFlags(), internal_lean_path: true, bridged_observation_fast: true, ...BOUND_S2_FLAGS,
+        concurrent_dial: { outbound: { web: true, mobile: true }, internal: { web: true, mobile: true } } };
+      const { call } = await colleague(h);
+      h.telnyx.physical.answered(call.operatorLegCallControlId);
+      await h.legEvent(call.operatorLegCallControlId, "call.answered");
+      expect(readPendingEffects(h.session(call.sessionId) as SessionRow).entries).toEqual([]);
+      const callee = String(h.openLegFor(call.sessionId, PROFILES.o2)!.telnyx_call_control_id);
+      h.advance(300);
+      h.telnyx.physical.answered(callee);
+      const answer = await metered(h, () => h.legEvent(callee, "call.answered"), meter => {
+        meter.watch("talking", () => h.session(call.sessionId).state === "talking");
+      });
+      expect(h.session(call.sessionId).state).toBe("talking");
+      bounded(sendWave(answer, "bridge"), BOUND_S6.calleeAnswerExplicit.toBridge);
+      bounded(markWave(answer, "talking"), BOUND_S6.calleeAnswerExplicit.toTalking);
+      bounded(answer.requests, BOUND_S6.calleeAnswerExplicit.requests);
+      expect(BOUND_S6.calleeAnswerExplicit.toBridge).toBe(BOUND_S1.internalCalleeAnswer.toBridge);
+    });
 
   it("holds from the web console, first with the conference promotion and later without", async () => {
     const h = harness();

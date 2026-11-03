@@ -2342,11 +2342,10 @@ async function executeReduceResult(
       }
       const refused = executed.skipped && executed.detail?.reason === "awaiting_bridged_evidence";
       if (command.kind === "bridge" && command.concurrentBridge && (!executed.skipped || refused)) {
-        // Call-speed S6.2: Telnyx accepted the explicit concurrent bridge (its
-        // 2xx keeps the deadline sweep from ending a pair whose evidence is
-        // merely late), or refused it with a non-call-gone 422 (the sweep
-        // retries it once, about 2 s later). The call still connects only on
-        // `call.bridged`.
+        // Call-speed S6.2: Telnyx accepted the explicit concurrent bridge (the
+        // runner then connects the call with `concurrent_bridge_accepted`, and
+        // a lost follow-up still connects at the deadline), or refused it with
+        // a non-call-gone 422 (the sweep retries it once, about 2 s later).
         const meta = readMeta(ctx.session), bridge = meta.far_end?.bridge;
         if (meta.far_end && bridge?.commandId === command.commandId && !bridge.acceptedAt) {
           const at = deps.now().toISOString();

@@ -19,7 +19,7 @@ import { readPendingEffects } from "./continuation";
 import { isUnprovenBridgeRefusal } from "./effects";
 import { buildTelnyxEnvelope } from "./events";
 import { planInitialCall } from "./transitions";
-import { CONCURRENT_BRIDGE_DEADLINE_MS, CONCURRENT_BRIDGE_EXTENSION_MS, CONCURRENT_BRIDGE_RETRY_AFTER_MS, CONCURRENT_BRIDGE_WITHOUT_EVIDENCE } from "./types";
+import { CONCURRENT_BRIDGE_DEADLINE_MS, CONCURRENT_BRIDGE_EXTENSION_MS, CONCURRENT_BRIDGE_RETRY_AFTER_MS, CONCURRENT_BRIDGE_WITHOUT_EVIDENCE, CONCURRENT_PROVIDER_BRIDGE_WAIT_MS } from "./types";
 import { readMeta, type AppEvent, type DialCommand, type SessionRow } from "./types";
 
 /**
@@ -29,11 +29,14 @@ import { readMeta, type AppEvent, type DialCommand, type SessionRow } from "./ty
  * There is no Telnyx evidence yet for a far end answering while the own leg
  * still rings (TEST spike S6.0/1), so every outcome must end well:
  *  (A) Telnyx completes the bridge itself once the own leg answers;
- *  (B) nothing is bridged and both legs stay up: the second answer sends one
- *      explicit bridge, and the call connects on its `call.bridged` (a 2xx
- *      without that evidence by the deadline still connects; a refusal of any
- *      wording, a 5xx or a lost response never does, and the deadline sweep
- *      ends both legs);
+ *  (B) nothing is bridged and both legs stay up. With `bridge_on_answer` on
+ *      the far leg the server first waits 1.5 s after the own answer for
+ *      Telnyx's own bridge (TEST: A, about 0.5 s; a bridge of ours sent
+ *      meanwhile was also accepted and bridged the pair twice), then sends one
+ *      explicit bridge; without it, at the second answer. The call connects on
+ *      that bridge's 2xx or on `call.bridged`; a refusal of any wording, a 5xx
+ *      or a lost response never connects it, and the deadline sweep ends both
+ *      legs;
  *  (C) Telnyx hangs the far leg up: the call ends, not as an answered call.
  * The fake provider models `bridge_on_answer` as (A): `physical.connected`.
  */
@@ -115,6 +118,8 @@ async function sweepAfter(t: World, ms: number) {
 }
 /** …after the concurrent bridge's deadline. */
 const sweepAfterDeadline = (t: World) => sweepAfter(t, CONCURRENT_BRIDGE_DEADLINE_MS + 1);
+/** …once Telnyx's own bridge had its time (outcome A) and none reported: our explicit fallback bridge goes. */
+const explicitFallback = (t: World) => sweepAfter(t, CONCURRENT_PROVIDER_BRIDGE_WAIT_MS + 1);
 /** A provider event for this leg that is in the webhook ledger but not processed yet (deferred behind the session lease). */
 function ledgerPending(t: World, callControlId: string, eventType: string) {
   t.h.db.insert("motorist_telnyx_webhook_events", { organization_id: ORG, event_id: `pending-${eventType}-${callControlId}`, event_type: eventType,
@@ -287,25 +292,32 @@ describe("S6.2 decision table: outbound", () => {
     expect(readContactHistory(t.h.session(call.sessionId) as SessionRow).proofs).toMatchObject([{ topology: "bridge", customerControlId: call.far, operatorControlId: call.own }]);
   });
 
-  it("(B) customer first, nothing bridged: the own answer bridges, once, in today's direction, and the call connects on its call.bridged", async () => {
+  it("(B) customer first, nothing bridged: Telnyx's own bridge gets 1.5 s, then one explicit bridge in today's direction, and its 2xx connects the call", async () => {
     const t = world();
     const call = await outbound(t);
     await answer(t, call.far);
     await answer(t, call.own);
-    expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far, parkAfterUnbridge: "self" })]);
-    // The bridge is sent, not proven: still ringing, nothing answered in the history yet.
+    // The customer's dial carries `bridge_on_answer`: no bridge of ours while Telnyx may still bridge.
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "ringing", answered_at: null });
-    expect(t.h.call(call.sessionId)).toMatchObject({ status: "outbound", answered_at: null });
-    expect(meta(t, call.sessionId).far_end?.bridge).toMatchObject({ commandId: t.h.telnyx.of("bridge")[0].params.commandId, acceptedAt: expect.any(String) });
-    // A duplicate own answer sends no second bridge.
+    expect(meta(t, call.sessionId).far_end).toMatchObject({ awaitBridgeUntil: expect.any(String) });
+    // A duplicate own answer changes nothing; neither does a sweep before the wait is over.
     await t.h.legEvent(call.own, "call.answered", {}, "duplicate-own-answer");
-    expect(t.h.telnyx.of("bridge")).toHaveLength(1);
-    // Its bridged events, after the bridge and with the client state the bridge
-    // put on the own leg, connect the call and prove the contact of the customer dial (callbacks).
+    await sweepAfter(t, CONCURRENT_PROVIDER_BRIDGE_WAIT_MS / 2);
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
+    await explicitFallback(t);
+    expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far, parkAfterUnbridge: "self" })]);
+    // Its 2xx is the connection: talking now, not at the `call.bridged` webhook.
+    expect(meta(t, call.sessionId).far_end?.bridge).toMatchObject({ commandId: t.h.telnyx.of("bridge")[0].params.commandId, acceptedAt: expect.any(String) });
+    expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
+    expect(t.h.call(call.sessionId)).toMatchObject({ status: "answered" });
+    // N5's warning belongs to the deadline path only.
+    expect(t.h.logs.filter(entry => entry.code === CONCURRENT_BRIDGE_WITHOUT_EVIDENCE)).toEqual([]);
+    // Its bridged events, with the client state the bridge put on the own leg,
+    // prove the contact of the customer dial (callbacks).
     t.h.advance(400);
     await bridged(t, call);
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
-    expect(t.h.call(call.sessionId)).toMatchObject({ status: "answered" });
     const farDial = t.h.telnyx.of("dial")[1].params.commandId;
     expect(readContactHistory(t.h.session(call.sessionId) as SessionRow).proofs).toMatchObject([{ operationId: farDial, customerControlId: call.far, operatorControlId: call.own }]);
     // A later sweep changes nothing.
@@ -314,11 +326,35 @@ describe("S6.2 decision table: outbound", () => {
     expect(hungUp(t, call.own) || hungUp(t, call.far)).toBe(false);
   });
 
-  it("connects an accepted (2xx) bridge at the deadline even when its call.bridged is late, never tearing it down", async () => {
+  it.each(["outbound", "colleague (auto-bridge)"] as const)("(A) %s: Telnyx bridges 500 ms after the own answer, and no explicit bridge is ever sent", async (kind) => {
+    const t = world({ internal_auto_bridge: true });
+    const call = kind === "outbound" ? await outbound(t) : await colleague(t);
+    await answer(t, call.far);
+    await answer(t, call.own);
+    expect(t.h.session(call.sessionId).state).toBe("ringing");
+    t.h.advance(500);
+    await bridged(t, call);
+    expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
+    await explicitFallback(t);
+    await sweepAfterDeadline(t);
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
+    expect(t.h.session(call.sessionId).state).toBe("talking");
+    expect(hungUp(t, call.own) || hungUp(t, call.far)).toBe(false);
+  });
+
+  it("(N5) connects at the deadline on a 2xx the journal holds when the effect never recorded it, and warns", async () => {
     const t = world();
     const call = await outbound(t);
     await answer(t, call.far);
     await answer(t, call.own);
+    // The explicit bridge went and Telnyx accepted it, but the effect's own record of it was lost.
+    const commandId = "00000000-0000-4000-8000-00000000b41d";
+    const row = t.h.session(call.sessionId) as SessionRow;
+    const farEnd = readMeta(row).far_end!;
+    t.h.db.update("motorist_call_sessions", { metadata: { ...readMeta(row), far_end: { ...farEnd, awaitBridgeUntil: null,
+      bridge: { commandId, sentAt: t.h.now().toISOString(), deadlineAt: later(t, CONCURRENT_BRIDGE_DEADLINE_MS) } } } }, item => item.id === call.sessionId);
+    t.h.db.insert("motorist_provider_commands", { session_id: call.sessionId, command_id: commandId, fingerprint: "f", method: "POST", path: "/calls/x/actions/bridge",
+      request_payload: {}, dispatch_generation: 0, dispatch_token: "t", first_dispatched_at: t.h.now().toISOString(), outcome: "accepted", http_status: 200 });
     expect(t.h.session(call.sessionId).state).toBe("ringing");
     await sweepAfterDeadline(t);
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
@@ -329,7 +365,7 @@ describe("S6.2 decision table: outbound", () => {
     expect(t.h.rows("motorist_call_events").some(row => JSON.stringify(row.normalized_payload).includes(CONCURRENT_BRIDGE_WITHOUT_EVIDENCE))).toBe(true);
   });
 
-  it("(B) bridges when the customer answered first at the provider, even if the own answer is processed first", async () => {
+  it("(B) sends the fallback bridge when the customer answered first at the provider, even if the own answer is processed first", async () => {
     const t = world();
     const call = await outbound(t);
     t.h.telnyx.physical.answered(call.far);
@@ -341,9 +377,11 @@ describe("S6.2 decision table: outbound", () => {
     expect(t.h.session(call.sessionId).state).toBe("ringing");
     expect(t.h.telnyx.of("bridge")).toHaveLength(0);
     await eventAt(t, call.far, "call.answered", farAt);
-    expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far })]);
+    // Telnyx gets 1.5 s from the own answer for its own bridge; then ours goes, and its 2xx connects.
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
     expect(t.h.session(call.sessionId).state).toBe("ringing");
-    await bridged(t, call);
+    await explicitFallback(t);
+    expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far })]);
     expect(t.h.session(call.sessionId).state).toBe("talking");
   });
 
@@ -373,6 +411,8 @@ describe("S6.2 decision table: outbound", () => {
     t.h.telnyx.failNext("bridge", refusal);
     const result = await answer(t, call.own);
     expect(result.outcome).toBe("processed");
+    await explicitFallback(t);
+    expect(t.h.telnyx.of("bridge")).toHaveLength(1);
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "ringing", answered_at: null });
     expect(hungUp(t, call.own) || hungUp(t, call.far)).toBe(false);
     expect(readPendingEffects(t.h.session(call.sessionId) as SessionRow).entries).toEqual([]);
@@ -393,6 +433,7 @@ describe("S6.2 decision table: outbound", () => {
     await answer(t, call.far);
     t.h.telnyx.failNext("bridge", refusal());
     await answer(t, call.own);
+    await explicitFallback(t);
     expect(t.h.telnyx.of("bridge")).toHaveLength(1);
     // Neither connected nor torn down, and nothing left for a replay to get stuck on.
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "ringing", answered_at: null });
@@ -419,15 +460,18 @@ describe("S6.2 decision table: outbound", () => {
     await expectEndedUnanswered(t, call);
   });
 
-  it("(B, N1) a retried bridge that Telnyx accepts connects on its call.bridged", async () => {
+  it("(B, N1) a retried bridge that Telnyx accepts connects on its 2xx", async () => {
     const t = world();
     const call = await outbound(t);
     await answer(t, call.far);
     t.h.telnyx.failNext("bridge", new TelnyxCommandError({ code: "90053", status: 422, detail: "Call is not answered yet" }));
     await answer(t, call.own);
+    await explicitFallback(t);
     await sweepAfter(t, CONCURRENT_BRIDGE_RETRY_AFTER_MS + 1);
     expect(t.h.telnyx.of("bridge")).toHaveLength(2);
     expect(meta(t, call.sessionId).far_end?.bridge).toMatchObject({ retried: true, acceptedAt: expect.any(String) });
+    // Its 2xx connects at once.
+    expect(t.h.session(call.sessionId).state).toBe("talking");
     await bridged(t, call);
     expect(t.h.session(call.sessionId).state).toBe("talking");
     await sweepAfterDeadline(t);
@@ -445,6 +489,7 @@ describe("S6.2 decision table: outbound", () => {
     if (failure) t.h.telnyx.failNext("bridge", failure());
     else t.h.telnyx.loseNextResponse("bridge");
     await answer(t, call.own);
+    await explicitFallback(t);
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "ringing", answered_at: null });
     expect(readPendingEffects(t.h.session(call.sessionId) as SessionRow).entries).toEqual([]);
     expect(t.h.rows("motorist_provider_commands").find(row => row.command_id === t.h.telnyx.of("bridge")[0].params.commandId)).toMatchObject({ outcome: "unknown" });
@@ -465,6 +510,7 @@ describe("S6.2 decision table: outbound", () => {
     await answer(t, call.far);
     t.h.telnyx.loseNextResponse("bridge");
     await answer(t, call.own);
+    await explicitFallback(t);
     await sweepAfterDeadline(t);
     expect(meta(t, call.sessionId).far_end?.bridge).toMatchObject({ extended: true });
     await bridged(t, call);
@@ -480,6 +526,8 @@ describe("S6.2 decision table: outbound", () => {
     await answer(t, call.far);
     t.h.telnyx.failNext("bridge", ALREADY_BRIDGED());
     await answer(t, call.own);
+    await explicitFallback(t);
+    expect(t.h.telnyx.of("bridge")).toHaveLength(1);
     // Telnyx's own bridge reported itself, but its webhook waits behind the session's lease.
     ledgerPending(t, call.far, "call.bridged");
     await sweepAfter(t, CONCURRENT_BRIDGE_RETRY_AFTER_MS + 1);
@@ -492,7 +540,7 @@ describe("S6.2 decision table: outbound", () => {
     expect(t.h.session(call.sessionId).state).toBe("talking");
   });
 
-  it("(N2) the request that sent the bridge enforces its deadline itself, after its response, with no other webhook, poll or cron", async () => {
+  it("(N2) the request that answered enforces the fallback bridge and its deadline itself, after its response, with no other webhook, poll or cron", async () => {
     const t = world();
     const call = await outbound(t);
     await answer(t, call.far);
@@ -505,10 +553,12 @@ describe("S6.2 decision table: outbound", () => {
     await processTelnyxEvent({ ...t.h.deps, deferMaintenance: (work) => { jobs.push(work); } }, buildTelnyxEnvelope({ id: t.h.nextEventId(), type: "call.answered",
       occurredAt: t.h.now().toISOString(), payload: { connection_id: CONNECTION_ID, call_control_id: call.own, call_leg_id: leg.telnyx_call_leg_id ?? `leg-${call.own}`,
         call_session_id: session.telnyx_session_id ?? `tsess-${session.id}`, client_state: encodeClientState(t.h.clientStateOf(call.own)), from: leg.from_number, to: leg.to_number } }));
-    expect(t.h.telnyx.of("bridge")).toHaveLength(1);
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
     expect(t.h.session(call.sessionId).state).toBe("ringing");
-    // The response is out; its retained work waits for the deadline (one extension: the 503 left the outcome unknown).
+    // The response is out; its retained work sends the fallback bridge 1.5 s later, then waits for the
+    // deadline (one extension: the 503 left the outcome unknown) and ends both legs.
     for (const job of jobs) await job();
+    expect(t.h.telnyx.of("bridge")).toHaveLength(1);
     await expectEndedUnanswered(t, call);
   });
 
@@ -532,6 +582,7 @@ describe("S6.2 decision table: outbound", () => {
     await answer(t, call.far);
     t.h.telnyx.failNext("bridge", new TelnyxCommandError({ code: "service_unavailable", status: 503, retryable: true }));
     await answer(t, call.own);
+    await explicitFallback(t);
     expect(t.h.session(call.sessionId).state).toBe("ringing");
     await bridged(t, call);
     expect(t.h.session(call.sessionId).state).toBe("talking");
@@ -851,12 +902,13 @@ describe("S6.2/S6.3 colleague calls", () => {
     await answer(t, call.own);
     await answer(t, call.far);
     expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far })]);
-    expect(t.h.session(call.sessionId).state).toBe("ringing");
+    // Its 2xx connects the call; the bridged events change nothing.
+    expect(t.h.session(call.sessionId).state).toBe("talking");
     await bridged(t, call);
     expect(t.h.session(call.sessionId).state).toBe("talking");
   });
 
-  it.each([true, false])("waits for the caller when the colleague answers first, then bridges on the caller's answer (auto-bridge=%s)", async (autoBridge) => {
+  it.each([true, false])("waits for the caller when the colleague answers first, then connects on the caller's answer (auto-bridge=%s)", async (autoBridge) => {
     const t = world({ internal_auto_bridge: autoBridge });
     const call = await colleague(t);
     await answer(t, call.far);
@@ -865,12 +917,16 @@ describe("S6.2/S6.3 colleague calls", () => {
     expect(t.h.presence(PROFILES.o2)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
     expect(meta(t, call.sessionId)).toMatchObject({ far_end: { answeredAt: expect.any(String) }, accepted_device_legs: { [PROFILES.o2]: call.far } });
     expect(t.h.telnyx.of("bridge")).toHaveLength(0);
-    if (autoBridge) t.h.telnyx.failNext("bridge", ALREADY_BRIDGED());
     await answer(t, call.own);
-    expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far, parkAfterUnbridge: "self" })]);
-    // Sent, not proven: the colleague keeps "Spájam…" until the pair reports the bridge.
-    expect(t.h.session(call.sessionId).state).toBe("ringing");
-    await bridged(t, call);
+    if (autoBridge) {
+      // The colleague's leg carries `bridge_on_answer`: Telnyx bridges it now; we send nothing.
+      expect(t.h.telnyx.of("bridge")).toHaveLength(0);
+      expect(t.h.session(call.sessionId).state).toBe("ringing");
+      await bridged(t, call);
+    } else {
+      // Our bridge, in today's direction; its 2xx connects.
+      expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: call.far, parkAfterUnbridge: "self" })]);
+    }
     expect(t.h.session(call.sessionId).state).toBe("talking");
     expect(t.h.rows("motorist_job_incidents").filter(row => row.status === "open")).toEqual([]);
   });
@@ -967,7 +1023,8 @@ describe("S6.2/S6.3 colleague calls", () => {
       expect(hungUp(t, winner) || hungUp(t, call.own)).toBe(false);
       expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: winner })]);
       expect(meta(t, call.sessionId).accepted_device_legs).toMatchObject({ [PROFILES.o2]: winner });
-      expect(t.h.session(call.sessionId).state).toBe("ringing");
+      // The winner's bridge 2xx connects the call.
+      expect(t.h.session(call.sessionId).state).toBe("talking");
       await bridged(t, { own: call.own, far: winner });
       expect(t.h.session(call.sessionId).state).toBe("talking");
       for (const id of [loser, winner, call.own]) await t.h.legEvent(id, "call.hangup", { hangup_cause: "normal_clearing" });
@@ -1003,7 +1060,7 @@ describe("S6.2/S6.3 colleague calls", () => {
     // Both answering within a moment: the loser's late answer is hung up, never bridged.
     await answer(t, loser);
     expect(t.h.telnyx.of("bridge").map(command => command.params)).toEqual([expect.objectContaining({ callControlId: call.own, targetCallControlId: winner })]);
-    expect(t.h.session(call.sessionId).state).toBe("ringing");
+    expect(t.h.session(call.sessionId).state).toBe("talking");
     await bridged(t, { own: call.own, far: winner });
     expect(t.h.session(call.sessionId).state).toBe("talking");
     expect(meta(t, call.sessionId).accepted_device_legs).toMatchObject({ [PROFILES.o2]: winner });
@@ -1060,19 +1117,14 @@ describe("S6.2 permutations: whatever order the provider events arrive in", () =
   const scenarios = ["far end answered first", "own leg answered first"] as const;
   type Scenario = (typeof scenarios)[number];
   const cases = scenarios.flatMap(scenario => orders.map(order => [scenario, order] as const));
-  /**
+  /*
    * The decision follows the provider's answer times, never the delivery
-   * order. Only when the far end answered first (outcome B: Telnyx could not
-   * bridge to a ringing own leg) does the server send the one explicit bridge,
-   * and only if no bridged evidence was processed before both answers; a 422
-   * "already bridged" would then count as success. When the own leg answered
-   * first Telnyx bridges at the far end's answer (`bridge_on_answer`): none.
+   * order. Both kinds carry `bridge_on_answer` on the far leg: when the own
+   * leg answered first Telnyx bridges at the far end's answer, and when the
+   * far end answered first the server waits 1.5 s for Telnyx's own bridge
+   * (outcome A) before any of its own. The pair reports itself bridged in
+   * every order here, so the server never sends one.
    */
-  const explicitBridges = (scenario: Scenario, order: string) => {
-    if (scenario === "own leg answered first") return 0;
-    const at = (step: Step) => order.split(" → ").indexOf(step);
-    return Math.max(at("own.answered"), at("far.answered")) < Math.min(at("own.bridged"), at("far.bridged")) ? 1 : 0;
-  };
   /** Delivers the four events in `order`, each stamped with its provider time. */
   async function deliver(t: World, call: { own: string; far: string }, scenario: Scenario, order: string) {
     const first = later(t, 100), second = later(t, 400), bridged = later(t, 450);
@@ -1093,7 +1145,7 @@ describe("S6.2 permutations: whatever order the provider events arrive in", () =
     await deliver(t, call, scenario, order);
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
     expect(t.h.call(call.sessionId)).toMatchObject({ status: "answered" });
-    expect(t.h.telnyx.of("bridge")).toHaveLength(explicitBridges(scenario, order));
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
     expect(t.h.telnyx.of("hangup")).toEqual([]);
     expect(readContactHistory(t.h.session(call.sessionId) as SessionRow).proofs.length).toBeGreaterThanOrEqual(1);
     expect(readPendingEffects(t.h.session(call.sessionId) as SessionRow).entries).toEqual([]);
@@ -1114,7 +1166,7 @@ describe("S6.2 permutations: whatever order the provider events arrive in", () =
     t.h.telnyx.physical.answered(call.own);
     await deliver(t, call, scenario, order);
     expect(t.h.session(call.sessionId)).toMatchObject({ state: "talking", answered_at: expect.any(String) });
-    expect(t.h.telnyx.of("bridge")).toHaveLength(explicitBridges(scenario, order));
+    expect(t.h.telnyx.of("bridge")).toHaveLength(0);
     expect(t.h.telnyx.of("hangup")).toEqual([]);
     expect(t.h.presence(PROFILES.o2)).toMatchObject({ status: "on_call", current_session_id: call.sessionId });
     await t.h.legEvent(call.own, "call.hangup", { hangup_cause: "normal_clearing" });
@@ -1298,6 +1350,7 @@ describe("S6 with S5: both legs in the session's frozen API region", () => {
     // (B) the customer answers first: the explicit bridge.
     await answer(t, call.far);
     await answer(t, call.own);
+    await explicitFallback(t);
     expect(t.h.telnyx.of("bridge")).toHaveLength(1);
     await hangupCall(t.deps, actor, call.sessionId);
     expect(callRoutes(t).filter(route => route.method === "dial")).toHaveLength(2);
