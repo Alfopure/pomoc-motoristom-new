@@ -311,6 +311,12 @@ export type DialCommand = CommandBase & {
    * the same entry creates, resolved from that dial's result at dispatch.
    */
   linkTo: string | { fromDial: string } | null;
+  /**
+   * S6 B′ (`start_mode.farLinkTo: false`): the own leg's dial this concurrent
+   * far dial belongs to, kept in our own state because no `link_to` tells the
+   * provider (callback contact proof binds the operator leg through it).
+   */
+  ownDialCommandId?: string;
   timeoutSecs: number;
   /** Provider connects this explicitly linked recipient as soon as they answer. */
   bridgeOnAnswer?: boolean;
@@ -719,7 +725,9 @@ export type RingMode = "plan" | "transfer" | "pickup" | "outbound" | "internal" 
  * `holdJoinWithHold` (call-speed S7b) is present only when frozen on: the
  * first hold joins the customer to the new conference already held.
  */
-export type SessionStartMode = { concurrent: boolean; autoBridge: boolean; ownLegTimeoutSecs: number; apiRegion: "us" | "eu"; origin: "web" | "mobile" | null; holdJoinWithHold?: true };
+export type SessionStartMode = { concurrent: boolean; autoBridge: boolean; ownLegTimeoutSecs: number; apiRegion: "us" | "eu"; origin: "web" | "mobile" | null; holdJoinWithHold?: true;
+  /** S6 B′ (TEST experiment): the concurrent far dial carries no `link_to`/`bridge_on_answer`; the server bridges it. */
+  farLinkTo?: false };
 
 export type SessionMeta = {
   holdControl?: { commandId: string; held: boolean; customerControlId: string } | null;
@@ -759,8 +767,12 @@ export type SessionMeta = {
     capacity_wait_since?: string | null;
   } | null;
   outbound?: { to: string; by: string; from: string; case_id?: string | null } | null;
-  /** `operatorControlId` is null for a concurrent start (S6.1): the own leg did not exist yet. */
-  outbound_auto_bridge?: { commandId: string; operatorControlId: string | null; startedAt: string } | null;
+  /**
+   * `operatorControlId` is null for a concurrent start (S6.1): the own leg did
+   * not exist yet. `serverBridged` (S6 B′): the customer dial carries no
+   * `bridge_on_answer`; the server's explicit bridge connects it.
+   */
+  outbound_auto_bridge?: { commandId: string; operatorControlId: string | null; startedAt: string; serverBridged?: true } | null;
   /**
    * Call-speed S6.1, the record of a start that really ran concurrently
    * (`start_mode` only says what was frozen at creation): the far end was

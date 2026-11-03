@@ -226,35 +226,54 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
   const occurredAt = Date.parse(event.occurredAt ?? "");
   if (!username || !Number.isFinite(occurredAt)) return null;
   const sip = `sip:${username}@sip.telnyx.com`;
+  const sipUser: string = username, callControlAppId = config.callControlAppId;
   const signal = AbortSignal.timeout(1_500);
   try {
     const candidate = await deps.admin.from("motorist_call_sessions").select("id, metadata")
       .eq("organization_id", deps.organizationId).eq("telnyx_session_id", event.callSessionId)
       .contains("metadata", { environment: deps.environment }).abortSignal(signal).maybeSingle();
-    if (candidate.error || !candidate.data) return null;
-    const sessionId = candidate.data.id;
+    if (candidate.error) return null;
+    if (candidate.data) return await provenMirror(candidate.data.id) ? candidate.data.id : null;
+    // S6 B′ (`start_mode.farLinkTo: false`): the far dial shares no provider
+    // session with the own leg, so its mirror's session is ours only through
+    // our own state — the operator leg dialled to this SIP address, then the
+    // same exact journal proof (that dial's own `call_session_id`).
+    const recent = await deps.admin.from("motorist_call_legs").select("session_id").eq("organization_id", deps.organizationId)
+      .eq("role", "operator").eq("to_number", sip).gte("initiated_at", new Date(occurredAt - MIRROR_UNLINKED_WINDOW_MS).toISOString())
+      .order("initiated_at", { ascending: false }).limit(MIRROR_PROOF_LIMIT).abortSignal(signal);
+    if (recent.error || !recent.data?.length) return null;
+    const unlinked = await deps.admin.from("motorist_call_sessions").select("id, metadata").eq("organization_id", deps.organizationId)
+      .in("id", [...new Set(recent.data.map((leg) => leg.session_id))]).contains("metadata", { environment: deps.environment }).abortSignal(signal);
+    if (unlinked.error) return null;
+    for (const row of unlinked.data ?? []) {
+      if (readMeta(row).start_mode?.farLinkTo === false && await provenMirror(row.id)) return row.id;
+    }
+    return null;
+  } catch { return null; }
+
+  async function provenMirror(sessionId: string): Promise<boolean> {
     const [legs, commands, browsers, mobiles] = await Promise.all([
       deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, telnyx_call_leg_id, profile_id, from_number")
         .eq("organization_id", deps.organizationId).eq("session_id", sessionId).eq("role", "operator").eq("to_number", sip)
         .limit(MIRROR_PROOF_LIMIT + 1).abortSignal(signal),
       deps.admin.from("motorist_provider_commands").select("first_dispatched_at, request_payload, result")
         .eq("session_id", sessionId).eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
-        .contains("request_payload", { connection_id: config.callControlAppId, to: sip })
+        .contains("request_payload", { connection_id: callControlAppId, to: sip })
         .limit(MIRROR_PROOF_LIMIT + 1).abortSignal(signal),
       deps.admin.from("motorist_operator_devices").select("profile_id, telnyx_credential_id")
-        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", username)
+        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", sipUser)
         .limit(2).abortSignal(signal),
       deps.admin.from("motorist_operator_mobile_devices").select("profile_id, telnyx_credential_id")
-        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", username)
+        .eq("organization_id", deps.organizationId).eq("environment", deps.environment).eq("sip_username", sipUser)
         .limit(2).abortSignal(signal),
     ]);
     if ([legs, commands, browsers, mobiles].some(read => read.error) ||
         (legs.data?.length ?? 0) > MIRROR_PROOF_LIMIT || (commands.data?.length ?? 0) > MIRROR_PROOF_LIMIT ||
-        (browsers.data?.length ?? 0) > 1 || (mobiles.data?.length ?? 0) > 1) return null;
+        (browsers.data?.length ?? 0) > 1 || (mobiles.data?.length ?? 0) > 1) return false;
     const enrolled = [...(browsers.data ?? []), ...(mobiles.data ?? [])];
     const identities = new Set(enrolled.map(row => `${row.profile_id}:${row.telnyx_credential_id}`));
-    if (identities.size !== 1 || !enrolled[0]?.profile_id || !enrolled[0].telnyx_credential_id) return null;
-    const proven = (commands.data ?? []).some(command => {
+    if (identities.size !== 1 || !enrolled[0]?.profile_id || !enrolled[0].telnyx_credential_id) return false;
+    return (commands.data ?? []).some(command => {
       const payload = object(command.request_payload), result = object(object(command.result).data);
       const state = decodeClientState(payload.client_state);
       const dispatchedAt = Date.parse(command.first_dispatched_at);
@@ -265,9 +284,11 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
       return (legs.data ?? []).some(leg => leg.telnyx_call_control_id === result.call_control_id &&
         leg.telnyx_call_leg_id === result.call_leg_id && leg.profile_id === state.operatorId && leg.from_number === event.from);
     });
-    return proven ? sessionId : null;
-  } catch { return null; }
+  }
 }
+
+/** S6 B′: how far back an unlinked far dial's operator leg is looked for when its mirror arrives. */
+const MIRROR_UNLINKED_WINDOW_MS = 15 * 60_000;
 
 /**
  * A gather/playback/speak completion for a customer leg that has already

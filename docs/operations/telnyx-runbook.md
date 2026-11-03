@@ -127,7 +127,7 @@ The customer hears silence until the own leg answers (owner default), at most th
 
 The fallback bridge is never sent by an answer itself, not even one processed after the 1.5 s wait: such an answer makes it due at once, and the overdue sweep (with its ledger check) or the timer sends it. The timer runs in whichever request applied the answer — the webhook, its deferred drain or a held claim's drain — and only after its response (`after()`); without `after()` the sweeps alone enforce it.
 
-`targetLocalFirst` (S6.4) is not usable yet: the browser's `remoteAudioPlaying` turns true on the answered leg's own media before any bridge, so the colleague's bar could show "Prebieha" for a call that is not connected. Keep it off until a far-party audio signal exists.
+`targetLocalFirst` (S6.4) is not usable yet: the browser's `remoteAudioPlaying` turns true on the answered leg's own media before any bridge, so the colleague's bar could show "Prebieha" for a call that is not connected. The code passes it to the console only on TEST (`TARGET_LOCAL_FIRST_PROVEN` in `latency-flags.ts`); keep it off until a far-party audio signal exists.
 
 `--answer-on none` keeps the synthetic target signed in and registered (it rings) without answering, for the own-leg and timeout spikes.
 
@@ -136,6 +136,28 @@ The fallback bridge is never sent by an answer itself, not even one processed af
 **If it fails.** Turn the switch off (frozen calls finish in their mode). Outcome C on a customer dial means concurrent outbound must not use `bridge_on_answer`: that is a reviewed code change, not a configuration change.
 
 **First TEST runs (dev `b4fba58`, synthetic A → B colleague calls, web, EU API).** T1 p50 3.33 s sequential, 1.96 s concurrent with the auto-bridge, 1.92 s without; 5/5 passes each. Far end first with the auto-bridge (`--caller-answer-delay 1500`): outcome A, Telnyx bridged about 0.5 s after the own answer, and our explicit bridge sent 40 ms later was also accepted (200), bridging the pair twice in 2/3 runs (`exactlyOneBridge` failed); the far leg survived. That build sent the bridge at once; the server now waits for Telnyx's bridge first (row A). Far end first without the auto-bridge: 3/3 passes with one explicit bridge. Own leg dropped: 2/2 clean. In the runs without the auto-bridge the UI waited for `call.bridged` after the bridge (about 0.5 s); the bridge's 2xx now connects the call. Rerun spikes 1, 3 and 5 on the new build.
+
+**Round 2 (3 Nov, dev `393e97c`, synthetic A → B colleague calls, web, EU API; tone probe: A plays 440 Hz, B 880 Hz, ringback 425 Hz excluded).** Full data in `.context/voice-harness/runs/PROGRESS.md` and `runs/r2-*`.
+
+| Mode | T1 p50 | B hears A (tone) | A hears B (tone) | Result |
+|---|---|---|---|---|
+| sequential baseline | 3.78 s | 1.35 s | 1.65 s | 3/3 |
+| concurrent + auto-bridge | 1.89 s | 1.23 s | **2.76 s** (1.45–3.19) | 5/5 pass |
+| concurrent, our explicit bridge | 1.85 s | 1.59 s | **no 880 Hz tone within 2.9 s in 4/5** (max share 0.002) | 5/5 pass |
+| far end first + auto-bridge | 1.83 s | — | 2.09 s | 3/3; outcome A: Telnyx bridged, we sent nothing (no double bridge) |
+| own leg dropped / no answer | ~1.9 s | — | — | 2/2 + 2/2 clean |
+
+**Finding: one-way initial audio.** The concurrent dial is correct and T1 drops by about 1.9 s, but at first the audio is one-way: the colleague hears the caller at once, the caller hears the colleague 1–3 s late (with our explicit bridge, not within the 2.9 s window in 4/5 runs). Round 1 already showed it: Telnyx's `bridge_on_answer` bridged about 320 ms after B answered, B's audio started 0.27 s later, A's 1.85 s later. Leading hypothesis: the far dial's `link_to` points at the own leg while that leg is not yet answered (the sequential path links to an answered leg and hears both ways at once). Our code does not gate the caller's received audio: the web phone never disables a remote track or deafens the call, the SDK attaches the remote stream itself, and the probe reads the remote track (not the audio element). The one in-browser explanation left is SDP renegotiation: if Telnyx re-INVITEs the caller's leg when the linked far call bridges, the SDK applies it on its own. `--signal-trace` records the signalling methods and SDP media directions (`sendrecv`/`sendonly`/`inactive`) on both pages to confirm or rule that out. **S6 stays off** until this is resolved.
+
+**Experiment B′ (`concurrent_far_link_to: false`, TEST only).** The concurrent far dial (internal and outbound) goes without `link_to`, and so without `bridge_on_answer` (which needs it); the server bridges every pair explicitly, and its 2xx connects. Frozen per call as `start_mode.farLinkTo: false` (that start also gets no auto-bridge); only a deployment whose application environment is exactly `test` freezes it; the default `true` is today's behaviour. What `link_to` gives today, and what B′ does instead:
+- a shared provider call session: Telnyx reports the colleague's call under its own `call_session_id`. Our correlation never relied on it: every dial carries the session's client state, every leg row is written from its own dial result, and the callback contact proof keeps the own dial in `ownDialCommandId`. The one place that used the shared session — recognising the colleague browser's credential-side mirror events — now finds an unlinked far dial's session through that operator leg and the same exact journal proof (the far dial's own `call_session_id`);
+- `bridge_on_answer` / the auto-bridge: replaced by the explicit bridge at the second answer, with no 1.5 s wait for a provider bridge that cannot come;
+- teardown: the server already hangs up the far leg when the own leg ends or times out (spike 2 passed for that reason, not because of `link_to`), and does the same unlinked;
+- reporting: the two calls are separate call sessions in Telnyx's own records.
+
+To run it on TEST, add `"concurrent_far_link_to": false` to the TEST `latency_flags` with `concurrent_dial.internal.web` on, then rerun round 2's concurrent modes with `--media-probe --signal-trace`. Pass: A hears B's tone about as soon as in the sequential baseline (≈ 1.65 s), with the usual harness checks.
+
+**Operating rules before production.** Alerting on `concurrent_bridge_connected_without_evidence` warnings and on the `bridge_failed` and `operator_leg_unavailable` end reasons has to exist and be watched before any S6 switch is enabled in production. Enable only directions and origins that have their own passing spikes: `concurrent_dial.internal.web` only on the internal web results, while `outbound.*`, `*.mobile` and `internal_auto_bridge` each need their own (outbound with a real PSTN destination, mobile on an iPhone).
 
 **Limits until it passes.** Only a deployment whose application environment is exactly `test` freezes a concurrent start or the colleague auto-bridge (`CONCURRENT_START_PROVEN` in `latency-flags.ts`, like S5 and S7b): production, a local run (`development`, which may point at production data) and an unreadable environment keep the sequential start whatever the switches say, until a reviewed change records the pass of spikes 1–4.
 

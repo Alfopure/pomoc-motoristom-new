@@ -121,8 +121,9 @@ export function collectContactOperation(state: ContactSnapshot, commands: Comman
     }
     // Call-speed S6.1: the same intent, frozen for a customer dialled together
     // with the operator's own leg. That leg is bound once its row exists.
-    const ownDial = command.kind === "dial" && command.linkTo !== null && typeof command.linkTo === "object" ? command.linkTo.fromDial : null;
-    if (command.kind === "dial" && ownDial && command.bridgeOnAnswer && command.role === "customer" && state.session.direction === "outbound" &&
+    // S6 B′: no `link_to` names the own dial; `ownDialCommandId` does, and the server's bridge (not `bridge_on_answer`) connects.
+    const ownDial = command.kind === "dial" ? (command.linkTo !== null && typeof command.linkTo === "object" ? command.linkTo.fromDial : command.ownDialCommandId ?? null) : null;
+    if (command.kind === "dial" && ownDial && (command.bridgeOnAnswer || command.ownDialCommandId) && command.role === "customer" && state.session.direction === "outbound" &&
       command.to === state.session.called_number && command.clientState.intent === contactOperationIntent(command.commandId)) {
       const pending = history.pendingDials ??= [];
       if (!pending.some((item) => item.id === command.commandId) && !history.operations.some((item) => item.id === command.commandId)) {
