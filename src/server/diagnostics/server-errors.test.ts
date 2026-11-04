@@ -172,4 +172,60 @@ describe("explicit private server Sentry", () => {
     expect(second.eventId).not.toBe(first.eventId); expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps exact webhook categories and closed event types, dropping arbitrary metadata", async () => {
+    const { sanitizeServerError, sanitizeOutboundServerEvent } = await import("./server-errors");
+    const safe = sanitizeServerError(error(), { source: "telephony", failureKind: "lease_busy", providerEventType: "call.answered" }, { release: "release", environment: "test" })!;
+    expect(safe.tags).toMatchObject({ failure_kind: "lease_busy", provider_event_type: "call.answered" });
+    const injected = sanitizeOutboundServerEvent({ ...safe, tags: { ...safe.tags, failure_kind: "PRIVATE", provider_event_type: "call.customer-phone-PRIVATE" } });
+    expect(injected?.tags).not.toHaveProperty("failure_kind"); expect(injected?.tags).not.toHaveProperty("provider_event_type");
+  });
+
+  it("labels phone observations, preserves only closed evidence, and owns grouping", async () => {
+    const { sanitizeServerError, sanitizeOutboundServerEvent } = await import("./server-errors");
+    const failure = Object.assign(new Error("PRIVATE raw SDK"), { name: "PhoneLifecycleObservation", code: "browser_phone_failure" });
+    const safe = sanitizeServerError(failure, { source: "phone_observation", observationEventId: "11111111-1111-4111-8111-111111111111",
+      deviceSessionId: "22222222-2222-4222-8222-222222222222", phoneFailure: "sdk_recovery_disabled", phoneReason: "sdk_recovery_failed", sdkCode: 36005, rtcEdge: "eu", browserBuild: "browser_release" }, { release: "server_release", environment: "test" })!;
+    expect(safe.tags).toMatchObject({ source: "phone_observation", phone_failure: "sdk_recovery_disabled", phone_sdk_code: "36005", rtc_edge: "eu", browser_build: "browser_release" });
+    expect(safe.fingerprint).toEqual(["phone-lifecycle-observation", "test", "22222222-2222-4222-8222-222222222222", "sdk_recovery_disabled"]);
+    const injected = sanitizeOutboundServerEvent({ ...safe, fingerprint: ["PRIVATE"], tags: { ...safe.tags, phone_failure: "PRIVATE", phone_sdk_code: "999999", rtc_edge: "PRIVATE", browser_build: "https://PRIVATE", phone_reason: "PRIVATE" }, request: "PRIVATE" })!;
+    expect(JSON.stringify(injected)).not.toContain("PRIVATE");
+    for (const key of ["phone_failure", "phone_sdk_code", "rtc_edge", "browser_build", "phone_reason"]) expect(injected.tags).not.toHaveProperty(key);
+    expect(injected.fingerprint?.at(-1)).toBe("unknown");
+  });
+
+  it("deduplicates paired observations but retains another affected device or RTC edge", async () => {
+    const { captureServerError } = await import("./server-errors");
+    const failure = Object.assign(new Error("browser_phone_failure"), { name: "PhoneLifecycleObservation", code: "browser_phone_failure" });
+    const context = { source: "phone_observation" as const, observationEventId: "11111111-1111-4111-8111-111111111111", deviceSessionId: "22222222-2222-4222-8222-222222222222", phoneFailure: "recovery_timeout" as const, rtcEdge: "eu" as const };
+    const first = await captureServerError(failure, context);
+    const paired = await captureServerError(failure, { ...context, observationEventId: "33333333-3333-4333-8333-333333333333" });
+    expect(first.accepted).toBe(true); expect(paired.eventId).toBe(first.eventId); expect(paired.accepted).toBe(false);
+    await captureServerError(failure, { ...context, observationEventId: "44444444-4444-4444-8444-444444444444", deviceSessionId: "55555555-5555-4555-8555-555555555555" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const sent = vi.mocked(fetch).mock.calls.map(([, init]) => wire(init?.body)[2]);
+    expect(sent[0].fingerprint).not.toEqual(sent[1].fingerprint);
+    const anotherEdge = await captureServerError(failure, { ...context, observationEventId: "66666666-6666-4666-8666-666666666666", rtcEdge: "default" });
+    expect(anotherEdge.accepted).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses the same Sentry identity when a durable observation is retried on a cold instance", async () => {
+    const failure = Object.assign(new Error("browser_phone_failure"), { name: "PhoneLifecycleObservation", code: "browser_phone_failure" });
+    const context = { source: "phone_observation" as const, observationEventId: "11111111-1111-4111-8111-111111111111", deviceSessionId: "22222222-2222-4222-8222-222222222222" };
+    const first = await (await import("./server-errors")).captureServerError(failure, context);
+    vi.resetModules();
+    const retried = await (await import("./server-errors")).captureServerError(failure, context);
+    expect(first.accepted).toBe(true); expect(retried.accepted).toBe(true); expect(retried.eventId).toBe(first.eventId);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("reserves transport capacity for server failures during a phone observation storm", async () => {
+    const { captureServerError } = await import("./server-errors");
+    const failure = Object.assign(new Error("browser_phone_failure"), { name: "PhoneLifecycleObservation", code: "browser_phone_failure" });
+    for (let index = 1; index <= 5; index++) await captureServerError(failure, { source: "phone_observation", observationEventId: `11111111-1111-4111-8111-${String(index).padStart(12, "0")}`, deviceSessionId: `22222222-2222-4222-8222-${String(index).padStart(12, "0")}` });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect((await captureServerError(error(), { source: "telephony" })).accepted).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
 });

@@ -8,6 +8,7 @@ import { assertSameOriginRequest, requireDefaultMotoristActor, type MotoristActo
 import { MutationError } from '@/server/mutation-error';
 import type { TelephonyCronJobResult } from '@/server/telephony/cron-jobs';
 import { readRoutingDiagnostics } from './routing-read';
+import { deferAcceptedPhoneFailures } from './phone-observations';
 export const DIAGNOSTIC_MEMBER_ROLES = ['dispatcher','senior_dispatcher','manager','admin'] as const;
 export const diagnosticsEnabled = () => process.env.DIAGNOSTICS_ENABLED === 'true';
 export const diagnosticsEnvironment = () => resolveAppEnvironment();
@@ -48,6 +49,7 @@ export async function ingestDiagnostics(request:Request):Promise<Response> {
     const result=await persistDiagnostics(actor,events as DiagnosticEvent[],'browser');
     if(result.unavailable)return response({acceptedIds:[],degraded:true},503,{'Retry-After':'300'});
     if(result.rateLimited)return response({acceptedIds:[],degraded:true},429,{'Retry-After':'60'});
+    deferAcceptedPhoneFailures(actor,events as DiagnosticEvent[],result.acceptedIds,diagnosticsEnvironment());
     return response({acceptedIds:result.acceptedIds,rejectedIds:result.rejectedIds??[],degraded:result.degraded??false});
   }catch(error){return diagnosticErrorResponse(error);}
 }

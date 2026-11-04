@@ -156,4 +156,11 @@ describe("POST /api/telephony/telnyx/webhook", () => {
     expect(reporting.capture).toHaveBeenCalledWith(expect.objectContaining({ code: "webhook_unresolved" }), expect.objectContaining({ retryable: false, attempt: 5 }));
   });
 
+  it.each(["lease_busy", "lease_lost", "routing_context", "snapshot_unavailable"])("keeps %s as diagnostic metadata without changing the retry response", async failureKind => {
+    processTelnyxEvent.mockResolvedValue(processorResult({ status: 500, outcome: "failed", failureKind, type: "call.answered", claim: { attempts: 1 } }));
+    expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(500);
+    await reporting.after.mock.calls[0][0]();
+    expect(reporting.capture).toHaveBeenCalledWith(expect.objectContaining({ code: "webhook_processing_failed" }), expect.objectContaining({ failureKind, providerEventType: "call.answered", retryable: true }));
+  });
+
 });

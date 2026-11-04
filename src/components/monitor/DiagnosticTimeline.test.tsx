@@ -11,6 +11,22 @@ const selection: RoutingDiagnostic = {
   members: [{ memberId: null, profileId: '00000000-0000-0000-0000-000000000001', endpoint: 'sip', outcome: 'skipped', reason: 'device_stale', presence: 'available', registration: 'registering', heartbeatAgeMs: 500, openOffer: false }],
 };
 describe('routing evidence presentation', () => {
+  it('shows the recorded terminal cause, SDK code and RTC edge without upgrading older generic labels to evidence', () => {
+    const base: DiagnosticStoredEvent = {
+      id: '00000000-0000-4000-8000-000000000001', pageId: '00000000-0000-4000-8000-000000000002', sequence: 1,
+      occurredAt: '2026-11-04T10:00:00.000Z', receivedAt: '2026-11-04T10:00:01.000Z', monotonicMs: 1,
+      type: 'phone_lifecycle', module: 'telephony', outcome: 'failed', buildId: 'test-build', sampled: false, sampleRate: 1,
+      reason: 'recovery_timeout', profileId: null, source: 'browser', serverBuild: 'test-build',
+    };
+    const current = renderToStaticMarkup(<DiagnosticEvents events={[{ ...base, reason: 'sdk_recovery_failed', phoneFailure: 'sdk_recovery_disabled', sdkCode: 36005, rtcEdge: 'eu', rtcRegion: 'eu', rtcDc: 'EUld6' }]} />);
+    expect(current).toContain('SDK už spojenie neobnovuje'); expect(current).toContain('SDK 36005');
+    expect(current).toContain('RTC edge: eu'); expect(current).toContain('centrum: EUld6');
+    expect(current).toContain('nie potvrdený výpadok zvuku');
+    const historical = renderToStaticMarkup(<DiagnosticEvents events={[base]} />);
+    expect(historical).toContain('Staršie označenie bez presného dôvodu SDK');
+    expect(historical).not.toContain('Obnova spojenia prekročila časový limit');
+    expect(historical).not.toContain('SDK 36005');
+  });
   it('presents the allowlisted voice observation with its code without asserting an outage', () => {
     const event: DiagnosticStoredEvent = {
       id: '00000000-0000-4000-8000-000000000001', pageId: '00000000-0000-4000-8000-000000000002', sequence: 1,

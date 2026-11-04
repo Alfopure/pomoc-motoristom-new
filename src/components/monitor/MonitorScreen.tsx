@@ -4,6 +4,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { DiagnosticIncident, DiagnosticIncidentDetail, DiagnosticIncidentStatus, DiagnosticOverview } from "@/lib/diagnostics/types";
 import { setDiagnosticIdentity } from "@/lib/diagnostics/client";
 import { CallDiagnosticsCard } from "./CallDiagnosticsCard";
+import { PhoneStatusCard } from "./PhoneStatusCard";
+import type { DiagnosticPhoneStatus } from "@/lib/diagnostics/phone-status";
 import { DiagnosticEvents } from "./DiagnosticTimeline";
 import { MonitorTable } from "./MonitorTable";
 import { ReportProblemButton } from "./ReportProblemButton";
@@ -28,6 +30,7 @@ export function MonitorScreen({ appVersion, identity, externalLinks = {} }: Prop
   const overview = useMonitorResource<DiagnosticOverview>(`/api/diagnostics?${params}`);
   const live = useMonitorResource<Health>("/api/health/live", 60_000, 60_000);
   const ready = useMonitorResource<Health>("/api/health/ready", 300_000, 300_000);
+  const phones = useMonitorResource<DiagnosticPhoneStatus>("/api/diagnostics/phones");
   const now = useMonitorClock();
   const data = overview.data;
   const stale = freshness(data?.checkedAt ? Date.parse(data.checkedAt) : overview.observedAt, now, 120_000) !== "fresh";
@@ -44,7 +47,7 @@ export function MonitorScreen({ appVersion, identity, externalLinks = {} }: Prop
       <span className="text-xs">{data ? { production: "PRODUKCIA", test: "TEST", development: "VÝVOJ" }[data.environment] : "Prostredie neoverené"} · <a href="/" target="_blank" rel="noopener noreferrer" className="underline">Dispečing v novej karte</a></span>
     </div></header>
     <div className="mx-auto max-w-[1500px] space-y-4 p-4 sm:p-6">
-      <div className="flex flex-wrap items-center justify-between gap-3"><p className={noteClass}>Obnova každú minútu, iba vo viditeľnej karte.</p><div className="flex gap-2"><ReportProblemButton /><button className={buttonClass} disabled={overview.loading} onClick={() => { overview.refresh(); live.refresh(); ready.refresh(); }}>Obnoviť</button></div></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><p className={noteClass}>Obnova každú minútu, iba vo viditeľnej karte.</p><div className="flex gap-2"><ReportProblemButton /><button className={buttonClass} disabled={overview.loading} onClick={() => { overview.refresh(); live.refresh(); ready.refresh(); phones.refresh(); }}>Obnoviť</button></div></div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <HealthCard title="Odpoveď aplikácie" resource={live} expected="live" now={now} maxAge={120_000} frequency="60 sekúnd" />
         <HealthCard title="Pripravenosť aplikácie" resource={ready} expected="ready" now={now} maxAge={600_000} frequency="5 minút" />
@@ -59,6 +62,7 @@ export function MonitorScreen({ appVersion, identity, externalLinks = {} }: Prop
           <p className={noteClass}>Stav externých služieb sa tu neoveruje.</p>
         </Card>
       </div>
+      <PhoneStatusCard resource={phones} now={now} />
       {overview.error && <p role="alert" className={warningClass}>{overview.error}</p>}
       {data && stale && <p role="status" className={warningClass}>Prehľad je zastaraný. Posledné overenie: {timestamp(data.checkedAt)}.</p>}
       {data && !data.enabled && <p role="status" className={warningClass}>Zber diagnostiky je vypnutý. Prázdny zoznam nevylučuje chyby.</p>}

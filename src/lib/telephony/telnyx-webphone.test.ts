@@ -2367,6 +2367,49 @@ describe("browser RTC edge and ICE prefetch (call-speed S5)", () => {
     h.phone.stop();
   });
 
+  it.each([
+    ["telnyx.warning", {warning: {code: 36005}}, "sdk_recovery_failed", "sdk_recovery_disabled", 36005],
+    ["telnyx.error", {error: {code: 45003, fatal: true}}, "sdk_recovery_failed", "sdk_recovery_exhausted", 45003],
+    ["telnyx.error", {error: {code: 46002, fatal: true}}, "auth_failure", "invalid_credentials", 46002],
+    ["telnyx.error", {error: {code: 45001, fatal: true}}, "sdk_fatal", "sdk_fatal", 45001],
+    ["telnyx.error", {error: {code: 99999, fatal: true}}, "sdk_fatal", "sdk_fatal", undefined],
+  ])("retains the connected RTC identity for terminal %s after the login trial ends", async (event, payload, reason, phoneFailure, sdkCode) => {
+    const logger = vi.fn();
+    const h = edgeHarness({webRtcRegion: "eu"}, {logger});
+    h.phone.start(); await flush();
+    const client = h.created[0].client;
+    Object.assign(client, {region: "eu", dc: "fr5"}); client.emit("telnyx.ready");
+    client.emit(String(event), payload);
+    expect(h.phone.getSnapshot().status).toBe("failed");
+    expect(logged(logger, "disconnect")).toEqual([[expect.objectContaining({reason, phoneFailure, rtcEdge: "eu", rtcRegion: "eu", rtcDc: "fr5",
+      ...(sdkCode === undefined ? {} : {sdkCode})})]]);
+    const terminal = logger.mock.calls.filter(([entry]) => entry.phoneFailure);
+    expect(terminal.length).toBeGreaterThan(0);
+    expect(terminal.every(([entry]) => entry.reason !== "recovery_timeout")).toBe(true);
+    if (sdkCode === undefined) expect(terminal.every(([entry]) => entry.sdkCode === undefined)).toBe(true);
+    h.phone.stop();
+    Object.assign(h.token.body, {webRtcRegion: "auto"});
+    h.phone.start(); await flush();
+    const next = h.created[1].client;
+    Object.assign(next, {region: "us-central", dc: "ch1"}); next.emit("telnyx.ready");
+    next.emit("telnyx.error", {error: {code: 45003, fatal: true}});
+    expect(logged(logger, "disconnect").at(-1)).toEqual([expect.objectContaining({rtcEdge: "default", rtcRegion: "us-central", rtcDc: "ch1"})]);
+    h.phone.stop();
+  });
+
+  it("labels only the elapsed recovery watchdog as recovery_timeout with the connected RTC edge", async () => {
+    const logger = vi.fn();
+    const h = edgeHarness({webRtcRegion: "eu"}, {logger});
+    h.phone.start(); await flush();
+    const client = h.created[0].client;
+    Object.assign(client, {region: "eu", dc: "am3"}); client.emit("telnyx.ready");
+    client.emit("telnyx.socket.close");
+    h.runTimer(timer => timer.delayMs === WEBPHONE_RECOVERY_TIMEOUT_MS);
+    expect(logged(logger, "disconnect")).toEqual([[expect.objectContaining({reason: "recovery_timeout", phoneFailure: "recovery_timeout", rtcEdge: "eu", rtcDc: "am3"})]]);
+    expect(h.phone.getSnapshot().status).toBe("failed");
+    h.phone.stop();
+  });
+
   it("applies a flag change at the next client creation, never to the client carrying a call", async () => {
     const logger = vi.fn();
     const h = edgeHarness({ webRtcRegion: "auto", webPrefetchIce: false }, { logger });

@@ -8,6 +8,14 @@ import { voiceQualityWarning } from "@/lib/diagnostics/voice-quality";
 import { eventLabels, latency, operationLabels, outcomeLabels, timestamp } from "./monitor-model";
 import { useMonitorResource } from "./useMonitorResource";
 
+const phoneFailureLabels = {
+  recovery_timeout: 'Obnova spojenia prekročila časový limit',
+  sdk_recovery_exhausted: 'SDK vyčerpal obnovu spojenia',
+  sdk_recovery_disabled: 'SDK už spojenie neobnovuje',
+  invalid_credentials: 'SDK odmietol prihlasovacie údaje',
+  sdk_fatal: 'SDK oznámil konečnú chybu',
+};
+
 export function DiagnosticEvents({ events }: { events: DiagnosticStoredEvent[] }) {
   if (!events.length) return <p className="py-3 text-sm text-zinc-500">V tomto období nie sú dostupné udalosti. Chýbajúci záznam nevylučuje problém.</p>;
   return <ol className="divide-y divide-zinc-100" aria-label="Časová os udalostí">{events.map(event => {
@@ -17,6 +25,9 @@ export function DiagnosticEvents({ events }: { events: DiagnosticStoredEvent[] }
     <div className="min-w-0"><p className="font-semibold text-zinc-900">{event.operation ? operationLabels[event.operation] : eventLabels[event.type]} <span className="font-normal text-zinc-500">· {outcomeLabels[event.outcome]}</span></p>
       <p className="mt-1 text-zinc-600">{quality ? <span>{quality.label} · SDK {quality.code} · </span> : event.reason && <span>{event.reason} · </span>}{event.errorClass && <span>{event.errorClass} · </span>}{event.durationMs !== undefined && <span>{latency(event.durationMs)} · </span>}Verzia {event.buildId}</p>
       {quality && <p className="mt-1 text-zinc-500">Pozorovanie telefónu; samo nepotvrdzuje výpadok ani príčinu. {quality.silence ? "Ticho môže byť zámerné. " : ""}Počuteľnosť oboma smermi treba overiť pri hovore.</p>}
+      {event.phoneFailure && <p className="mt-1 text-zinc-600">{phoneFailureLabels[event.phoneFailure]}{event.sdkCode !== undefined && ` · SDK ${event.sdkCode}`}. Pozorovanie telefónu, nie potvrdený výpadok zvuku.</p>}
+      {!event.phoneFailure && event.reason === 'recovery_timeout' && <p className="mt-1 text-zinc-500">Staršie označenie bez presného dôvodu SDK; samo nepotvrdzuje časový limit ani výpadok zvuku.</p>}
+      {event.rtcEdge && <p className="mt-1 text-zinc-600">RTC edge: {event.rtcEdge}{event.rtcTrigger && ` · spúšťač: ${event.rtcTrigger}`}{event.rtcRegion && ` · región: ${event.rtcRegion}`}{event.rtcDc && ` · centrum: ${event.rtcDc}`}</p>}
       <details className="mt-1 text-zinc-500"><summary className="w-fit cursor-pointer">Súvislosti udalosti</summary><dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 break-all">
         <dt>Prijaté serverom</dt><dd>{timestamp(event.receivedAt)}</dd><dt>ID udalosti</dt><dd>{event.id}</dd><dt>Stránka / poradie</dt><dd>{event.pageId} / {event.sequence}</dd>
         <dt>Verzia servera pri prijatí</dt><dd>{event.serverBuild}</dd>

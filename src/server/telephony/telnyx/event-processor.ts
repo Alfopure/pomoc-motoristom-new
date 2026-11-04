@@ -1,3 +1,4 @@
+import type { WebhookFailureKind } from "@/lib/diagnostics/telephony-context";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { requestTimingContext } from "@/server/request-metrics";
 
@@ -126,6 +127,8 @@ export type ProcessorResult = {
   commands: CommandOutcome[];
   notes: string[];
   error: string | null;
+  /** Closed diagnostic cause; does not control retries or acknowledgement. */
+  failureKind?: WebhookFailureKind;
   ms: number;
 };
 
@@ -635,7 +638,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
         const message = error instanceof Error ? error.message : String(error);
         await markWebhookEventFailed(deps.admin, event.id, "ai_demo_handler_failed", { claimedAt: claim.claimedAt, logger: deps.logger, releaseForRetry: true });
         deps.logger?.({ level: "error", scope: "ai-demo", eventId: event.id, type: event.type, message: "handler failed", error: message });
-        return done({ ...identity, claim, status: 500, outcome: "failed", error: "ai_demo_handler_failed" });
+        return done({ ...identity, claim, status: 500, outcome: "failed", failureKind: "handler_failure", error: "ai_demo_handler_failed" });
       }
     }
   }
@@ -808,7 +811,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
           run.session.direction === "inbound" && !run.session.answered_at && !run.session.ended_at &&
           ["received", "greeting", "ivr"].includes(run.session.state)) setupRecovery = run.session;
         logResult(deps, event, claim, ownedSession.id, "failed", run.commands, started, now);
-        return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "failed", commands: run.commands, notes: run.apply.notes, error: run.apply.failure?.error ?? null });
+        return done({ ...identity, claim, sessionId: ownedSession.id, status: 200, outcome: "failed", failureKind: "effect_failure", commands: run.commands, notes: run.apply.notes, error: run.apply.failure?.error ?? null });
       }
 
       logResult(deps, event, claim, ownedSession.id, "processed", run.commands, started, now);
@@ -882,6 +885,10 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     return result;
   } catch (error) {
     const message = describeServiceError(error);
+    const failureKind: WebhookFailureKind = error instanceof SessionLeaseBusyError ? "lease_busy"
+      : error instanceof SessionLeaseLostError ? "lease_lost"
+      : error instanceof SessionEventDeferredError ? (["snapshot_unavailable", "routing_context", "native_hold_revision", "transition_staging_unavailable"].includes(error.code ?? "") ? error.code as WebhookFailureKind : "session_event_deferred")
+      : "processing_failure";
     const deferred = error instanceof SessionEventDeferredError || error instanceof SessionLeaseLostError || !processingStarted;
     // A busy lease before any work started, on a session whose inbox drain
     // replays this event type: the fact is durable in the ledger and its own
@@ -890,7 +897,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
       Boolean(session) && Boolean(event.callControlId) && DEFERRED_EVENT_RANK[event.type] !== undefined;
     // A held claim met a holder again (S1.3): it stays claimed and waits again.
     if (held && error instanceof SessionLeaseBusyError && !processingStarted) {
-      return done({ ...identity, claim, sessionId: session?.id ?? null, status: 200, outcome: "deferred", error: message, notes: [HELD_CLAIM_WAITING] });
+      return done({ ...identity, claim, sessionId: session?.id ?? null, status: 200, outcome: "deferred", failureKind, error: message, notes: [HELD_CLAIM_WAITING] });
     }
     // `claim_holding_drain` (S1.3): keep this claim rather than deferring the
     // row, whose SQL backoff refuses any re-claim for ≥ 500 ms, and finish the
@@ -916,7 +923,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
           ms: now().getTime() - started, deferral: "lease_busy", claim_held: true,
           ...(error instanceof SessionLeaseBusyError ? { lease_wait_ms: error.details?.waitedMs ?? null, polls: error.details?.polls ?? null } : {}),
           finished_at: new Date().toISOString(), timing: event.timing, meta: { attempt: event.deliveryAttempt, delivered_to: event.deliveredTo } });
-        return done({ ...identity, claim, sessionId: heldSessionId, status: 200, outcome: "deferred", error: message, notes: ["claim held"] });
+        return done({ ...identity, claim, sessionId: heldSessionId, status: 200, outcome: "deferred", failureKind, error: message, notes: ["claim held"] });
       } catch {
         // No retained request scope: the ledger deferral below, as before.
         unholdClaim(deps, heldSessionId, waiter);
@@ -975,7 +982,7 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // whose transition may have applied).
     const acknowledged = selfDrain && drainScheduled && Date.now() - ingressWall <= DEFERRED_ACK_MAX_ELAPSED_MS;
     const status = acknowledged || (eventClass === "control" && session && !deferred) ? 200 : 500;
-    return done({ ...identity, claim, sessionId: session?.id ?? null, status, outcome: acknowledged ? "deferred" : "failed", error: message });
+    return done({ ...identity, claim, sessionId: session?.id ?? null, status, outcome: acknowledged ? "deferred" : "failed", failureKind, error: message });
   }
 }
 

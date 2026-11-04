@@ -1,0 +1,4 @@
+/** Closed observability values; never forward provider messages or arbitrary event names. */
+export const WEBHOOK_FAILURE_KINDS = ['lease_busy', 'lease_lost', 'session_event_deferred', 'snapshot_unavailable', 'routing_context', 'native_hold_revision', 'transition_staging_unavailable', 'handler_failure', 'effect_failure', 'processing_failure', 'unresolved'] as const;
+export type WebhookFailureKind = typeof WEBHOOK_FAILURE_KINDS[number];
+export const DIAGNOSTIC_PROVIDER_EVENT_TYPES = ['call.initiated', 'call.answered', 'call.bridged', 'call.hangup', 'call.gather.ended', 'call.playback.ended', 'call.speak.ended', 'call.dtmf.received', 'call.hold', 'call.unhold', 'call.refer.started', 'call.refer.completed', 'call.refer.failed', 'conference.created', 'conference.ended', 'conference.participant.joined', 'conference.participant.left', 'conference.floor.changed', 'call.recording.saved', 'call.recording.error', 'conference.recording.saved'] as const;
