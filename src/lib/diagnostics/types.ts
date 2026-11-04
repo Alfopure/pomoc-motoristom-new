@@ -7,7 +7,11 @@ export const DIAGNOSTIC_OPERATIONS = ['case.open','case.create','case.save','cas
 export const DIAGNOSTIC_OUTCOMES = ['ok','failed','conflict','cancelled','timeout','unknown','committed_refresh_failed'] as const;
 export const DIAGNOSTIC_EVENT_TYPES = ['ui_error','unhandled_rejection','chunk_error','user_report','operation','page_lifecycle','phone_lifecycle','app_update','call_timing','coverage','exception_delivery'] as const;
 export const EXCEPTION_DELIVERY_REASONS = ['sentry_enqueued','sentry_deduplicated','sentry_delivered','sentry_rejected','sentry_retry_exhausted','sentry_expired','sentry_overflow','sentry_invalid','sentry_cleared','sentry_storage_unavailable','sentry_disabled'] as const;
-export const DIAGNOSTIC_REASONS = ['online','offline','pagehide','pageshow','update_detected','update_requested','update_blocked','registered','registering','unregistered','reconnect','takeover','dispose','logout','hangup_intent','provider_disconnect','transport_error','chunk_load','boundary','global_error','global_rejection','user_requested','slow','request_failed','validation','refresh_failed','unknown','incoming_event','answer_clicked','sdk_answer_invoked','sdk_active','remote_audio_attached','server_answered','component_unmount','ownership_release','mobile_standby','superseded','recovery_timeout','auth_failure','disconnected','reconnecting','ownership_acquired','takeover_requested','hangup_requested','sdk_warning','sdk_socket_error','sdk_recoverable_error','visible','hidden','queue_drop','startup_started','startup_ready','startup_timeout','early_accept','early_accept_mismatch','early_accept_cancelled','rtc_region_fallback','rtc_edge_connected', ...EXCEPTION_DELIVERY_REASONS, ...VOICE_QUALITY_WARNINGS.map(warning => warning.reason)] as const;
+export const DIAGNOSTIC_REASONS = ['online','offline','pagehide','pageshow','update_detected','update_requested','update_blocked','registered','registering','unregistered','reconnect','takeover','dispose','logout','hangup_intent','provider_disconnect','transport_error','chunk_load','boundary','global_error','global_rejection','user_requested','slow','request_failed','validation','refresh_failed','unknown','incoming_event','answer_clicked','sdk_answer_invoked','sdk_active','remote_audio_attached','server_answered','component_unmount','ownership_release','mobile_standby','superseded','recovery_timeout','sdk_recovery_failed','sdk_fatal','device_error','auth_failure','disconnected','reconnecting','ownership_acquired','takeover_requested','hangup_requested','sdk_warning','sdk_socket_error','sdk_recoverable_error','visible','hidden','queue_drop','startup_started','startup_ready','startup_timeout','early_accept','early_accept_mismatch','early_accept_cancelled','rtc_region_fallback','rtc_edge_connected', ...EXCEPTION_DELIVERY_REASONS, ...VOICE_QUALITY_WARNINGS.map(warning => warning.reason)] as const;
+export const DIAGNOSTIC_PHONE_FAILURES = ['recovery_timeout','sdk_recovery_exhausted','sdk_recovery_disabled','invalid_credentials','sdk_fatal'] as const;
+/** Terminal codes used by the installed Telnyx SDK 2.27.10; never accept arbitrary provider values. */
+export const DIAGNOSTIC_PHONE_SDK_CODES = [36005,45001,45003,46002,49001] as const;
+export const DIAGNOSTIC_PHONE_FAILURE_REASONS = ['recovery_timeout','sdk_recovery_failed','sdk_fatal','auth_failure','device_error','disconnected'] as const;
 /** Browser RTC edge (call-speed S5): closed values only, never a provider string. */
 export const DIAGNOSTIC_RTC_EDGES = ['eu','default'] as const;
 export const DIAGNOSTIC_RTC_TRIGGERS = ['connect_rejected','socket_closed','socket_error','sdk_error','login_timeout'] as const;
@@ -28,6 +32,7 @@ export type DiagnosticEvent = {
   requestId?: string; operationId?: string; caseId?: string; callSessionId?: string; deviceSessionId?: string;
   reason?: DiagnosticReason; errorClass?: DiagnosticErrorClass; errorId?: string; count?: number;
   sdkWarningCode?: VoiceQualityWarningCode;
+  phoneFailure?: typeof DIAGNOSTIC_PHONE_FAILURES[number]; sdkCode?: typeof DIAGNOSTIC_PHONE_SDK_CODES[number];
   rtcEdge?: typeof DIAGNOSTIC_RTC_EDGES[number]; rtcTrigger?: typeof DIAGNOSTIC_RTC_TRIGGERS[number];
   rtcRegion?: typeof DIAGNOSTIC_RTC_REGIONS[number]; rtcDc?: string;
 };
@@ -35,7 +40,7 @@ export type DiagnosticEventInput = Omit<DiagnosticEvent, 'id'|'pageId'|'sequence
 export type DiagnosticAck = {acceptedIds:string[]; rejectedIds?:string[]; degraded?:boolean};
 export function isDiagnosticUuid(value: unknown): value is string { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value); }
 export function isDiagnosticSafeId(value: unknown): value is string { return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(value); }
-const fields = new Set(['id','pageId','sequence','occurredAt','monotonicMs','type','module','outcome','buildId','sampled','sampleRate','operation','durationMs','requestId','operationId','caseId','callSessionId','deviceSessionId','reason','errorClass','errorId','count','sdkWarningCode','rtcEdge','rtcTrigger','rtcRegion','rtcDc']);
+const fields = new Set(['id','pageId','sequence','occurredAt','monotonicMs','type','module','outcome','buildId','sampled','sampleRate','operation','durationMs','requestId','operationId','caseId','callSessionId','deviceSessionId','reason','errorClass','errorId','count','sdkWarningCode','phoneFailure','sdkCode','rtcEdge','rtcTrigger','rtcRegion','rtcDc']);
 const includes = (values: readonly string[], value: unknown) => typeof value === 'string' && values.includes(value);
 const bounded = (v:unknown,min:number,max:number) => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 /** Reject unknown fields rather than accepting a payload which accidentally contains private data. */
@@ -54,10 +59,17 @@ export function parseDiagnosticEvent(value:unknown):DiagnosticEvent|null {
     const warning=voiceQualityWarning(e.sdkWarningCode);
     if (!warning || e.reason!==warning.reason || e.type!=='phone_lifecycle' || e.module!=='telephony' || e.outcome!=='unknown' || !isDiagnosticUuid(e.callSessionId)) return null;
   }
+  if (e.phoneFailure!==undefined || e.sdkCode!==undefined) {
+    if (e.type!=='phone_lifecycle'||e.module!=='telephony'||e.outcome!=='failed'||!includes(DIAGNOSTIC_PHONE_FAILURES,e.phoneFailure)) return null;
+    const expected = {recovery_timeout:['recovery_timeout',undefined],sdk_recovery_exhausted:['sdk_recovery_failed',45003],sdk_recovery_disabled:['sdk_recovery_failed',36005],invalid_credentials:['auth_failure',46002],sdk_fatal:['sdk_fatal',undefined]}[e.phoneFailure as NonNullable<DiagnosticEvent['phoneFailure']>];
+    if (e.reason!==expected[0]) return null;
+    if (e.sdkCode!==undefined && (!(DIAGNOSTIC_PHONE_SDK_CODES as readonly unknown[]).includes(e.sdkCode) || (e.phoneFailure==='sdk_fatal' ? ![45001,49001].includes(Number(e.sdkCode)) : e.sdkCode!==expected[1]))) return null;
+  }
   if (e.rtcEdge!==undefined||e.rtcTrigger!==undefined||e.rtcRegion!==undefined||e.rtcDc!==undefined) {
-    if (e.type!=='phone_lifecycle'||e.module!=='telephony'||!includes(DIAGNOSTIC_RTC_EDGES,e.rtcEdge)||!includes(['rtc_region_fallback','rtc_edge_connected'],e.reason)) return null;
+    if (e.type!=='phone_lifecycle'||e.module!=='telephony'||!includes(DIAGNOSTIC_RTC_EDGES,e.rtcEdge)||!includes(['rtc_region_fallback','rtc_edge_connected',...DIAGNOSTIC_PHONE_FAILURE_REASONS],e.reason)) return null;
     if (e.rtcTrigger!==undefined&&(e.reason!=='rtc_region_fallback'||!includes(DIAGNOSTIC_RTC_TRIGGERS,e.rtcTrigger))) return null;
-    if ((e.rtcRegion!==undefined||e.rtcDc!==undefined)&&e.reason!=='rtc_edge_connected') return null;
+    if ((e.rtcRegion!==undefined||e.rtcDc!==undefined)&&e.reason!=='rtc_edge_connected'&&!includes(DIAGNOSTIC_PHONE_FAILURE_REASONS,e.reason)) return null;
+    if (includes(DIAGNOSTIC_PHONE_FAILURE_REASONS,e.reason)&&e.outcome!=='failed') return null;
     if ((e.rtcRegion!==undefined&&!includes(DIAGNOSTIC_RTC_REGIONS,e.rtcRegion))||(e.rtcDc!==undefined&&!isDiagnosticRtcDc(e.rtcDc))) return null;
   }
   if (e.type==='exception_delivery' && (e.module!=='app' || !includes(EXCEPTION_DELIVERY_REASONS,e.reason) || e.count===undefined)) return null;

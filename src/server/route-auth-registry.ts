@@ -134,6 +134,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/voice/presence": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },
   "mobile/v1/voice/disconnect": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Native mobile lease; dedicated TEST pilot with provider provenance guards." },
   diagnostics: {class: 'session', role: ['manager','admin']},
+  'diagnostics/phones': {class: 'session', role: ['manager','admin'], note: 'Read-only organization/environment-scoped device status aggregates; no device secrets or provider identifiers.'},
   'diagnostics/canary': {class: 'dual', role: ['admin'], note: 'Fixed synthetic error only: dedicated TEST + expiring deployment flag; temporary purpose-bound bearer or same-origin admin. Disabled deployments return 404. No application-session or provider access.'},
   'diagnostics/events': {class: 'session', role: ['dispatcher','senior_dispatcher','manager','admin'], note: 'Same-origin, authenticated account-bound diagnostic batch.'},
   'diagnostics/incidents/[id]': {class: 'session', role: ['manager','admin']},

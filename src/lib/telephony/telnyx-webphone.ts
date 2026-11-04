@@ -20,6 +20,7 @@
  */
 
 import { applyStoredAudioOutput, REMOTE_AUDIO_ELEMENT_ID } from "@/lib/telephony/audio-output";
+import { DIAGNOSTIC_PHONE_SDK_CODES, type DiagnosticEventInput } from "@/lib/diagnostics/types";
 import { expectedVoiceSilence, voiceQualityWarning, type VoiceQualityWarning, type VoiceQualityWarningCode } from "@/lib/diagnostics/voice-quality";
 import { BrowserIncomingRingtone } from "@/lib/telephony/browser-ringtone";
 import { browserCallMonotonicNow, browserCallTelemetry, prepareBrowserCallHeartbeat, type BrowserCallPhase, type BrowserCallObservation } from "@/lib/telephony/browser-call-telemetry";
@@ -157,7 +158,8 @@ export type WebphoneSnapshot = {
 
 export type IncomingOfferPolicy = { presenceRevision?: number; automaticAllowed: boolean; requestPending?: boolean; explicitLegs?: Array<{ callControlId: string; sessionId: string }> };
 
-export type WebphoneStopReason = "component_unmount" | "pagehide" | "ownership_release" | "mobile_standby" | "superseded" | "recovery_timeout" | "auth_failure" | "unknown";
+export type WebphoneStopReason = "component_unmount" | "pagehide" | "ownership_release" | "mobile_standby" | "superseded" | "recovery_timeout" | "sdk_recovery_failed" | "sdk_fatal" | "auth_failure" | "unknown";
+type PhoneFailureDiagnostic = Pick<DiagnosticEventInput, "phoneFailure" | "sdkCode">;
 
 export type TelnyxWebphoneOptions = {
   deviceKind?: "web" | "mobile";
@@ -267,6 +269,8 @@ export class TelnyxWebphone {
   private loginTimer: number | null = null;
   /** Bounds an EU-edge client's first login; see `abandonEuEdge`. */
   private euEdgeTimer: number | null = null;
+  /** Diagnostic identity of the current client; kept after its first successful registration. */
+  private activeRtcEdge: { client: WebphoneSdkClient; edge: RtcEdge } | null = null;
   /** A client created while `webRtcRegion` asks for the EU edge, until its first `telnyx.ready` (call-speed S5). */
   private edgeTrial: { client: WebphoneSdkClient; edge: RtcEdge } | null = null;
   private heartbeatTimer: number | null = null;
@@ -615,23 +619,23 @@ export class TelnyxWebphone {
     } catch { /* Diagnostic observers cannot interrupt the media state machine. */ }
   }
 
-  private dispatch(event: WebphoneEvent, stopReason: WebphoneStopReason = "unknown"): void {
+  private dispatch(event: WebphoneEvent, stopReason: WebphoneStopReason = "unknown", failure?: PhoneFailureDiagnostic): void {
     const previousStatus = this.state.status;
     const result = reduceWebphone(this.state, event, { now: this.now(), random: this.options.random });
     const changed = result.state !== this.state;
     this.state = result.state;
-    if (previousStatus !== this.state.status && event.type !== "stop") this.log({ event: event.type, status: this.state.status });
     const reason = event.type === "stop" ? stopReason : this.state.status === "superseded" ? "superseded"
-      : event.type === "recovery_failed" ? "recovery_timeout"
+      : event.type === "recovery_failed" ? failure?.phoneFailure === "invalid_credentials" ? "auth_failure" : failure?.phoneFailure === "recovery_timeout" ? "recovery_timeout" : failure?.phoneFailure === "sdk_fatal" ? "sdk_fatal" : "sdk_recovery_failed"
       : (event.type === "client_error" && event.authFailure) || (event.type === "token_rejected" && [401, 403].includes(event.status)) ? "auth_failure" : "unknown";
-    for (const effect of result.effects) this.runEffect(effect, reason);
+    if (previousStatus !== this.state.status && event.type !== "stop") this.log({ event: event.type, status: this.state.status, ...(failure || this.state.status === "failed" && reason !== "unknown" ? {reason, ...this.phoneFailureDiagnostic(failure ?? {})} : {}) });
+    for (const effect of result.effects) this.runEffect(effect, reason, failure);
     // Publish registration and renewed session ids immediately. Waiting for
     // the next timer tick can leave a resumed tab unavailable to routing.
     if (this.state.status === "registered" && (event.type === "client_ready" || event.type === "token_issued")) void this.sendHeartbeat();
     if (changed) this.publish();
   }
 
-  private runEffect(effect: WebphoneEffect, reason: WebphoneStopReason): void {
+  private runEffect(effect: WebphoneEffect, reason: WebphoneStopReason, failure?: PhoneFailureDiagnostic): void {
     switch (effect.kind) {
       case "clear_timers":
         this.clearTimer("retryTimer");
@@ -644,14 +648,14 @@ export class TelnyxWebphone {
         void this.connect(effect.credentials);
         return;
       case "disconnect":
-        void this.disconnectClient(reason);
+        void this.disconnectClient(reason, failure);
         return;
       case "await_recovery":
         if (this.recoveryTimer === null) {
           const generation = this.clientGeneration;
           this.recoveryTimer = this.schedule(() => {
             this.recoveryTimer = null;
-            if (this.started && generation === this.clientGeneration) this.dispatch({ type: "recovery_failed" });
+            if (this.started && generation === this.clientGeneration) this.dispatch({ type: "recovery_failed" }, "unknown", {phoneFailure: "recovery_timeout"});
           }, WEBPHONE_RECOVERY_TIMEOUT_MS);
         }
         return;
@@ -987,6 +991,7 @@ export class TelnyxWebphone {
         return;
       }
       this.client = client;
+      this.activeRtcEdge = edge ? {client, edge} : null;
       this.appliedToken = credentials.token;
       this.socketLoginToken = credentials.token;
       const current = () => this.started && this.client === client && generation === this.clientGeneration;
@@ -1218,7 +1223,7 @@ export class TelnyxWebphone {
       this.mediaRecovering = true;
       this.beginRecovery("Obnovujem zvuk prebiehajúceho hovoru.", false);
     } else if (code === 36005) {
-      this.dispatch({ type: "recovery_failed" });
+      this.dispatch({ type: "recovery_failed" }, "unknown", {phoneFailure: "sdk_recovery_disabled", sdkCode: 36005});
     }
   }
 
@@ -1247,9 +1252,15 @@ export class TelnyxWebphone {
     return this.sdkModule;
   }
 
-  private async disconnectClient(reason: WebphoneStopReason): Promise<void> {
+  /** Diagnostic-only identity: unlike the pre-login trial, this survives successful registration. */
+  private phoneFailureDiagnostic(failure: PhoneFailureDiagnostic): Record<string, unknown> {
+    const edge = this.activeRtcEdge;
+    return { ...failure, ...(edge?.client === this.client && this.client ? {rtcEdge: edge.edge, rtcRegion: this.client.region, rtcDc: this.client.dc} : {}) };
+  }
+
+  private async disconnectClient(reason: WebphoneStopReason, failure?: PhoneFailureDiagnostic): Promise<void> {
     const client = this.client;
-    if (client) this.log({ event: "disconnect", reason });
+    if (client) this.log({ event: "disconnect", reason, ...(failure || reason === "auth_failure" ? this.phoneFailureDiagnostic(failure ?? {}) : {}) });
     this.client = null;
     this.clientGeneration += 1;
     this.mintGeneration++;
@@ -1267,6 +1278,7 @@ export class TelnyxWebphone {
     this.loginFailureEvent = null;
     this.lastWarningRefreshAt = -Infinity;
     this.edgeTrial = null;
+    this.activeRtcEdge = null;
     this.clearTimer("recoveryTimer");
     this.clearTimer("loginTimer");
     this.clearTimer("euEdgeTimer");
@@ -1297,7 +1309,7 @@ export class TelnyxWebphone {
     const code = payload?.error?.code;
     const message = payload?.error?.message ?? payload?.message ?? null;
     if (code === 46002) {
-      this.dispatch({ type: "recovery_failed", message: "Prihlasovacie údaje telefónu nie sú platné. Znovu pripojte telefón." });
+      this.dispatch({ type: "recovery_failed", message: "Prihlasovacie údaje telefónu nie sú platné. Znovu pripojte telefón." }, "unknown", {phoneFailure: "invalid_credentials", sdkCode: 46002});
       return;
     }
     if (code === 46001) {
@@ -1328,7 +1340,8 @@ export class TelnyxWebphone {
       return;
     }
     if (code === 45003 || payload?.error?.fatal === true && !CALL_ERROR_CODES.has(code ?? 0)) {
-      this.dispatch({ type: "recovery_failed" });
+      const sdkCode = (DIAGNOSTIC_PHONE_SDK_CODES as readonly unknown[]).includes(code) ? code as NonNullable<DiagnosticEventInput["sdkCode"]> : undefined;
+      this.dispatch({ type: "recovery_failed" }, "unknown", {phoneFailure: code === 45003 ? "sdk_recovery_exhausted" : "sdk_fatal", ...(sdkCode === undefined ? {} : {sdkCode})});
       return;
     }
     // These codes describe a single call. Resetting its healthy registration

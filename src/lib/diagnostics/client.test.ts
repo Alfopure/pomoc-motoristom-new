@@ -67,6 +67,17 @@ describe('bounded diagnostic collector',()=>{
     expect(f.collector.coverage()).toMatchObject({queued:1,deduplicated:9999});
     expect(f.collector.record({...input,message:'phone +421 email@test token'} as DiagnosticEventInput)).toBeNull();
   });
+  it('preserves different terminal phone causes and RTC identities while deduplicating identical observations',async()=>{
+    const f=fixture({online:false});await settle();
+    const base:DiagnosticEventInput={type:'phone_lifecycle',module:'telephony',outcome:'failed',reason:'sdk_recovery_failed',phoneFailure:'sdk_recovery_disabled',sdkCode:36005,deviceSessionId:profileId,rtcEdge:'eu',rtcRegion:'eu',rtcDc:'fr5'};
+    const first=f.collector.record(base);
+    expect(f.collector.record({...base})).toBe(first);
+    const exhausted=f.collector.record({...base,phoneFailure:'sdk_recovery_exhausted',sdkCode:45003});
+    const differentEdge=f.collector.record({...base,rtcEdge:'default',rtcRegion:'us-central',rtcDc:'ch1'});
+    const differentDc=f.collector.record({...base,rtcDc:'am3'});
+    expect(new Set([first,exhausted,differentEdge,differentDc]).size).toBe(4);
+    expect(f.collector.coverage()).toMatchObject({queued:4,deduplicated:1});
+  });
   it('removes only explicit durable ACK IDs, tracks rejections as drops',async()=>{
     const fetcher=vi.fn(async(_url: unknown,init?:RequestInit)=>{const events=JSON.parse(init!.body as string).events;return new Response(JSON.stringify({acceptedIds:[events[0].id,'bogus'],rejectedIds:[events[1].id],degraded:true}));});
     const f=fixture({fetch:fetcher});await settle();

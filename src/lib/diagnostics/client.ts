@@ -150,7 +150,7 @@ export class DiagnosticCollector {
     private insert(event: DiagnosticEvent) {
         this.prune();
         // Keep in-flight payload immutable: an ACK must not consume unseen repetitions.
-        const fingerprint = (e: DiagnosticEvent) => [e.type, e.module, e.operation, e.outcome, e.reason, e.errorClass, e.errorId, e.caseId, e.callSessionId, e.deviceSessionId].join(':');
+        const fingerprint = (e: DiagnosticEvent) => [e.type, e.module, e.operation, e.outcome, e.reason, e.errorClass, e.errorId, e.caseId, e.callSessionId, e.deviceSessionId, e.phoneFailure, e.sdkCode, e.rtcEdge, e.rtcRegion, e.rtcDc].join(':');
         if (!event.sampled && event.type !== 'user_report' && event.type !== 'operation' && event.type !== 'coverage') {
             const duplicate = this.events.find(e => !this.flightIds.has(e.id) && fingerprint(e) === fingerprint(event) && this.now() - Date.parse(e.occurredAt) < 30000);
             if (duplicate) {

@@ -1,0 +1,368 @@
+{
+  "auditedAt": "2026-11-04",
+  "main": "eebaa8322f0dd98317ba9bcafbdf53db61e8a550",
+  "dev": "ef6d85c6de93ebea5fe9248f8d4fc8471204c832",
+  "proof": "Every archived tip is an ancestor of both audited main and dev. No open PR. Main/dev and all non-ancestor work are excluded.",
+  "branches": [
+    {
+      "branch": "Alfopure/ios-scene-release-evidence",
+      "sha": "398c76acfb050c4bf4e02ce6b07b663e5f0a8a7e"
+    },
+    {
+      "branch": "Alfopure/ios-scene-startup-fix",
+      "sha": "96afa6f619a0bcffc1f478d3ecab6ae0c26e2845"
+    },
+    {
+      "branch": "Alfopure/klientska-infra-trukt-ra-a-datab-zy",
+      "sha": "5729ff83260d90ec114fef3c658788475fdc689c"
+    },
+    {
+      "branch": "Alfopure/local-xcode-testflight",
+      "sha": "9466ffd6b4f13ce027ab3a9df4c9ad4b4316dc73"
+    },
+    {
+      "branch": "Alfopure/mobil-hovor-ponuka",
+      "sha": "9267b06b83e800e5575112ccc047ddb7eb80045e"
+    },
+    {
+      "branch": "Alfopure/mobil-ponuka-diagnostika",
+      "sha": "52eeeea54abfc4c07a632228c6c680797f92b72f"
+    },
+    {
+      "branch": "Alfopure/mobil-ponuka-relacia",
+      "sha": "9d45c47cd4f80e457cff549ec5a18d4e512e89e2"
+    },
+    {
+      "branch": "Alfopure/mobil-pripravenost",
+      "sha": "676219f72e883cc1ad1408427f52e8b828993c5e"
+    },
+    {
+      "branch": "Alfopure/mobile-build-19-handoff",
+      "sha": "02c33412f82ce6f27b0e8a05c0ff291777177f04"
+    },
+    {
+      "branch": "Alfopure/mobile-delivery-recovery",
+      "sha": "14339ad72286102c4668ce4cabe65b05bb0775ad"
+    },
+    {
+      "branch": "Alfopure/mobile-reliability-audit",
+      "sha": "19ea7e6756fc57031a9f1376f11fe6fcab15bf28"
+    },
+    {
+      "branch": "Alfopure/mobilna-praca-po-hovore",
+      "sha": "e498b9bfba3a8c378efa453e2980374c3cbef845"
+    },
+    {
+      "branch": "Alfopure/mobilne-detaily-hladanie",
+      "sha": "583a30db8c717d9fa9633adb3f3d4a84b9793edf"
+    },
+    {
+      "branch": "Alfopure/mobilne-formulare",
+      "sha": "277d7f4e054e7095e4ab8ebcf82b40e133b03127"
+    },
+    {
+      "branch": "Alfopure/mobilne-hovor",
+      "sha": "aedccd9b70867e6b66f27a1e27d10855c5d2f198"
+    },
+    {
+      "branch": "Alfopure/mobilne-nastroje-dispecera",
+      "sha": "484d3535fe94968c2e1de3ba795b8d944fa90c65"
+    },
+    {
+      "branch": "Alfopure/mobilne-odovzdanie",
+      "sha": "698096cbf9ae096d71c6d98a4fdd36eb865d1f0d"
+    },
+    {
+      "branch": "Alfopure/mobilne-opravy",
+      "sha": "578647a60320023052126a0662b2d3e2897017d8"
+    },
+    {
+      "branch": "Alfopure/mobilne-podrzanie-hovoru",
+      "sha": "362bd40f287bea34e8469690681d38962b1a3b39"
+    },
+    {
+      "branch": "Alfopure/mobilne-prepojenie",
+      "sha": "a23f79ec43cf99f94a5d686453214b042ac2eb3d"
+    },
+    {
+      "branch": "Alfopure/mobilne-prilohy",
+      "sha": "b3632b8243ef8192c8751b4c25f6fafe109cb658"
+    },
+    {
+      "branch": "Alfopure/mobilne-pripady-hovorov",
+      "sha": "a8b2aa77d42abc01ba66a5f92e0e339de509a7f4"
+    },
+    {
+      "branch": "Alfopure/mobilne-pristavovac",
+      "sha": "e410cc64a96641092980fece1785f2f5da97e816"
+    },
+    {
+      "branch": "Alfopure/mobilne-push",
+      "sha": "305b05b1f2014069c8169aea13b0bbcee577444e"
+    },
+    {
+      "branch": "Alfopure/mobilne-push-text",
+      "sha": "46b117d37bd6c51ed6efddd373bc05fcb3f69de5"
+    },
+    {
+      "branch": "Alfopure/mobilne-spatne",
+      "sha": "afed1c14e53386e869f4bd38cd88c9538b7ee0c4"
+    },
+    {
+      "branch": "Alfopure/mobilne-spatne-volania",
+      "sha": "e037428d2840a2e49461176794548859332b6533"
+    },
+    {
+      "branch": "Alfopure/mobilne-ucet",
+      "sha": "c91ac001078d1cb645a43fbabf4ebb1d122ca0ca"
+    },
+    {
+      "branch": "Alfopure/mobilne-upozornenia",
+      "sha": "cc860834656fc67a5327bc3ccd03f13b8120b91b"
+    },
+    {
+      "branch": "Alfopure/mobilne-vydanie",
+      "sha": "a829b467a2a21a594b2c6e35e6b2b646b92d9af2"
+    },
+    {
+      "branch": "Alfopure/mobilny-dizajn-lista",
+      "sha": "9c98dcc867b4cc1b9b68cf83c420eff44671fd14"
+    },
+    {
+      "branch": "Alfopure/pristavovac-moduly-poloha",
+      "sha": "89a139858f72aabc80d735c32a91741f888996fa"
+    },
+    {
+      "branch": "Alfopure/pristavovac-test-stav",
+      "sha": "202eec16766554c843c54eff16c6b527b8d985f0"
+    },
+    {
+      "branch": "Alfopure/sentry-emaily-a-v-padky",
+      "sha": "b1c591dd944860e2ae47c733743952a83b1d6244"
+    },
+    {
+      "branch": "Alfopure/testflight-build-18",
+      "sha": "762b9c268260ced82baeec0def38582e6beddc00"
+    },
+    {
+      "branch": "Alfopure/testflight-priprava",
+      "sha": "23323b8c33c146b6813befefba2d7d94e295e368"
+    },
+    {
+      "branch": "Alfopure/testflight-stav",
+      "sha": "792afbbe0348bbb80bcc6f370be854a0d4854e4a"
+    },
+    {
+      "branch": "Alfopure/testflight-ucel-pohybu",
+      "sha": "e62ddc571028ad4904ebff5a0a8e29fee7bdbc8d"
+    },
+    {
+      "branch": "docs/build-26",
+      "sha": "eaf05e20e64c7c00819940681d1d3d57366d6a87"
+    },
+    {
+      "branch": "docs/plan-mobil-push-android",
+      "sha": "60baaccbf067ab30f9eb66dcfe05431d85cee70b"
+    },
+    {
+      "branch": "docs/production-release-plan",
+      "sha": "b009596ac2fa358b14f2d3d879046381de36a4ca"
+    },
+    {
+      "branch": "docs/release-plan-fixes-1103",
+      "sha": "06578fe2dc0073c915841437a59773560d3d540b"
+    },
+    {
+      "branch": "docs/test-supabase-pro-medium-1030",
+      "sha": "07b75a508f21225bfb5455a40ed190b74bd4f2fe"
+    },
+    {
+      "branch": "docs/testflight-build-27-1030",
+      "sha": "8d37ac89e2bccd4fb5b87de1611c5064d2759513"
+    },
+    {
+      "branch": "docs/webhooks-and-release-1028",
+      "sha": "07429b8679e6b247e6677a93a42b55e681fd515a"
+    },
+    {
+      "branch": "feat/android-play-prep",
+      "sha": "08259a72a03c2fdb799157910c6aafda616c992a"
+    },
+    {
+      "branch": "feat/android-play-test-1029",
+      "sha": "e1361f7e75cb43151580b11cdb42c6a03e831d4e"
+    },
+    {
+      "branch": "feat/app-store-readiness-1103",
+      "sha": "3d569d2f532d0f11f37cdd8a93383b4b0e55f8a4"
+    },
+    {
+      "branch": "feat/mobile-finish",
+      "sha": "760d8b8582dd358702b8a79a381a892291eaed87"
+    },
+    {
+      "branch": "feat/mobile-phase-one-ready",
+      "sha": "f62ea2a5b3f52f2f61a29af99dc067c4c17fcc82"
+    },
+    {
+      "branch": "feat/mobile-work-modules",
+      "sha": "a157d92ba185686f63cb2aa3e9bcb101116b10be"
+    },
+    {
+      "branch": "feat/mobile-work-push",
+      "sha": "8f973b84cfd1b33c720b232fd47d520b5b7abb8f"
+    },
+    {
+      "branch": "feat/owner-decisions-1028",
+      "sha": "65ddd7cbb7385569ead56e22fd3a6b778d0a00ad"
+    },
+    {
+      "branch": "feat/partneri-followups",
+      "sha": "8a6821138b44f851ab854528e481d1488d0606ec"
+    },
+    {
+      "branch": "feat/pobocky-branch-work",
+      "sha": "39e9f639fcdb97f311eb3957df0ff974ac2c02bc"
+    },
+    {
+      "branch": "feat/production-native-voice-1029",
+      "sha": "51c3a8de22bebd92354636d845d560e877b4c4c4"
+    },
+    {
+      "branch": "feat/rental-draft-prep",
+      "sha": "be2ca370e466768da51f26f7cc821786c7a3945d"
+    },
+    {
+      "branch": "feat/telephony-hardening",
+      "sha": "cc570f8f352f2a31d546780a438a9f811e182cc5"
+    },
+    {
+      "branch": "feat/unified-dispatch-web",
+      "sha": "89e4f3162c0c705df44214e1527f07fb9312f885"
+    },
+    {
+      "branch": "feat/voice-device-diagnostics-1030",
+      "sha": "13174d435865ca6ef8e6e7c243527f195243320d"
+    },
+    {
+      "branch": "feat/web-delivery-handoff",
+      "sha": "4b41e40ee43c2805fcd4ed6b03ab4c1f39f2f515"
+    },
+    {
+      "branch": "fix/export-compliance-1103",
+      "sha": "a4c11e6b599561272372375e9301021717f6043d"
+    },
+    {
+      "branch": "fix/ios-hold-action-identity-1030",
+      "sha": "08e4e279508fd7e927b707243ffc656adb143fa2"
+    },
+    {
+      "branch": "fix/iphone-voice-1030",
+      "sha": "8d6c3f8c4e8848129144020f7cef217185b6f1f5"
+    },
+    {
+      "branch": "fix/privacy-jazda-background-1029",
+      "sha": "33bcc72f7da76d797813c5aca122a5100eb54b45"
+    },
+    {
+      "branch": "fix/rental-draft-source",
+      "sha": "d2f38051f57b27d408676df1d2b09989c3b068cb"
+    },
+    {
+      "branch": "fix/s5-region-followup-1102",
+      "sha": "a994f11349f8398550bfcbb6e7798b8bce90f3ea"
+    },
+    {
+      "branch": "fix/s5-region-followup-2-1102",
+      "sha": "2847e07f6bd9cd4b0bac830fdceff1912ed69384"
+    },
+    {
+      "branch": "fix/s5-region-followup-3-1102",
+      "sha": "6b08d0f7f5f3616ed7cb92b6b8f2999097d9d136"
+    },
+    {
+      "branch": "fix/s6-bprime-followup-1103",
+      "sha": "4ecb3b2f6825ba8406a936c4eb092c5fc4931d1a"
+    },
+    {
+      "branch": "fix/s6-followup-1103",
+      "sha": "e294fc82937808806418d4a9e2e44dd4f99d9790"
+    },
+    {
+      "branch": "fix/s6-followup-2-1103",
+      "sha": "4de55619cb4414fc40b13522306958c0dbe8db34"
+    },
+    {
+      "branch": "fix/s8-revocation-followup-1102",
+      "sha": "0fc04e083d52fe86d61564d68348a9d1ee7cb973"
+    },
+    {
+      "branch": "fix/security-readiness-1030",
+      "sha": "c8b9b999712ef6b24521afd796f8107987e30c23"
+    },
+    {
+      "branch": "fix/towing-offline-lease-flake-1103",
+      "sha": "59f1bcc76f213291d3f8abbe5052e4d5b7fdac04"
+    },
+    {
+      "branch": "fix/voice-stale-termination-1030",
+      "sha": "e7478a8de49a4fbb697be016439f4c6b25b63561"
+    },
+    {
+      "branch": "perf/call-speed-s0-1030",
+      "sha": "b45c5b379726087a6101d83029585ad626812cbd"
+    },
+    {
+      "branch": "perf/call-speed-s1-1030",
+      "sha": "5608632acc5c351d9968bea6e7d2703b7fe078ef"
+    },
+    {
+      "branch": "perf/call-speed-s2-1102",
+      "sha": "18d818698aca82f292934efbb1f71966f4b81063"
+    },
+    {
+      "branch": "perf/call-speed-s3-1030",
+      "sha": "2e73cda5d6d3c73c25a27ecd76b6f30c3422f6fd"
+    },
+    {
+      "branch": "perf/call-speed-s4-keepalive-1103",
+      "sha": "9738407fcef8d1ee78a014fc80603ec75303b1f1"
+    },
+    {
+      "branch": "perf/call-speed-s5-eu-api-1102",
+      "sha": "0fc8d28712d40096e15d5fd644bbcb8906120b6a"
+    },
+    {
+      "branch": "perf/call-speed-s5a-web-region-1102",
+      "sha": "251928df1880a3fbfaa05dd287142e34a0edf974"
+    },
+    {
+      "branch": "perf/call-speed-s6-concurrent-1102",
+      "sha": "d248c69db2066004d043adee34c6254be8ac262d"
+    },
+    {
+      "branch": "perf/call-speed-s7-1030",
+      "sha": "5b3c16098aca31ff33a62524592f1de6e3720d1f"
+    },
+    {
+      "branch": "perf/call-speed-s8-1030",
+      "sha": "18daab2621f294db704e21abfaf862c25cac99e3"
+    },
+    {
+      "branch": "perf/call-speed-sip-eu-1103",
+      "sha": "0f4aedcee83a2cf82016d6d9279e73fd2e45505d"
+    },
+    {
+      "branch": "perf/s6-blink-experiment-1103",
+      "sha": "555819ab934a63d57d6650db25018a9f5eb788fd"
+    },
+    {
+      "branch": "release-prep/prod-unlock-1103",
+      "sha": "d953f3b4ad743031df5f320e57a9cb3d8a7434c2"
+    },
+    {
+      "branch": "test/live-delivery-acceptance",
+      "sha": "b993d6fd5410b203dc9dc57a17fad689b8eae22b"
+    }
+  ]
+}

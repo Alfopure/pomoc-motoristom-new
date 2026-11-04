@@ -1,5 +1,5 @@
 import { recordDiagnostic } from "@/lib/diagnostics/client";
-import { DIAGNOSTIC_REASONS, DIAGNOSTIC_RTC_EDGES, DIAGNOSTIC_RTC_REGIONS, DIAGNOSTIC_RTC_TRIGGERS, isDiagnosticRtcDc, isDiagnosticUuid, type DiagnosticEventInput, type DiagnosticOperation, type DiagnosticReason } from "@/lib/diagnostics/types";
+import { DIAGNOSTIC_PHONE_FAILURES, DIAGNOSTIC_PHONE_FAILURE_REASONS, DIAGNOSTIC_PHONE_SDK_CODES, DIAGNOSTIC_REASONS, DIAGNOSTIC_RTC_EDGES, DIAGNOSTIC_RTC_REGIONS, DIAGNOSTIC_RTC_TRIGGERS, isDiagnosticRtcDc, isDiagnosticUuid, type DiagnosticEventInput, type DiagnosticOperation, type DiagnosticReason } from "@/lib/diagnostics/types";
 import { expectedVoiceSilence, voiceQualityWarning } from "@/lib/diagnostics/voice-quality";
 import type { ActiveCallPayload } from "./active-calls-model";
 import type { WebphoneCallView } from "./telnyx-webphone";
@@ -32,17 +32,28 @@ export function webphoneDiagnostic(entry: Record<string, unknown>): DiagnosticEv
     : entry.status === "superseded" ? "superseded"
     : entry.status === "failed" ? "disconnected" : null;
   if (!reason) return null;
-  return { type: "phone_lifecycle", module: "telephony", outcome: ["superseded", "recovery_timeout", "auth_failure", "disconnected", "sdk_socket_error", "early_accept_mismatch", "early_accept_cancelled", "rtc_region_fallback"].includes(reason) ? "failed" : "ok", reason,
+  return { type: "phone_lifecycle", module: "telephony", outcome: ["superseded", "recovery_timeout", "sdk_recovery_failed", "sdk_fatal", "device_error", "auth_failure", "disconnected", "sdk_socket_error", "early_accept_mismatch", "early_accept_cancelled", "rtc_region_fallback"].includes(reason) ? "failed" : "ok", reason,
     ...(isDiagnosticUuid(entry.deviceSessionId) ? { deviceSessionId: entry.deviceSessionId } : {}),
     ...(isDiagnosticUuid(entry.callSessionId) ? { callSessionId: entry.callSessionId } : {}),
-    ...rtcEdgeDiagnostic(reason, entry) };
+    ...phoneFailureDiagnostic(reason, entry), ...rtcEdgeDiagnostic(reason, entry) };
 }
 
 const oneOf = <T extends string>(values: readonly T[], value: unknown): value is T => typeof value === "string" && (values as readonly string[]).includes(value);
 
+/** Only closed terminal observations survive the browser boundary. */
+function phoneFailureDiagnostic(reason: DiagnosticReason, entry: Record<string, unknown>): Partial<DiagnosticEventInput> {
+  if (!oneOf(DIAGNOSTIC_PHONE_FAILURES, entry.phoneFailure)) return {};
+  const expected = { recovery_timeout: "recovery_timeout", sdk_recovery_exhausted: "sdk_recovery_failed", sdk_recovery_disabled: "sdk_recovery_failed", invalid_credentials: "auth_failure", sdk_fatal: "sdk_fatal" } as const;
+  if (reason !== expected[entry.phoneFailure]) return {};
+  const sdkCode = (DIAGNOSTIC_PHONE_SDK_CODES as readonly unknown[]).includes(entry.sdkCode) ? entry.sdkCode as NonNullable<DiagnosticEventInput["sdkCode"]> : undefined;
+  const matching = entry.phoneFailure === "sdk_recovery_exhausted" ? sdkCode === 45003 : entry.phoneFailure === "sdk_recovery_disabled" ? sdkCode === 36005
+    : entry.phoneFailure === "invalid_credentials" ? sdkCode === 46002 : entry.phoneFailure === "sdk_fatal" ? sdkCode === 45001 || sdkCode === 49001 : false;
+  return { phoneFailure: entry.phoneFailure, ...(matching ? {sdkCode} : {}) };
+}
+
 /** Call-speed S5: the edge, the fallback's trigger and the SDK's own region/dc; anything else is dropped. */
 function rtcEdgeDiagnostic(reason: DiagnosticReason, entry: Record<string, unknown>): Partial<DiagnosticEventInput> {
-  if ((reason !== "rtc_region_fallback" && reason !== "rtc_edge_connected") || !oneOf(DIAGNOSTIC_RTC_EDGES, entry.rtcEdge)) return {};
+  if ((reason !== "rtc_region_fallback" && reason !== "rtc_edge_connected" && !(DIAGNOSTIC_PHONE_FAILURE_REASONS as readonly string[]).includes(reason)) || !oneOf(DIAGNOSTIC_RTC_EDGES, entry.rtcEdge)) return {};
   if (reason === "rtc_region_fallback") return { rtcEdge: entry.rtcEdge, ...(oneOf(DIAGNOSTIC_RTC_TRIGGERS, entry.rtcTrigger) ? { rtcTrigger: entry.rtcTrigger } : {}) };
   return { rtcEdge: entry.rtcEdge, ...(oneOf(DIAGNOSTIC_RTC_REGIONS, entry.rtcRegion) ? { rtcRegion: entry.rtcRegion } : {}),
     ...(isDiagnosticRtcDc(entry.rtcDc) ? { rtcDc: entry.rtcDc } : {}) };
