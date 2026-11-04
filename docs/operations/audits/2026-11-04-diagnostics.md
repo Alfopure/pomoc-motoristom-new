@@ -55,9 +55,13 @@ udalosti môžu odmietnuť, preto treba vracať klienta aj server spolu.
   vetva a nezlúčená práca zostali zachované.
 - Tri ďalšie vetvy sú iba v TESTe: #565/#567 dokumentácia App Store
   a #566 hláška obsadeného vodiča. Produkčný PR diagnostiky ich nezahŕňa.
-- Zvyšných 60 historických vetiev nie je predkom `dev`; samotný graf
-  nerozlišuje opustenú prácu od cherry-pick/rebase. Zachovať ich bez
-  hromadného zlučovania alebo mazania. Nie sú to automaticky čakajúce vydania.
+- Zvyšných 60 historických vetiev bolo skontrolovaných aj podľa patchov
+  a PR: 40 má všetky patche už v `dev`; pri ďalších 10 sa presný tip zhoduje
+  s hlavou už zlúčeného PR. Deväť uzavretých návrhov bolo nahradených alebo
+  zámerne neprevzatých a jedna vetva obsahuje historický plán. Nenašla sa
+  zabudnutá dôležitá runtime oprava. Tieto historické vetvy ostali zachované.
+  Odkaz na septembrový plán v `call-latency-status.md` bol opravený na
+  nemenný archívny commit a dokument jasne označený ako historický.
 
 ## Overenie vydania
 
