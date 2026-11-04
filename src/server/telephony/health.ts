@@ -13,7 +13,8 @@ import { ACTIVE_SESSION_STATES, readMeta } from "./state/types";
 import { PROGRESS_WARN_MS, sessionProgressIssue, type ProviderVerification } from "./health-progress";
 import { loadTelephonyAlertEvidence } from "./alert-evidence";
 import { ledgerFailureKind, resolvedCallEndFailureIds } from "./ledger-failures";
-import { WEBHOOK_CLAIM_STALE_AFTER_MS } from "./telnyx/webhook-ledger";
+import { LEDGER_RETRY_GRACE_MS, WEBHOOK_CLAIM_STALE_AFTER_MS } from "./telnyx/webhook-ledger";
+export { LEDGER_RETRY_GRACE_MS } from "./telnyx/webhook-ledger";
 import { createHealthReadRetry } from "./health-read";
 
 /**
@@ -67,8 +68,6 @@ export type TelephonyHealthDeps = {
 export const WEBHOOK_SILENCE_WARN_MS = PROGRESS_WARN_MS;
 /** Failed ledger rows in this window are counted; older ones are the prune job's problem. */
 export const LEDGER_FAILURE_WINDOW_MS = 24 * 60 * 60_000;
-/** Give the existing five-minute recovery cron a chance; retries never reset this receipt-age limit. */
-export const LEDGER_RETRY_GRACE_MS = 10 * 60_000;
 /** Usage above this share of the daily leg cap warns before the cap starts refusing calls. */
 export const USAGE_WARN_RATIO = 0.8;
 

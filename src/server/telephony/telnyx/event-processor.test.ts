@@ -8,6 +8,7 @@ import { sweepOverdueRingSteps } from "../routing/ring-plan";
 import { encodeClientState } from "./client-state";
 import { drainDeferredDelivery, INLINE_DRAIN_BUDGET_MS, processTelnyxEvent, replayDeferredSessionEvents } from "./event-processor";
 import { defaultLatencyFlags, latencyFlagsOf } from "../latency-flags";
+import { LEDGER_RETRY_GRACE_MS } from "./webhook-ledger";
 
 // A pass-through spy: every inline sweep still runs the real sweep, its call
 // shape is just observable.
@@ -516,8 +517,47 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
       call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, hangup_cause: "normal_clearing",
       client_state: encodeClientState(h.clientStateOf(call.callControlId)),
     }, "unretained-hangup"));
-    expect(result).toMatchObject({ status: 500, outcome: "failed", failureKind: "lease_busy" });
+    expect(result).toMatchObject({ status: 500, outcome: "failed", failureKind: "lease_busy", durableDeferral: "lease_busy" });
     expect(ledgerRow(h, "unretained-hangup")).toMatchObject({ retry_state: "deferred" });
+  });
+
+  it.each(["write_error", "claim_lost"])("does not claim durable contention when the ledger cannot save retry (%s)", async failure => {
+    const { h, call } = await talkingCall({ writerContract: 2, sweepAfterEvent: false });
+    h.db.rpcHandlers.get("motorist_session_lease_acquire_v2")!({ p_session_id: call.sessionId, p_token: "holder", p_ttl_ms: 30_000 }, h.db);
+    h.deps.random = () => 0;
+    h.deps.sleep = async ms => { h.advance(ms); };
+    if (failure === "write_error") h.db.failNext("motorist_telnyx_finish_webhook_event_v2", "rpc", "ledger unavailable");
+    else h.db.registerRpc("motorist_telnyx_finish_webhook_event_v2", () => false);
+    const result = await processTelnyxEvent(h.deps, h.envelope("call.hangup", {
+      call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, hangup_cause: "normal_clearing",
+      client_state: encodeClientState(h.clientStateOf(call.callControlId)),
+    }, `unsaved-${failure}`));
+    expect(result).toMatchObject({ status: 500, outcome: "failed", failureKind: "lease_busy" });
+    expect(result).not.toHaveProperty("durableDeferral");
+    expect(ledgerRow(h, `unsaved-${failure}`).retry_state).not.toBe("deferred");
+  });
+
+  it.each([
+    { label: "grace expired", age: LEDGER_RETRY_GRACE_MS, retryState: "deferred" },
+    { label: "terminal deferral age", age: 24 * 60 * 60_000 + 1, retryState: "dead_letter" },
+    { label: "future receipt", age: -60_000, retryState: "deferred" },
+  ])("does not quiet lease contention with $label", async ({ age, retryState }) => {
+    const { h, call } = await talkingCall({ writerContract: 2, sweepAfterEvent: false });
+    h.db.rpcHandlers.get("motorist_session_lease_acquire_v2")!({ p_session_id: call.sessionId, p_token: "holder", p_ttl_ms: 30_000 }, h.db);
+    h.deps.random = () => 0;
+    h.deps.sleep = async ms => { h.advance(ms); };
+    const eventId = `aged-contention-${age}`;
+    h.db.seed("motorist_telnyx_webhook_events", [{ ...deferredTemplate(h, call), event_id: eventId, event_type: "call.hangup",
+      received_at: new Date(h.now().getTime() - age).toISOString(), next_attempt_at: new Date(h.now().getTime() - 1).toISOString(),
+      payload: { call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, connection_id: CONNECTION_ID,
+        hangup_cause: "normal_clearing", client_state: encodeClientState(h.clientStateOf(call.callControlId)) } }]);
+    const result = await processTelnyxEvent(h.deps, h.envelope("call.hangup", {
+      call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, hangup_cause: "normal_clearing",
+      client_state: encodeClientState(h.clientStateOf(call.callControlId)),
+    }, eventId));
+    expect(result).toMatchObject({ status: 500, outcome: "failed", failureKind: "lease_busy" });
+    expect(result).not.toHaveProperty("durableDeferral");
+    expect(ledgerRow(h, eventId).retry_state).toBe(retryState);
   });
 
   it("shares read-only waiting across a callback burst, including a late joiner, and releases the shared drain", async () => {
