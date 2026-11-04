@@ -22,7 +22,33 @@
 - Snímky 6,7"/6,9" (1290 × 2796) z produkčnej appky s recenzentským účtom; skutočné
   číslo spätného volania je rozmazané.
 
-### Čo kedy vyprší
+### Ďalšie kroky (stav 4. 11. 2026, pokračovať v novom chate)
+
+1. **Čakať na Apple.** E-mail o kontrole 1.0 a o Unlisted. Po schválení kontroly
+   **nevydávať, kým nepríde schválenie Unlisted.** Potom vydať manuálne a poslať odkaz.
+2. **Demo dáta recenzenta:** pristavenie platí do 6. 11. 2026, potom vydať nové
+   (recenzent `2d9d9ab5-…` v pobočke „Kontrola Apple“); demo jazda má termín 10. 11.
+3. **Po vydaní 1.0:**
+   - zapnúť mobilné latency flagy stage D v produkcii a urobiť skúšobný hovor,
+   - obmedziť recenzentský účet, aby nevidel skutočné prípady (musí ostať aktívny),
+   - produkcia `sip_domain: eu` (`EU_SIP_DOMAIN_PROVEN`).
+4. **Verzia 1.1 s OTA aktualizáciami (rozhodnutie majiteľa 4. 11. 2026).** Majiteľ chce
+   časté zmeny layoutu a menšie funkcie s nasadením do jedného dňa. Apple kontroluje
+   50 % podaní do 24 h a 90 % do 48 h, čo to nezaručí. Preto:
+   - zapnúť `expo-updates` (EAS Update) s `runtimeVersion` a **podpisovaním aktualizácií**
+     (Expo code signing), kanály TEST a produkcia, najprv TEST a po súhlase majiteľa produkcia;
+   - cez OTA iba JS, štýly, texty a layout v rámci existujúcich funkcií (pravidlo 2.5.2);
+     nové povolenia, natívny kód, knižnice a SDK vždy novou verziou cez App Review;
+   - 1.1 pôjde raz cez App Review, potom sú bežné zmeny u ľudí pri ďalšom spustení appky.
+5. **Server, čaká na súhlas s produkciou:** PR #566, zrozumiteľná chyba „Máte rozbehnutú
+   inú prácu“ v Pristaveniach. Je na TEST (`dev` `942f5374`), do `main` až po súhlase majiteľa.
+6. **Otvorené z volaní:** vyzváňací tón počas zvonenia zákazníka (SDK 31006, falošné
+   `call_interruption`); konzultácia a prepojenie na `eu` overiť naživo.
+
+Overené na zariadení 4. 11. 2026: produkčné hovory (odchádzajúce aj prichádzajúce na
+zamknutom iPhone), produkčné notifikácie (Expo receipt `ok`) a poloha na pozadí pri
+zamknutom telefóne s povolením „Pri používaní“ (TEST, 7 polôh za 3 minúty počas pohybu).
+
 
 | Položka | ID | Platí do | Dôsledok |
 |---|---|---|---|
