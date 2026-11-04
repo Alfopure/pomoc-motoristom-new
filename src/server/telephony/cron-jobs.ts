@@ -711,14 +711,21 @@ export async function reconcileWithTelnyx(deps: TelephonyCronDeps, candidates?: 
 
 /** Mails the failing health checks to `ALERT_EMAIL_TO` (see `alerts.ts`). */
 export async function runAlertJob(deps: TelephonyCronDeps, providerVerification?: ProviderVerification): Promise<TelephonyCronJobResult> {
+  const report = deps.alerts?.report ?? await getTelephonyHealth({ admin: deps.admin, organizationId: deps.organizationId,
+    config: deps.config, now: () => nowOf(deps), providerVerification });
+  const ledger = report.checks.find(check => check.key === "ledger");
+  // Health already applies the durable retry grace and excludes recovered facts.
+  // Reuse that decision after replay; do not add another query or retry policy.
+  if (ledger?.status === "fail" && Array.isArray(ledger.detail.failedIds) && ledger.detail.failedIds.length > 0) {
+    reportJobError(deps.onJobError, Object.assign(new Error("webhook_recovery_failed"), { code: "webhook_recovery_failed" }), ALERT_JOB);
+  }
   const result = await runTelephonyAlerts({
     admin: deps.admin,
     organizationId: deps.organizationId,
     config: deps.config,
     now: () => nowOf(deps),
-    report: deps.alerts?.report ?? await getTelephonyHealth({ admin: deps.admin, organizationId: deps.organizationId,
-      config: deps.config, now: () => nowOf(deps), providerVerification }),
     ...(deps.alerts ?? {}),
+    report,
   });
   if (result.status === "failed") {
     deps.logger?.({ level: "error", scope: "cron", job: ALERT_JOB, error: result.error });

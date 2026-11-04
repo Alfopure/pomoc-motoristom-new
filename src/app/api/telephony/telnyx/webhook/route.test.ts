@@ -132,7 +132,7 @@ describe("POST /api/telephony/telnyx/webhook", () => {
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toEqual({ error: "processing_failed" });
   });
-  it("reports first technical failure after the response with safe correlation", async () => {
+  it("reports technical failure after the response with safe correlation", async () => {
     processTelnyxEvent.mockResolvedValue(processorResult({ status: 500, outcome: "failed", error: "PRIVATE", claim: { attempts: 1 } }));
     expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(500);
     expect(reporting.capture).not.toHaveBeenCalled(); expect(reporting.after).toHaveBeenCalledOnce();
@@ -141,12 +141,52 @@ describe("POST /api/telephony/telnyx/webhook", () => {
     expect(String(reporting.capture.mock.calls[0][0])).not.toContain("PRIVATE");
   });
 
-  it("leaves ordinary busy, correlation waits and later failed redelivery to the ledger without paging each retry", async () => {
-    for (const outcome of ["busy", "awaiting_correlation", "failed"]) {
-      processTelnyxEvent.mockResolvedValue(processorResult({ status: 500, outcome, claim: { attempts: 2 } }));
-      expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(500);
+  it("leaves ordinary busy, correlation waits and acknowledged deferrals to the ledger", async () => {
+    for (const outcome of ["busy", "awaiting_correlation", "deferred", "processed", "duplicate"]) {
+      const status = ["deferred", "processed", "duplicate"].includes(outcome) ? 200 : 500;
+      processTelnyxEvent.mockResolvedValue(processorResult({ status, outcome, claim: { attempts: 2 } }));
+      expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(status);
     }
     expect(reporting.after).not.toHaveBeenCalled();
+  });
+
+  it("keeps a proven durable lease wait out of Sentry without changing provider retry", async () => {
+    processTelnyxEvent.mockResolvedValue(processorResult({ status: 500, outcome: "failed", failureKind: "lease_busy", durableDeferral: "lease_busy", claim: { attempts: 1 } }));
+    const response = await POST(signedRequest(JSON.stringify(ENVELOPE)));
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({ ok: false, outcome: "failed", eventId: "evt-1", type: "call.initiated", sessionId: "sess-1", commands: ["answer"], ms: 3 });
+    expect(reporting.after).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, false, "unknown"])("alerts a lease wait without exact durable retry proof (%s)", async durableDeferral => {
+    processTelnyxEvent.mockResolvedValue(processorResult({ status: 500, outcome: "failed", failureKind: "lease_busy", durableDeferral, claim: { attempts: 2 } }));
+    expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(500);
+    await reporting.after.mock.calls[0][0]();
+    expect(reporting.capture).toHaveBeenCalledWith(expect.objectContaining({ code: "webhook_processing_failed" }), expect.objectContaining({ failureKind: "lease_busy", retryable: true, attempt: 2 }));
+  });
+
+  it("alerts a real failure on the next attempt after a suppressed lease wait", async () => {
+    processTelnyxEvent.mockResolvedValueOnce(processorResult({ status: 500, outcome: "failed", failureKind: "lease_busy", durableDeferral: "lease_busy", claim: { attempts: 1 } }))
+      .mockResolvedValueOnce(processorResult({ status: 500, outcome: "failed", failureKind: "processing_failure", claim: { attempts: 2 } }));
+    expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(500);
+    expect(reporting.after).not.toHaveBeenCalled();
+    expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(500);
+    await reporting.after.mock.calls[0][0]();
+    expect(reporting.capture).toHaveBeenCalledWith(expect.objectContaining({ code: "webhook_processing_failed" }), expect.objectContaining({ failureKind: "processing_failure", attempt: 2 }));
+  });
+
+  it.each([
+    { status: 200, outcome: "failed", failureKind: "lease_busy" },
+    { status: 500, outcome: "failed", failureKind: "lease_lost" },
+    { status: 500, outcome: "failed", failureKind: "processing_failure" },
+    { status: 500, outcome: "failed", failureKind: undefined },
+    { status: 200, outcome: "unresolved", failureKind: "lease_busy" },
+  ])("never suppresses compensated, terminal or other real failures ($outcome/$status/$failureKind)", async failure => {
+    processTelnyxEvent.mockResolvedValue(processorResult({ ...failure, durableDeferral: "lease_busy", claim: { attempts: 3 } }));
+    expect((await POST(signedRequest(JSON.stringify(ENVELOPE)))).status).toBe(failure.status);
+    expect(reporting.after).toHaveBeenCalledOnce();
+    await reporting.after.mock.calls[0][0]();
+    expect(reporting.capture).toHaveBeenCalledOnce();
   });
 
   it("reports terminal unresolved even when the provider acknowledgement is 200", async () => {

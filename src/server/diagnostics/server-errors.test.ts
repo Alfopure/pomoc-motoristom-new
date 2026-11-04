@@ -29,6 +29,14 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("explicit private server Sentry", () => {
+  it("delivers a controlled recovery failure code without forwarding raw ledger text", async () => {
+    const { captureServerError } = await import("./server-errors");
+    const receipt = await captureServerError(Object.assign(error(), { code: "webhook_recovery_failed" }), { source: "cron", route: "/api/telephony/cron" });
+    expect(receipt.accepted).toBe(true);
+    const sent = wire(vi.mocked(fetch).mock.calls[0][1]?.body)[2];
+    expect(sent.tags).toMatchObject({ source: "cron", error_code: "webhook_recovery_failed" });
+    expect(JSON.stringify(sent)).not.toMatch(/SECRET|421901|password/);
+  });
   it("gates exact stable deployments and pins project/organization despite matching copied DSNs", async () => {
     const { serverSentryConfiguration: config } = await import("./server-errors");
     expect(config(testEnv)).toMatchObject({ environment: "test", release: "exact_release" });
