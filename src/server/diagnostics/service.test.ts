@@ -1,8 +1,9 @@
 import { beforeEach,describe,expect,it,vi } from 'vitest';
-const f=vi.hoisted(()=>({rpc:vi.fn(),auth:vi.fn(),after:vi.fn(),routingRead:vi.fn()}));
+const f=vi.hoisted(()=>({rpc:vi.fn(),auth:vi.fn(),after:vi.fn(),routingRead:vi.fn(),phoneReport:vi.fn()}));
 vi.mock('@/lib/supabase/admin',()=>({createSupabaseAdminClient:()=>({rpc:f.rpc})}));
 vi.mock('@/server/api-auth',()=>({requireDefaultMotoristActor:f.auth,assertSameOriginRequest:(r:Request)=>{if(r.headers.get('origin')!=='https://example.test')throw new Error('origin');}}));
 vi.mock('next/server',()=>({after:f.after}));
+vi.mock('./phone-observations',()=>({deferAcceptedPhoneFailures:f.phoneReport}));
 vi.mock('./routing-read',()=>({readRoutingDiagnostics:f.routingRead}));
 import { diagnosticsEnvironment,ingestDiagnostics,parseDiagnosticQuery,readDiagnosticBody,readDiagnostics,runDiagnosticsMaintenance } from './service';
 import { recordServerDiagnostic } from './record';
@@ -14,7 +15,7 @@ const request=(body:unknown,origin='https://example.test')=>new Request('https:/
 beforeEach(()=>{vi.clearAllMocks();vi.stubEnv('DIAGNOSTICS_ENABLED','true');f.auth.mockResolvedValue(actor);f.rpc.mockReturnValue({abortSignal:vi.fn().mockResolvedValue({data:{acceptedIds:[id]},error:null})});});
 describe('closed diagnostic envelope',()=>{
  it('rejects private fields, unknown enum and malformed IDs',()=>{expect(parseDiagnosticEvent(event)).toEqual(event);for(const extra of [{message:'canary@example.test'},{stack:'phone+421000'},{source:'server'},{organizationId:org},{reason:'secret'},{buildId:'https://token'},{durationMs:NaN},{id:'bad'},{occurredAt:'2026-02-30T12:00:00.000Z'}])expect(parseDiagnosticEvent({...event,...extra})).toBeNull();});
- it('refuses account switching before persistence',async()=>{const r=await ingestDiagnostics(request({actor:{...actor,profileId:org},events:[event]}));expect(r.status).toBe(400);const wrong=await ingestDiagnostics(request({actor:{profileId:org,organizationId:org},events:[event]}));expect(wrong.status).toBe(401);expect(f.rpc).not.toHaveBeenCalled();});
+ it('refuses account switching before persistence',async()=>{const r=await ingestDiagnostics(request({actor:{...actor,profileId:org},events:[event]}));expect(r.status).toBe(400);const wrong=await ingestDiagnostics(request({actor:{profileId:org,organizationId:org},events:[event]}));expect(wrong.status).toBe(401);expect(f.rpc).not.toHaveBeenCalled();expect(f.phoneReport).not.toHaveBeenCalled();});
  it('only durable IDs are acknowledged and unavailable never confirms',async()=>{const body={actor:{profileId:id,organizationId:org},events:[event]};expect((await (await ingestDiagnostics(request(body))).json()).acceptedIds).toEqual([id]);f.rpc.mockReturnValue({abortSignal:vi.fn().mockResolvedValue({data:null,error:{message:'private DB detail'}})});const r=await ingestDiagnostics(request(body));expect(r.status).toBe(503);expect(await r.text()).not.toContain('private DB');});
  it('returns distributed throttling retry-after',async()=>{f.rpc.mockReturnValue({abortSignal:vi.fn().mockResolvedValue({data:{acceptedIds:[],rateLimited:true},error:null})});const r=await ingestDiagnostics(request({actor:{profileId:id,organizationId:org},events:[event]}));expect(r.status).toBe(429);expect(r.headers.get('retry-after')).toBe('60');});
  it('requires origin, bounded batches and strict identity',async()=>{expect((await ingestDiagnostics(request({actor:{profileId:id,organizationId:org},events:[event]},''))).status).toBe(403);expect((await ingestDiagnostics(request({actor:{profileId:id,organizationId:org},events:Array(17).fill(event)}))).status).toBe(400);expect(f.rpc).not.toHaveBeenCalled();});
@@ -27,6 +28,21 @@ describe('closed diagnostic envelope',()=>{
   expect(await result).toMatchObject({status:408});expect(cancel).toHaveBeenCalledOnce();expect(vi.getTimerCount()).toBe(0);vi.useRealTimers();
  });
  it('bounds actual stream bytes without Content-Length',async()=>{await expect(readDiagnosticBody(request({value:'x'.repeat(17000)}))).rejects.toMatchObject({status:413});});
+});
+describe('accepted phone reporting handoff',()=>{
+ it('hands off only after durable persistence and never on failed/rate-limited stores',async()=>{
+  const phone={...event,type:'phone_lifecycle',module:'telephony',reason:'recovery_timeout',deviceSessionId:id};
+  const body={actor:{profileId:id,organizationId:org},events:[phone]};
+  expect((await ingestDiagnostics(request(body))).status).toBe(200);
+  expect(f.phoneReport).toHaveBeenCalledWith(actor,[phone],[id],expect.any(String));
+  expect(f.rpc.mock.invocationCallOrder[0]).toBeLessThan(f.phoneReport.mock.invocationCallOrder[0]);
+  f.phoneReport.mockClear();
+  for(const data of [{acceptedIds:[],unavailable:true},{acceptedIds:[],rateLimited:true}]){
+   f.rpc.mockReturnValue({abortSignal:vi.fn().mockResolvedValue({data,error:null})});
+   await ingestDiagnostics(request(body));
+  }
+  expect(f.phoneReport).not.toHaveBeenCalled();
+ });
 });
 describe('read and fail-open writes',()=>{
  it('adds routing evidence only after the RPC confirms the authorized call session',async()=>{

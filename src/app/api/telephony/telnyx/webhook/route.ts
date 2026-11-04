@@ -1,3 +1,4 @@
+import type { WebhookFailureKind } from "@/lib/diagnostics/telephony-context";
 import { measureRequestStep, requestTimingContext, withRequestMetrics, withBackgroundRequestMetrics } from "@/server/request-metrics";
 import { after } from "next/server";
 import { createTelephonyDeps, notConfiguredResponse, telephonyLogger } from "@/server/telephony/runtime";
@@ -12,7 +13,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /** Retained reporting stays outside the cold call-control import and response path. */
-function reportWebhookFailure(error: unknown, details: { sessionId?: string | null; eventId?: string | null; retryable: boolean; attempt?: number; status: number }) {
+function reportWebhookFailure(error: unknown, details: { sessionId?: string | null; eventId?: string | null; retryable: boolean; attempt?: number; status: number; failureKind?: WebhookFailureKind; eventType?: string | null }) {
   if (process.env.DIAGNOSTICS_SERVER_ERRORS_ENABLED !== "true") return;
   const requestId = requestTimingContext()?.request_id;
   try {
@@ -20,7 +21,7 @@ function reportWebhookFailure(error: unknown, details: { sessionId?: string | nu
       try {
         const { captureServerError } = await import("@/server/diagnostics/server-errors");
         await captureServerError(error, { source: "telephony", route: "call.webhook", requestId, status: details.status,
-          callSessionId: details.sessionId ?? undefined, eventId: details.eventId ?? undefined, retryable: details.retryable, attempt: details.attempt });
+          callSessionId: details.sessionId ?? undefined, eventId: details.eventId ?? undefined, retryable: details.retryable, attempt: details.attempt, failureKind: details.failureKind, providerEventType: details.eventType ?? undefined });
       } catch { /* Reporting cannot change provider acknowledgement or call control. */ }
     });
   } catch { /* No retained lifecycle; no detached background task. */ }
@@ -73,7 +74,8 @@ export async function POST(request: Request) {
       if (result.outcome === "unresolved" || result.outcome === "failed" && (result.status === 200 || (result.claim?.attempts ?? 1) <= 1)) {
         const code = result.outcome === "unresolved" ? "webhook_unresolved" : "webhook_processing_failed";
         reportWebhookFailure(Object.assign(new Error(code), { code }), { sessionId: result.sessionId, eventId: result.eventId,
-          retryable: result.status >= 500, attempt: result.claim?.attempts, status: result.status });
+          retryable: result.status >= 500, attempt: result.claim?.attempts, status: result.status,
+          failureKind: result.outcome === "unresolved" ? "unresolved" : result.failureKind ?? "processing_failure", eventType: result.type });
       }
 
       return Response.json(

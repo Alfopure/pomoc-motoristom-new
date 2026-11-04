@@ -191,7 +191,7 @@ describe("processTelnyxEvent", () => {
 
     h.db.failNext("motorist_call_events", "upsert", "disk full");
     const failed = await h.legEvent(call.callControlId, "call.speak.started", {});
-    expect(failed).toMatchObject({ status: 500, outcome: "failed" });
+    expect(failed).toMatchObject({ status: 500, outcome: "failed", failureKind: "processing_failure" });
     expect(h.rows("motorist_telnyx_webhook_events").at(-1)).toMatchObject({ status: "failed", error: expect.stringContaining("disk full") });
     expect(h.rows("motorist_job_incidents")).toEqual([expect.objectContaining({ job_name: "telephony.telnyx.webhook" })]);
   });
@@ -202,7 +202,7 @@ describe("processTelnyxEvent", () => {
     h.db.failNext("motorist_call_legs", "update", "legs locked");
     const o1 = h.legFor(call.sessionId, PROFILES.o1)!;
     const result = await h.legEvent(String(o1.telnyx_call_control_id), "call.answered");
-    expect(result).toMatchObject({ status: 200, outcome: "failed", error: expect.stringContaining("legs locked") });
+    expect(result).toMatchObject({ status: 200, outcome: "failed", failureKind: "processing_failure", error: expect.stringContaining("legs locked") });
     expect(h.rows("motorist_telnyx_webhook_events").at(-1)).toMatchObject({ status: "failed" });
     expect(h.rows("motorist_job_incidents")).toEqual([expect.objectContaining({ job_name: "telephony.telnyx.webhook", consecutive_failures: 1 })]);
     // The lease was released, so the retry (after the stale window) succeeds.
@@ -218,7 +218,7 @@ describe("processTelnyxEvent", () => {
 
     const result = await h.process(h.envelope("call.initiated", { call_control_id: "cc-boom", call_session_id: "tsess-boom", direction: "incoming", to: NUMBERS.allianz, from: NUMBERS.customer }, "evt-boom"));
 
-    expect(result).toMatchObject({ status: 500, outcome: "failed", sessionId: null, error: expect.stringContaining("connection reset") });
+    expect(result).toMatchObject({ status: 500, outcome: "failed", failureKind: "processing_failure", sessionId: null, error: expect.stringContaining("connection reset") });
     expect(h.rows("motorist_call_sessions")).toHaveLength(0);
     expect(h.rows("motorist_telnyx_webhook_events").at(-1)).toMatchObject({ status: "failed" });
     // The redelivery after the stale window rescues the call.
@@ -443,7 +443,7 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
       client_state: encodeClientState(h.clientStateOf(call.callControlId)),
     }, "deferred-hangup"));
     // Not applied yet, but durable and retained by this host: acknowledged instead of redelivered.
-    expect(result).toMatchObject({ status: 200, outcome: "deferred", sessionId: call.sessionId });
+    expect(result).toMatchObject({ status: 200, outcome: "deferred", sessionId: call.sessionId, failureKind: "lease_busy" });
     expect(ledgerRow(h, "deferred-hangup")).toMatchObject({ retry_state: "deferred", delivery_count: 1, deferral_count: 1, attempts: 1 });
     expect(ledgerRow(h, "deferred-hangup").error).toContain("deferral=lease_busy");
     expect(h.logs).toContainEqual(expect.objectContaining({ scope: "webhook", eventId: "deferred-hangup", deferral: "lease_busy", polls: expect.any(Number), lease_wait_ms: expect.any(Number) }));
@@ -516,7 +516,7 @@ describe("deferred-event self-drain and lease-free ignores (E2)", () => {
       call_control_id: call.callControlId, call_session_id: call.telnyxSessionId, hangup_cause: "normal_clearing",
       client_state: encodeClientState(h.clientStateOf(call.callControlId)),
     }, "unretained-hangup"));
-    expect(result).toMatchObject({ status: 500, outcome: "failed" });
+    expect(result).toMatchObject({ status: 500, outcome: "failed", failureKind: "lease_busy" });
     expect(ledgerRow(h, "unretained-hangup")).toMatchObject({ retry_state: "deferred" });
   });
 

@@ -51,7 +51,7 @@ const CREDENTIAL_RENEW_WINDOW_MS = 24 * 60 * 60 * 1000;
 function recordDeviceTransition(deps: DeviceDeps, device: DeviceRow, reason: DiagnosticReason) {
   if (deps.deviceKind === "mobile" || !isDiagnosticUuid(device.device_session_id)) return;
   recordServerDiagnostic({organizationId: device.organization_id, profileId: device.profile_id}, {
-    type: "phone_lifecycle", module: "telephony", outcome: "ok", reason, deviceSessionId: device.device_session_id,
+    type: "phone_lifecycle", module: "telephony", outcome: reason === "device_error" ? "failed" : "ok", reason, deviceSessionId: device.device_session_id,
   });
 }
 
@@ -525,7 +525,7 @@ export async function touchDevice(
     };
   });
   if (!updated) return { ok: false, reason: "stale_session" };
-  if (updated.registration_state !== device.registration_state) recordDeviceTransition(deps, updated, updated.registration_state === "error" ? "auth_failure" : updated.registration_state);
+  if (updated.registration_state !== device.registration_state) recordDeviceTransition(deps, updated, updated.registration_state === "error" ? "device_error" : updated.registration_state);
   return { ok: true, device: updated };
 }
 
