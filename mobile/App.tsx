@@ -1,9 +1,10 @@
 import { PhoneOverlayProvider } from "./src/ui/phone-overlays";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, AppState, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { LockKeyhole, Mail, PhoneCall } from "lucide-react-native";
+import { Eye, EyeOff, LockKeyhole, Mail, PhoneCall } from "lucide-react-native";
+import { MIN_TOUCH, palette, radius, space, type } from "./src/design/tokens";
 import { QueryClient, QueryClientProvider, focusManager, useQuery } from "@tanstack/react-query";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import { createMobileApi, MobileApiError, usableMobileIdentity, type MobileApi } from "./src/lib/api";
@@ -170,7 +171,7 @@ function ConfiguredApp({ config, onReset }: { config: MobileConfig; onReset: () 
 
 function BrandRow({ test }: { test: boolean }) {
   return <View style={s.brand}><View style={s.brandMark}><PhoneCall size={18} strokeWidth={2.3} color={colors.ink} accessible={false} /></View>
-    <View style={s.brandText}><Text style={s.brandName}>Dispatching</Text><Text style={s.brandCaption}>Mobilný dispečing Linky pomoci</Text></View>
+    <View style={s.brandText}><Text style={s.brandName}>Dispatching</Text><Text style={s.brandCaption}>Linka pomoci</Text></View>
     {test && <Text style={s.testBadge}>TEST</Text>}
   </View>;
 }
@@ -178,6 +179,7 @@ function BrandRow({ test }: { test: boolean }) {
 function SignIn({ client, config, logoutState }: { client: SupabaseClient; config: MobileConfig; logoutState: LogoutState }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [durableDrafts] = useState(supportsDurableDrafts);
@@ -207,15 +209,20 @@ function SignIn({ client, config, logoutState }: { client: SupabaseClient; confi
             selectionColor={colors.brand} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" autoComplete="email" textContentType="username" editable={!busy && !logoutState.busy}
             returnKeyType="next" onSubmitEditing={() => passwordInput.current?.focus()} />
         </View></View>
-        <View><Text style={styles.label}>Heslo</Text><View style={s.inputWrap}>
+        <View><View style={s.passwordLabel}><Text style={styles.label}>Heslo</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={showPassword ? "Skryť heslo" : "Zobraziť heslo"} accessibilityState={{ expanded: showPassword }}
+            onPress={() => setShowPassword(value => !value)} style={({ pressed }) => [s.passwordToggle, pressed && { opacity: 0.65 }]}>
+            {showPassword ? <EyeOff size={17} color={colors.ink} accessible={false} /> : <Eye size={17} color={colors.ink} accessible={false} />}
+            <Text style={s.passwordToggleText}>{showPassword ? "Skryť" : "Zobraziť"}</Text>
+          </Pressable></View><View style={s.inputWrap}>
           <View pointerEvents="none" style={s.inputIcon}><LockKeyhole size={19} color={colors.muted} accessible={false} /></View>
           <TextInput ref={passwordInput} accessibilityLabel="Heslo" placeholder="Vaše heslo" placeholderTextColor={colors.muted} value={password} onChangeText={setPassword} style={[styles.input, s.inputWithIcon]}
-            selectionColor={colors.brand} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="current-password" textContentType="password" editable={!busy && !logoutState.busy} returnKeyType="go" onSubmitEditing={() => { void login(); }} />
+            selectionColor={colors.brand} secureTextEntry={!showPassword} autoCapitalize="none" autoCorrect={false} autoComplete="current-password" textContentType="password" editable={!busy && !logoutState.busy} returnKeyType="go" onSubmitEditing={() => { void login(); }} />
         </View></View>
         {logoutState.message && <ErrorNotice message={logoutState.message} />}
         {logoutState.busy && <Text style={styles.muted}>Dokončujem odhlásenie…</Text>}
         {error && <ErrorNotice message={error} />}
-        <Button label={busy ? "Prihlasujem…" : "Prihlásiť sa"} disabled={busy || logoutState.busy || !email.trim() || !password} onPress={() => { void login(); }} />
+        <Button primary label={busy ? "Prihlasujem…" : "Prihlásiť sa"} disabled={busy || logoutState.busy || !email.trim() || !password} onPress={() => { void login(); }} />
         <Button label="Zabudnuté heslo" secondary onPress={() => {
           void Linking.openURL(config.apiOrigin + "/auth/forgot-password?email=" + encodeURIComponent(email.trim())).catch(() => setError("Stránku na obnovu hesla sa nepodarilo otvoriť."));
         }} />
@@ -346,19 +353,22 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
 }
 
 const s = StyleSheet.create({
-  brand: { flexDirection: "row", alignItems: "center", gap: 11, paddingHorizontal: 22, paddingVertical: 12 },
-  brandMark: { width: 40, height: 40, borderRadius: 14, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center" },
+  brand: { flexDirection: "row", alignItems: "center", gap: space.m, paddingHorizontal: space.l, paddingVertical: space.m, width: "100%", maxWidth: 520, alignSelf: "center" },
+  brandMark: { width: 40, height: 40, borderRadius: radius.m, borderCurve: "continuous", backgroundColor: colors.brand, alignItems: "center", justifyContent: "center" },
   brandText: { flex: 1, gap: 2 },
-  brandName: { fontSize: 17, fontWeight: "700", letterSpacing: -0.4, color: colors.ink },
-  brandCaption: { fontSize: 12, color: colors.muted, fontWeight: "500" },
-  testBadge: { color: colors.ink, backgroundColor: "#FFF4AF", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12, fontWeight: "700", fontSize: 10, letterSpacing: 0.8 },
-  signInContent: { flexGrow: 1, justifyContent: "center", gap: 22 },
-  signInHero: { gap: 12, paddingBottom: 4 },
-  signInEmblem: { width: 76, height: 76, borderRadius: 25, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center", marginBottom: 8 },
-  signInHeading: { fontSize: 36, lineHeight: 42, letterSpacing: -1.3, fontWeight: "700", color: colors.ink },
-  signInDescription: { fontSize: 16, lineHeight: 24 },
-  signInFootnote: { textAlign: "center", fontSize: 12, lineHeight: 19, paddingHorizontal: 10 },
+  brandName: { ...type.headline, color: colors.ink },
+  brandCaption: { ...type.caption, color: colors.muted },
+  testBadge: { ...type.tag, color: colors.ink, backgroundColor: palette.brandSoft, paddingHorizontal: space.s, paddingVertical: space.xs, borderRadius: radius.s },
+  signInContent: { flexGrow: 1, justifyContent: "center", gap: space.xl, width: "100%", maxWidth: 520, alignSelf: "center", paddingTop: space.xl },
+  signInHero: { gap: space.m, paddingBottom: space.xs },
+  signInEmblem: { width: 64, height: 64, borderRadius: radius.xl, borderCurve: "continuous", backgroundColor: colors.brand, alignItems: "center", justifyContent: "center", marginBottom: space.s },
+  signInHeading: { ...type.title, color: colors.ink },
+  signInDescription: { ...type.body },
+  signInFootnote: { ...type.caption, textAlign: "center", paddingHorizontal: space.s },
   inputWrap: { position: "relative" },
   inputIcon: { position: "absolute", left: 16, top: 0, bottom: 0, justifyContent: "center", zIndex: 1 },
   inputWithIcon: { paddingLeft: 46 },
+  passwordLabel: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: space.s },
+  passwordToggle: { minHeight: MIN_TOUCH, flexDirection: "row", alignItems: "center", gap: space.s, paddingHorizontal: space.s },
+  passwordToggleText: { ...type.subhead, fontWeight: "600", color: colors.ink },
 });

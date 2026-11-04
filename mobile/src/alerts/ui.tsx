@@ -57,7 +57,7 @@ function open(item: AlertItem, targets: AlertTargets) {
   else if (item.kind === "task") targets.openTask(item.id);
   else targets.openCase(item.id);
 }
-/** Title on one line, then the deadline tag and where it comes from. */
+/** Urgency and its context stay readable at larger text sizes. */
 function AlertRow({ item, first, targets }: { item: AlertItem; first: boolean; targets: AlertTargets }) {
   const Icon = icons[item.kind];
   return <Pressable accessibilityRole="button" accessibilityLabel={item.title + ", " + item.tag + ". " + item.detail} onPress={() => open(item, targets)}
@@ -66,8 +66,8 @@ function AlertRow({ item, first, targets }: { item: AlertItem; first: boolean; t
     <View style={[s.icon, { backgroundColor: item.tone === "red" ? palette.redSoft : palette.orangeSoft }]}>
       <Icon size={15} strokeWidth={2.3} color={item.tone === "red" ? palette.redText : palette.orangeText} accessible={false} /></View>
     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-      <Text numberOfLines={1} style={s.rowTitle}>{item.title}</Text>
-      <View style={s.rowMeta}>{item.tag ? <Tag text={item.tag} tone={item.tone} /> : null}<Text numberOfLines={1} style={s.rowDetail}>{item.detail}</Text></View>
+      <Text style={s.rowTitle}>{item.title}</Text>
+      <View style={s.rowMeta}>{item.tag ? <Tag text={item.tag} tone={item.tone} /> : null}<Text style={s.rowDetail}>{item.detail}</Text></View>
     </View>
     <Text style={s.chevron}>›</Text>
   </Pressable>;
@@ -79,7 +79,7 @@ export function AlertsPreview({ scope, active, targets, onAll }: { scope: ShellS
   const shown = alerts.items.slice(0, 4), { count, empty } = summary(alerts);
   return <>
     <SectionHeader title="Treba riešiť" detail={alerts.loading ? null : count} />
-    {alerts.loading ? <ActivityIndicator color={palette.secondaryLabel} /> : <>
+    {alerts.loading ? <Group><Row first title="Načítavam upozornenia…" leading={<ActivityIndicator color={palette.secondaryLabel} />} /></Group> : <>
       {alerts.failed && <Retry alerts={alerts} />}
       <Group>
         {shown.map((item, index) => <AlertRow key={item.key} item={item} first={index === 0} targets={targets} />)}
@@ -139,12 +139,12 @@ const s = StyleSheet.create({
   title: { ...type.title, color: palette.label },
   lead: { ...type.subhead, color: palette.secondaryLabel, paddingHorizontal: space.l, paddingTop: 2 },
   note: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, paddingHorizontal: 20, paddingTop: space.s },
-  icon: { width: 28, height: 28, borderRadius: 8, alignItems: "center", justifyContent: "center" },
-  row: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: space.m, paddingVertical: 8, minHeight: 56, backgroundColor: palette.card },
-  separator: { position: "absolute", top: 0, left: 50, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
+  icon: { width: 32, height: 32, borderRadius: 10, alignItems: "center", justifyContent: "center" },
+  row: { flexDirection: "row", alignItems: "center", gap: space.m, paddingHorizontal: space.l, paddingVertical: space.m, minHeight: 64, backgroundColor: palette.card },
+  separator: { position: "absolute", top: 0, left: 60, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
   rowTitle: { ...type.rowTitle, color: palette.label },
-  rowMeta: { flexDirection: "row", alignItems: "center", gap: 6, overflow: "hidden" },
-  rowDetail: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, flexShrink: 1 },
-  chevron: { fontSize: 20, color: palette.tertiaryLabel },
+  rowMeta: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.xs },
+  rowDetail: { ...type.subhead, color: palette.secondaryLabel, flexShrink: 1 },
+  chevron: { ...type.objectTitle, color: palette.secondaryLabel },
   retry: { paddingHorizontal: space.l, paddingBottom: space.s },
 });

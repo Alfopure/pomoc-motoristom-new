@@ -154,7 +154,7 @@ Dostupnosť modulu aj systémového API sa overí pred importom natívneho pohľ
 Starší iPhone s dostupným BlurView má rozmazaný povrch; Android, web a zostava
 bez týchto modulov čitateľný nepriehľadný povrch. Nastavenie **Znížiť
 priehľadnosť** má prednosť; **Znížiť pohyb** vypne interaktívny sklenený efekt
-aj pohyb výberu v lište. Zväčšené písmo zväčší lištu najviac 1,3×; obsah
+aj pohyb výberu v lište. Zväčšené písmo zväčší lištu najviac 2×; obsah
 rezervuje priestor aj pre spodný bezpečný okraj. Klávesnica dočasne skryje
 lištu a po zatvorení ju obnoví. Farby, písmo a rozostupy sú v
 `src/design/tokens.ts`.
@@ -414,3 +414,7 @@ porovnaní/prebázovaní alebo zahodení konceptu. Neskoršia chyba neistého z�
 ani nesúlad identity príkazu nepovolia novú operáciu. Výber príloh odstraňuje
 overené pracovné kópie z cache po zachytení bajtov, aj pri odmietnutí súboru;
 pôvodné súbory mimo cache neodstraňuje a opakovanie používa zachytené bajty.
+
+## UX/UI redizajn · 4. 11. 2026
+
+Redizajn zachováva existujúce moduly a funkčné modely; zjednocuje čitateľnejšie tokeny, skutočné 44-bodové ovládače, adaptívne rozloženie, pomenované akcie a stavové hlásenia. Prehľad uprednostňuje naliehavú prácu, Moduly ukazujú celé názvy a popisy. Podklad a rozsah: [realizačný plán](../docs/mobile/redesign-plan-2026-11-04.md), [33 primárnych zdrojov](../docs/mobile/ux-ui-sources-2026-11-04.md), [mobilný štandard](../docs/mobile/design-standard.md). Nový dizajn vyžaduje nový natívny build; OTA v existujúcich binárkach zostáva vypnuté.

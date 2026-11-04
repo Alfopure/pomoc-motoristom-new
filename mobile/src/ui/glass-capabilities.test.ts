@@ -25,11 +25,12 @@ describe("optional native presentation boundary", () => {
     expect(await loadSurface("blur", loaders)).toBeNull();
   });
   it("reserves overlay clearance as text and safe-area grow", () => {
-    expect(navigationContentBottom(1, 0)).toBeGreaterThanOrEqual(112);
-    expect(navigationContentBottom(2, 34)).toBeGreaterThanOrEqual(34 - 6 + 62 + 9 + 22);
+    expect(navigationContentBottom(1, 0)).toBeGreaterThanOrEqual(124);
+    expect(navigationContentBottom(2, 34)).toBeGreaterThanOrEqual(34 - 6 + tabBarHeight(2) + 22);
     expect(navigationContentBottom(3, 50)).toBeGreaterThan(navigationContentBottom(2, 34));
-    expect(tabBarHeight(1)).toBe(62);
-    expect(tabBarHeight(4)).toBe(tabBarHeight(1.3));
+    expect(tabBarHeight(1)).toBe(72);
+    expect(tabBarHeight(2)).toBeGreaterThan(tabBarHeight(1.3));
+    expect(tabBarHeight(4)).toBe(tabBarHeight(2));
     expect(tabBarBottom(0)).toBe(10);
   });
 });

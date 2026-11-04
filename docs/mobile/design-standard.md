@@ -1,5 +1,7 @@
 # Mobilný dizajnový štandard
 
+Aktualizované **4. 11. 2026** podľa [auditu a realizačného plánu](redesign-plan-2026-11-04.md) a [33 primárnych zdrojov](ux-ui-sources-2026-11-04.md).
+
 Platí pre každú obrazovku mobilnej appky Linka pomoci. Režim: iba svetlý
 (tmavý a režim „Rukavice“ pre terén prídu neskôr). Majiteľ 18. 10. 2026
 schválil prestavbu navigácie a variant lišty **A · Dock** z klikacieho
@@ -27,7 +29,7 @@ modul do nej zapadne bez nového dizajnu.
 **Horná lišta** (`mobile/src/shell/top-bar.tsx`): vľavo stav operátora
 (Dostupný / Pauza / Na hovore…, ťuk otvorí Ústredňu) alebo šípka Späť s názvom
 cieľa (‹ Prípady, ‹ Prípad, ‹ Hovory, ‹ Moduly); vpravo **☆ Do lišty** pri
-module otvorenom z Modulov, štítok TEST a žltý avatar (Účet). Podstránky modulov
+module otvorenom z Modulov, štítok TEST a žlté tlačidlo s iniciálami a viditeľným popisom Účet. Podstránky modulov
 (detail, formulár, prílohy, úlohy…) nemajú vlastné tlačidlo Späť v obsahu –
 zaregistrujú ho cez `useShellBack(active, "Prípady", back, ukladanie)`.
 
@@ -38,12 +40,9 @@ zaregistrujú ho cez `useShellBack(active, "Prípady", back, ukladanie)`.
 - Voľné miesto po odobratí modulu je položka **+ Pridať** (otvorí úpravu lišty).
 - Odznak iba pre to, čo čaká na človeka (napr. čakajúce spätné volania).
 - Lupa v lište nie je. Hľadanie je pole na obrazovke (Moduly, História, Prípady, Úlohy).
-- Pri písaní sa lišta skryje; zväčšené písmo zväčší lištu najviac 1,3×.
+- Pri písaní sa lišta skryje; zväčšené písmo zväčší lištu najviac 2×.
 
-**Moduly** (`modules-screen.tsx`): hľadanie modulu, karta **Moja lišta** s náhľadom
-lišty a žltým tlačidlom **Upraviť lištu**, mriežka modulov (★ = v lište, odznak počtu)
-a riadok **Účet a koncepty**. Pri najviac ôsmich moduloch je jedna mriežka,
-pri viacerých sa zobrazia skupiny (Komunikácia, Zásahy, Vozový park, Kancelária…).
+**Moduly** (`modules-screen.tsx`): hľadanie modulu a adaptívna mriežka povolených modulov. Karta má celý názov, popis, označenie V lište a samostatné viditeľné tlačidlo **Možnosti**. Počet stĺpcov sa prispôsobí nameranej šírke a veľkosti písma (1–3); názvy sa nezmenšujú. Pod modulmi je **Moja lišta** s náhľadom a **Upraviť lištu**, potom **Účet a prístupy**. Pri viac ako ôsmich moduloch ostáva zoskupenie.
 
 **Prispôsobenie lišty** (všetky cesty sú viditeľné):
 
@@ -75,12 +74,7 @@ upozornenia); Späť ich zatvorí a vráti záložku, z ktorej boli otvorené.
 znakov hľadá v prípadoch celej organizácie (číslo, meno, EČV, telefón),
 v hovoroch a v moduloch; ťuk otvorí detail prípadu, detail hovoru alebo modul.
 
-**Prehľad** (`home.tsx`): hľadanie, hovory na účte (ak sú), dlaždice Spätné volania,
-Prípady, Moje úlohy a Telefón, pri vlastnej práci v teréne aj Pristavenia a Moja práca;
-ťuk otvorí príslušný modul. Pod nimi sekcia
-**Treba riešiť**: najviac štyri najnaliehavejšie položky a riadok **Všetky
-upozornenia**. Jednorazový tip ukáže, kde sú Moduly; zmizne po ťuknutí na OK
-alebo po prvej návšteve Modulov.
+**Prehľad** (`home.tsx`): nadpis a dátum, hľadanie, prípadné živé hovory, **Treba riešiť**, potom **Vaša práca** (spätné volania, prípady, úlohy a povolená vlastná práca) a samostatný široký stav **Telefón**. Súhrnné karty sa menia z 1 na 2–3 stĺpce podľa priestoru a písma. Upozornenia a dlhé názvy sa zalomia. Potiahnutie na obnovu ukazuje priebeh požiadaviek.
 
 **Upozornenia** (`mobile/src/alerts/`): jedna schránka toho, čo čaká na človeka,
 zoradená podľa naliehavosti – spätné volania po termíne, vaše úlohy po termíne,
@@ -140,7 +134,7 @@ telefónu sa teda ukáže a zmizne s oneskorením do 30 s. Zavesenie v tomto tel
 obnoví čítanie hneď a hovor ukončený v telefóne sa v lište už neukáže. Na Ústredni a v detaile toho istého hovoru sa nezobrazuje;
 pri písaní sa skryje a obsah končí nad ním.
 
-**Okná (sheet)**: jedno spoločné okno zdola pre úpravu lišty, výber náhrady
+**Okná (sheet)**: názov má vlastný riadok, akcie pružnú šírku; systémová klávesnica je zohľadnená.  jedno spoločné okno zdola pre úpravu lišty, výber náhrady
 a menu modulu; každé má viditeľné Hotovo, Zrušiť alebo Zavrieť. Pri začiatku
 hovoru alebo prechode do pozadia sa zatvorí (`usePhoneOverlay`), aby ovládanie
 hovoru ostalo v popredí.
@@ -178,19 +172,21 @@ Hodnoty sú v `mobile/src/design/tokens.ts`; obrazovky nepoužívajú vlastné.
 
 | Rola textu | Veľkosť / riadok | Rez |
 | --- | --- | --- |
-| Nadpis obrazovky | 28 / 34 | bold |
-| Názov objektu v detaile | 22 / 28 | bold |
-| Číslo v dlaždici | 24 / 29 | bold, pevná šírka číslic |
+| Nadpis obrazovky | 32 / 38 | bold |
+| Názov objektu v detaile | 24 / 30 | bold |
+| Číslo v dlaždici | 30 / 36 | bold, pevná šírka číslic |
 | Nadpis listu, sekcie karty | 17 / 22 | semibold |
-| Názov v riadku | 15 / 20 | semibold |
-| Telo, podnadpis | 13–15 / 18–20 | regular |
-| Atribúty, čas, čipy | 12 / 16 | medium |
-| Štítky | 11 / 14 | bold – nikdy menej |
+| Názov v riadku | 16 / 22 | semibold |
+| Telo / podnadpis | 16 / 23 · 14 / 20 | regular |
+| Atribúty, čas | 13 / 18 | medium |
+| Štítky | 12 / 16 | bold |
+| Nadpis sekcie | 15 / 21 | bold |
+| Popis navigácie | 11 / 14 | semibold, do dvoch riadkov |
 
 - Rozostupy 4 · 8 · 12 · 16 (okraj obrazovky) · 24 · 32.
-- Skupiny riadkov a dlaždice: biele na `#F2F2F7`, zaoblenie 16, bez rámčekov.
+- Skupiny riadkov a dlaždice: biele na `#F2F2F7`, zaoblenie 20 s plynulými rohmi, bez rámčekov.
 - Tlačidlá: kapsula výšky 44; hlavná akcia čierna alebo žltá (najviac jedna žltá na obrazovku).
-- Čipy filtrov: biele kapsuly 36 b (ťuková plocha 44), vybraný čierny; výber
+- Čipy filtrov: biele kapsuly so skutočnou minimálnou výškou 44 b, vybraný čierny; výber
   zo zoznamu má šípku ▾.
 - Farby: žltá `#FCD703` (hlavná akcia, „moje“, avatar), jantárová `#7D6300`
   pre žltý text, stavové tóny červený/oranžový/zelený/modrý/sivý v plnej aj jemnej podobe.
@@ -213,8 +209,7 @@ a `mobile/src/shell/parts.tsx` (prvky kostry):
 - **Skupina** s odsadenými deliacimi čiarami, **hlavička sekcie**, **segment**
   (2–5 častí, s odznakom), **sklenené tlačidlo** hornej lišty, **okno zdola**,
   **potvrdenie** nad lištou (aj pre VoiceOver), **ikona modulu**, **náhľad lišty**.
-- **Štítok stavu** – 11 b bold v jemnom podklade, vždy na jednom riadku (v riadku
-  sa skráti text vedľa neho); stav vždy aj textom.
+- **Štítok stavu** – 12 b bold v jemnom podklade, dlhý stav sa zalomí; susedné údaje nesmú zmiznúť; stav vždy aj textom.
 - **Tlačidlo** – čierne; jediná hlavná akcia formulára (Uložiť, Vytvoriť,
   Potvrdiť) je žltá (`primary`), doplnkové sivé (`secondary`), nedostupné svetlosivé.
 - **Formulár** – sekcie s nadpisom; v riadku popis (12 b) nad poľom (16 b), ťuk
@@ -303,3 +298,7 @@ lišta a jej úprava fungujú ťuknutím bez gest.
 - React Navigation – Native bottom tabs: https://reactnavigation.org/docs/native-bottom-tab-navigator
 - WCAG 2.2 – Target size (minimum): https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html
 - WCAG 2.2 – Use of color: https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html
+
+## 11. Overovanie redizajnu 4. 11. 2026
+
+Regresná základňa: 1 433 testov pred úpravami; nové testy overujú adaptívne stĺpce, geometriu navigácie a kontrast významových tónov. Doplniť vizuálne skúšky 320/390/768 b a veľké písmo. Kontrolovať samostatne chybu, načítanie a prázdny stav aj pre terén a pobočku. Konkrétne výsledky a vydávaný commit zapisovať do [plánu](redesign-plan-2026-11-04.md); tento štandard nie je potvrdením natívnej akceptácie.
