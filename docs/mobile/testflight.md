@@ -1,3 +1,9 @@
+# UX/UI redizajn · 4. 11. 2026
+
+Redizajn je zlúčený do `dev` `21d9b44` a overený na stabilnom TEST. iPhone náhľad bol publikovaný do existujúcej EAS vetvy `iphone-m1-test`; [úplné odovzdanie, odkaz a dôkazy](redesign-plan-2026-11-04.md#test-odovzdanie--4-11-2026).
+
+Lokálny natívny TEST build **1.0.0 (34)** bol spustený, ale jeho dokončenie a nahratie do TestFlightu **nie sú potvrdené**: následný príkaz na Mac skončil `Timed out waiting for client`. Pred pokračovaním najprv zistiť stav existujúceho behu `runs/21d9b448-*/`; neopakovať build ani upload bez overenia. Staršie záznamy nižšie opisujú svoje historické vydania, nie potvrdenie tohto redizajnu v TestFlighte.
+
 # TestFlight — Dispatching TEST
 
 Cieľ: TEST aplikácia v iPhone cez interný TestFlight, bez App Review. Je to TEST
