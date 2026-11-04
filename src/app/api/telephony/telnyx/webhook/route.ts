@@ -68,10 +68,13 @@ export async function POST(request: Request) {
       const deps = await measureRequestStep("read", () => createTelephonyDeps({ config }));
       const result = await processTelnyxEvent({ ...deps, deferMaintenance: (work) => after(withBackgroundRequestMetrics(work)) }, envelope);
 
-      // Busy claims and pending correlation deliberately request provider retry.
-      // First technical failure and terminal unresolved outcomes need a signal;
-      // ordinary later redeliveries already have durable ledger/incident evidence.
-      if (result.outcome === "unresolved" || result.outcome === "failed" && (result.status === 200 || (result.claim?.attempts ?? 1) <= 1)) {
+      // A proven pre-effect lease wait is saved for retry and remains visible in
+      // the ledger/warn log. Persistent waits are escalated by the existing cron.
+      // Any actual failure still signals, including after an earlier deferred
+      // attempt; bounded Sentry capture owns repeated-error deduplication.
+      const durableContention = result.outcome === "failed" && result.status >= 500
+        && result.failureKind === "lease_busy" && result.durableDeferral === "lease_busy";
+      if (result.outcome === "unresolved" || result.outcome === "failed" && !durableContention) {
         const code = result.outcome === "unresolved" ? "webhook_unresolved" : "webhook_processing_failed";
         reportWebhookFailure(Object.assign(new Error(code), { code }), { sessionId: result.sessionId, eventId: result.eventId,
           retryable: result.status >= 500, attempt: result.claim?.attempts, status: result.status,
