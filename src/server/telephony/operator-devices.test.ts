@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { recordServerDiagnostic } from "@/server/diagnostics/record";
+vi.mock("@/server/diagnostics/record", () => ({recordServerDiagnostic: vi.fn()}));
 import { pendingCredentialEntries } from "@/lib/telephony/device-liveness";
 import { clearRateLimits } from "@/server/rate-limit";
 
@@ -13,6 +15,20 @@ function deps(h: ReturnType<typeof createTelephonyHarness>, overrides: Partial<D
 }
 
 describe("operator devices", () => {
+  it("records a generic error heartbeat as device_error rather than inventing an authentication failure", async () => {
+    const h = createTelephonyHarness();
+    const issued = await issueWebphoneToken(deps(h), {organizationId: ORG, profileId: PROFILES.o1, takeover: true});
+    await touchDevice(deps(h), {organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: issued.deviceSessionId, registrationState: "registered"});
+    vi.mocked(recordServerDiagnostic).mockClear();
+    const result = await touchDevice(deps(h), {organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: issued.deviceSessionId, registrationState: "error"});
+    expect(result).toMatchObject({ok: true, device: {registration_state: "error"}});
+    expect(recordServerDiagnostic).toHaveBeenCalledExactlyOnceWith({organizationId: ORG, profileId: PROFILES.o1}, {
+      type: "phone_lifecycle", module: "telephony", outcome: "failed", reason: "device_error", deviceSessionId: issued.deviceSessionId,
+    });
+    await touchDevice(deps(h), {organizationId: ORG, profileId: PROFILES.o1, deviceSessionId: issued.deviceSessionId, registrationState: "error"});
+    expect(recordServerDiagnostic).toHaveBeenCalledOnce();
+  });
+
   it("creates a Telnyx credential lazily, once, on the environment's credential connection", async () => {
     const h = createTelephonyHarness();
     const device = await ensureOperatorCredential(deps(h), { organizationId: ORG, profileId: PROFILES.o3 });

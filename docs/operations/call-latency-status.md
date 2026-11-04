@@ -1,9 +1,8 @@
-# Call latency repair — where we are
+# Call latency repair — historical snapshot
 
-Running status of the repair described in `plan/call-latency-repair-2026-09-16`
-(`docs/plans/call-latency-2026-09-16/plan-v5.md`). Updated as stages land, so a
-session that starts cold can see what is done, what is measured and what is
-deliberately left.
+Historical status of the repair described in the
+[archived plan at its original commit](https://github.com/Alfopure/pomoc-motoristom-new/blob/5bc9f2f36a9495dac0868f05752a9e6eaae4f134/docs/plans/call-latency-2026-09-16/plan-v5.md).
+This is the 17 September snapshot, not the current production status.
 
 Last updated: 17 Sep 2026.
 

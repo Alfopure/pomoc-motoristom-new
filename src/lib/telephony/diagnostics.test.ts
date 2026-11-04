@@ -38,6 +38,39 @@ describe("phone diagnostics boundary", () => {
     expect(parseDiagnosticEvent({ ...envelope, ...fallback, rtcRegion: "eu" })).toBeNull();
   });
 
+  it.each([
+    ["recovery_timeout", "recovery_timeout", undefined],
+    ["sdk_recovery_exhausted", "sdk_recovery_failed", 45003],
+    ["sdk_recovery_disabled", "sdk_recovery_failed", 36005],
+    ["invalid_credentials", "auth_failure", 46002],
+    ["sdk_fatal", "sdk_fatal", 45001],
+    ["sdk_fatal", "sdk_fatal", 49001],
+  ] as const)("keeps terminal cause %s distinct from a timeout and drops provider payloads", (phoneFailure, reason, sdkCode) => {
+    const input = { event: "recovery_failed", status: "failed", reason, phoneFailure, ...(sdkCode === undefined ? {} : {sdkCode}),
+      rtcEdge: "eu", rtcRegion: "eu", rtcDc: "fr5", message: "secret", token: "secret", payload: {sdp: "private"} };
+    const diagnostic = webphoneDiagnostic(input);
+    expect(diagnostic).toEqual({type: "phone_lifecycle", module: "telephony", outcome: "failed", reason, phoneFailure,
+      ...(sdkCode === undefined ? {} : {sdkCode}), rtcEdge: "eu", rtcRegion: "eu", rtcDc: "fr5"});
+    const envelope = { id: session, pageId: session, sequence: 1, occurredAt: "2026-11-02T10:00:00.000Z", monotonicMs: 1, buildId: "test-build", sampled: false, sampleRate: 1 };
+    expect(parseDiagnosticEvent({...envelope, ...diagnostic})).toEqual({...envelope, ...diagnostic});
+    for (const patch of [{module: "app"}, {type: "operation", operation: "call.start"}, {outcome: "ok"}, {phoneFailure: "secret"}, {sdkCode: 99999}, {reason: "registered"}, {rtcDc: "wss://private"}, {rtcTrigger: "sdk_error"}]) {
+      expect(parseDiagnosticEvent({...envelope, ...diagnostic, ...patch})).toBeNull();
+    }
+    // A previously deployed browser remains valid without the new optional fields.
+    expect(parseDiagnosticEvent({...envelope, type: "phone_lifecycle", module: "telephony", outcome: "failed", reason: "recovery_timeout"})).not.toBeNull();
+    expect(parseDiagnosticEvent({...envelope, ...diagnostic, phoneFailure: undefined, sdkCode: 45003})).toBeNull();
+    expect(webphoneDiagnostic({...input, sdkCode: "private-code"})).not.toHaveProperty("sdkCode");
+    expect(webphoneDiagnostic({...input, phoneFailure: "private-cause"})).not.toHaveProperty("phoneFailure");
+  });
+
+  it("rejects mismatched SDK causes instead of accepting a different terminal diagnosis", () => {
+    const envelope = { id: session, pageId: session, sequence: 1, occurredAt: "2026-11-02T10:00:00.000Z", monotonicMs: 1, buildId: "test-build", sampled: false, sampleRate: 1,
+      type: "phone_lifecycle", module: "telephony", outcome: "failed", reason: "sdk_recovery_failed", phoneFailure: "sdk_recovery_exhausted", sdkCode: 36005 };
+    expect(parseDiagnosticEvent(envelope)).toBeNull();
+    expect(parseDiagnosticEvent({...envelope, reason: "sdk_fatal", phoneFailure: "sdk_fatal", sdkCode: 45003})).toBeNull();
+    expect(parseDiagnosticEvent({...envelope, reason: "recovery_timeout", phoneFailure: "recovery_timeout", sdkCode: 45003})).toBeNull();
+  });
+
   it("measures explicit controls but never the existing snapshot/heartbeat polling", () => {
     expect(telephonyRequestDiagnostic(`/api/telephony/calls/${session}/pickup`, "POST")).toEqual({ operation: "call.pickup", callSessionId: session });
     expect(telephonyRequestDiagnostic(`/api/telephony/calls/${session}/hangup`, "POST")?.operation).toBe("call.hangup");

@@ -1,21 +1,23 @@
 import "server-only";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { after } from "next/server";
 import type { LightNodeClient } from "@sentry/node-core/light";
 import { assertAppEnvironment, isTestLiveDeployment, PRODUCTION_SUPABASE_REF, resolveAppEnvironment } from "@/lib/app-environment";
 import { diagnosticErrorText } from "@/lib/diagnostics/error-value";
-import { isDiagnosticSafeId, isDiagnosticUuid } from "@/lib/diagnostics/types";
+import { DIAGNOSTIC_PHONE_FAILURES, DIAGNOSTIC_PHONE_FAILURE_REASONS, DIAGNOSTIC_PHONE_SDK_CODES, DIAGNOSTIC_RTC_EDGES, isDiagnosticSafeId, isDiagnosticUuid, type DiagnosticEvent } from "@/lib/diagnostics/types";
+import { DIAGNOSTIC_PROVIDER_EVENT_TYPES, WEBHOOK_FAILURE_KINDS, type WebhookFailureKind } from "@/lib/diagnostics/telephony-context";
 import { requestTimingContext } from "@/server/request-metrics";
 
-export const SERVER_SENTRY_LIMITS = { transportMs: 1000, eventWaitMs: 1500, eventsPerMinute: 10, eventBytes: 24 * 1024, frames: 20 } as const;
-const classes = new Set(["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "AbortError", "TimeoutError", "UnknownError", "MutationError", "CallActionError", "SessionEventDeferredError", "SessionLeaseLostError", "TelnyxCommandError", "PresenceServiceError", "OperatorDeviceError"]);
-const codes = new Set(["ABORT_ERR", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "DIAGNOSTIC_TEST_CANARY", "session_event_deferred", "session_lease_unavailable", "session_checkpoint_failed", "provider_outcome_unknown", "timeout", "network", "deadline", "invalid_response", "recording_ack_invalid", "57014", "53300", "57P01", "08006", "PGRST000", "PGRST001", "PGRST002", "PGRST003", "webhook_processing_failed", "webhook_unresolved"]);
+export const SERVER_SENTRY_LIMITS = { transportMs: 1000, eventWaitMs: 1500, eventsPerMinute: 10, phoneObservationsPerMinute: 3, eventBytes: 24 * 1024, frames: 20 } as const;
+const classes = new Set(["PhoneLifecycleObservation", "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "AbortError", "TimeoutError", "UnknownError", "MutationError", "CallActionError", "SessionEventDeferredError", "SessionLeaseLostError", "TelnyxCommandError", "PresenceServiceError", "OperatorDeviceError"]);
+const codes = new Set(["browser_phone_failure", "ABORT_ERR", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "DIAGNOSTIC_TEST_CANARY", "session_event_deferred", "session_lease_unavailable", "session_checkpoint_failed", "provider_outcome_unknown", "timeout", "network", "deadline", "invalid_response", "recording_ack_invalid", "57014", "53300", "57P01", "08006", "PGRST000", "PGRST001", "PGRST002", "PGRST003", "webhook_processing_failed", "webhook_unresolved"]);
 type ServerFrame = { filename: string; abs_path: string; lineno: number; colno: number; in_app: true };
-export type ServerErrorContext = { requestId?: string; route?: string; status?: number; source?: "next" | "telephony" | "cron" | "canary"; callSessionId?: string; eventId?: string; commandId?: string; retryable?: boolean; attempt?: number; databaseTimeouts?: number };
+export type ServerErrorContext = { requestId?: string; route?: string; status?: number; source?: "next" | "telephony" | "cron" | "canary" | "phone_observation"; callSessionId?: string; eventId?: string; commandId?: string; retryable?: boolean; attempt?: number; databaseTimeouts?: number; failureKind?: WebhookFailureKind; providerEventType?: string; observationEventId?: string; deviceSessionId?: string; phoneFailure?: DiagnosticEvent["phoneFailure"]; phoneReason?: DiagnosticEvent["reason"]; sdkCode?: number; rtcEdge?: DiagnosticEvent["rtcEdge"]; browserBuild?: string };
 export type PrivateServerEvent = {
   type: undefined; event_id: string; timestamp: number; platform: "node"; level: "error"; release: string; environment: "production" | "test";
   exception: { values: Array<{ type: string; value: string; stacktrace?: { frames: ServerFrame[] } }> };
-  tags: { diagnostic_error_id: string; runtime: "server"; source: string; request_id?: string; route?: string; http_status?: string; error_code?: string; call_session_id?: string; provider_event_id?: string; command_id?: string; retryable?: string; attempt?: string; database_timeouts?: string };
+  tags: { diagnostic_error_id: string; runtime: "server"; source: string; request_id?: string; route?: string; http_status?: string; error_code?: string; call_session_id?: string; provider_event_id?: string; command_id?: string; retryable?: string; attempt?: string; database_timeouts?: string; failure_kind?: string; provider_event_type?: string; observation_event_id?: string; device_session_id?: string; phone_failure?: string; phone_reason?: string; phone_sdk_code?: string; rtc_edge?: string; browser_build?: string };
+  fingerprint?: string[];
   contexts?: { failure: { causes: Array<{ type: string; code?: string; status?: number }> } };
 };
 type ServerConfiguration = { dsn: string; environment: "production" | "test"; release: string };
@@ -94,7 +96,11 @@ export function sanitizeServerError(error: unknown, context: ServerErrorContext,
       route: context.route, http_status: context.status === undefined ? undefined : String(context.status), error_code: code,
       call_session_id: context.callSessionId, provider_event_id: context.eventId, command_id: context.commandId,
       retryable: context.retryable === undefined ? undefined : String(context.retryable), attempt: context.attempt === undefined ? undefined : String(context.attempt),
-      database_timeouts: context.databaseTimeouts === undefined ? undefined : String(context.databaseTimeouts) },
+      database_timeouts: context.databaseTimeouts === undefined ? undefined : String(context.databaseTimeouts),
+      failure_kind: context.failureKind, provider_event_type: context.providerEventType,
+      observation_event_id: context.observationEventId, device_session_id: context.deviceSessionId,
+      phone_failure: context.phoneFailure, phone_reason: context.phoneReason, phone_sdk_code: context.sdkCode === undefined ? undefined : String(context.sdkCode),
+      rtc_edge: context.rtcEdge, browser_build: context.browserBuild },
     contexts: { failure: { causes: causalDetails(error) } },
   });
 }
@@ -110,7 +116,7 @@ export function sanitizeOutboundServerEvent(value: unknown): PrivateServerEvent 
     const errorCode = code && (codes.has(code) || exception.type === "TelnyxCommandError" && /^[0-9]{3,5}$/.test(code)) ? code : undefined;
     const frames = (Array.isArray(exception.stacktrace?.frames) ? exception.stacktrace.frames : []).slice(-SERVER_SENTRY_LIMITS.frames)
       .flatMap(frame => { const safe = ownedFrame(frame?.filename, frame?.lineno, frame?.colno); return safe ? [safe] : []; });
-    const tags: PrivateServerEvent["tags"] = { diagnostic_error_id: input.event_id, runtime: "server", source: ["next", "telephony", "cron", "canary"].includes(input.tags?.source) ? input.tags.source : "next" };
+    const tags: PrivateServerEvent["tags"] = { diagnostic_error_id: input.event_id, runtime: "server", source: ["next", "telephony", "cron", "canary", "phone_observation"].includes(input.tags?.source) ? input.tags.source : "next" };
     if (isDiagnosticUuid(input.tags?.request_id)) tags.request_id = input.tags.request_id;
     // Framework route templates / fixed operation names, never request paths or query strings.
     if (typeof input.tags?.route === "string" && /^[a-zA-Z0-9_./\[\]()-]{1,160}$/.test(input.tags.route) && !input.tags.route.includes("..")) tags.route = input.tags.route;
@@ -119,15 +125,28 @@ export function sanitizeOutboundServerEvent(value: unknown): PrivateServerEvent 
     for (const key of ["call_session_id", "provider_event_id", "command_id"] as const) if (isDiagnosticUuid(input.tags?.[key])) tags[key] = input.tags[key];
     if (["true", "false"].includes(input.tags?.retryable ?? "")) tags.retryable = input.tags.retryable;
     for (const key of ["attempt", "database_timeouts"] as const) if (/^(?:0|[1-9][0-9]{0,3})$/.test(input.tags?.[key] ?? "")) tags[key] = input.tags[key];
+    if (WEBHOOK_FAILURE_KINDS.some(kind => kind === input.tags?.failure_kind)) tags.failure_kind = input.tags.failure_kind;
+    if (DIAGNOSTIC_PROVIDER_EVENT_TYPES.some(type => type === input.tags?.provider_event_type)) tags.provider_event_type = input.tags.provider_event_type;
+    if (tags.source === "phone_observation" && exception.type === "PhoneLifecycleObservation" && isDiagnosticUuid(input.tags?.observation_event_id) && isDiagnosticUuid(input.tags?.device_session_id)) {
+      tags.observation_event_id = input.tags.observation_event_id;
+      tags.device_session_id = input.tags.device_session_id;
+      if (DIAGNOSTIC_PHONE_FAILURE_REASONS.some(reason => reason === input.tags?.phone_reason)) tags.phone_reason = input.tags.phone_reason;
+      if (DIAGNOSTIC_PHONE_FAILURES.some(reason => reason === input.tags?.phone_failure)) tags.phone_failure = input.tags.phone_failure;
+      if (DIAGNOSTIC_PHONE_SDK_CODES.some(code => String(code) === input.tags?.phone_sdk_code)) tags.phone_sdk_code = input.tags.phone_sdk_code;
+      if (DIAGNOSTIC_RTC_EDGES.some(edge => edge === input.tags?.rtc_edge)) tags.rtc_edge = input.tags.rtc_edge;
+      if (isDiagnosticSafeId(input.tags?.browser_build)) tags.browser_build = input.tags.browser_build;
+    }
     const causes = (Array.isArray(input.contexts?.failure?.causes) ? input.contexts.failure.causes : []).slice(0, 4).flatMap(cause => {
       if (!cause || !classes.has(cause.type)) return [];
       const code = typeof cause.code === "string" && (codes.has(cause.code) || cause.type === "TelnyxCommandError" && /^[0-9]{3,5}$/.test(cause.code)) ? cause.code : undefined;
       return [{ type: cause.type, ...(code ? { code } : {}), ...(Number.isInteger(cause.status) && Number(cause.status) >= 400 && Number(cause.status) <= 599 ? { status: cause.status } : {}) }];
     });
+    const fingerprint = tags.source === "phone_observation" && tags.device_session_id && tags.observation_event_id
+      ? ["phone-lifecycle-observation", input.environment, tags.device_session_id, tags.phone_failure ?? tags.phone_reason ?? "unknown"] : undefined;
     return { type: undefined, event_id: input.event_id, timestamp: Number.isFinite(input.timestamp) && input.timestamp > 0 && input.timestamp <= Date.now() / 1000 + 60 ? input.timestamp : Date.now() / 1000,
       platform: "node", level: "error", release: input.release, environment: input.environment,
       exception: { values: [{ type: exception.type, value: errorCode ? `${exception.type}: ${errorCode}` : exception.type,
-        ...(frames.length ? { stacktrace: { frames } } : {}) }] }, tags, ...(causes.length ? { contexts: { failure: { causes } } } : {}) };
+        ...(frames.length ? { stacktrace: { frames } } : {}) }] }, tags, ...(fingerprint ? { fingerprint } : {}), ...(causes.length ? { contexts: { failure: { causes } } } : {}) };
   } catch { return null; }
 }
 
@@ -190,6 +209,7 @@ export async function getServerSentryClient(): Promise<LightNodeClient | null> {
 }
 
 let attempts: number[] = [];
+let phoneAttempts: number[] = [];
 const recent = new Map<string, { at: number; id: string }>();
 export type ServerErrorReceipt = { eventId: string | null; accepted: boolean };
 function reportOutcome(outcome: "disabled" | "invalid" | "deduplicated" | "limited" | "accepted" | "unacknowledged" | "unretained", event?: PrivateServerEvent): void {
@@ -203,15 +223,23 @@ export async function captureServerError(error: unknown, context: ServerErrorCon
     const configuration = serverSentryConfiguration();
     if (!configuration) { reportOutcome("disabled"); return unavailable; }
     const timing = requestTimingContext();
-    const safe = sanitizeServerError(error, { ...context, route: context.route ?? timing?.route, requestId: context.requestId ?? timing?.request_id, databaseTimeouts: context.databaseTimeouts ?? timing?.database_timeouts }, configuration);
+    // A replay of one durable browser observation uses the same Sentry identity,
+    // including on another instance. Warm device/cause dedup below also coalesces
+    // the status and disconnect observations emitted for one SDK failure.
+    const observationId = context.source === "phone_observation" && isDiagnosticUuid(context.observationEventId)
+      ? createHash("sha256").update(`browser-phone:${configuration.environment}:${context.observationEventId.toLowerCase()}`).digest("hex").slice(0, 32) : undefined;
+    const safe = sanitizeServerError(error, { ...context, route: context.route ?? timing?.route, requestId: context.requestId ?? timing?.request_id, databaseTimeouts: context.databaseTimeouts ?? timing?.database_timeouts }, configuration, observationId);
     if (!safe) { reportOutcome("invalid"); return unavailable; }
     const now = Date.now();
     attempts = attempts.filter(at => at > now - 60_000);
-    const fingerprint = JSON.stringify([safe.release, safe.exception, safe.tags.route, safe.tags.source, safe.tags.call_session_id, safe.tags.command_id, safe.contexts?.failure, safe.tags.database_timeouts]);
+    phoneAttempts = phoneAttempts.filter(at => at > now - 60_000);
+    const fingerprint = JSON.stringify([safe.release, safe.exception, safe.tags.route, safe.tags.source, safe.tags.call_session_id, safe.tags.command_id, safe.contexts?.failure, safe.tags.database_timeouts, safe.tags.failure_kind, safe.tags.provider_event_type, safe.tags.device_session_id, safe.tags.phone_failure ?? safe.tags.phone_reason, safe.tags.phone_sdk_code, safe.tags.rtc_edge, safe.tags.browser_build]);
     const duplicate = recent.get(fingerprint);
     if (duplicate && duplicate.at > now - 60_000) { reportOutcome("deduplicated", { ...safe, event_id: duplicate.id }); return { eventId: duplicate.id, accepted: false }; }
-    if (attempts.length >= SERVER_SENTRY_LIMITS.eventsPerMinute) { reportOutcome("limited", safe); return unavailable; }
-    attempts.push(now); recent.set(fingerprint, { at: now, id: safe.event_id });
+    if (attempts.length >= SERVER_SENTRY_LIMITS.eventsPerMinute || safe.tags.source === "phone_observation" && phoneAttempts.length >= SERVER_SENTRY_LIMITS.phoneObservationsPerMinute) { reportOutcome("limited", safe); return unavailable; }
+    attempts.push(now);
+    if (safe.tags.source === "phone_observation") phoneAttempts.push(now);
+    recent.set(fingerprint, { at: now, id: safe.event_id });
     while (recent.size > 100) recent.delete(recent.keys().next().value!);
     // The timeout includes a cold SDK import; no detached retry loop is created.
     return await new Promise<ServerErrorReceipt>(resolve => {
