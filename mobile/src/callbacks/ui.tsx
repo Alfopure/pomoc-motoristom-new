@@ -179,7 +179,7 @@ const s = StyleSheet.create({
   summaryCount: { ...type.headline, color: palette.label },
   caption: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel },
   filters: { flexDirection: "row", gap: 6, flexWrap: "wrap" },
-  filter: { borderRadius: 16, minHeight: 32, backgroundColor: colors.white, borderWidth: StyleSheet.hairlineWidth, borderColor: "rgba(60,60,67,0.16)", paddingHorizontal: 12, paddingVertical: 6, alignItems: "center", justifyContent: "center" },
+  filter: { borderRadius: 22, minHeight: 44, backgroundColor: colors.white, borderWidth: StyleSheet.hairlineWidth, borderColor: "rgba(60,60,67,0.16)", paddingHorizontal: 12, paddingVertical: 8, alignItems: "center", justifyContent: "center" },
   filterText: { fontSize: 13, lineHeight: 17, fontWeight: "600", color: colors.ink },
   filterSelected: { backgroundColor: colors.ink },
   row: { backgroundColor: palette.card },

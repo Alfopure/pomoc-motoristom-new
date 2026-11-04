@@ -53,48 +53,49 @@ export function History({ api, me, queryKey, active, category, onCategory, searc
           const callback = call.callback ? "Spätné: " + callbackStatusLabels[call.callback.status] + (call.callback.status === "scheduled" && call.callback.claimedByName ? " · " + call.callback.claimedByName : "") : null;
           return <View key={call.id} style={s.row}>
             {index > 0 && <View style={s.separator} />}
-            <Pressable accessibilityRole="button" accessibilityLabel={"Detail hovoru " + title} onPress={() => onCallContext({ kind: "call", id: call.id })}
+            <Pressable accessibilityRole="button" accessibilityLabel={["Detail hovoru " + title, callStatus(call.status), formatTime(call.startedAt), callback].filter(Boolean).join(", ")} onPress={() => onCallContext({ kind: "call", id: call.id })}
               style={({ pressed }) => [s.rowMain, pressed && { opacity: 0.6 }]}>
               <View style={[s.callIcon, missed && s.missedIcon]}><DirectionIcon size={16} strokeWidth={2.2} color={missed ? colors.danger : colors.ink} accessible={false} /></View>
               <View style={{ flex: 1, minWidth: 0 }}>
-                <View style={s.titleLine}><Text numberOfLines={1} style={[s.callTitle, missed && { color: colors.danger }]}>{title}</Text><Text style={s.time}>{formatTime(call.startedAt)}</Text></View>
-                <Text numberOfLines={1} style={s.callSub}>{[call.name ? formatNumber(call.number) : null, call.direction === "outbound" ? "Odchádzajúci" : call.direction === "internal" ? "Interný" : "Prichádzajúci", callStatus(call.status), duration].filter(Boolean).join(" · ")}</Text>
-                <Text numberOfLines={1} style={[s.callMeta, call.callback?.status === "open" && { color: colors.danger }]}>{[call.lineLabel, callback].filter(Boolean).join(" · ")}</Text>
+                <View style={s.titleLine}><Text style={[s.callTitle, missed && { color: colors.danger }]}>{title}</Text><Text style={s.time}>{formatTime(call.startedAt)}</Text></View>
+                <Text style={s.callSub}>{[call.name ? formatNumber(call.number) : null, call.direction === "outbound" ? "Odchádzajúci" : call.direction === "internal" ? "Interný" : "Prichádzajúci", callStatus(call.status), duration].filter(Boolean).join(" · ")}</Text>
+                <Text style={[s.callMeta, call.callback?.status === "open" && { color: colors.danger }]}>{[call.lineLabel, callback].filter(Boolean).join(" · ")}</Text>
               </View>
             </Pressable>
             {call.direction !== "internal" && dialable(call.number) && (calling.ready
               ? <Pressable accessibilityRole="button" accessibilityLabel={"Zavolať " + (call.name ? call.name + ", " : "") + formatNumber(call.number)} hitSlop={6}
                 onPress={() => { if (call.number) calling.call(call.number, call.name); }} style={({ pressed }) => [s.select, s.call, pressed && { opacity: 0.6 }]}>
-                <Phone size={17} strokeWidth={2.2} color={colors.success} accessible={false} /></Pressable>
+                <Phone size={17} strokeWidth={2.2} color={colors.success} accessible={false} /><Text style={[s.selectLabel, { color: colors.success }]}>Zavolať</Text></Pressable>
               : <Pressable accessibilityRole="button" accessibilityLabel={"Vybrať číslo " + formatNumber(call.number) + " na volanie"} hitSlop={6}
                 onPress={() => { if (call.number) onSelect(call.number); }} style={({ pressed }) => [s.select, pressed && { opacity: 0.6 }]}>
-                <PhoneForwarded size={17} strokeWidth={2.2} color={colors.ink} accessible={false} /></Pressable>)}
+                <PhoneForwarded size={17} strokeWidth={2.2} color={colors.ink} accessible={false} /><Text style={s.selectLabel}>Vybrať číslo</Text></Pressable>)}
           </View>;
         })}</View>}
-        {calls.length > 0 && <Text style={styles.muted}>Ťuknutím otvoríte detail hovoru, ikonou vpravo {calling.ready ? "zavoláte cez ústredňu" : "vyberiete číslo na volanie"}.</Text>}
+        {calls.length > 0 && <Text style={styles.muted}>Ťuknutím na hovor otvoríte jeho detail. Tlačidlo {calling.ready ? "Zavolať otvorí potvrdenie hovoru" : "Vybrať číslo pripraví číslo v ústredni"}.</Text>}
         {query.isFetchNextPageError && <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.fetchNextPage(); }} />}
         {query.hasNextPage && !query.isFetchNextPageError && <Button label={query.isFetchingNextPage ? "Načítavam…" : "Ďalšie hovory"} secondary disabled={query.isFetchingNextPage} onPress={() => { void query.fetchNextPage(); }} />}
       </>}
   </ScrollView>;
 }
 const s = StyleSheet.create({
-  search: { minHeight: 38, borderRadius: 19, backgroundColor: palette.fill, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 12 },
-  searchInput: { flex: 1, minHeight: 38, fontSize: 16, color: colors.ink, paddingVertical: 0 },
+  search: { minHeight: 48, borderRadius: 16, backgroundColor: palette.fill, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12 },
+  searchInput: { flex: 1, minWidth: 0, minHeight: 48, ...type.body, color: colors.ink, paddingVertical: 8 },
   group: { backgroundColor: colors.white, borderRadius: 16, overflow: "hidden" },
-  row: { flexDirection: "row", alignItems: "center", paddingRight: 8 },
+  row: { padding: 12, gap: 8 },
   separator: { position: "absolute", top: 0, left: 50, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
-  rowMain: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 12, paddingVertical: 8, minHeight: 56 },
+  rowMain: { minWidth: 0, flexDirection: "row", alignItems: "flex-start", gap: 10, minHeight: 56 },
   callIcon: { width: 28, height: 28, borderRadius: 8, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
   missedIcon: { backgroundColor: palette.redSoft },
-  titleLine: { flexDirection: "row", alignItems: "baseline", gap: 8 },
-  callTitle: { ...type.rowTitle, color: colors.ink, flex: 1 },
+  titleLine: { gap: 2 },
+  callTitle: { ...type.rowTitle, color: colors.ink },
   time: { ...type.caption, color: colors.muted, fontVariant: ["tabular-nums"] },
   callSub: { ...type.subhead, color: colors.muted },
   callMeta: { ...type.caption, fontWeight: "400", color: colors.muted },
-  select: { width: 40, height: 40, borderRadius: 20, backgroundColor: palette.fill, alignItems: "center", justifyContent: "center", marginLeft: 6 },
+  select: { minHeight: 44, maxWidth: "100%", alignSelf: "flex-end", flexDirection: "row", flexWrap: "wrap", gap: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 22, backgroundColor: palette.fill, alignItems: "center", justifyContent: "center" },
+  selectLabel: { ...type.subhead, fontWeight: "600", color: colors.ink },
   call: { backgroundColor: palette.greenSoft },
   filters: { flexDirection: "row", gap: 6, flexWrap: "wrap" },
-  filter: { borderRadius: 16, minHeight: 32, backgroundColor: palette.card, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.separator, paddingHorizontal: 12, paddingVertical: 6, alignItems: "center", justifyContent: "center" },
-  filterText: { fontSize: 13, lineHeight: 17, fontWeight: "600", color: colors.ink },
+  filter: { borderRadius: 22, minHeight: 44, backgroundColor: palette.card, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.separator, paddingHorizontal: 12, paddingVertical: 8, alignItems: "center", justifyContent: "center" },
+  filterText: { ...type.subhead, fontWeight: "600", color: colors.ink },
   filterSelected: { backgroundColor: colors.ink, borderColor: colors.ink },
 });

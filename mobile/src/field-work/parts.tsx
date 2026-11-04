@@ -9,7 +9,7 @@ import type { PendingWork, WorkCommands, WorkCommandsView } from "./commands";
 export function Chip({ label, selected, onPress, disabled, accessibilityLabel, onCard }: { label: string; selected: boolean; onPress: () => void; disabled?: boolean; accessibilityLabel?: string; onCard?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ selected, disabled: Boolean(disabled) }} disabled={disabled}
     hitSlop={{ top: 4, bottom: 4 }} onPress={onPress} style={({ pressed }) => [s.chip, onCard && { backgroundColor: palette.fill }, selected && s.chipSelected, disabled && { opacity: 0.4 }, pressed && { opacity: 0.7 }]}>
-    <Text numberOfLines={1} style={[s.chipText, selected && { color: palette.card }]}>{label}</Text>
+    <Text style={[s.chipText, selected && { color: palette.card }]}>{label}</Text>
   </Pressable>;
 }
 
@@ -49,13 +49,13 @@ export const fieldStyles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: space.m, paddingHorizontal: space.m, paddingVertical: 10, minHeight: 64, backgroundColor: palette.card },
   separator: { position: "absolute", top: 0, left: 60, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
   icon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
-  rowHead: { flexDirection: "row", alignItems: "center", gap: 6 },
+  rowHead: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 },
   rowTitle: { ...type.rowTitle, color: palette.label, flexShrink: 1 },
   rowDetail: { ...type.subhead, color: palette.secondaryLabel },
   chevron: { fontSize: 20, color: palette.tertiaryLabel },
 });
 const s = StyleSheet.create({
-  chip: { minHeight: 36, borderRadius: 18, paddingHorizontal: 14, alignItems: "center", justifyContent: "center", backgroundColor: palette.card },
+  chip: { minHeight: 44, maxWidth: "100%", borderRadius: 22, paddingHorizontal: space.m, paddingVertical: space.s, alignItems: "center", justifyContent: "center", backgroundColor: palette.card },
   chipSelected: { backgroundColor: palette.label },
   chipText: { ...type.rowTitle, color: palette.label },
 });

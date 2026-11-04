@@ -41,6 +41,7 @@ import { CallPhoneOffer } from "./call-phone-offer";
 import { useCallAction } from "../voice/dial";
 import { CaseFieldSections, CaseServiceSection } from "./fields-ui";
 import { formLayout } from "../design/form";
+import { palette, type } from "../design/tokens";
 
 const errorMessage = (error: unknown) => error instanceof MobileApiError ? error.message : "Prípady sa nepodarilo načítať. Skúste znova.";
 export type CaseOpenRequest = ({ kind: "case.owner" | "detail" | "case-create" | "case-edit" | "case-note" | "task-create" | "handoff" | "attachment"; id: string | null } | { kind: "case-call-create"; id: null; number: string }
@@ -339,17 +340,17 @@ const priorityBar: Partial<Record<MobileCaseSummary["priority"], string>> = { ur
 /** One case in up to three lines: who and which car, number and place, state. */
 function CaseRow({ item, first, onPress }: { item: MobileCaseSummary; first: boolean; onPress: () => void }) {
   const title = [item.contact.name || "Kontakt bez mena", item.vehicle.licensePlate].filter(Boolean).join(" · ");
-  return <Pressable accessibilityRole="button" accessibilityLabel={"Otvoriť prípad " + item.caseNumber + ", " + title} onPress={onPress}
+  return <Pressable accessibilityRole="button" accessibilityLabel={["Otvoriť prípad " + item.caseNumber, title, item.priorityLabel, item.statusLabel, item.pickupAddress, item.owner.name || "Bez vlastníka"].filter(Boolean).join(", ")} onPress={onPress}
     style={({ pressed }) => [s.caseRow, pressed && { backgroundColor: "#ECECF0" }]}>
     {!first && <View style={s.separator} />}
     {priorityBar[item.priority] && <View style={[s.bar, { backgroundColor: priorityBar[item.priority] }]} />}
     <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
-      <View style={s.titleLine}><Text numberOfLines={1} style={s.caseTitle}>{title}</Text><Text style={s.caseTime}>{formatTime(item.createdAt)}</Text></View>
-      <Text numberOfLines={1} style={styles.muted}>{[item.caseNumber, item.pickupAddress || item.summary || "Miesto nedoplnené"].filter(Boolean).join(" · ")}</Text>
+      <View style={s.titleLine}><Text style={s.caseTitle}>{title}</Text><Text style={s.caseTime}>{formatTime(item.createdAt)}</Text></View>
+      <Text style={styles.muted}>{[item.caseNumber, item.pickupAddress || item.summary || "Miesto nedoplnené"].filter(Boolean).join(" · ")}</Text>
       <View style={s.tags}>
         {(item.priority === "urgent" || item.priority === "high") && <Text style={[s.tag, item.priority === "urgent" ? s.tagRed : s.tagOrange]}>{item.priorityLabel}</Text>}
         <Text style={[s.tag, s.tagGray]}>{item.statusLabel}</Text>
-        {item.owner.mine ? <Text style={[s.tag, s.tagYellow]}>Môj</Text> : <Text numberOfLines={1} style={s.owner}>{item.owner.name || "Bez vlastníka"}</Text>}
+        {item.owner.mine ? <Text style={[s.tag, s.tagYellow]}>Môj</Text> : <Text style={s.owner}>{item.owner.name || "Bez vlastníka"}</Text>}
       </View>
     </View>
   </Pressable>;
@@ -503,20 +504,20 @@ const s = StyleSheet.create({
   modalBackdrop: { flex: 1, justifyContent: "center", padding: 20, backgroundColor: "rgba(0,0,0,0.5)" },
   modalCard: { maxHeight: "80%", backgroundColor: colors.white, borderRadius: 20, padding: 20, gap: 16 },
   choices: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  search: { minHeight: 38, borderRadius: 19, backgroundColor: "rgba(118,118,128,0.12)", flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 12 },
-  searchInput: { flex: 1, minHeight: 38, fontSize: 16, color: colors.ink, paddingVertical: 0 },
+  search: { minHeight: 48, borderRadius: 16, backgroundColor: palette.fill, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12 },
+  searchInput: { flex: 1, minWidth: 0, minHeight: 48, ...type.body, color: colors.ink, paddingVertical: 8 },
   group: { backgroundColor: colors.white, borderRadius: 16, overflow: "hidden" },
   caseRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingVertical: 8, minHeight: 64 },
   separator: { position: "absolute", top: 0, left: 12, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: "rgba(60,60,67,0.16)" },
   bar: { position: "absolute", left: 0, top: 9, bottom: 9, width: 3, borderTopRightRadius: 3, borderBottomRightRadius: 3 },
-  titleLine: { flexDirection: "row", alignItems: "baseline", gap: 8 },
-  caseTitle: { fontSize: 15, lineHeight: 20, fontWeight: "600", color: colors.ink, flex: 1 },
-  caseTime: { fontSize: 12, lineHeight: 16, fontWeight: "500", color: colors.muted, fontVariant: ["tabular-nums"] },
-  tags: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 2, overflow: "hidden" },
-  tag: { fontSize: 11, lineHeight: 14, fontWeight: "700", borderRadius: 5, paddingHorizontal: 5, paddingVertical: 1, overflow: "hidden" },
-  tagRed: { backgroundColor: "#FFE7E6", color: "#C4161B" }, tagOrange: { backgroundColor: "#FFF0E0", color: "#B35A00" },
-  tagGray: { backgroundColor: "rgba(118,118,128,0.12)", color: "#3A3A3C" }, tagYellow: { backgroundColor: "#FFF6BF", color: "#7D6300" },
-  owner: { fontSize: 12, lineHeight: 16, color: colors.muted, flexShrink: 1 },
+  titleLine: { flexDirection: "row", flexWrap: "wrap", alignItems: "baseline", gap: 8 },
+  caseTitle: { ...type.rowTitle, color: colors.ink, flex: 1 },
+  caseTime: { ...type.caption, color: colors.muted, fontVariant: ["tabular-nums"] },
+  tags: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 2 },
+  tag: { ...type.tag, maxWidth: "100%", borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 },
+  tagRed: { backgroundColor: palette.redSoft, color: palette.redText }, tagOrange: { backgroundColor: palette.orangeSoft, color: palette.orangeText },
+  tagGray: { backgroundColor: palette.fill, color: palette.secondaryLabel }, tagYellow: { backgroundColor: palette.brandSoft, color: palette.brandInk },
+  owner: { ...type.caption, color: colors.muted, flexShrink: 1 },
   detail: { paddingTop: 6, paddingBottom: NAVIGATION_CONTENT_BOTTOM },
   notices: { paddingHorizontal: 16, paddingBottom: 8, gap: 8 },
   chevron: { fontSize: 20, color: "#AEAEB2" },

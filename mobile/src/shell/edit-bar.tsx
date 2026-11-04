@@ -93,7 +93,7 @@ function PinRow({ id, index, count, onRemove, onMove }: { id: ModuleId; index: n
 const s = StyleSheet.create({
   mini: { marginHorizontal: space.l, marginTop: space.s, backgroundColor: palette.card },
   note: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, paddingHorizontal: 22, paddingTop: space.s },
-  done: { minHeight: 36, borderRadius: 18, backgroundColor: palette.brand, paddingHorizontal: 14, alignItems: "center", justifyContent: "center" },
+  done: { minHeight: 44, borderRadius: 22, backgroundColor: palette.brand, paddingHorizontal: 14, paddingVertical: 8, alignItems: "center", justifyContent: "center" },
   doneText: { ...type.rowTitle, color: palette.label },
   pickBar: { flexDirection: "row", alignItems: "center", gap: space.s, marginHorizontal: space.l, marginTop: space.m, padding: space.m, borderRadius: 14, backgroundColor: palette.brandSoft },
   pickText: { ...type.subhead, color: "#3D3000", flex: 1 },

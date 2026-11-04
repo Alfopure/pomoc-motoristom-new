@@ -109,7 +109,7 @@ export function WorkRow({ item, first, now, onOpen }: { item: WorkItem; first: b
     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
       <Text numberOfLines={2} style={s.rowTitle}>{title}</Text>
       <View style={s.rowHead}><Tag text={status.text} tone={status.tone} />{late && <Tag text="Po termíne" tone="red" />}
-        <Text numberOfLines={1} style={[s.rowDetail, { flexShrink: 1 }]}>{termLabel(item.at)}</Text></View>
+        <Text style={[s.rowDetail, { flexShrink: 1 }]}>{termLabel(item.at)}</Text></View>
       {route.some(Boolean) ? <Text numberOfLines={2} style={s.rowDetail}>{route.filter(Boolean).join(" → ")}</Text> : null}
     </View>
     <Text style={s.chevron}>›</Text>
@@ -154,7 +154,7 @@ function OperationDetail({ session, id, active }: { session: FieldWorkSession; i
     if (!step.confirm) { void run(step.action, step.label); return; }
     Alert.alert(step.label, step.confirm, [{ text: "Späť", style: "cancel" }, { text: step.label, onPress: () => { void run(step.action, step.label); } }]);
   };
-  return <ScrollView contentContainerStyle={formLayout.content} keyboardShouldPersistTaps="handled">
+  return <ScrollView contentContainerStyle={formLayout.content} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" automaticallyAdjustKeyboardInsets>
     <DetailHeader title={operationKindLabels[operation.kind] + (operation.vehicle ? " · " + operation.vehicle : "")} subtitle={[operation.from, operation.to].filter(Boolean).join(" → ") || null}
       tags={<Tag text={operationStatusLabels[operation.status]} tone={operationStatusTones[operation.status]} />}
       meta={[operation.caseNumber ? "Prípad " + operation.caseNumber : null, termLabel(operation.scheduledAt)].filter(Boolean).join(" · ")} />
@@ -373,7 +373,7 @@ function TowingDetail({ session, id, active }: { session: FieldWorkSession; id: 
     if (!step.confirm) { void run(step.type, step.label); return; }
     Alert.alert(step.label, step.confirm, [{ text: "Späť", style: "cancel" }, { text: step.label, onPress: () => { void run(step.type, step.label); } }]);
   };
-  return <ScrollView contentContainerStyle={formLayout.content} keyboardShouldPersistTaps="handled">
+  return <ScrollView contentContainerStyle={formLayout.content} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" automaticallyAdjustKeyboardInsets>
     <DetailHeader title={serviceLabels[f.serviceType] + " · " + order.number} subtitle={[f.subjectDescription, f.plate].filter(Boolean).join(" · ") || null}
       tags={<Tag text={towingStatusLabels[order.workStatus]} tone={towingStatusTones[order.workStatus]} />} meta={f.plannedAt ? "Termín " + termLabel(f.plannedAt) : "Bez termínu"} />
     {recovery}

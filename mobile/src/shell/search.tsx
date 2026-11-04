@@ -89,8 +89,8 @@ function countLabel(count: number, more: boolean) { return more || count > LIMIT
 const s = StyleSheet.create({
   content: { paddingBottom: NAVIGATION_CONTENT_BOTTOM },
   title: { ...type.title, color: palette.label, paddingHorizontal: space.l, paddingTop: 2, paddingBottom: space.s },
-  field: { marginHorizontal: space.l, minHeight: 40, borderRadius: 20, backgroundColor: palette.fill, flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: space.m },
-  input: { flex: 1, minHeight: 40, fontSize: 16, color: palette.label, paddingVertical: 0 },
+  field: { marginHorizontal: space.l, minHeight: 48, borderRadius: 16, backgroundColor: palette.fill, flexDirection: "row", alignItems: "center", gap: space.s, paddingHorizontal: space.m },
+  input: { flex: 1, minWidth: 0, minHeight: 48, ...type.body, color: palette.label, paddingVertical: space.s },
   clear: { width: 18, height: 18, borderRadius: 9, backgroundColor: palette.tertiaryLabel, alignItems: "center", justifyContent: "center" },
   hint: { ...type.subhead, color: palette.secondaryLabel, paddingHorizontal: 20, paddingTop: space.s },
   chevron: { fontSize: 20, color: palette.tertiaryLabel },

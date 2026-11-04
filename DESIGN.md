@@ -2,7 +2,9 @@
 
 ## Source of truth
 
-**Status: Draft · 26. 10. 2026.** Návrh webového modulu **Pristavenia a odvozy** v existujúcom dispečingu. Dokument pokrýva tento modul a jeho väzby; neurčuje nový dizajn celej aplikácie. Ide o produktový návrh, nie hotovú implementáciu ani overenie živého nasadenia.
+**Mobilný dizajn: Active · 4. 11. 2026.** Platí [mobilný štandard](docs/mobile/design-standard.md), [audit a realizačný plán](docs/mobile/redesign-plan-2026-11-04.md) a [33 preštudovaných primárnych zdrojov](docs/mobile/ux-ui-sources-2026-11-04.md). Mobilná časť pokrýva spoločný dizajnový systém, navigáciu a existujúce moduly Expo aplikácie. Overenia a stav vydania sú v pláne; tento status sám nepotvrdzuje natívnu akceptáciu.
+
+**Webová logistika: Draft · 26. 10. 2026.** Návrh webového modulu **Pristavenia a odvozy** v existujúcom dispečingu. Dokument pokrýva tento modul a jeho väzby; neurčuje nový dizajn celej aplikácie. Ide o produktový návrh, nie hotovú implementáciu ani overenie živého nasadenia.
 
 Technický realizačný kontrakt bol dopracovaný cez [RALPLAN a sekvenčne schválený architektom aj kritikom](docs/plans/spolocna-aplikacia-20261026.md). Určuje aj dve spresnenia UX: pridelený front jázd sa odlišuje od potvrdenej časovej kapacity; po fyzickom dokončení starším mobilom môže rovnaký úkon na webe zobrazovať „Vykonané · dôkazy čakajú“, kým sa oprávnene doplní evidencia. Prenajaté auto možno plánovať na vyzdvihnutie; voľnosť SWHouse je podmienkou až nového použitia a pripravenosti.
 
@@ -26,9 +28,13 @@ Podkladom je lokálny checkout `f62ea2a` a tieto existujúce časti:
 
 ## Brand
 
+**Mobil:** pokojný pracovný nástroj Linky pomoci, svetlý podklad, žltá značka, jednotné Lucide ikony. Čitateľnosť má prednosť pred dekoráciou; Liquid Glass iba v navigácii a ovládačoch.
+
 Pracovný nástroj Pomoc motoristom: vecný, úsporný, čitateľný pri telefonovaní. Dôveru vytvára jasný zodpovedný človek, čas poslednej zmeny, overiteľný priebeh a poctivé označenie neznámych údajov. Zachovať vizuálny jazyk dispečingu.
 
 ## Product goals
+
+**Mobil:** naliehavé veci pred metrikami, rýchlo nájsť správny modul a ďalší krok, celé názvy a adresy, ovládanie pri veľkom písme. Nemeniť funkčný rozsah rolí, hovorov ani rozpracovaných zápisov.
 
 - Dispečer na jednej obrazovke zistí, čo treba pristaviť alebo odviezť, kedy, odkiaľ, kam a kto to vykoná.
 - Údaje prípadu, klienta a flotily sa využijú bez opakovaného prepisovania. Všetky pohľady otvárajú ten istý úkon.
@@ -43,6 +49,8 @@ Prvá verzia pokrýva web. Nové mobilné funkcie, automatické optimalizovanie 
 
 ## Personas and jobs
 
+**Mobil:** dispečer rieši prípady a hovory; vodič/pristavovač vykonáva vlastnú prácu v teréne; miestny dispečer preberá a prideľuje požiadavky. Jednotná kostra zobrazuje iba ich existujúce povolené moduly.
+
 | Používateľ | Potrebuje |
 | --- | --- |
 | Dispečer | Založiť úkon z prípadu, nájsť auto, dohodnúť čas, prideliť človeka, riešiť zmeny a problémy. |
@@ -53,6 +61,8 @@ Prvá verzia pokrýva web. Nové mobilné funkcie, automatické optimalizovanie 
 Rozsah pobočiek a práv sa overuje na serveri. Právo pristavovať (`deliver`) a viesť odťahovku (`drive`) zostáva odlíšené. Používateľ môže mať obe.
 
 ## Information architecture
+
+**Mobil:** zachovať Prehľad · tri používateľove moduly · Moduly. Prehľad: živý hovor → Treba riešiť → Vaša práca → Telefón. Moduly: hľadanie a povolené moduly s celým názvom/popismi → úprava lišty → účet a prístupy. Nastavenie modulu má viditeľnú akciu Možnosti.
 
 Do prevádzkovej skupiny spoločnej navigácie pri **Flotile** pridať **Pristavenia a odvozy**. Použiť rovnakú hlavičku, účet, telefóniu podľa oprávnenia a návrat na prípad. Pri prepnutí modulu sa zachová rozpracovaný hovor a stav prípadu. Konkrétnu URL určí implementácia podľa navigácie dispečingu; hlboký odkaz musí otvoriť rovnaký úkon po obnovení stránky.
 
@@ -115,6 +125,8 @@ Ilustračný prípad: v pondelok ide poškodené auto do servisu a pristavovač 
 
 ## Design principles
 
+**Mobil:** skutočné dotykové plochy aspoň 44 bodov, stav textom aj farbou, jedna výrazná hlavná akcia, gestá len ako skratky. Rozloženie sa prispôsobí priestoru a systémovému písmu; nezmenšuje dôležitý text, aby sa vošiel.
+
 - Prípad je spoločný kontext; úkon je samostatne vykonateľná práca. Pridelenie, prijatie a vykonanie sú rôzne udalosti.
 - Prevádzkový stav, stav prenájmu, dostupnosť vozidla a finančné vyrovnanie sa zobrazujú oddelene.
 - Software House zostáva zdrojom obsadenosti; Commander a poloha telefónu pomáhajú s polohou. GPS nedokazuje voľné auto ani dokončenú jazdu.
@@ -124,9 +136,13 @@ Ilustračný prípad: v pondelok ide poškodené auto do servisu a pristavovač 
 
 ## Visual language
 
+**Mobil:** `mobile/src/design/tokens.ts` vlastní farby, písmo, zaoblenie a rozostupy. Nadpis 32, detail 24, číslo 30, riadok/telo 16, podnadpis 14, sekcia 15, metadáta 13, štítok 12, navigácia 11 bodov. Tabuľka tokenov v mobilnom štandarde je záväzná. Biele nepriehľadné skupiny na systémovom podklade, plynulé rohy; existujúci natívny sklenený povrch má čitateľnú náhradu.
+
 Použiť existujúci `dispatch-app-shell`: systémové písmo a kompaktnú hustotu, neutrálny svetlý podklad, dnešné vstupy, tlačidlá a ikony Lucide. Návrh nepridáva vlastnú paletu ani paralelný systém tokenov. Farba dopĺňa text stavu; červená označuje problém alebo meškanie, nie bežnú rozpracovanosť. Minimálna animácia, stabilné riadky počas obnovy.
 
 ## Components
+
+**Mobil:** rozšíriť existujúce Group/Row, Field/FormSection, DetailHeader/InfoRow/ActionBar, Sheet, Segmented a DockTabBar. Rozloženie riešia spoločné `columnsForWidth`/`gridItemWidth`; nevytvárať druhý dizajnový systém. Dlhé detaily a akcie sa zalomia.
 
 - Opätovne použiť spôsob navigácie dispečingu, jeho tabuľky, filtre, formuláre adries, dialóg SMS, otvorenie prípadu a detail auta. Zdieľanú logiku vyčleniť podľa potreby, nekopírovať celý `DispatchConsole`.
 - Existujúce `CaseHandoffPanel` a `HandoffSummary` sú východisko pre pridelenie, náhľad a históriu; nepredstierajú hotové plánovanie odvozov.
@@ -137,13 +153,19 @@ Použiť existujúci `dispatch-app-shell`: systémové písmo a kompaktnú husto
 
 ## Accessibility
 
+**Mobil:** VoiceOver názvy obsahujú stav/termín/podnadpis, významové textové tóny a odznaky majú cieľ kontrastu 4,5 : 1. Obsah podporuje systémové písmo; dock rastie do 2× a má Large Content Viewer. Rešpektovať Reduce Motion/Transparency. Webová automatická skúška nenahrádza natívne VoiceOver/TalkBack ani overenie systémového skla.
+
 Návrhový cieľ je WCAG 2.2 AA; splnenie sa preverí pri implementácii. Tabuľka má hlavičky, stavové štítky text a ovládacie prvky dostupné názvy. Celý postup pridelenia a zmeny termínu funguje klávesnicou. Detail spravuje fokus a po zatvorení ho vráti na pôvodný riadok. Presúvanie v pláne má alternatívu cez tlačidlo a formulár. Zmeny stavu sa oznámia bez odoberania fokusu; rešpektovať obmedzený pohyb.
 
 ## Responsive behavior
 
+**Mobil:** overiť 320, 390, 768 bodov; mriežka sa riadi nameranou vnútornou šírkou a fontScale, pri menšej ploche/veľkom písme prejde do jedného stĺpca. Dock má max. 560 bodov a je centrovaný vo svojom rodičovi. Pri klávesnici ustúpi dock; terénne formuláre prispôsobia insets a mapa počas písania dôvodu ustúpi.
+
 Priorita je desktopový web: od približne 1280 px tabuľka a detail vedľa seba; na menšom okne detail prekryje pracovnú plochu. Pod existujúcou hranicou 1024 px použiť jednu plochu a kompaktné karty s rovnakým obsahom. Telefón pristavovača používa responzívny web, nejde o zmenu natívnej aplikácie. Hlavné kroky majú viditeľný text a dostatočné dotykové plochy.
 
 ## Interaction states
+
+**Mobil:** načítanie a chyba sa nikdy nevydávajú za vybavenú prácu. Prázdny stav až po úspešnej odpovedi príslušného zdroja vrátane frontu pobočky. Obnova má viditeľný stav; neisté zápisy, potvrdenia hovorov a obnova konceptov zostávajú v existujúcich modeloch.
 
 - **Nové / Naplánované → Pridelené · čaká na prijatie → Prijaté → Na ceste → Na mieste → Dokončené.** Pri pristavení posledná akcia znie **Auto odovzdané klientovi**. Pri vyzdvihnutí sa medzi príchodom ku klientovi a dokončením eviduje **Auto prevzaté → Doručené do cieľa**. Krok kontroly auta je samostatný.
 - **Problém** je viditeľné upozornenie s dôvodom, vlastníkom a ďalším krokom; nestratí sa informácia, v akej fáze problém vznikol. Odmietnutie pridelenia ponechá samotný úkon otvorený na nové pridelenie.
@@ -155,13 +177,17 @@ Priorita je desktopový web: od približne 1280 px tabuľka a detail vedľa seba
 
 ## Content voice
 
+**Mobil:** krátka vecná slovenčina, konkrétne Zavolať/Vybrať číslo/Pokračovať. Zachovať celé názvy modulov; skratka Pristav. je iba v úzkej navigácii, dostupný názov je celý. Súradnice a formuláre majú trvalé viditeľné popisy.
+
 Používať slovenské prevádzkové názvy: **Pristavenie**, **Vyzdvihnutie od klienta**, **Presun medzi pobočkami**, **Odťah poškodeného vozidla**. V detaile byť presnejší než všeobecné „odvoz“. Rozlíšiť **Dohodnuté**, **Odhad**, **Zatiaľ neurčené**. Časy zobrazovať v `Europe/Bratislava`. Žiadne technické názvy databázových tabuliek alebo interné prepínače v používateľskom postupe.
 
 ## Implementation constraints
 
+**Mobil:** Expo 57 / React Native 0.86.3 / React 19.2.3, existujúce závislosti. Preštudované verziované API; žiadny upgrade ani zmena serverových oprávnení, providerov alebo databázy. Natívne OTA sú vypnuté: nový dizajn na iPhone potrebuje nový overený TEST build; Vercel build ho nenahrádza.
+
 ### Rozsah a kompatibilita
 
-Existujúci framework je Next.js 16.3.8 / React 19.2.4. Pred kódovaním treba prečítať relevantné lokálne návody Next.js a oficiálne skills pre príslušný framework. Tento návrh nepridáva závislosti, migrácie, provider zápisy, worker, listener ani cron. Prípadná implementácia prejde bežným postupom cez stabilný TEST; produkcia zostáva samostatne schvaľovaná podľa `AGENTS.md`.
+Existujúci framework je Next.js 16.4.1 / React 19.2.4. Pred kódovaním treba prečítať relevantné lokálne návody Next.js a oficiálne skills pre príslušný framework. Tento návrh nepridáva závislosti, migrácie, provider zápisy, worker, listener ani cron. Prípadná implementácia prejde bežným postupom cez stabilný TEST; produkcia zostáva samostatne schvaľovaná podľa `AGENTS.md`.
 
 ### Dátové hranice, ktoré treba pri implementácii zachovať
 
@@ -196,6 +222,8 @@ Ide o lokálne etapy logistického modulu; ich zaradenie medzi Final CD, Erosove
 - Overiť desktop aj úzky web, ovládanie klávesnicou a autentifikovaný tok oboch rolí na identifikovanom stabilnom TEST commite. Existujúce testy a build brána sa použijú primerane zmenenému správaniu.
 
 ## Open questions
+
+**Mobil:** smerovanie a vizuálny rozsah vyplývajú z požiadavky majiteľa. Fyzická skúška iPhone/Android, VoiceOver a živé audio zostávajú samostatným dôkazom; nezamieňať výskumné odporúčanie s certifikáciou Apple.
 
 Nejasnosti neblokujú tento produktový návrh; pred implementáciou sa uzavrú len tie, ktoré menia daný rozsah.
 

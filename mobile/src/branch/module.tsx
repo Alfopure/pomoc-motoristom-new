@@ -109,7 +109,7 @@ function RequestRow({ request, first, now, onOpen }: { request: MobileBranchRequ
     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
       <Text numberOfLines={2} style={fieldStyles.rowTitle}>{title}</Text>
       <View style={fieldStyles.rowHead}><Tag text={branchStateLabels[state]} tone={branchStateTones[state]} />{late && <Tag text="Po termíne" tone="red" />}
-        <Text numberOfLines={1} style={[fieldStyles.rowDetail, { flexShrink: 1 }]}>{termLabel(request.dueAt)}</Text></View>
+        <Text style={[fieldStyles.rowDetail, { flexShrink: 1 }]}>{termLabel(request.dueAt)}</Text></View>
       <Text numberOfLines={2} style={fieldStyles.rowDetail}>{[[request.pickup, request.destination].filter(Boolean).join(" → "), holder].filter(Boolean).join(" · ") || request.groupName}</Text>
     </View>
     <Text style={fieldStyles.chevron}>›</Text>

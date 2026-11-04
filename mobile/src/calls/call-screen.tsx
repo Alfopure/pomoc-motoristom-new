@@ -255,13 +255,13 @@ function Round({ label, accessibilityLabel, icon: Icon, onPress, active, disable
   return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ disabled: Boolean(disabled), selected: Boolean(active) }}
     disabled={disabled} onPress={onPress} style={({ pressed }) => [s.round, disabled && { opacity: 0.4 }, pressed && { opacity: 0.7 }]}>
     <View style={[s.roundIcon, active && { backgroundColor: palette.label }]}><Icon size={26} strokeWidth={2.2} color={active ? "#FFFFFF" : palette.label} accessible={false} /></View>
-    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.roundLabel}>{label}</Text>
+    <Text style={s.roundLabel}>{label}</Text>
   </Pressable>;
 }
 function Big({ label, color, icon: Icon, onPress }: { label: string; color: string; icon: typeof Mic; onPress: () => void }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={({ pressed }) => [s.big, pressed && { opacity: 0.8 }]}>
     <View style={[s.bigIcon, { backgroundColor: color }]}><Icon size={30} strokeWidth={2.4} color="#FFFFFF" accessible={false} /></View>
-    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.roundLabel}>{label}</Text>
+    <Text style={s.roundLabel}>{label}</Text>
   </Pressable>;
 }
 
@@ -283,7 +283,7 @@ const s = StyleSheet.create({
   status: { fontSize: 17, lineHeight: 22, fontWeight: "600", textAlign: "center", fontVariant: ["tabular-nums"] },
   line: { ...type.subhead, color: palette.secondaryLabel, textAlign: "center" },
   context: { flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: space.s, marginTop: space.m },
-  pill: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 36, borderRadius: 18, paddingHorizontal: 14, backgroundColor: palette.brandSoft },
+  pill: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "center", gap: 6, minHeight: 44, borderRadius: 22, paddingHorizontal: space.m, paddingVertical: space.s, backgroundColor: palette.brandSoft },
   pillCompact: { gap: 4, paddingHorizontal: 10 },
   pillLabel: { fontSize: 14, lineHeight: 18, fontWeight: "600", color: palette.brandInk },
   grid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: space.l, marginTop: space.xl, maxWidth: 320 },
@@ -302,10 +302,10 @@ const s = StyleSheet.create({
   recordingState: { flexDirection: "row", alignItems: "center", gap: 6 },
   recordingDot: { width: 9, height: 9, borderRadius: 5 },
   recordingLabel: { ...type.subhead, fontWeight: "600", color: palette.label },
-  recordingButton: { minHeight: 36, justifyContent: "center", borderRadius: 18, paddingHorizontal: 14, backgroundColor: palette.redSoft },
+  recordingButton: { minHeight: 44, justifyContent: "center", borderRadius: 22, paddingHorizontal: space.m, paddingVertical: space.s, backgroundColor: palette.redSoft },
   recordingButtonLabel: { fontSize: 14, lineHeight: 18, fontWeight: "600", color: palette.redText },
   noticeText: { ...type.subhead, color: palette.secondaryLabel, textAlign: "center" },
-  bottom: { flexDirection: "row", justifyContent: "center", gap: 64, paddingTop: space.m },
+  bottom: { flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: space.xxl, paddingTop: space.m },
   big: { alignItems: "center", gap: 6, minWidth: 84 },
   bigIcon: { width: 74, height: 74, borderRadius: 37, alignItems: "center", justifyContent: "center" },
 });
