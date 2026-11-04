@@ -1,5 +1,67 @@
 # Dispatching v App Store – podklady
 
+## Stav podania 1.0 (4. 11. 2026)
+
+- **Podané 4. 11. 2026**, verzia 1.0, build 3 z `main` `eebaa832`, stav Waiting for Review.
+  App Store Connect `6830148973`, bundle `sk.linkapomoci.dispecing`, SKU `dispatching-prod`.
+- **Vydanie je manuálne a nesmie sa spustiť, kým Apple neschváli Unlisted.** Žiadosť
+  o Unlisted bola podaná 4. 11. hneď po podaní na kontrolu. Ak by sa appka vydala skôr,
+  ostala by verejná natrvalo (spôsob distribúcie sa po schválení nedá zmeniť).
+- Krajiny SK, CZ, HU, PL; zadarmo; DSA obchodník MICT, s. r. o. aktívny (27 krajín EÚ,
+  verejný kontakt +421 910 988 882, info@alfopure.tech).
+- Štítky App Privacy publikované (12 typov údajov, všetko „App Functionality“, prepojené
+  s používateľom, bez sledovania), zhodné s privacy manifestom. Telnyx call reports sú
+  v appke vypnuté (`enableCallReports: false`).
+- Recenzentský účet „Apple Review“ (`michal.michalek+applereview@alfopure.tech`, heslo je
+  len v App Store Connect → App Review Information): Dispečer + Pristavovač + Vodič +
+  miestny dispečer pobočky „Kontrola Apple“. **Musí ostať aktívny** aj po schválení.
+  Ukážkové dáta: pristavenie ponúknuté recenzentovi (platí do 6. 11. 2026, potom vydať
+  nové), jazda v Moja práca (termín 10. 11.) a požiadavka pobočky. Recenzent volá len na
+  testovaciu linku +421 2 3240 8774 (TEST). K podaniu je priložené video prichádzajúceho
+  hovoru na zamknutom iPhone.
+- Snímky 6,7"/6,9" (1290 × 2796) z produkčnej appky s recenzentským účtom; skutočné
+  číslo spätného volania je rozmazané.
+
+### Ďalšie kroky (stav 4. 11. 2026, pokračovať v novom chate)
+
+1. **Čakať na Apple.** E-mail o kontrole 1.0 a o Unlisted. Po schválení kontroly
+   **nevydávať, kým nepríde schválenie Unlisted.** Potom vydať manuálne a poslať odkaz.
+2. **Demo dáta recenzenta:** pristavenie platí do 6. 11. 2026, potom vydať nové
+   (recenzent `2d9d9ab5-…` v pobočke „Kontrola Apple“); demo jazda má termín 10. 11.
+3. **Po vydaní 1.0:**
+   - zapnúť mobilné latency flagy stage D v produkcii a urobiť skúšobný hovor,
+   - obmedziť recenzentský účet, aby nevidel skutočné prípady (musí ostať aktívny),
+   - produkcia `sip_domain: eu` (`EU_SIP_DOMAIN_PROVEN`).
+4. **Verzia 1.1 s OTA aktualizáciami (rozhodnutie majiteľa 4. 11. 2026).** Majiteľ chce
+   časté zmeny layoutu a menšie funkcie s nasadením do jedného dňa. Apple kontroluje
+   50 % podaní do 24 h a 90 % do 48 h, čo to nezaručí. Preto:
+   - zapnúť `expo-updates` (EAS Update) s `runtimeVersion` a **podpisovaním aktualizácií**
+     (Expo code signing), kanály TEST a produkcia, najprv TEST a po súhlase majiteľa produkcia;
+   - cez OTA iba JS, štýly, texty a layout v rámci existujúcich funkcií (pravidlo 2.5.2);
+     nové povolenia, natívny kód, knižnice a SDK vždy novou verziou cez App Review;
+   - 1.1 pôjde raz cez App Review, potom sú bežné zmeny u ľudí pri ďalšom spustení appky.
+5. **Server, čaká na súhlas s produkciou:** PR #566, zrozumiteľná chyba „Máte rozbehnutú
+   inú prácu“ v Pristaveniach. Je na TEST (`dev` `942f5374`), do `main` až po súhlase majiteľa.
+6. **Otvorené z volaní:** vyzváňací tón počas zvonenia zákazníka (SDK 31006, falošné
+   `call_interruption`); konzultácia a prepojenie na `eu` overiť naživo.
+
+Overené na zariadení 4. 11. 2026: produkčné hovory (odchádzajúce aj prichádzajúce na
+zamknutom iPhone), produkčné notifikácie (Expo receipt `ok`) a poloha na pozadí pri
+zamknutom telefóne s povolením „Pri používaní“ (TEST, 7 polôh za 3 minúty počas pohybu).
+
+
+| Položka | ID | Platí do | Dôsledok |
+|---|---|---|---|
+| VoIP Services certifikát (produkcia) | `7VXUH8LBC6`, Telnyx push credential `421c315e…` | **3. 12. 2027** | prestane zvoniť pri zamknutom telefóne |
+| Apple Distribution certifikát | `54NCTXKNLT` | 22. 10. 2027 | nedá sa podpísať build |
+| App Store profil produkcie | `YNMG98U25U` | 22. 10. 2027 | nedá sa podpísať build |
+| APNs kľúč (Expo, iba téma produkcie) | `NVGAUGKD6Q` | neexpiruje | — |
+
+Súkromné kľúče sú iba na Macu majiteľa v `~/conductor/builds/dispatching-test/private/signing/`.
+Pred obnovou VoIP certifikátu vytvoriť nový Telnyx iOS push credential a pripojiť ho
+na `pomoc-motoristom-webrtc`.
+
+
 Podklady pre App Store Connect pripravené 20. 10. 2026, doplnené rozhodnutiami
 majiteľa z 3. 11. 2026 (App Store Connect `6830148973`, SKU `dispatching-prod`). Vypĺňa ich vydavateľ
 **MICT, s. r. o.** po schválení Apple Developer Program. Texty a právne
