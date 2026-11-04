@@ -29,6 +29,8 @@ export type WebhookClaimOutcome = ClaimRpcResult["outcome"];
 export type WebhookEventStatus = ClaimRpcResult["event_status"];
 
 export const WEBHOOK_CLAIM_STALE_AFTER_MS = 30_000;
+/** Give the existing five-minute recovery cron a chance; retries never reset this receipt-age limit. */
+export const LEDGER_RETRY_GRACE_MS = 10 * 60_000;
 
 export type ClaimWebhookEventInput = {
   eventId: string;

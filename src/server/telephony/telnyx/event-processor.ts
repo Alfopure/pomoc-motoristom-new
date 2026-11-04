@@ -20,7 +20,7 @@ import { concurrentBridgeSessionDueAt, readMeta, sessionSipDomain, telnyxSipUri,
 import { loadParticipantManifest, observeParticipants } from "../state/participants";
 import { enqueueSavedRecording } from "../recording-jobs";
 import { recordingIntent } from "../state/recording";
-import { claimWebhookEvent, markWebhookEventFailed, markWebhookEventProcessed, pendingLedgerControlIds, WEBHOOK_CLAIM_STALE_AFTER_MS, type WebhookClaim } from "./webhook-ledger";
+import { claimWebhookEvent, LEDGER_RETRY_GRACE_MS, markWebhookEventFailed, markWebhookEventProcessed, pendingLedgerControlIds, WEBHOOK_CLAIM_STALE_AFTER_MS, type WebhookClaim } from "./webhook-ledger";
 import { acceptsTestProviderEvent, getTestProviderSafety, hasTestCallProvenance } from "./test-safety";
 import { decodeClientState } from "./client-state";
 import { freezeStartMode, latencyFlagsOf, providerRegionOf, sessionApiRegion } from "../latency-flags";
@@ -129,6 +129,8 @@ export type ProcessorResult = {
   error: string | null;
   /** Closed diagnostic cause; does not control retries or acknowledgement. */
   failureKind?: WebhookFailureKind;
+  /** Proven pre-effect contention saved for retry; diagnostic policy only. */
+  durableDeferral?: "lease_busy";
   ms: number;
 };
 
@@ -982,7 +984,14 @@ export async function processTelnyxEvent(deps: ProcessorDeps, envelope: unknown)
     // whose transition may have applied).
     const acknowledged = selfDrain && drainScheduled && Date.now() - ingressWall <= DEFERRED_ACK_MAX_ELAPSED_MS;
     const status = acknowledged || (eventClass === "control" && session && !deferred) ? 200 : 500;
-    return done({ ...identity, claim, sessionId: session?.id ?? null, status, outcome: acknowledged ? "deferred" : "failed", failureKind, error: message });
+    // A successful finish can also dead-letter an expired deferral. Only a
+    // trustworthy receipt still inside the health/recovery grace proves a wait
+    // which may be quiet initially; retries must never restart that clock.
+    const receiptAge = claim.receivedAt ? nowOf(deps)().getTime() - Date.parse(claim.receivedAt) : NaN;
+    const freshRetry = claim.terminalReason === null && ["ready", "deferred"].includes(claim.retryState)
+      && Number.isFinite(receiptAge) && receiptAge >= 0 && receiptAge < LEDGER_RETRY_GRACE_MS;
+    return done({ ...identity, claim, sessionId: session?.id ?? null, status, outcome: acknowledged ? "deferred" : "failed", failureKind,
+      ...(durable && freshRetry && !processingStarted && error instanceof SessionLeaseBusyError ? { durableDeferral: "lease_busy" as const } : {}), error: message });
   }
 }
 
