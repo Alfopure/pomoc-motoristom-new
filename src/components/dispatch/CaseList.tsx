@@ -370,6 +370,7 @@ function FilterSelect({
     <label className="block min-w-0">
       <span className="mb-1 block text-[10px] font-semibold uppercase tracking-normal text-zinc-500">{label}</span>
       <select
+        aria-label={label}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className="h-11 w-full min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-base font-medium text-zinc-800 outline-none ring-yellow-300 transition focus:ring-2 lg:h-8 lg:text-xs"

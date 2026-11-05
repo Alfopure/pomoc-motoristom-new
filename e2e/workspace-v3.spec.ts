@@ -423,7 +423,7 @@ test("inline case draft survives repeat row selection and desktop-mobile-desktop
   const row = page.locator(".dispatch-workspace-upper").getByRole("button", { name: "Otvoriť prípad PM-2026-0517", exact: true });
   await row.click();
   const editor = page.getByTestId("case-edit-form-main");
-  await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
+  await expect(editor).toBeVisible();
   const plate = editor.getByLabel("EČV", { exact: true });
   await plate.fill("RESIZE77");
   await editor.evaluate(node => node.setAttribute("data-inline-draft", "retained"));
@@ -439,5 +439,18 @@ test("inline case draft survives repeat row selection and desktop-mobile-desktop
     if (width >= 1024) await expect(search).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   }
+  expect(errors).toEqual([]);
+});
+
+test("first overview entry preserves an active-case scope already narrowed by priority", async ({ page }) => {
+  const errors = await boot(page, 1440);
+  const list = page.getByTestId("dispatch-case-list");
+  await list.getByRole("button", { name: "Filtre", exact: true }).click();
+  await list.getByLabel("Priorita", { exact: true }).selectOption("urgent");
+  await page.locator(".workspace-center-tabs").getByRole("tab", { name: "Prehľad prípadov", exact: true }).click();
+  const directory = page.getByRole("region", { name: "Prehľad prípadov", exact: true });
+  await expect(directory.getByRole("button", { name: /^Aktívne/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(directory.getByLabel("Priorita", { exact: true })).toHaveValue("urgent");
+  await expect(directory.getByRole("button", { name: "Otvoriť prípad PM-2026-0517", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });

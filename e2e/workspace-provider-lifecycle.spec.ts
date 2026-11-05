@@ -30,3 +30,42 @@ test("capability refresh preserves the surrounding case draft and clears private
   await expect(page.getByLabel("Rozpracovaný kontakt prípadu")).toHaveValue("Zachovať neuložený kontakt");
   await expect(page.getByText("Súkromná poznámka 1", { exact: true })).toHaveCount(0);
 });
+
+test("disabled task workspace leaves legacy case tasks intact and performs no requests", async ({ page }) => {
+  const requests: string[] = [];
+  await page.route("**/*", route => {
+    const url = new URL(route.request().url());
+    if (url.origin === "https://provider-lifecycle.test" && url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<html><div id="root"></div></html>' });
+    requests.push(url.href);
+    return route.abort();
+  });
+  await page.goto("https://provider-lifecycle.test/?legacy=1");
+  await page.addScriptTag({ content: script });
+  await expect(page.getByLabel("Načítané úlohy")).toBeEmpty();
+  await page.getByLabel("Rozpracovaný kontakt prípadu").fill("Pôvodná karta prípadu");
+  await page.getByRole("button", { name: "Obnoviť úlohy" }).click();
+  await expect(page.getByLabel("Úlohy prípadu", { exact: true })).toHaveText("Pôvodná úloha prípadu");
+  expect(requests).toEqual([]);
+});
+
+test("enabled task workspace clears its published case tasks after access is revoked", async ({ page }) => {
+  let revoked = false;
+  await page.route("**/*", route => {
+    const url = new URL(route.request().url());
+    if (url.origin !== "https://provider-lifecycle.test") return route.abort();
+    if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<html><div id="root"></div></html>' });
+    if (url.pathname === "/api/notes/colleagues") return route.fulfill({ json: { colleagues: [] } });
+    if (url.pathname === "/api/notes") return route.fulfill({ json: { notes: [] } });
+    if (url.pathname === "/api/tasks") return revoked
+      ? route.fulfill({ status: 403, json: { error: "Prístup bol odobratý" } })
+      : route.fulfill({ json: { tasks: [{ id: "task-private", title: "Súkromná úloha", revision: 1 }] } });
+    return route.abort();
+  });
+  await page.goto("https://provider-lifecycle.test/");
+  await page.addScriptTag({ content: script });
+  await expect(page.getByLabel("Úlohy prípadu", { exact: true })).toHaveText("Súkromná úloha");
+  revoked = true;
+  await page.getByRole("button", { name: "Obnoviť úlohy" }).click();
+  await expect(page.getByLabel("Načítané úlohy")).toBeEmpty();
+  await expect(page.getByLabel("Úlohy prípadu", { exact: true })).toBeEmpty();
+});

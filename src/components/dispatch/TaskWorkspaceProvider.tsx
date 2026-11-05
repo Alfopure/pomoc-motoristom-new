@@ -17,7 +17,7 @@ function TaskWorkspaceSession({ children, actorKey, enabled = false, initialTask
   useLayoutEffect(() => { store.setEnabled(enabled); }, [store, enabled]);
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   useEffect(() => { store.setOnTasksChange(onTasksChange); return () => { store.setOnTasksChange(undefined); }; }, [store, onTasksChange]);
-  useEffect(() => { if (snapshot.hidden) onTasksChange?.([]); }, [snapshot.hidden, onTasksChange]);
+  useEffect(() => { if (enabled && snapshot.hidden) onTasksChange?.([]); }, [enabled, snapshot.hidden, onTasksChange]);
   useEffect(() => { if (initialTasks) store.setTasks(initialTasks); }, [store, initialTasks]);
   useEffect(() => {
     if (!enabled) return;
