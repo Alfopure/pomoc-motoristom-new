@@ -3,9 +3,17 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from "react";
 import { Truck } from "lucide-react";
 import Link from "next/link";
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { signOutCurrentSession } from "@/components/auth/sign-out";
 import styles from "./towing.module.css";
+
+export type PendingChangesReporter = (pending: boolean) => void;
+
+/** Report the form's actual state and release its report when it unmounts. */
+export function usePendingChanges(pending: boolean, onChange?: PendingChangesReporter) {
+  useEffect(() => { onChange?.(pending); }, [onChange, pending]);
+  useEffect(() => () => onChange?.(false), [onChange]);
+}
 
 export function Button({ primary, danger, className = "", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { primary?: boolean; danger?: boolean }) {
   return <button {...props} className={`${styles.button} ${primary ? styles.primary : ""} ${danger ? styles.danger : ""} ${className}`} />;
@@ -28,8 +36,9 @@ export function Panel({ title, children }: { title: string; children: ReactNode 
 export function Notice({ children, kind = "notice" }: { children: ReactNode; kind?: "notice" | "error" | "success" }) {
   return <div role={kind === "error" ? "alert" : "status"} className={`${styles.notice} ${kind === "notice" ? "" : styles[kind]}`}>{children}</div>;
 }
-export function Shell({ children, view, canOffice, canDriver, canDispatch, canDeliver, canPartner, canBranch }: { children: ReactNode; view: "office" | "driver" | "operations" | "branch"; canOffice?: boolean; canDriver?: boolean; canDispatch?: boolean; canDeliver?: boolean; canPartner?: boolean; canBranch?: boolean }) {
+export function Shell({ children, view, canOffice, canDriver, canDispatch, canDeliver, canPartner, canBranch, embedded = false }: { children: ReactNode; view: "office" | "driver" | "operations" | "branch"; canOffice?: boolean; canDriver?: boolean; canDispatch?: boolean; canDeliver?: boolean; canPartner?: boolean; canBranch?: boolean; embedded?: boolean }) {
   const [signingOut, setSigningOut] = useState(false);
   const [error, setError] = useState("");
+  if (embedded) return <div className={styles.embedded}>{children}</div>;
   return <div className={styles.shell}><header className={styles.header}><div className={styles.brand}><span className={styles.brandIcon}><Truck size={24} /></span><span>POMOC MOTORISTOM<br /><small className={styles.muted}>{view === "operations" ? "Výjazdy a odvozy" : view === "branch" ? "Pobočka" : "Zákazky odťahovej služby"}</small></span></div><nav aria-label="Rozhrania">{canOffice && <Link href="/zakazky" aria-current={view === "office" ? "page" : undefined}>Kancelária</Link>}{canDriver && <Link href="/vodic" aria-current={view === "driver" ? "page" : undefined}>Moje zákazky</Link>}{(canDriver || canDeliver) && <Link href="/moje-jazdy" aria-current={view === "operations" ? "page" : undefined}>Moje jazdy</Link>}{canBranch && <Link href="/pobocka" aria-current={view === "branch" ? "page" : undefined}>Pobočka</Link>}{canDispatch && <Link href="/">Dispečing</Link>}{canPartner && <Link href="/partner">Partnerské výstupy</Link>}<button disabled={signingOut} onClick={async () => { setSigningOut(true); try { await signOutCurrentSession(); } catch { setError("Odhlásenie sa nepodarilo dokončiť. Skúste ho znova."); } finally { setSigningOut(false); } }}>{signingOut ? "Odhlasujem…" : "Odhlásiť"}</button></nav></header><main className={styles.main}>{error && <Notice kind="error">{error}</Notice>}{children}</main></div>;
 }

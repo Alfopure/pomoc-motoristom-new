@@ -13,7 +13,7 @@ import { CallMonitorInvitations } from "./CallMonitorInvitations";
 import { canInviteMonitor } from "@/lib/telephony/monitor-invitations";
 import { requestCallbackTargetConfirmation } from "@/lib/telephony/callback-target-client";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -148,9 +148,12 @@ import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
 type View = "dispatch" | PinnableNavigationView;
 
+const TowingModule = lazy(() => import("@/components/towing/TowingModule").then(module => ({ default: module.TowingModule })));
+
 type NavigationOptions = {
   beforeNavigate?: () => boolean;
   documentNavigation?: boolean;
+  towingExit?: boolean;
 };
 
 type NavigationGroup = "daily" | "operations" | "management";
@@ -247,7 +250,8 @@ function DispatchConsoleContent({
   viewerOrganizationId,
   viewerProfileId,
   viewerRole,
-  towingHref,
+  towingAccess,
+  fieldWorkspaceHref,
 }: {
   initialData: DispatchData;
   layoutPreviewEnabled?: boolean;
@@ -259,7 +263,8 @@ function DispatchConsoleContent({
   viewerProfileId?: string;
   /** The signed-in profile's role; only supervision is gated on it in the console. */
   viewerRole?: AppRole;
-  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy" | "/pobocka";
+  towingAccess?: { office: boolean; driver: boolean };
+  fieldWorkspaceHref?: "/moje-jazdy" | "/pobocka";
 }) {
   const { mode: layoutMode } = useLayoutPreview();
   const updateAvailable = useAppUpdate(appVersion);
@@ -301,6 +306,11 @@ function DispatchConsoleContent({
     users[0]?.name ||
     "Prihlásený používateľ";
   const [activeView, setActiveView] = useState<View>("dispatch");
+  const [towingVisited, setTowingVisited] = useState(false);
+  const [towingPendingReveal, setTowingPendingReveal] = useState(0);
+  const canUseTowing = Boolean(towingAccess?.office || towingAccess?.driver);
+  const towingPendingRef = useRef(false);
+  const handleTowingPendingChanges = useCallback((pending: boolean) => { towingPendingRef.current = pending; }, []);
   const [routingTarget, setRoutingTarget] = useState<RoutingNavigationTarget | null>(null);
   const routingNavigationUrl = useRef<string | null>(null);
   const pendingRoutingUrl = useRef<string | null>(null);
@@ -927,6 +937,7 @@ function DispatchConsoleContent({
     { group: "operations", icon: Truck, label: "Flotila", shortLabel: "Flotila", view: "fleet" },
     { group: "operations", icon: Building2, label: "Pobočky", shortLabel: "Pobočky", view: "branches" },
     { group: "operations", icon: MapPinned, label: "Výjazdy a odvozy", shortLabel: "Výjazdy", view: "operations" },
+    ...(canUseTowing ? [{ group: "operations" as const, icon: Truck, label: towingAccess?.office ? "Kniha odťahov" : "Moje odťahy", shortLabel: "Odťahy", view: "towing" as const }] : []),
     { group: "operations", icon: ClipboardCheck, label: "Partneri", shortLabel: "Partneri", view: "partners" },
     { group: "management", icon: BarChart3, label: "Reporty", shortLabel: "Reporty", view: "reports" },
     { group: "management", icon: Settings2, label: "Nastavenia", shortLabel: "Nastav.", view: "settings" },
@@ -1059,6 +1070,13 @@ function DispatchConsoleContent({
   }, []);
 
   const requestNavigation = useCallback((navigate: () => void, options: NavigationOptions = {}) => {
+    if ((options.documentNavigation || options.towingExit) && towingPendingRef.current) {
+      setActiveView("towing");
+      setToolsOpen(false);
+      setTowingPendingReveal(version => version + 1);
+      window.alert("V odťahoch máte neuložené údaje alebo nepotvrdený zápis. Najprv ich uložte alebo dokončite v Knihe odťahov.");
+      return false;
+    }
     if (options.beforeNavigate?.() === false) return false;
     if (!hasUnsavedChanges && !isCaseSaveLocked && !drafts.dirty && !drafts.saving) {
       if (options.documentNavigation) navigateAfterDraftApproval(navigate);
@@ -1762,11 +1780,13 @@ function DispatchConsoleContent({
 
   function switchView(view: View) {
     sharedCaseRead.current?.abort();
+    if (view === "towing" && !canUseTowing) return;
     if (view === "tools") { toggleTools(); return; }
     const navigate = () => {
       setToolsOpen(false);
       setWidgetSettingsOpen(false);
       setActiveView(view);
+      if (view === "towing") setTowingVisited(true);
       if (routingNavigationUrl.current) {
         const url = clearRoutingTargetUrl(window.location.href, view);
         window.history.pushState(window.history.state, "", url);
@@ -1838,7 +1858,7 @@ function DispatchConsoleContent({
 
   function requestSignOut() {
     if (isSigningOut) return;
-    requestNavigation(() => void signOut());
+    requestNavigation(() => void signOut(), { towingExit: true });
   }
 
   function startNewCase(call?: DispatchCall) {
@@ -2257,7 +2277,7 @@ function DispatchConsoleContent({
           displayName={signedInName}
           email={viewerEmail}
           role={viewerRole}
-          towingHref={towingHref}
+          fieldWorkspaceHref={fieldWorkspaceHref}
           signingOut={isSigningOut}
           onSignOut={requestSignOut}
           onRefresh={requestAppRefresh}
@@ -2703,6 +2723,13 @@ function DispatchConsoleContent({
       <main className="dispatch-standalone-workspace" hidden={activeView !== "partners"} inert={activeView !== "partners"}>
         {activeView === "partners" && <PartnersModule />}
       </main>
+      {canUseTowing && towingVisited && towingAccess && (
+        <main className="dispatch-standalone-workspace" data-testid="towing-module-workspace" hidden={activeView !== "towing"} inert={activeView !== "towing"}>
+          <Suspense fallback={<p role="status" className="p-4 text-sm text-zinc-600">Načítavam odťahové zákazky…</p>}>
+            <TowingModule access={towingAccess} onPendingChangesChange={handleTowingPendingChanges} revealPendingRequest={towingPendingReveal} />
+          </Suspense>
+        </main>
+      )}
       {activeView === "fleet" && (
         <FleetModule
           branches={branches}
@@ -2841,7 +2868,7 @@ function AccountMenu({
   appRelease,
   role,
   signingOut,
-  towingHref,
+  fieldWorkspaceHref,
 }: {
   displayName: string;
   email?: string;
@@ -2852,7 +2879,7 @@ function AccountMenu({
   appRelease: AppRelease;
   role?: AppRole;
   signingOut: boolean;
-  towingHref?: "/zakazky" | "/vodic" | "/moje-jazdy" | "/pobocka";
+  fieldWorkspaceHref?: "/moje-jazdy" | "/pobocka";
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -2935,7 +2962,7 @@ function AccountMenu({
             </span>
           </div>
           <div className="border-t border-zinc-200 p-2">
-            {towingHref && <a href={towingHref} target="_blank" rel="noreferrer" className="flex min-h-11 items-center rounded-lg px-2.5 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{towingHref === "/moje-jazdy" ? "Moje jazdy" : towingHref === "/pobocka" ? "Pobočka" : "Zákazky odťahovej služby"} ↗</a>}
+            {fieldWorkspaceHref && <a href={fieldWorkspaceHref} target="_blank" rel="noreferrer" className="flex min-h-11 items-center rounded-lg px-2.5 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100">{fieldWorkspaceHref === "/moje-jazdy" ? "Moje jazdy" : "Pobočka"} ↗</a>}
             {(role === "manager" || role === "admin") && <a href="/monitor" target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)}
               className="flex min-h-11 items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100">Monitor prevádzky <span className="ml-auto text-xs font-normal">↗</span></a>}
             <ReportProblemButton className="min-h-11 w-full rounded-lg px-2.5 py-2 text-left text-sm font-semibold text-zinc-700 hover:bg-zinc-100" />

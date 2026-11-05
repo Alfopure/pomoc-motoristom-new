@@ -5,6 +5,8 @@ import type { DispatchData } from "@/data/dispatch-types";
 
 const enabled = new URLSearchParams(window.location.search).has("workspace");
 const archived = new URLSearchParams(window.location.search).has("archive");
+const towing = new URLSearchParams(window.location.search).get("towing");
+const towingAccess = { office: towing === "office" || towing === "both", driver: towing === "driver" || towing === "both" };
 const standaloneTask = {
   id: "00000000-0000-4000-8000-000000000010", caseId: "", caseIds: [], caseLinks: [], title: "Samostatná testovacia úloha",
   assignedTo: "00000000-0000-4000-8000-000000000002", dueAt: "", reminderAt: null, status: "open" as const, priority: "normal" as const, kind: "other" as const,
@@ -25,4 +27,4 @@ const data: DispatchData = {
   users: [], partnerDirectory: [], fleetProviderVehicles: [], commanderVehicles: [], source: "mock",
 };
 Object.assign(window, { workspaceFixtureData: data });
-createRoot(document.getElementById("root")!).render(<DispatchConsole initialData={data} viewerOrganizationId="00000000-0000-4000-8000-000000000001" viewerProfileId="00000000-0000-4000-8000-000000000002" viewerDisplayName="Test dispečer" appVersion="isolated-workspace" />);
+createRoot(document.getElementById("root")!).render(<DispatchConsole initialData={data} viewerOrganizationId="00000000-0000-4000-8000-000000000001" viewerProfileId="00000000-0000-4000-8000-000000000002" viewerDisplayName="Test dispečer" appVersion="isolated-workspace" towingAccess={towingAccess} />);

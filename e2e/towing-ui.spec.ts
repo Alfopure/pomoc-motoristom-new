@@ -178,7 +178,8 @@ test("manager records an unknown receipt exception without inventing a receipt U
 
 
 test("saving driver notes preserves assignment start provenance; editing the start explicitly stays conflict-free", async ({ page }) => {
-  const workspace = fixture("driver"); const { commands } = await mount(page, workspace);
+  const workspace = fixture("driver"); workspace.orders[0].fields.startSource = "assignment";
+  const { commands } = await mount(page, workspace);
   await page.getByRole("button", { name: "Otvoriť zákazku" }).click();
   await page.getByLabel("Poznámka vodiča", { exact: true }).fill("Poznámka bez zmeny začiatku");
   await page.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
@@ -186,7 +187,7 @@ test("saving driver notes preserves assignment start provenance; editing the sta
   await expect(page.getByRole("alert")).toHaveCount(0);
   expect(commands[0].payload.fields).toEqual({ driverNotes: "Poznámka bez zmeny začiatku" });
   expect(workspace.orders[0].fields.startSource).toBe("assignment");
-  await page.getByLabel("Skutočný začiatok · prevzatý z pridelenia", { exact: true }).fill("2026-10-13T09:15");
+  await page.getByLabel("Skutočný začiatok · potvrďte skutočný čas", { exact: true }).fill("2026-10-13T09:15");
   await page.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
   await expect(page.getByLabel("Skutočný začiatok", { exact: true })).toHaveValue("2026-10-13T09:15");
   await expect(page.getByRole("alert")).toHaveCount(0);
