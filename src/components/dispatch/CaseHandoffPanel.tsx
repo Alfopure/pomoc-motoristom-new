@@ -15,12 +15,12 @@ import { previewEditablePhone } from "@/lib/telephony/phone-entry";
 import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 import "./case-handoff.css";
 
-type CaseHandoffPanelProps = { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean; presentation?: "accordion" | "drawer"; onWorkCommitted?: () => void; initialWorkKinds?: WorkRequestKind[] };
+type CaseHandoffPanelProps = { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean; presentation?: "accordion" | "drawer"; onWorkCommitted?: () => void; initialWorkKinds?: WorkRequestKind[]; openRequest?: number };
 
 export function CaseHandoffPanel(props: CaseHandoffPanelProps) {
   return <CaseHandoffSession key={props.caseId} {...props} />;
 }
-function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpanded = false, presentation = "accordion", onWorkCommitted, initialWorkKinds }: CaseHandoffPanelProps) {
+function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpanded = false, presentation = "accordion", onWorkCommitted, initialWorkKinds, openRequest = 0 }: CaseHandoffPanelProps) {
   const drawer = presentation === "drawer";
   const titleId = useId();
   const [drawerStarted, setDrawerStarted] = useState(false);
@@ -28,6 +28,11 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
   const { state: caseAccess } = useCaseCollaboration();
   const { mode: layoutMode } = useLayoutPreview();
   const [expanded, setExpanded] = useState(initiallyExpanded), [context, setContext] = useState<HandoffContext | null>(null);
+  const [handledOpenRequest, setHandledOpenRequest] = useState(openRequest);
+  if (openRequest !== handledOpenRequest) {
+    setHandledOpenRequest(openRequest);
+    if (openRequest > 0) { setExpanded(true); setDrawerStarted(true); }
+  }
   const [name, setName] = useState(""), [phone, setPhone] = useState(""), [instructions, setInstructions] = useState(""), [scheduled, setScheduled] = useState(""), [hours, setHours] = useState(24);
   const [recipientMemberId, setRecipientMemberId] = useState(""), [deliveryMemberId, setDeliveryMemberId] = useState("");
   const [channel, setChannel] = useState<"app" | "branch" | "link">("app");

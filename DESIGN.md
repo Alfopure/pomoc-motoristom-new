@@ -10,6 +10,14 @@ Podklady: majiteľom priložený DOCX „Appka pre odťahovku – Eros (1)“, v
 
 **Rozsah aktualizácie:** nasledujúci podklad z 26. 10. zostáva zachovaný pre širšiu logistiku, návraty, flotilu a väzby partnerov. Jeho tvrdenia o vtedajšej implementácii sú historické. Pri klientskych požiadavkách, knihe zásahov a nových terénnych doplneniach platia označené doplnky z 5. 11. a spoločný realizačný plán; neprepisujú ostatné schválené hranice.
 
+### Aktívne spresnenie 5. 11. 2026 — prehľad práce v prípade a odovzdanie
+
+Podkladom je nový screenshot majiteľa `d07180ee.../image.png`. Jeden odťah sa zobrazoval ako veľká logistická karta a potom opäť ako zákazka. Prehľad aj karta Práca a jazdy teraz používajú jednu zachovanú prevádzkovú časť: dva rovnaké stĺpce Odťah / Pristavenie, zhodná hierarchia stav → príjemca → trasa → termín. Projekcie sa spájajú iba podľa identity výkonu, nie podľa rovnakého druhu práce. Číselníky a oprávnenia zostávajú serverové; výpadok jedného zdroja neukryje oprávnené údaje iného.
+
+V odovzdaní sa podľa aktuálne uloženého typu prípadu predvyplnia odťah a pristavenie samostatne. Nové termíny sú aktuálny miestny dátum a minúta pri otvorení/pridaní; sú iba predvyplnením pred vedomým odoslaním. Ručne zvolené termíny a neisté už odoslané príkazy sa nemenia. Širší bočný panel má na notebooku dve rovnocenné karty, na mobile jeden stĺpec. Hlavné výbery sú príjemca a termín; obsiahle pôvodné správy jázd/zákaziek sa otvárajú na vyžiadanie a po otvorení zostávajú pripojené kvôli rozpracovaniu.
+
+Overenie: dual-default po zmene typov v skrytom paneli, lokálny čas otvorenia, zachovanie manuálneho času a frozen retry; jedna karta pre odťah + jeho projekciu + materializovanú požiadavku; rozdielne výkony zostávajú rozdielne. Pri 1440/1024 px dva stĺpce pri dostupnej šírke aspoň 720 px, pri 768/390/320 px čitateľné skladanie podľa kontajnera bez pretečenia stránky. Min. 44 px mobilné ovládanie, ikony doplnené názvami. Bez nových databázových operácií alebo zmeny finančných pravidiel.
+
 ### Historický východiskový návrh — 26. 10. 2026
 
 **Webová logistika: Draft · 26. 10. 2026.** Návrh webového modulu **Pristavenia a odvozy** v existujúcom dispečingu. Dokument pokrýva tento modul a jeho väzby; neurčuje nový dizajn celej aplikácie. Ide o produktový návrh, nie hotovú implementáciu ani overenie živého nasadenia.

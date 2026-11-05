@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { DispatchCall, DispatchCase, PriceRule } from "@/domain/types";
 import type { DispatchData } from "@/data/dispatch-types";
@@ -45,17 +45,18 @@ Object.assign(window, { google: { maps: {
   importLibrary: async () => ({}), event: { trigger() {} }, places: { PlaceAutocompleteElement: Autocomplete },
 } } });
 
+const dual = new URLSearchParams(location.search).has("dual");
 const populated = new URLSearchParams(location.search).get("filled") !== "false";
 const description = "Dlhý opis prípadu so všetkými podrobnosťami. ".repeat(15) + "KONIEC CELÉHO OPISU";
 const caseItem: DispatchCase = {
   id: "case-fixture", caseNumber: "TEST-001", status: "open", priority: "normal", ownerId: "operator-fixture", ownerName: "Test Operátor",
-  jobTypes: populated ? ["tow"] : [], contact: { id: "contact-fixture", name: populated ? "Test Klient" : "", phone: populated ? "+421900000001" : "", role: "client" },
+  jobTypes: populated ? dual ? ["tow", "replacement_vehicle"] : ["tow"] : [], contact: { id: "contact-fixture", name: populated ? "Test Klient" : "", phone: populated ? "+421900000001" : "", role: "client" },
   customerDetails: populated ? { type: "private_person", firstName: "Test", lastName: "Klient" } : {},
   vehicle: { id: "vehicle-fixture", licensePlate: populated ? "TEST001" : "", make: populated ? "Škoda" : "", model: populated ? "Octavia" : "", category: "", driveable: false, conditionFlags: [], issue: "" },
   incidentDetails: { damageAreas: [], description: populated ? description : "" },
   pickup: populated ? { id: "pickup-fixture", label: "Nitra", address: "Dlhá ulica 1, Nitra", lat: 48.3064, lng: 18.0764, kind: "pickup" } : undefined,
   customerSharedLocation: populated ? { label: "Testovacia GPS poloha", lat: 48.1486, lng: 17.1077, submittedAt: "2026-09-10T10:55:00Z", accuracyMeters: 22 } : undefined,
-  locationDetails: { accessComplications: [] }, replacementVehicle: { needed: false, preferences: [] }, attachments: [],
+  locationDetails: { accessComplications: [] }, replacementVehicle: { needed: populated && dual, preferences: [] }, attachments: [],
   paymentDetails: populated ? { method: "card", status: "unpaid" } : {}, closureDetails: {},
   summary: populated ? description : "", mainNote: "", nextStep: populated ? "Overiť príjazd" : "",
   createdAt: "2026-09-10T10:00:00Z", updatedAt: "2026-09-10T11:00:00Z",
@@ -68,6 +69,11 @@ const call: DispatchCall = { id: "call-fixture", status: "ended", callerNumber: 
 const noop = () => {};
 function Fixture() {
   const [currentCase, setCurrentCase] = useState(caseItem);
+  useEffect(() => {
+    const snapshot = (event: Event) => setCurrentCase(current => ({ ...current, ...(event as CustomEvent<Partial<DispatchCase>>).detail }));
+    window.addEventListener("case-fixture-snapshot", snapshot);
+    return () => window.removeEventListener("case-fixture-snapshot", snapshot);
+  }, []);
   const [mode, setMode] = useState<"expanded" | "split" | "collapsed">("split");
   const [open, setOpen] = useState(true);
   const [point, setPoint] = useState<PlaceSelectionInput | null>(null);
