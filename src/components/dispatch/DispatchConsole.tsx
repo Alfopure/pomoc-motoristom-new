@@ -61,6 +61,7 @@ import { CallCenterModule } from "./CallCenterModule";
 import { HeaderLiveCallsMenu } from "./LiveCallOverview";
 import { matchesCaseStatus } from "./case-status-filter";
 import { CaseDirectory } from "./CaseDirectory";
+import { matchesCaseOverviewFilters, countCaseOverviewFilters } from "./case-overview-filters";
 import { CaseList, type CaseFilters } from "./CaseList";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { DashboardPhone } from "./DashboardPhone";
@@ -146,7 +147,7 @@ import { TELEPHONY_NOT_CONFIGURED_MESSAGE, TelephonyNotConfiguredError } from "@
 import { pausePlan } from "@/lib/telephony/pause-ending";
 import type { TelephonyAvailabilityAction } from "@/lib/telephony/presence";
 
-type View = "dispatch" | PinnableNavigationView;
+type View = "dispatch" | "cases" | "tasks" | "notes" | PinnableNavigationView;
 
 const TowingModule = lazy(() => import("@/components/towing/TowingModule").then(module => ({ default: module.TowingModule })));
 
@@ -373,6 +374,9 @@ function DispatchConsoleContent({
   const handleRoutingEditor = useCallback((editor: DraftEditorState | null) => registerDraft("Prichádzajúce hovory", editor), [registerDraft]);
   const handleNotebookEditor = useCallback((editor: DraftEditorState) => registerDraft("Poznámky", editor), [registerDraft]);
   const centerView = workspacePreferences.centerView;
+  const tableLeftBeforeRef = useRef<boolean | null>(null);
+  const tableVisitedRef = useRef(false);
+  const overviewDetailRef = useRef(false);
   const workspaceStorageKey = workspacePreferenceStorageKey(viewerOrganizationId, viewerProfileId);
   const currentSessionKeyRef = useRef<string | null>(actorKey);
   useEffect(() => {
@@ -393,7 +397,19 @@ function DispatchConsoleContent({
     try { window.localStorage.setItem(workspaceStorageKey, JSON.stringify(next)); } catch { /* Layout works without storage. */ }
   }
   function setCenterView(view: CenterView) {
-    updateWorkspacePreferences({ ...workspacePreferences, centerView: view });
+    let leftCollapsed = workspacePreferences.leftCollapsed;
+    if (view === "table" && centerView !== "table") {
+      tableLeftBeforeRef.current = leftCollapsed;
+      leftCollapsed = true;
+    } else if (view !== "table" && centerView === "table" && tableLeftBeforeRef.current !== null) {
+      leftCollapsed = tableLeftBeforeRef.current;
+      tableLeftBeforeRef.current = null;
+    }
+    updateWorkspacePreferences({ ...workspacePreferences, centerView: view, leftCollapsed });
+  }
+  function toggleCaseList() {
+    tableLeftBeforeRef.current = null;
+    updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: !workspacePreferences.leftCollapsed });
   }
   function preferredCockpitMode(mobileMode: WorkspaceMode = "split", view: CenterView = centerView): WorkspaceMode {
     return window.matchMedia("(max-width: 1023px)").matches
@@ -405,7 +421,14 @@ function DispatchConsoleContent({
     }
   }
   const loadWorkspacePreferences = useEffectEvent((raw: string | null, initial: boolean) => {
-    const next = parseWorkspacePreferences(raw);
+    const parsed = parseWorkspacePreferences(raw);
+    const openingTable = initial && parsed.centerView === "table";
+    const next = openingTable ? { ...parsed, leftCollapsed: true } : parsed;
+    if (openingTable) {
+      tableLeftBeforeRef.current = parsed.leftCollapsed;
+      tableVisitedRef.current = true;
+      setCaseFilters(current => current.statusTouched ? current : { ...current, status: "all" });
+    }
     const modeChanged = next.desktopWorkspaceMode !== workspacePreferences.desktopWorkspaceMode;
     const centerChanged = next.centerView !== centerView;
     setWorkspacePreferences(next);
@@ -413,7 +436,7 @@ function DispatchConsoleContent({
     if (window.matchMedia("(min-width: 1024px)").matches && (initial || modeChanged || centerChanged)) {
       setWorkspace(current => {
         if (current.kind !== "cockpit") return current;
-        const mode = initial || modeChanged
+        const mode = openingTable ? "collapsed" : initial || modeChanged
           ? visibleDesktopWorkspaceMode(next.desktopWorkspaceMode, next.centerView)
           : current.mode === "expanded" ? "split" : current.mode;
         return { ...current, mode };
@@ -775,7 +798,7 @@ function DispatchConsoleContent({
   );
 
   const callsByCaseId = useMemo(() => latestCallByCaseId(visibleCallCenterCalls), [visibleCallCenterCalls]);
-  const effectiveCaseFilters = useMemo(() => caseSearch.trim() ? { ...caseFilters, status: "all" as const } : caseFilters, [caseFilters, caseSearch]);
+  const effectiveCaseFilters = useMemo(() => caseSearch.trim() && !caseFilters.statusTouched ? { ...caseFilters, status: "all" as const } : caseFilters, [caseFilters, caseSearch]);
   const filteredCases = useMemo(() => {
     const branchesById = new Map(branches.map((branch) => [branch.id, branch]));
     const assetsById = new Map(fleetAssets.map((asset) => [asset.id, asset]));
@@ -803,7 +826,7 @@ function DispatchConsoleContent({
     caseFilters.ownerId !== "all",
     caseFilters.sourceType !== "all",
     caseFilters.assistanceService !== "all",
-  ].filter(Boolean).length;
+  ].filter(Boolean).length + countCaseOverviewFilters(effectiveCaseFilters);
   const assistanceServiceOptions = useMemo(
     () => [...new Set(dispatchCases.map(caseAssistanceServiceName).filter(Boolean))].sort((left, right) => left.localeCompare(right, "sk")),
     [dispatchCases],
@@ -928,10 +951,7 @@ function DispatchConsoleContent({
 
   const navItems: NavigationItem[] = [
     { icon: LayoutDashboard, label: "Nástenka", shortLabel: "Nástenka", view: "dispatch" },
-    { badgeCount: taskAttentionCount, group: "daily", icon: BellRing, label: "Úlohy", shortLabel: "Úlohy", view: "tasks" },
-    { group: "daily", icon: NotebookPen, label: "Poznámky", shortLabel: "Poznámky", view: "notes" },
     { group: "daily", icon: Wrench, label: "Nástroje", shortLabel: "Nástroje", view: "tools" },
-    { group: "daily", icon: Table2, label: "Prípady", shortLabel: "Prípady", view: "cases" },
     { group: "daily", icon: Headphones, label: "Ústredňa", shortLabel: "Ústredňa", view: "call-center" },
     { group: "operations", icon: CalendarDays, label: "Dochádzka", shortLabel: "Doch.", view: "attendance" },
     { group: "operations", icon: Truck, label: "Flotila", shortLabel: "Flotila", view: "fleet" },
@@ -952,7 +972,7 @@ function DispatchConsoleContent({
   const secondaryBadgeCount = secondaryNavItems.reduce((total, item) => total + (item.badgeCount ?? 0), 0);
   const mobileShortcutItems: MobileShortcutItem[] = [
     {
-      active: activeView === "cases" || activeView === "dispatch" && !toolsOpen && !focusedTaskId && (mobilePane === "cases" || centerView === "map" && (workspace.kind !== "cockpit" || workspace.mode === "expanded")),
+      active: activeView === "cases" || activeView === "dispatch" && !toolsOpen && !focusedTaskId && (mobilePane === "cases" || centerView === "table" || centerView === "map" && (workspace.kind !== "cockpit" || workspace.mode === "expanded")),
       icon: Table2,
       label: "Prípady",
       onSelect: showMobileCases,
@@ -960,7 +980,7 @@ function DispatchConsoleContent({
       shortLabel: "Prípady",
     },
     {
-      active: activeView === "tasks",
+      active: activeView === "dispatch" && centerView === "tasks" && !toolsOpen,
       badgeCount: taskAttentionCount,
       icon: BellRing,
       label: "Úlohy",
@@ -977,7 +997,6 @@ function DispatchConsoleContent({
       shortLabel: "Mapa",
     },
     ...secondaryNavItems
-      .filter((item) => item.view !== "tasks" && item.view !== "cases")
       .map((item): MobileShortcutItem => ({
         active: item.view === "tools" ? toolsOpen : activeView === item.view,
         badgeCount: item.badgeCount,
@@ -1201,6 +1220,7 @@ function DispatchConsoleContent({
   function selectCase(caseId: string) {
     sharedCaseRead.current?.abort();
     return requestNavigation(() => {
+      overviewDetailRef.current = false;
       observeCaseOpen(caseId);
       setCenterView("map");
       setToolsOpen(false);
@@ -1214,6 +1234,7 @@ function DispatchConsoleContent({
   function openCase(caseId: string) {
     sharedCaseRead.current?.abort();
     requestNavigation(() => {
+      overviewDetailRef.current = false;
       observeCaseOpen(caseId);
       setCenterView("map");
       setToolsOpen(false);
@@ -1229,6 +1250,7 @@ function DispatchConsoleContent({
 
   function openCaseDetail(caseId: string, afterNavigate?: () => void) {
     requestNavigation(() => {
+      overviewDetailRef.current = false;
       observeCaseOpen(caseId);
       setCenterView("map");
       setToolsOpen(false);
@@ -1239,6 +1261,26 @@ function DispatchConsoleContent({
       setActiveView("dispatch");
       setWorkspace({ kind: "detail", mode: "expanded" });
       afterNavigate?.();
+    });
+  }
+
+  function openOverviewCase(caseId: string) {
+    if (workspace.kind === "detail" && activeCaseId === caseId) {
+      overviewDetailRef.current = true;
+      setMobilePane("workspace");
+      setWorkspace({ kind: "detail", mode: window.matchMedia("(max-width: 1023px)").matches ? "expanded" : "split" });
+      return;
+    }
+    requestNavigation(() => {
+      observeCaseOpen(caseId);
+      overviewDetailRef.current = true;
+      returnViewRef.current = "dispatch";
+      setToolsOpen(false);
+      setActiveCaseId(caseId);
+      setFocusedTaskId(undefined);
+      setActiveView("dispatch");
+      setMobilePane("workspace");
+      setWorkspace({ kind: "detail", mode: window.matchMedia("(max-width: 1023px)").matches ? "expanded" : "split" });
     });
   }
 
@@ -1744,14 +1786,25 @@ function DispatchConsoleContent({
     setCaseSearch("");
   }
 
+  function clearOverviewFilters() {
+    setCaseFilters({ ...defaultCaseFilters, status: "all" });
+    setCaseSearch("");
+  }
+
   function switchCenterView(view: CenterView) {
-    // Local tabs replace only the map area. The case and side panels stay in place.
+    sharedCaseRead.current?.abort();
+    if (view === "table" && !tableVisitedRef.current) {
+      tableVisitedRef.current = true;
+      if (!caseSearch.trim() && !caseFilters.statusTouched && caseFilters.status === "active" && activeFilterCount === 1) {
+        setCaseFilters(current => ({ ...current, status: "all" }));
+      }
+    }
     setCenterView(view);
     setToolsOpen(false);
     setWidgetSettingsOpen(false);
     setActiveView("dispatch");
     setMobilePane("workspace");
-    setWorkspace(current => ({ ...current, mode: window.matchMedia("(max-width: 1023px)").matches ? "collapsed" : current.mode === "expanded" ? "split" : current.mode }));
+    setWorkspace(current => ({ ...current, mode: view === "table" && current.kind === "cockpit" || window.matchMedia("(max-width: 1023px)").matches ? "collapsed" : current.mode === "expanded" ? "split" : current.mode }));
   }
 
   function openTools() {
@@ -1780,6 +1833,12 @@ function DispatchConsoleContent({
 
   function switchView(view: View) {
     sharedCaseRead.current?.abort();
+    if (view === "cases" || view === "tasks" || view === "notes") {
+      const open = () => switchCenterView(view === "cases" ? "table" : view);
+      if (activeView === "dispatch") open();
+      else requestNavigation(open);
+      return;
+    }
     if (view === "towing" && !canUseTowing) return;
     if (view === "tools") { toggleTools(); return; }
     const navigate = () => {
@@ -1831,12 +1890,11 @@ function DispatchConsoleContent({
   }
 
   function showMobileCases() {
-    setToolsOpen(false);
     requestNavigation(() => {
-      setActiveView("dispatch");
-      setMobilePane("cases");
+      overviewDetailRef.current = false;
       setFocusedTaskId(undefined);
-      setWorkspace({ kind: "cockpit", mode: "split" });
+      setWorkspace({ kind: "cockpit", mode: "collapsed" });
+      switchCenterView("table");
     });
   }
 
@@ -1866,6 +1924,7 @@ function DispatchConsoleContent({
   }
 
   function startNewCaseNow(call?: DispatchCall) {
+    overviewDetailRef.current = centerView === "table" && !call;
     setMobilePane("workspace");
     returnViewRef.current = activeView;
     // Generická nová karta (bez explicitného hovoru) štartuje čistá — nedediť
@@ -1882,7 +1941,7 @@ function DispatchConsoleContent({
     setNewCaseCall(call ?? blankCall);
     setFocusedTaskId(undefined);
     setActiveView("dispatch");
-    setCenterView("map");
+    if (!overviewDetailRef.current) setCenterView("map");
     setWorkspace({ kind: "new", mode: "expanded" });
   }
 
@@ -1891,7 +1950,6 @@ function DispatchConsoleContent({
     requestNavigation(() => {
       setCallStatus(nextCall.status === "missed" || nextCall.status === "ended" ? nextCall.status : "answered");
       setActiveView("dispatch");
-      setCenterView("map");
       startNewCaseNow(nextCall);
     });
   }
@@ -1901,10 +1959,10 @@ function DispatchConsoleContent({
     setHandoffCaseId(openHandoff ? caseId : null);
     setActiveCaseId(caseId);
     setActiveView("dispatch");
-    setCenterView("map");
+    if (!overviewDetailRef.current) setCenterView("map");
     setFocusedTaskId(undefined);
     setHasUnsavedChanges(false);
-    setWorkspace({ kind: "detail", mode: "expanded" });
+    setWorkspace({ kind: "detail", mode: overviewDetailRef.current && window.matchMedia("(min-width: 1024px)").matches ? "split" : "expanded" });
     setMutationNotice(notice ?? "Nový prípad je uložený v Supabase a zobrazený na mape.");
 
     if (newCaseCall.id !== "call-idle" && looksLikeUuid(newCaseCall.id)) {
@@ -2101,10 +2159,21 @@ function DispatchConsoleContent({
 
   function returnToCockpit() {
     requestNavigation(() => {
+      if (overviewDetailRef.current) {
+        overviewDetailRef.current = false;
+        setActiveView("dispatch");
+        setFocusedTaskId(undefined);
+        setMobilePane("workspace");
+        setCenterView("table");
+        setWorkspace({ kind: "cockpit", mode: "collapsed" });
+        return;
+      }
       setFocusedTaskId(undefined);
       setMobilePane("cases");
       if (returnViewRef.current !== "dispatch") {
-        setActiveView(returnViewRef.current);
+        const view = returnViewRef.current;
+        if (view === "cases" || view === "tasks" || view === "notes") switchCenterView(view === "cases" ? "table" : view);
+        else setActiveView(view);
         setWorkspace({ kind: "cockpit", mode: preferredCockpitMode() });
         returnViewRef.current = "dispatch";
         return;
@@ -2132,6 +2201,11 @@ function DispatchConsoleContent({
   }
 
   const keepWorkspaceVisibleOnMobile = useEffectEvent(() => {
+    if (activeView === "dispatch" && workspace.kind === "detail" && workspace.mode === "split") {
+      setMobilePane("workspace");
+      setWorkspace({ kind: "detail", mode: "expanded" });
+      return;
+    }
     // Preserve the selected local tool when the desktop split no longer fits.
     // The map view keeps the case visible; its mounted editor retains all drafts.
     if (activeView === "dispatch" && workspace.kind === "cockpit" && workspace.mode === "split"
@@ -2142,6 +2216,10 @@ function DispatchConsoleContent({
   });
 
   const restoreDesktopWorkspace = useEffectEvent(() => {
+    if (overviewDetailRef.current && workspace.kind === "detail") {
+      setWorkspace(current => ({ ...current, mode: "split" }));
+      return;
+    }
     setWorkspace(current => current.kind === "cockpit"
       ? { ...current, mode: visibleDesktopWorkspaceMode(workspacePreferences.desktopWorkspaceMode, centerView) } : current);
   });
@@ -2166,6 +2244,11 @@ function DispatchConsoleContent({
       cancelPendingNavigation();
       return;
     }
+    if (overviewDetailRef.current && workspace.kind !== "cockpit") {
+      event.preventDefault();
+      returnToCockpit();
+      return;
+    }
     if (centerView !== "map" && !caseDirectoryDetailOpen) return;
 
     if (workspace.mode === "expanded") {
@@ -2178,7 +2261,9 @@ function DispatchConsoleContent({
           return;
         }
         if (returnViewRef.current !== "dispatch") {
-          setActiveView(returnViewRef.current);
+          const view = returnViewRef.current;
+          if (view === "cases" || view === "tasks" || view === "notes") switchCenterView(view === "cases" ? "table" : view);
+          else setActiveView(view);
           returnViewRef.current = "dispatch";
         }
         // Escape from a full editor restores the layout; Escape from a
@@ -2419,7 +2504,7 @@ function DispatchConsoleContent({
           ) : null}
           <div className="min-w-0">
             <h1 className="truncate text-lg font-bold tracking-tight">
-              {activeView === "dispatch" ? toolsOpen ? "Nástroje" : mobilePane === "workspace" && centerView !== "map" ? ({ table: "Tabuľka prípadov", tasks: "Úlohy", notes: "Poznámky" })[centerView] : mobilePane === "cases" ? "Prípady" : workspace.kind === "new" ? "Nový prípad" : workspace.kind === "detail" || workspace.mode === "expanded" ? (collaborationState.hidden ? "Detail prípadu" : workspaceCase?.caseNumber ?? "Detail prípadu") : "Mapa zásahov" : activeView === "cases" && workspace.kind === "detail" ? (collaborationState.hidden ? "Detail prípadu" : workspaceCase?.caseNumber ?? "Detail prípadu") : navItems.find((item) => item.view === activeView)?.label}
+              {activeView === "dispatch" ? toolsOpen ? "Nástroje" : mobilePane === "workspace" && centerView !== "map" && workspace.mode !== "expanded" ? ({ table: "Prehľad prípadov", tasks: "Úlohy", notes: "Poznámky" })[centerView] : mobilePane === "cases" ? "Prípady" : workspace.kind === "new" ? "Nový prípad" : workspace.kind === "detail" || workspace.mode === "expanded" ? (collaborationState.hidden ? "Detail prípadu" : workspaceCase?.caseNumber ?? "Detail prípadu") : "Mapa zásahov" : activeView === "cases" && workspace.kind === "detail" ? (collaborationState.hidden ? "Detail prípadu" : workspaceCase?.caseNumber ?? "Detail prípadu") : navItems.find((item) => item.view === activeView)?.label}
               {activeView === "dispatch" && mobilePane === "cases" ? <span className="ml-1.5 font-medium text-zinc-500">{activeCasesTotal}</span> : null}
             </h1>
           </div>
@@ -2430,7 +2515,7 @@ function DispatchConsoleContent({
             <Plus size={18} aria-hidden="true" /> Nový prípad
           </button>
         ) : null}
-        {(selectedCase || workspace.kind === "new") && !toolsOpen && (activeView === "dispatch" && mobilePane === "workspace" && centerView === "map" || activeView === "cases" && workspace.kind === "detail") ? (
+        {(selectedCase || workspace.kind === "new") && !toolsOpen && (activeView === "dispatch" && mobilePane === "workspace" && (centerView === "map" || workspace.kind !== "cockpit") || activeView === "cases" && workspace.kind === "detail") ? (
           <button
             type="button"
             onClick={() => workspace.mode === "expanded" ? showMobileMap() : restoreMobileCase()}
@@ -2500,28 +2585,6 @@ function DispatchConsoleContent({
       )}
       </div>
 
-      {activeView === "cases" && (
-          <CaseDirectory
-            activeCaseId={activeCaseId}
-            activeFilterCount={activeFilterCount}
-            assets={fleetAssets}
-            assistanceServices={assistanceServiceOptions}
-            branches={branches}
-            calls={visibleCallCenterCalls}
-            cases={filteredCases}
-            filters={effectiveCaseFilters}
-            onClearFilters={clearCaseFilters}
-            onFiltersChange={setCaseFilters}
-            onNewCase={() => startNewCase()}
-            onOpenDetails={openCaseDetail}
-            onSearchChange={setCaseSearch}
-            onSortChange={setCaseSort}
-            operators={effectiveOperators}
-            search={caseSearch}
-            sort={caseSort}
-            totalCases={dispatchCases.length}
-          />
-      )}
 
       <main
           ref={dashboardGridRef}
@@ -2578,7 +2641,7 @@ function DispatchConsoleContent({
           <div className="dashboard-tablet-phone hidden min-w-0 p-2 lg:col-span-2 lg:block xl:hidden">
             <DashboardPhone onCreateCase={() => startNewCase()} caseContext={dashboardSmsCaseContext} isDialing={telephony.outboundPending} onDataChange={setDispatchData} onDial={(phone) => dialNumber(phone, dashboardSmsCaseContext?.id)} />
           </div>
-          {workspacePreferences.leftCollapsed && <button type="button" className="hidden min-h-11 items-center justify-center border-r border-zinc-200 bg-white lg:flex" aria-label="Obnoviť panel prípadov" onClick={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: false })}><PanelLeftOpen size={20} /></button>}
+          {workspacePreferences.leftCollapsed && <button type="button" className="hidden min-h-11 items-center justify-center border-r border-zinc-200 bg-white lg:flex" aria-label="Obnoviť panel prípadov" onClick={toggleCaseList}><PanelLeftOpen size={20} /></button>}
           <div className="mobile-dispatch-cases lg:contents">
           <CaseList
             activeCaseId={visibleActiveCaseId}
@@ -2612,7 +2675,19 @@ function DispatchConsoleContent({
             onCenterViewChange={switchCenterView}
             onOpenTools={toggleTools}
             toolsOpen={toolsOpen}
-            onToggleLeft={() => updateWorkspacePreferences({ ...workspacePreferences, leftCollapsed: !workspacePreferences.leftCollapsed })}
+            onToggleLeft={toggleCaseList}
+            leftCollapsed={workspacePreferences.leftCollapsed}
+            caseOverview={<CaseDirectory
+              activeCaseId={visibleActiveCaseId} activeFilterCount={activeFilterCount}
+              assets={fleetAssets} assistanceServices={assistanceServiceOptions} branches={branches}
+              calls={visibleCallCenterCalls} cases={filteredCases} filters={effectiveCaseFilters}
+              onClearFilters={clearOverviewFilters} onFiltersChange={setCaseFilters} onNewCase={() => startNewCase()}
+              onOpenDetails={openOverviewCase} onSearchChange={setCaseSearch} onSortChange={setCaseSort}
+              operators={effectiveOperators} search={caseSearch} sort={caseSort} totalCases={dispatchCases.length}
+              storageKey={`motorist:dispatch-case-table:visible-columns:v1:${actorKey}`}
+              workspaceMode={workspace.mode}
+              scopeCounts={{ active: activeCasesTotal, closed: dispatchCases.length - activeCasesTotal, all: dispatchCases.length }}
+            />}
             centerContent={<><div hidden={centerView !== "tasks"} className="h-full overflow-y-auto">{renderTasks("page", true)}</div><div hidden={centerView !== "notes"} className="h-full overflow-y-auto"><NotebookPanel active={activeView === "dispatch" && centerView === "notes" && !toolsOpen} /></div></>}
             activeCaseId={visibleActiveCaseId}
             assets={fleetAssets}
@@ -2661,13 +2736,6 @@ function DispatchConsoleContent({
           <WidgetHost preferences={workspacePreferences} onChange={updateWorkspacePreferences} renderWidget={renderWidget} expanded={toolsOpen} settingsOpen={widgetSettingsOpen} onSettingsChange={setWidgetSettingsOpen} active={activeView === "dispatch" && (toolsOpen || !workspacePreferences.rightCollapsed)} onClose={closeTools} />
 
         </main>
-
-      <main data-testid="standalone-tasks-page" className="dispatch-standalone-workspace" hidden={activeView !== "tasks"} inert={activeView !== "tasks"}>
-        {renderTasks("page")}
-      </main>
-      <main data-testid="standalone-notes-page" className="dispatch-standalone-workspace" hidden={activeView !== "notes"} inert={activeView !== "notes"}>
-        <NotebookPanel active={activeView === "notes"} />
-      </main>
 
       {activeView === "call-center" && (
         <CallCenterModule
@@ -3726,6 +3794,7 @@ function safeRandomId() {
 }
 
 function caseMatchesFilters(caseItem: DispatchCase, filters: CaseFilters) {
+  if (!matchesCaseOverviewFilters(caseItem, filters)) return false;
   if (!matchesCaseStatus(caseItem.status, filters.status, filters.statuses)) {
     return false;
   }
@@ -3824,10 +3893,11 @@ function caseMatchesSearch({
   const identifierQuery = compactSearch(search);
   const externalReference = caseItem.customerDetails.assistanceReference;
   const identifierMatches = identifierQuery.length > 0 &&
-    [caseItem.caseNumber, externalReference, caseItem.vehicle.licensePlate, caseItem.vehicle.vin, asset?.licensePlate]
+    [caseItem.caseNumber, externalReference, caseItem.vehicle.licensePlate, caseItem.vehicle.vin, asset?.licensePlate, caseItem.contact.phone, call?.callerNumber, call?.calledNumber]
       .some(value => Boolean(value && compactSearch(value).includes(identifierQuery)));
 
-  return identifierMatches || normalizeSearch(haystack.filter(Boolean).join(" ")).includes(query);
+  const text = normalizeSearch(haystack.filter(Boolean).join(" "));
+  return identifierMatches || query.split(/\s+/).every(term => text.includes(term));
 }
 
 function compareCases(

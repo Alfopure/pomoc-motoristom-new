@@ -67,6 +67,7 @@ for (const viewport of viewports) {
     await nav.getByRole("button", { name: "Menu", exact: true }).click();
     const menu = page.getByRole("dialog", { name: "Obrazovky aplikácie", exact: true });
     await expect(menu).toBeInViewport({ ratio: 1 });
+    for (const label of ["Prípady", "Úlohy", "Poznámky"]) await expect(menu.getByRole("button", { name: label, exact: true })).toHaveCount(0);
     await expectControlAboveFooter(menu, nav);
     await menu.getByRole("button", { name: "Nastavenia", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Upozornenia a zvuk", exact: true })).toBeVisible();
@@ -81,11 +82,13 @@ async function expectJoinedFooter(page: Page, viewport: { width: number; height:
   const geometry = await page.evaluate(() => {
     const shell = document.querySelector<HTMLElement>(".dispatch-app-shell")!;
     const nav = shell.querySelector<HTMLElement>(".dispatch-mobile-nav")!;
-    const main = shell.querySelector<HTMLElement>(":scope > main")!;
+    const visibleMains = [...shell.querySelectorAll<HTMLElement>(":scope > main")].filter(element => element.getClientRects().length > 0);
+    const main = visibleMains[0]!;
     const shellBox = shell.getBoundingClientRect();
     const navBox = nav.getBoundingClientRect();
     const mainBox = main.getBoundingClientRect();
     return {
+      visibleMainCount: visibleMains.length,
       shellBottom: shellBox.bottom,
       shellPadding: getComputedStyle(shell).paddingBottom,
       navTop: navBox.top,
@@ -99,6 +102,7 @@ async function expectJoinedFooter(page: Page, viewport: { width: number; height:
       verticalOverflow: document.documentElement.scrollHeight - document.documentElement.clientHeight,
     };
   });
+  expect(geometry.visibleMainCount).toBe(1);
   expect(geometry.shellPadding).toBe("0px");
   expect(geometry.navPosition).toBe("relative");
   expect(geometry.navHeight).toBe(52 + viewport.bottom);

@@ -2,7 +2,7 @@
 import type { CaseDetailData } from "@/data/case-detail";
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
-import { Columns3, GripHorizontal, Map, PanelLeftClose, PanelsTopLeft, StickyNote, Table2, Wrench } from "lucide-react";
+import { Columns3, GripHorizontal, Map, PanelLeftClose, PanelLeftOpen, PanelsTopLeft, StickyNote, Table2, Wrench } from "lucide-react";
 import type { CallCenterCall, CommanderVehicleConnection, DispatchData } from "@/data/dispatch-types";
 import type { Branch, DispatchCall, DispatchCase, FleetAsset, Operator, PartnerDirectoryEntry, PriceRule } from "@/domain/types";
 import type { DispatchMapModel } from "@/lib/map-adapter";
@@ -35,6 +35,8 @@ type MapWorkspaceProps = {
   mobilePane?: "cases" | "workspace";
   actorKey?: string;
   centerContent?: ReactNode;
+  caseOverview?: ReactNode;
+  leftCollapsed?: boolean;
   onCenterViewChange?: (view: CenterView) => void;
   onOpenTools?: () => void;
   toolsOpen?: boolean;
@@ -99,7 +101,7 @@ const centerTabs = [
   { view: "map", label: "Mapa", icon: Map },
   { view: "tasks", label: "Úlohy", icon: Columns3 },
   { view: "notes", label: "Poznámky", icon: StickyNote },
-  { view: "table", label: "Tabuľka", icon: Table2 },
+  { view: "table", label: "Prehľad prípadov", icon: Table2 },
 ] as const;
 
 type StoredWorkspaceLayout = { desktopPanelPercent?: number };
@@ -111,6 +113,8 @@ export function MapWorkspace({
   mobilePane = "workspace",
   actorKey,
   centerContent,
+  caseOverview,
+  leftCollapsed = false,
   onCenterViewChange,
   onOpenTools,
   toolsOpen = false,
@@ -310,7 +314,7 @@ export function MapWorkspace({
   return (
     <section className={sectionClassName}>
       {onCenterViewChange && <div className="workspace-toolbar">
-        <button type="button" className="workspace-panel-toggle" aria-label="Zbaliť panel prípadov" onClick={onToggleLeft}><PanelLeftClose size={16} /></button>
+        <button type="button" className="workspace-panel-toggle" aria-label={leftCollapsed ? "Zobraziť zoznam prípadov" : "Zbaliť panel prípadov"} onClick={onToggleLeft}>{leftCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>
         <div className="workspace-center-tabs" role="tablist" aria-label="Pracovná plocha">
           {centerTabs.map(({ view, label, icon: Icon }, index) => <button key={view} id={`workspace-tab-${view}`} type="button" role="tab" aria-selected={centerView === view} aria-controls="workspace-tab-content" tabIndex={centerView === view ? 0 : -1} onKeyDown={event => handleTabKeyDown(event, index)} onClick={() => onCenterViewChange(view)}><Icon size={15} aria-hidden="true" /><span>{label}</span></button>)}
         </div>
@@ -348,8 +352,8 @@ export function MapWorkspace({
               onSendLocationSms={onSendLocationSms}
             />
           </div>
-          {centerView === "table" && (
-            <CaseTable
+          <div hidden={centerView !== "table"} inert={centerView !== "table"} className="dispatch-workspace-view h-full">
+            {caseOverview ?? <CaseTable
               activeCaseId={activeCaseId}
               assets={assets}
               branches={branches}
@@ -362,8 +366,8 @@ export function MapWorkspace({
               storageKey={`motorist:dispatch-case-table:visible-columns:v1:${viewerProfileId ?? "local-browser"}`}
               totalCases={totalCases}
               workspaceMode={workspaceMode}
-            />
-          )}
+            />}
+          </div>
           <div hidden={centerView !== "tasks" && centerView !== "notes"} inert={centerView !== "tasks" && centerView !== "notes"} className="dispatch-workspace-view h-full">{centerContent}</div>
         </div>
 

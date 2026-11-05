@@ -163,3 +163,18 @@
 @media (max-width:767px), (pointer:coarse) {
   .case-section-navigation button { min-height:44px; }
 }
+
+/* The optional case list stays compact when restored beside the overview. */
+@media (min-width:1024px) {
+  [data-layout-preview="modern"] [data-testid="dispatch-case-list"] [data-case-number] { margin:4px 6px; padding:6px 8px; border-radius:8px; }
+  [data-layout-preview="modern"] [data-testid="dispatch-case-list"] [data-case-number] .case-list-card-content { margin-top:2px; }
+  [data-layout-preview="modern"] [data-testid="dispatch-case-list"] [data-case-number] .case-list-client { display:flex; align-items:center; gap:6px; min-width:0; margin-bottom:2px; font-size:12px; line-height:16px; }
+  .case-list-client-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .case-list-assistance { display:inline-flex; align-items:center; gap:3px; max-width:42%; min-width:0; color:#946a20; font-size:10px; font-weight:500; }
+  .case-list-assistance svg { flex-shrink:0; }
+  .case-list-assistance>span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  [data-layout-preview="modern"] [data-testid="dispatch-case-list"] [data-case-number] .case-list-card-content>span:last-child { gap:1px; font-size:10.5px; line-height:14px; }
+  [data-layout-preview="modern"] .case-list-meta { padding-top:0; }
+  .case-list-meta>span:first-of-type { flex:1; min-width:0; }
+  .case-list-task-count { display:inline-flex; flex-shrink:0; align-items:center; gap:3px; padding:0 4px; border-radius:4px; background:#f0f1f3; color:#606875; font-size:10px; }
+}

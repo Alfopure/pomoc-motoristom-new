@@ -1,5 +1,5 @@
 "use client";
-import { createContext, useContext, useEffect, useLayoutEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { afterRealtimeAuth, createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import type { WorkspaceTask } from "@/domain/task-workspace";
 import { TaskWorkspaceStore } from "./task-workspace-store";
@@ -14,10 +14,12 @@ export function TaskWorkspaceProvider(props: TaskWorkspaceProviderProps) {
 }
 function TaskWorkspaceSession({ children, actorKey, enabled = false, initialTasks, viewerProfileId, onEditorStateChange, onTasksChange }: TaskWorkspaceProviderProps) {
   const [store] = useState(() => new TaskWorkspaceStore(enabled, viewerProfileId, undefined, initialTasks));
-  useLayoutEffect(() => { store.setEnabled(enabled); }, [store, enabled]);
+  const hasEnabled = useRef(enabled);
+  useLayoutEffect(() => { if (enabled) hasEnabled.current = true; store.setEnabled(enabled); }, [store, enabled]);
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   useEffect(() => { store.setOnTasksChange(onTasksChange); return () => { store.setOnTasksChange(undefined); }; }, [store, onTasksChange]);
-  useEffect(() => { if (snapshot.hidden) onTasksChange?.([]); }, [snapshot.hidden, onTasksChange]);
+  // Only a workspace that owned the projection may clear it, including after capability loss.
+  useEffect(() => { if (hasEnabled.current && snapshot.hidden) onTasksChange?.([]); }, [enabled, snapshot.hidden, onTasksChange]);
   useEffect(() => { if (initialTasks) store.setTasks(initialTasks); }, [store, initialTasks]);
   useEffect(() => {
     if (!enabled) return;

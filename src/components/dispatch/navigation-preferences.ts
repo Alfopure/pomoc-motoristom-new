@@ -1,10 +1,7 @@
 export const MAX_PINNED_NAVIGATION_VIEWS = 3;
 
 export const PINNABLE_NAVIGATION_VIEWS = [
-  "tasks",
-  "notes",
   "tools",
-  "cases",
   "call-center",
   "attendance",
   "fleet",
@@ -18,7 +15,7 @@ export const PINNABLE_NAVIGATION_VIEWS = [
 
 export type PinnableNavigationView = (typeof PINNABLE_NAVIGATION_VIEWS)[number];
 
-export const DEFAULT_PINNED_NAVIGATION_VIEWS: PinnableNavigationView[] = ["tasks", "cases"];
+export const DEFAULT_PINNED_NAVIGATION_VIEWS: PinnableNavigationView[] = [];
 
 export const MAX_MOBILE_NAVIGATION_SHORTCUTS = 3;
 
