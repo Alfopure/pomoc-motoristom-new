@@ -29,6 +29,7 @@ export function TowingWorkspace({ view, initialData, initialOrderId, sourceCaseI
   const [cashPending, setCashPending] = useState(false);
   const [settingsPending, setSettingsPending] = useState(false);
   const [pendingOperations, setPendingOperations] = useState<Set<string>>(() => new Set());
+  const retries = useRef(new Map<string, { operation: Parameters<RunOperation>[1]; message: Parameters<RunOperation>[2] }>());
   const pending = busy || pendingOperations.size > 0 || detailPending || createPending || cashPending || settingsPending;
   usePendingChanges(pending, onPendingChangesChange);
   useEffect(() => {
@@ -36,10 +37,13 @@ export function TowingWorkspace({ view, initialData, initialOrderId, sourceCaseI
     window.addEventListener("beforeunload", protectDraftBeforeUnload);
     return () => window.removeEventListener("beforeunload", protectDraftBeforeUnload);
   }, [pending]);
-  const clearOperation = (key: string) => setPendingOperations(current => {
-    if (!current.has(key)) return current;
-    const next = new Set(current); next.delete(key); return next;
-  });
+  const clearOperation = (key: string) => {
+    retries.current.delete(key);
+    setPendingOperations(current => {
+      if (!current.has(key)) return current;
+      const next = new Set(current); next.delete(key); return next;
+    });
+  };
   const refresh = useCallback(async () => {
     const sequence = ++loadSequence.current;
     setLoading(true);
@@ -63,13 +67,18 @@ export function TowingWorkspace({ view, initialData, initialOrderId, sourceCaseI
   useEffect(() => { if (firstLoad.current && initialData && !initialOrderId) { firstLoad.current = false; return; } firstLoad.current = false; void refresh(); }, [initialData, initialOrderId, refresh]);
   const run: RunOperation = async (key, operation, message) => {
     if (operationRunning.current) return false;
+    // Keep the original request and acknowledgment handler even if a read or
+    // later edits change the form's revision and payload before recovery.
+    const attempt = retries.current.get(key) ?? { operation, message };
+    retries.current.set(key, attempt);
     setPendingOperations(current => new Set(current).add(key));
     operationRunning.current = true; setBusy(true); setError(""); setSuccess("");
     try {
-      const result = await operation();
-      setSuccess(typeof message === "function" ? message(result) : message);
+      const result = await attempt.operation();
+      setSuccess(typeof attempt.message === "function" ? attempt.message(result) : attempt.message);
       await refresh();
       clearOperation(key);
+      attempts.current.delete(key);
       return true;
     } catch (cause) {
       if (cause instanceof TowingRequestError && cause.status >= 400 && cause.status < 500) clearOperation(key);
@@ -95,6 +104,10 @@ export function TowingWorkspace({ view, initialData, initialOrderId, sourceCaseI
   return <Shell view={view} canOffice={canOffice} canDriver={can("drive")} canDeliver={can("deliver")} canDispatch={canDispatch} canPartner={canPartner} embedded={embedded}>
     <div ref={workspaceStart} />
     {error && <Notice kind="error">{error}<div className={styles.actions}><Button disabled={busy || loading} onClick={() => { setError(""); void refresh(); }}><RefreshCw size={16} /> Načítať aktuálne údaje</Button>{error.includes("prihlás") && <a className={styles.button} href={driver ? "/vodic" : "/zakazky"}>Obnoviť prihlásenie</a>}</div></Notice>}
+    {pendingOperations.size > 0 && !busy && <Notice>Výsledok pôvodného zápisu ešte nie je potvrdený. Overte ho pred odchodom; vaše novšie úpravy zostanú zachované.<div className={styles.actions}>{[...pendingOperations].map(key => <Button key={key} disabled={loading} onClick={() => {
+      const attempt = retries.current.get(key);
+      if (attempt) void run(key, attempt.operation, attempt.message);
+    }}>Overiť pôvodný zápis</Button>)}</div></Notice>}
     {success && <Notice kind="success">{success}</Notice>}
     {!workspace ? <Panel title={loading ? "Načítavam zákazky…" : "Zákazky sú nedostupné"}><p className={styles.muted}>{loading ? "Overujem oprávnenia a načítavam aktuálne údaje." : "Skontrolujte spojenie a skúste načítanie znova."}</p>{!loading && <Button onClick={() => void refresh()}>Skúsiť znova</Button>}</Panel> : selectedOrder ? <OrderDetail key={selectedOrder.id} order={selectedOrder} workspace={workspace} send={send} run={run} busy={busy} onBack={back} onPendingChangesChange={setDetailPending} /> : mode === "create" ? <CreateOrder workspace={workspace} busy={busy} send={send} onBack={back} sourceCaseId={sourceCaseId} onPendingChangesChange={setCreatePending} /> : mode === "cash" ? <><Button onClick={back}><ArrowLeft size={16} /> Späť na zákazky</Button><Cash workspace={workspace} busy={busy} send={send} run={run} onPendingChangesChange={setCashPending} /></> : mode === "members" ? <><Button onClick={back}><ArrowLeft size={16} /> Späť na zákazky</Button><Members workspace={workspace} busy={busy} run={run} /></> : mode === "settings" ? <><Button onClick={back}><ArrowLeft size={16} /> Späť na zákazky</Button><Settings workspace={workspace} busy={busy} send={send} onPendingChangesChange={setSettingsPending} /><ParkingSettings workspace={workspace} busy={busy} send={send} /></> : mode === "reports" ? <><Button onClick={back}><ArrowLeft size={16} /> Späť na zákazky</Button><FinancialReports workspace={workspace} /></> : <>
       <div className={styles.titleRow}><div><ListHeading className={styles.title}>{driver ? "Moje zákazky" : "Zákazky"}</ListHeading><p className={styles.subtitle}>{driver ? `${workspace.actor.displayName} · pridelená práca na jednom mieste` : "Od prijatia zásahu po kontrolu, fakturáciu a úhradu."}</p></div><div className={styles.actions} style={{ marginTop: 0 }}><Button aria-label="Obnoviť zákazky" disabled={loading || busy} onClick={() => void refresh()}><RefreshCw size={17} /></Button>{can("cash") || driver ? <Button onClick={() => setMode("cash")}><Wallet size={17} /> Hotovosť</Button> : null}{!driver && can("operate") && <Button primary onClick={() => setMode("create")}><Plus size={17} /> Nová zákazka</Button>}</div></div>

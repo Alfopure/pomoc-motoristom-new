@@ -35,10 +35,14 @@ function workspace(view: "office" | "driver", access: Access): TowingWorkspace {
     view, orders: [order], members: [], branches: [], fleet: [], cashAccounts: [], handovers: [], taxConfigured: true, taxRates: ["5"], taxDate: "2026-11-05" };
 }
 
-async function boot(page: Page, access: Access, width = 1440) {
+async function boot(page: Page, access: Access, width = 1440, options?: { pendingAttachment?: boolean }) {
   await page.setViewportSize({ width, height: 900 });
-  const state = { commands: [] as TowingCommand[], reads: [] as string[], exitRequests: [] as string[], documentRequests: 0, failCommands: false };
+  const state = { commands: [] as TowingCommand[], reads: [] as string[], exitRequests: [] as string[], documentRequests: 0, failCommands: false, applyThenFailOnce: false };
   const fixtures = { office: workspace("office", access), driver: workspace("driver", access) };
+  const acknowledgments = new Map<string, { commandId: string; targetId: string; revision: number }>();
+  if (options?.pendingAttachment) for (const fixture of Object.values(fixtures)) fixture.orders[0].attachments.push({
+    id: "44444444-4444-4444-8444-444444444444", kind: "work", name: "nedokoncena-fotka.png", mimeType: "image/png", size: 100, status: "pending", createdAt: "2026-11-05T09:00:00Z",
+  });
   await page.route("**/*", route => {
     const url = new URL(route.request().url());
     if (url.pathname.includes("/auth/v1/logout") || route.request().method() === "DELETE" && url.pathname.includes("/push/")) state.exitRequests.push(url.pathname);
@@ -59,11 +63,23 @@ async function boot(page: Page, access: Access, width = 1440) {
       const command = route.request().postDataJSON() as TowingCommand;
       state.commands.push(command);
       if (state.failCommands) return route.fulfill({ status: 503, json: { error: "Testovací výpadok. Uloženie nie je potvrdené." } });
+      const acknowledged = acknowledgments.get(command.commandId);
+      if (acknowledged) return route.fulfill({ json: acknowledged });
       for (const fixture of Object.values(fixtures)) {
         const order = fixture.orders[0];
         if (command.type === "update_order") { order.fields = { ...order.fields, ...command.payload.fields as object }; order.revision++; }
+        if (command.type === "abandon_attachment") {
+          const attachment = order.attachments.find(item => item.id === command.payload.id);
+          if (attachment) { attachment.status = "abandoned"; order.revision++; }
+        }
       }
-      return route.fulfill({ json: { commandId: command.commandId, targetId: command.targetId, revision: fixtures.office.orders[0].revision } });
+      const receipt = { commandId: command.commandId, targetId: command.targetId, revision: fixtures.office.orders[0].revision };
+      acknowledgments.set(command.commandId, receipt);
+      if (state.applyThenFailOnce) {
+        state.applyThenFailOnce = false;
+        return route.fulfill({ status: 503, json: { error: "Testovací výpadok. Uloženie nie je potvrdené." } });
+      }
+      return route.fulfill({ json: receipt });
     }
     if (url.pathname === "/api/notes") return route.fulfill({ json: { notes: [] } });
     if (url.pathname === "/api/notes/colleagues") return route.fulfill({ json: { colleagues: [] } });
@@ -228,6 +244,55 @@ test("a confirmed retry releases the refresh guard after towing edits are saved"
   await towingRegion.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
   await expect(towingRegion.getByRole("status").filter({ hasText: "Údaje zákazky sú uložené" })).toBeVisible();
   await expect(towingRegion.getByRole("button", { name: "Uložiť údaje", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Nástenka", exact: true }).click();
+  const warnings: string[] = [];
+  page.on("dialog", async dialog => { warnings.push(dialog.message()); await dialog.accept(); });
+  await page.getByRole("button", { name: /^Účet / }).click();
+  await page.getByRole("dialog", { name: "Používateľský účet" }).getByRole("button", { name: "Obnoviť aplikáciu", exact: true }).click();
+  await expect.poll(() => state.documentRequests).toBe(2);
+  expect(warnings).toEqual([]);
+});
+
+test("an applied command with lost acknowledgement remains recoverable after reading the newer server revision", async ({ page }) => {
+  const state = await boot(page, "office");
+  state.applyThenFailOnce = true;
+  await openTowing(page);
+  const towingRegion = page.getByTestId("towing-module-workspace");
+  await towingRegion.getByRole("button", { name: "Otvoriť Z-2026-0001", exact: true }).click();
+  await towingRegion.getByLabel("Poznámka vodiča", { exact: true }).fill("Server túto poznámku uložil, odpoveď sa stratila.");
+  await towingRegion.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
+  await expect(towingRegion.getByRole("alert").filter({ hasText: "Testovací výpadok" })).toBeVisible();
+  await towingRegion.getByRole("button", { name: "Načítať aktuálne údaje", exact: true }).click();
+  await expect(towingRegion.getByText("Uložená verzia 2", { exact: true })).toBeVisible();
+  await expect(towingRegion.getByRole("button", { name: "Uložiť údaje", exact: true })).toBeDisabled();
+  await towingRegion.getByRole("button", { name: "Overiť pôvodný zápis", exact: true }).click();
+  await expect(towingRegion.getByRole("button", { name: "Overiť pôvodný zápis", exact: true })).toHaveCount(0);
+  await expect(towingRegion.getByText("Uložená verzia 2", { exact: true })).toBeVisible();
+  expect(state.commands).toHaveLength(2);
+  expect(state.commands[1]).toEqual(state.commands[0]);
+  expect(state.commands[1].expectedRevision).toBe(1);
+  await page.getByRole("button", { name: "Nástenka", exact: true }).click();
+  const warnings: string[] = [];
+  page.on("dialog", async dialog => { warnings.push(dialog.message()); await dialog.accept(); });
+  await page.getByRole("button", { name: /^Účet / }).click();
+  await page.getByRole("dialog", { name: "Používateľský účet" }).getByRole("button", { name: "Obnoviť aplikáciu", exact: true }).click();
+  await expect.poll(() => state.documentRequests).toBe(2);
+  expect(warnings).toEqual([]);
+});
+
+test("acknowledged attachment abandonment clears its reason draft and permits refresh", async ({ page }) => {
+  const state = await boot(page, "office", 1440, { pendingAttachment: true });
+  await openTowing(page);
+  const towingRegion = page.getByTestId("towing-module-workspace");
+  await towingRegion.getByRole("button", { name: "Otvoriť Z-2026-0001", exact: true }).click();
+  await towingRegion.getByRole("tab", { name: "Fotografie (1)", exact: true }).click();
+  await towingRegion.getByLabel("Dôvod vyradenia neuloženej prílohy", { exact: true }).fill("Nahrávanie sa prerušilo, novú fotografiu pridáme osobitne.");
+  await towingRegion.getByRole("button", { name: "Vyradiť neuložený súbor nedokoncena-fotka.png", exact: true }).click();
+  await expect(towingRegion.getByRole("status").filter({ hasText: "Neuložená príloha bola vyradená" })).toBeVisible();
+  await expect(towingRegion.getByRole("tab", { name: "Fotografie (0)", exact: true })).toBeVisible();
+  expect(state.commands).toHaveLength(1);
+  expect(state.commands[0].type).toBe("abandon_attachment");
+  expect(state.commands[0].payload.reason).toBe("Nahrávanie sa prerušilo, novú fotografiu pridáme osobitne.");
   await page.getByRole("button", { name: "Nástenka", exact: true }).click();
   const warnings: string[] = [];
   page.on("dialog", async dialog => { warnings.push(dialog.message()); await dialog.accept(); });
