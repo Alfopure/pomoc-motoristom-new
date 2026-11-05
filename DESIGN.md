@@ -62,6 +62,8 @@ Rozsah pobočiek a práv sa overuje na serveri. Právo pristavovať (`deliver`) 
 
 ## Information architecture
 
+**Webové odťahy · 5. 11. 2026:** v skupine Prevádzka je **Kniha odťahov** vedľa Výjazdy a odvozy. Je to jeden kancelársky modul pre zákazky, kontrolu, nacenenie, doklady a financie. Člen s oprávnením vodiča má pohľad **Moje odťahy**; pri kombinovaných oprávneniach prepína pohľady vnútri modulu. Viditeľnosť určuje aktuálne členstvo odťahov rovnakého používateľa a organizácie, nie samotná rola správcu dispečingu. Odkaz na odťahy už nepatrí do menu účtu. Používajú sa existujúce pripínateľné skratky, hlavička a pracovná plocha dispečingu bez druhej hlavičky či odhlásenia. Po prvej návšteve zostávajú oba otvorené pohľady pripojené, aby prepnutie modulu nestratilo formulár ani identitu nepotvrdeného príkazu. Samostatné adresy `/zakazky`, `/vodic` a príprava offline zostávajú vstupmi pre terénne účty. Toto rozhodnutie nemení proces podľa Erosovho zadania ani účtovné oprávnenia; živá a terénna akceptácia sa uvádza samostatne.
+
 **Mobil:** zachovať Prehľad · tri používateľove moduly · Moduly. Prehľad: živý hovor → Treba riešiť → Vaša práca → Telefón. Moduly: hľadanie a povolené moduly s celým názvom/popismi → úprava lišty → účet a prístupy. Nastavenie modulu má viditeľnú akciu Možnosti.
 
 Do prevádzkovej skupiny spoločnej navigácie pri **Flotile** pridať **Pristavenia a odvozy**. Použiť rovnakú hlavičku, účet, telefóniu podľa oprávnenia a návrat na prípad. Pri prepnutí modulu sa zachová rozpracovaný hovor a stav prípadu. Konkrétnu URL určí implementácia podľa navigácie dispečingu; hlboký odkaz musí otvoriť rovnaký úkon po obnovení stránky.

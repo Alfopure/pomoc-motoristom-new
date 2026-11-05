@@ -9,6 +9,7 @@ import { getAppVersion } from "@/server/app-version";
 import { getAppRelease } from "@/server/app-release";
 import { getTowingAuthState, towingEnabled, towingLoginDestination } from "@/server/towing/auth";
 import { getPartnerAuthState } from "@/server/partners/auth";
+import { towingModuleAccess } from "@/domain/towing/module-access";
 
 export default async function Home() {
   await connection();
@@ -16,6 +17,7 @@ export default async function Home() {
   const appRelease = getAppRelease();
   const towingState = towingEnabled() ? await getTowingAuthState() : null;
   const towingHref = towingState?.authorized ? towingLoginDestination(towingState.actor) ?? undefined : undefined;
+  const towingAccess = towingModuleAccess(towingState?.authorized ? towingState.actor : null, authState.authorized && authState.profile ? authState.profile : null);
 
   if (!authState.authorized) {
     if (towingHref) redirect(towingHref);
@@ -37,7 +39,8 @@ export default async function Home() {
       viewerOrganizationId={authState.profile?.organizationId}
       viewerProfileId={authState.profile?.profileId}
       viewerRole={authState.profile?.role}
-      towingHref={towingHref}
+      towingAccess={towingAccess}
+      fieldWorkspaceHref={towingHref === "/moje-jazdy" || towingHref === "/pobocka" ? towingHref : undefined}
     />
   );
 }

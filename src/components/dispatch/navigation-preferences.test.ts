@@ -32,6 +32,12 @@ describe("navigation preferences", () => {
     expect(parsePinnedNavigationViews("[]")).toEqual([]);
   });
 
+  it("persists the towing module as a desktop and authorized mobile shortcut", () => {
+    expect(parsePinnedNavigationViews(JSON.stringify(["towing", "tasks"]))).toEqual(["towing", "tasks"]);
+    expect(parseMobileNavigationShortcuts(JSON.stringify(["towing", "tasks"]), ["towing", "tasks"])).toEqual(["towing", "tasks"]);
+    expect(parseMobileNavigationShortcuts(JSON.stringify(["towing", "tasks"]), ["tasks"])).toEqual(["tasks"]);
+  });
+
   it("adds, removes, and caps shortcuts without silently replacing one", () => {
     expect(togglePinnedNavigationView(["tasks"], "cases")).toEqual({ limitReached: false, views: ["tasks", "cases"] });
     expect(togglePinnedNavigationView(["tasks", "cases"], "tasks")).toEqual({ limitReached: false, views: ["cases"] });
