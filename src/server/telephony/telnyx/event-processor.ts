@@ -248,9 +248,11 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
     // Unlinked operator dials (S6 B′) and direct supervision can have their own
     // provider session. Find a candidate through the saved SIP leg, then require
     // the same exact accepted-dial proof with that dial's `call_session_id`.
-    // Only supervisors may use this path without the unlinked start mode.
+    // Only supervisors may use this path without the unlinked start mode or
+    // operator age cutoff: their hangup can arrive after a long listen-in.
     const recent = await deps.admin.from("motorist_call_legs").select("session_id").eq("organization_id", deps.organizationId)
-      .in("role", ["operator", "supervisor"]).in("to_number", telnyxSipUris(sipUser)).gte("initiated_at", new Date(occurredAt - MIRROR_UNLINKED_WINDOW_MS).toISOString())
+      .in("role", ["operator", "supervisor"]).in("to_number", telnyxSipUris(sipUser))
+      .or(`role.eq.supervisor,initiated_at.gte.${new Date(occurredAt - MIRROR_UNLINKED_WINDOW_MS).toISOString()}`)
       .order("initiated_at", { ascending: false }).limit(MIRROR_PROOF_LIMIT).abortSignal(signal);
     if (recent.error || !recent.data?.length) return null;
     const unlinked = await deps.admin.from("motorist_call_sessions").select("id, metadata").eq("organization_id", deps.organizationId)
@@ -301,9 +303,11 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
 }
 
 /**
- * How far back an unlinked operator or supervisor dial's leg is looked for
- * when its mirror arrives. The fallback reads only `MIRROR_PROOF_LIMIT` (8)
- * recent eligible legs to that SIP address in this window, and shares the
+ * How far back an unlinked operator dial's leg is looked for when its mirror
+ * arrives. Supervisor legs do not expire here: a long listen-in still needs
+ * its terminal callback recognized through the exact accepted-dial proof.
+ * The fallback reads only `MIRROR_PROOF_LIMIT` (8) newest eligible legs to
+ * that SIP address (operators in this window, supervisors of any age), and shares the
  * lookup's 1.5 s read budget (typically four sequential reads). A miss —
  * eight newer legs to the same address, or a slow read — attributes nothing:
  * the mirror waits for correlation, the session's drain and the cron retry it,
