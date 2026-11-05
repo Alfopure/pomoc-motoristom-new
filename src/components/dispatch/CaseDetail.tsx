@@ -4,7 +4,7 @@ import { retainDiagnosticUiContext, setDiagnosticEditorContext } from "@/lib/dia
 import { diagnosticJson } from "@/lib/diagnostics/request";
 import { diagnosticFailure, diagnosticRequestId, diagnosticResponse } from "@/lib/diagnostics/operations";
 import type { DiagnosticOutcome } from "@/lib/diagnostics/types";
-import type { CaseDetailData } from "@/data/case-detail";
+import { compareCaseRevisions, type CaseDetailData } from "@/data/case-detail";
 
 import { VehicleLookupControl } from "./VehicleLookupControl";
 import { CaseAccessBoundary, CaseEditorActivity, useCaseEditorPresence, useCaseCollaboration } from "./CaseCollaborationProvider";
@@ -144,9 +144,8 @@ import styles from "./case-detail.module.css";
 import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { CaseHandoffPanel } from "./CaseHandoffPanel";
-import { CaseOperationsPanel } from "@/components/operations/OperationsModule";
+import { CaseWorkOverview } from "./CaseWorkOverview";
 import { CasePartnerPanel } from "@/components/partners/CasePartnerPanel";
-import { CaseTowingOrdersPanel } from "./CaseTowingOrdersPanel";
 import { CaseEditorBoundary } from "./CaseEditorBoundary";
 
 type CaseDetailProps = {
@@ -314,6 +313,7 @@ function CaseDetailContent({
     onSaveDraftChange?.(saveDraft);
   }, [onSaveDraftChange]);
   const [workRefreshToken, setWorkRefreshToken] = useState(0);
+  const [handoffOpenRequest, setHandoffOpenRequest] = useState(0);
   const [editorControls, setEditorControls] = useState<CaseEditorControls | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
@@ -746,8 +746,8 @@ function CaseDetailContent({
         assets={assets}
         operators={operators}
         focusedTaskId={focusedTaskId}
-        handoff={<CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} initiallyExpanded={openHandoff} presentation="drawer" initialWorkKinds={[...(caseItem.jobTypes.includes("tow") || caseItem.jobTypes.includes("vehicle_recovery") ? ["tow" as const] : []), ...(caseItem.jobTypes.includes("replacement_vehicle") ? ["delivery" as const] : [])]} onWorkCommitted={() => setWorkRefreshToken(value => value + 1)} />}
-        work={<div className="grid min-w-0 gap-5"><CaseOperationsPanel caseId={caseItem.id} embedded refreshToken={workRefreshToken} /><CaseTowingOrdersPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} embedded refreshToken={workRefreshToken} /></div>}
+        handoff={<CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} initiallyExpanded={openHandoff} presentation="drawer" openRequest={handoffOpenRequest} initialWorkKinds={[...(caseItem.jobTypes.includes("tow") || caseItem.jobTypes.includes("vehicle_recovery") ? ["tow" as const] : []), ...(caseItem.jobTypes.includes("replacement_vehicle") ? ["delivery" as const] : [])]} onWorkCommitted={() => setWorkRefreshToken(value => value + 1)} />}
+        work={<CaseWorkOverview caseId={caseItem.id} caseNumber={caseItem.caseNumber} jobTypes={caseItem.jobTypes} active={active} refreshToken={workRefreshToken} onAssign={() => setHandoffOpenRequest(value => value + 1)} />}
         partner={<CasePartnerPanel caseId={caseItem.id} embedded />}
         notes={!hideNotesAndActivity ? <CaseNotesAndActivity busy={isRunningAction} timeline={caseItem.timeline} onAddNote={(note) => postAction({ action: "add_note", note }, "Poznámka pridaná.")} /> : undefined}
         sms={<CaseSmsHistory caseId={caseItem.id} embedded onCompose={() => { setSmsTemplate("custom"); setSmsComposerOpen(true); }} />}
@@ -1560,7 +1560,8 @@ function EditCaseForm({
 
   // Reconcile only a clean editor. Dirty values and its input nodes keep their identity.
   useEffect(() => {
-    if (caseItem.updatedAt === serverRevisionRef.current || savePhase === "saving" || collaborationState.hidden) return;
+    // A receipt can advance our revision before the parent obtains the canonical snapshot.
+    if (compareCaseRevisions(caseItem.updatedAt, serverRevisionRef.current) <= 0 || savePhase === "saving" || collaborationState.hidden) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Synchronizes an external authorized snapshot without remounting the user's input nodes.
     if (isDirty) { conflictRef.current = true; setConflict(true); return; }
     if (conflictRef.current) return;

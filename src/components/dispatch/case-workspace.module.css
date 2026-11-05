@@ -46,3 +46,5 @@
 .workspace button:focus-visible{outline:2px solid #557baa;outline-offset:-2px}
 @container(max-width:650px){.header{align-items:flex-start;flex-wrap:wrap;padding:15px}.actions{width:100%}.header h2{font-size:17px}.facts{grid-template-columns:repeat(2,minmax(0,1fr));padding:0 15px 14px;gap:14px}.facts>div:last-child{grid-column:1/-1;border-top:1px solid #eef1f5;padding-top:10px}.facts>div>svg{display:none}.route{margin:0 15px 14px;gap:6px;font-size:10px;flex-wrap:wrap}.tabs{padding:0 5px;gap:0}.tabs button{padding-inline:9px}.panel{padding:15px}.nextStep{flex-wrap:wrap}.nextStep>button{margin-left:50px}.footer{padding:9px 15px}.footer button{white-space:nowrap}}
 @media(prefers-reduced-motion:no-preference){.tabs button{transition:background .15s,color .15s}}
+
+.overviewFacts,.workOverview{min-width:0}.overviewFacts:not([hidden])+.workOverview{margin-top:18px;border-top:1px solid #edf1f6;padding-top:16px}

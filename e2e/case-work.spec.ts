@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { build } from "esbuild";
 import type { CaseWorkItem } from "../src/domain/case-work";
+test.use({ timezoneId: "Europe/Bratislava" });
 let script: string, css: string;
 const id = (n: number) =>
   `72000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -23,7 +24,15 @@ async function boot(
     lost = false,
     partial = false,
     rejectAt,
-  }: { lost?: boolean; partial?: boolean; rejectAt?: number } = {},
+    dual = false,
+    hidden = false,
+  }: {
+    lost?: boolean;
+    partial?: boolean;
+    rejectAt?: number;
+    dual?: boolean;
+    hidden?: boolean;
+  } = {},
 ) {
   const batches: CaseWorkItem[][] = [];
   const receipts = new Map();
@@ -86,8 +95,12 @@ async function boot(
     }
     return route.fulfill({ json: { results } });
   });
-  await page.goto("https://case-work.test/");
-  await expect(page.getByLabel("Príjemca", { exact: true })).toHaveCount(1);
+  await page.goto(
+    `https://case-work.test/?${dual ? "dual=1" : ""}${hidden ? "&hidden=1" : ""}`,
+  );
+  await expect(page.getByLabel("Príjemca", { exact: true })).toHaveCount(
+    hidden ? 0 : dual ? 2 : 1,
+  );
   return { batches, receipts };
 }
 test("unsent drafts survive closing and reopening panel", async ({ page }) => {
@@ -203,4 +216,61 @@ test("invalid interval stays editable before any request is sent", async ({
   await expect(page.getByRole("alert")).toContainText("Koniec musí nasledovať");
   await expect(page.getByLabel("Predpokladaný koniec")).toBeEnabled();
   expect(trace.batches).toHaveLength(0);
+});
+
+test("new tow and delivery default to the local minute when the panel opens", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date("2026-11-05T12:37:45Z") });
+  await boot(page, { dual: true });
+  await expect(page.getByLabel("Druh práce").nth(0)).toHaveValue("tow");
+  await expect(page.getByLabel("Druh práce").nth(1)).toHaveValue("delivery");
+  for (const field of await page.getByLabel("Dohodnutý termín").all())
+    await expect(field).toHaveValue("2026-11-05T13:37");
+});
+test("first opening uses the latest case job types and opening time after being hidden", async ({
+  page,
+}) => {
+  await page.clock.install({ time: new Date("2026-11-05T12:37:00Z") });
+  await boot(page, { hidden: true });
+  await page
+    .getByRole("button", { name: "Pridať pristavenie do prípadu" })
+    .click();
+  await page.clock.runFor(60000);
+  await page.getByRole("button", { name: "Prepnúť panel" }).click();
+  await expect(page.getByLabel("Druh práce")).toHaveCount(2);
+  await expect(page.getByLabel("Druh práce").nth(1)).toHaveValue("delivery");
+  await expect(page.getByLabel("Dohodnutý termín").first()).toHaveValue(
+    "2026-11-05T13:38",
+  );
+});
+test("reopening keeps an explicitly chosen date for both recipients", async ({
+  page,
+}) => {
+  await boot(page, { dual: true });
+  await page.getByLabel("Dohodnutý termín").first().fill("2026-12-12T15:10");
+  await page
+    .getByLabel("Pokyny pre tohto príjemcu")
+    .nth(1)
+    .fill("Iba pre pristavenie");
+  await page.getByRole("button", { name: "Prepnúť panel" }).click();
+  await page.getByRole("button", { name: "Prepnúť panel" }).click();
+  await expect(page.getByLabel("Dohodnutý termín").first()).toHaveValue(
+    "2026-12-12T15:10",
+  );
+  await expect(page.getByLabel("Pokyny pre tohto príjemcu").nth(1)).toHaveValue(
+    "Iba pre pristavenie",
+  );
+});
+
+test("opening defaults does not warn on leave but a chosen date protects the draft", async ({ page }) => {
+  await boot(page, { dual: true });
+  const guarded = () => page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  await expect.poll(guarded).toBe(false);
+  await page.getByLabel("Dohodnutý termín").first().fill("2026-11-06T15:45");
+  await expect.poll(guarded).toBe(true);
 });

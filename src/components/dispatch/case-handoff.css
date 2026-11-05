@@ -45,3 +45,7 @@
 .case-handoff-panel.handoff-drawer button.handoff-primary { background: #ffda45; border-color: #e6c22c; color: #29303b; }
 .case-handoff-panel.handoff-drawer button.handoff-primary:hover { background: #ffe365; }
 @media(max-width:767px) { .handoff-drawer-trigger { min-height: 40px; }.handoff-drawer-header { padding: 18px; }.handoff-drawer > .handoff-panel-body { padding: 14px 18px 24px; } }
+
+/* Make room for the case's tow + delivery; keep a single assignment compact. */
+.case-handoff-panel.handoff-drawer { width:min(620px,100%); }
+.case-handoff-panel.handoff-drawer:has(.case-work-items>.case-work-item:nth-child(2)) { width:min(1040px,100%); }

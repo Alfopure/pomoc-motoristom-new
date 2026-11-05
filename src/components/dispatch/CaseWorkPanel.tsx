@@ -1,6 +1,14 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, Plus, Send, Trash2 } from "lucide-react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
+import {
+  CarFront,
+  CheckCircle2,
+  Clock3,
+  Plus,
+  Send,
+  Trash2,
+  Truck,
+} from "lucide-react";
 import {
   isCaseWorkReceipt,
   type CaseWorkContext,
@@ -19,6 +27,7 @@ type Row = {
   destination: string;
   instructions: string;
   scheduled: string;
+  scheduledAuto?: boolean;
   end: string;
   fleetAssetId: string;
   cycleId: string;
@@ -28,11 +37,16 @@ type Row = {
   error?: string;
   errorStatus?: number;
 };
+const localInputTime = (at: Date) =>
+  new Date(at.getTime() - at.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 16);
 const localTime = (value: string) =>
   value ? new Date(value).toISOString() : null;
 function newRow(
   context: CaseWorkContext,
   kind: CaseWorkItem["kind"] = "delivery",
+  at: Date = new Date(),
 ): Row {
   return {
     id: crypto.randomUUID(),
@@ -41,7 +55,8 @@ function newRow(
     pickup: context.pickup,
     destination: context.destination,
     instructions: "",
-    scheduled: "",
+    scheduled: localInputTime(at),
+    scheduledAuto: true,
     end: "",
     fleetAssetId: "",
     cycleId: "",
@@ -69,10 +84,24 @@ export function CaseWorkPanel({
     [busy, setBusy] = useState(false);
   const running = useRef(false),
     storageKey = useRef("");
-  const suggestions = useRef(initialKinds);
+  const baselineCount = initialKinds?.length || 1;
+  const makeInitialRows = useEffectEvent(
+    (data: CaseWorkContext, openedAt: Date) =>
+      [
+        ...new Set(initialKinds?.length ? initialKinds : ["delivery" as const]),
+      ].map((kind) => newRow(data, kind, openedAt)),
+  );
+  function refreshAutomaticTimes(current: Row[], openedAt: Date) {
+    return current.map((row) =>
+      row.scheduledAuto && !row.pending && !row.receipt
+        ? { ...row, scheduled: localInputTime(openedAt) }
+        : row,
+    );
+  }
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
+    const openedAt = new Date();
     void fetch(`/api/cases/${encodeURIComponent(caseId)}/work`, {
       signal: controller.signal,
       cache: "no-store",
@@ -120,17 +149,19 @@ export function CaseWorkPanel({
               "Rozpracované odoslanie sa nepodarilo obnoviť. Obnovte stránku; ďalšie zadanie zatiaľ neposielajte.",
             );
           setRows((current) =>
-            keepDraft && current.length ? current : (saved as Row[]),
+            refreshAutomaticTimes(
+              keepDraft && current.length ? current : (saved as Row[]),
+              openedAt,
+            ),
           );
-        } else
+        } else {
+          const defaults = makeInitialRows(data, openedAt);
           setRows((current) =>
             keepDraft && current.length
-              ? current
-              : (suggestions.current?.length
-                  ? suggestions.current
-                  : ["delivery" as const]
-                ).map((kind) => newRow(data, kind)),
+              ? refreshAutomaticTimes(current, openedAt)
+              : defaults,
           );
+        }
       })
       .catch((e) => {
         if (!controller.signal.aborted) {
@@ -151,10 +182,10 @@ export function CaseWorkPanel({
         (r) =>
           r.pending ||
           (!r.receipt &&
-            (rows.length > (suggestions.current?.length || 1) ||
+            (rows.length > baselineCount ||
               r.target ||
               r.instructions ||
-              r.scheduled ||
+              (r.scheduled && !r.scheduledAuto) ||
               r.end ||
               r.pickup !== context?.pickup ||
               r.destination !== context?.destination)),
@@ -164,7 +195,7 @@ export function CaseWorkPanel({
     const guard = (e: BeforeUnloadEvent) => e.preventDefault();
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
-  }, [rows, context]);
+  }, [rows, context, baselineCount]);
   useEffect(() => {
     if (!context || !storageKey.current || !rows.length) return;
     try {
@@ -362,10 +393,10 @@ export function CaseWorkPanel({
     <section className="case-work" aria-label="Samostatné zadania práce">
       <div className="case-work-title">
         <div>
-          <h3>Práce v aplikácii</h3>
+          <h3>Vyberte príjemcov práce</h3>
           <p>
-            Každá práca má vlastného príjemcu, pokyny a termín. Pobočka ju
-            najprv dostane do svojho radu.
+            Pre každú prácu vyberte pobočku alebo človeka. Termín je
+            predvyplnený aktuálnym časom.
           </p>
         </div>
       </div>
@@ -430,219 +461,268 @@ export function CaseWorkPanel({
           )}
         </details>
       ) : null}
-      {context &&
-        rows.map((row, index) => {
-          const locked = busy || !!row.pending || !!row.receipt;
-          const people = context.people.filter((p) =>
-            p.kinds.includes(row.kind),
-          );
-          const groups = context.groups.filter((g) =>
-            g.kinds.includes(row.kind),
-          );
-          return (
-            <article key={row.id} className="case-work-item">
-              <div className="case-work-item-title">
-                <strong>
-                  {index + 1}. {workKinds[row.kind]}
-                </strong>
-                {row.receipt ? (
-                  <span role="status">
-                    <CheckCircle2 size={15} />{" "}
-                    {row.receipt.owner === "branch"
-                      ? "V rade pobočky"
-                      : "Pridelené v aplikácii"}
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    aria-label={`Odstrániť prácu ${index + 1}`}
-                    disabled={locked || rows.length === 1}
-                    onClick={() =>
-                      setRows((current) =>
-                        current.filter((r) => r.id !== row.id),
-                      )
-                    }
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                )}
-              </div>
-              <fieldset disabled={locked} className="case-work-grid">
-                <label>
-                  Druh práce
-                  <select
-                    aria-label="Druh práce"
-                    value={row.kind}
-                    onChange={(e) =>
-                      edit(row.id, {
-                        kind: e.target.value as Row["kind"],
-                        target: "",
-                        fleetAssetId: "",
-                        cycleId: "",
-                      })
-                    }
-                  >
-                    {Object.entries(workKinds).map(([v, label]) => (
-                      <option key={v} value={v}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Príjemca
-                  <select
-                    aria-label="Príjemca"
-                    value={row.target}
-                    onChange={(e) =>
-                      edit(row.id, { target: e.target.value, end: "" })
-                    }
-                  >
-                    <option value="">Vyberte pobočku alebo človeka</option>
-                    <optgroup label="Pobočky">
-                      {groups.map((g) => (
-                        <option key={g.id} value={`branch:${g.id}`}>
-                          {g.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                    <optgroup label="Ľudia">
-                      {people.map((p) => (
-                        <option key={p.id} value={`person:${p.id}`}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  </select>
-                </label>
-                <label>
-                  Začiatok / nakládka
-                  <input
-                    value={row.pickup}
-                    maxLength={1000}
-                    onChange={(e) => edit(row.id, { pickup: e.target.value })}
-                  />
-                </label>
-                <label>
-                  Cieľ / vykládka
-                  <input
-                    value={row.destination}
-                    maxLength={1000}
-                    onChange={(e) =>
-                      edit(row.id, { destination: e.target.value })
-                    }
-                  />
-                </label>
-                <label>
-                  Dohodnutý termín
-                  <input
-                    type="datetime-local"
-                    value={row.scheduled}
-                    onChange={(e) =>
-                      edit(row.id, { scheduled: e.target.value })
-                    }
-                  />
-                </label>
-                {row.target.startsWith("person:") && row.kind !== "tow" && (
-                  <label>
-                    Predpokladaný koniec
-                    <input
-                      type="datetime-local"
-                      value={row.end}
-                      min={row.scheduled || undefined}
-                      onChange={(e) => edit(row.id, { end: e.target.value })}
-                    />
-                  </label>
-                )}
-                {row.kind === "tow" && row.target.startsWith("person:") && (
-                  <label>
-                    Výkonná pobočka
-                    <select
-                      value={row.branchId}
-                      onChange={(e) =>
-                        edit(row.id, { branchId: e.target.value })
-                      }
-                    >
-                      <option value="">Vyberte pobočku</option>
-                      {context.branches.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                {row.kind !== "tow" && row.kind !== "collection" && (
-                  <label>
-                    Vozidlo (nepovinné)
-                    <select
-                      value={row.fleetAssetId}
-                      onChange={(e) =>
-                        edit(row.id, { fleetAssetId: e.target.value })
-                      }
-                    >
-                      <option value="">Bez výberu</option>
-                      {context.fleet.map((f) => (
-                        <option key={f.id} value={f.id}>
-                          {f.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                {row.kind === "collection" && (
-                  <label>
-                    Používanie vozidla
-                    <select
-                      value={row.cycleId}
-                      onChange={(e) =>
-                        edit(row.id, { cycleId: e.target.value })
-                      }
-                    >
-                      <option value="">Vyberte vozidlo na odvoz</option>
-                      {context.cycles.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.vehicle}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                <label className="case-work-full">
-                  Pokyny pre tohto príjemcu
-                  <textarea
-                    rows={2}
-                    maxLength={4000}
-                    value={row.instructions}
-                    onChange={(e) =>
-                      edit(row.id, { instructions: e.target.value })
-                    }
-                  />
-                </label>
-              </fieldset>
-              {row.error && (
-                <p role="alert" className="handoff-error">
-                  {row.error}
-                  {row.errorStatus === 400 && (
+      <div className="case-work-items">
+        {context &&
+          rows.map((row, index) => {
+            const locked = busy || !!row.pending || !!row.receipt;
+            const people = context.people.filter((p) =>
+              p.kinds.includes(row.kind),
+            );
+            const groups = context.groups.filter((g) =>
+              g.kinds.includes(row.kind),
+            );
+            return (
+              <article
+                key={row.id}
+                className="case-work-item"
+                data-kind={row.kind}
+                aria-label={`Práca ${index + 1}: ${workKinds[row.kind]}`}
+              >
+                <div className="case-work-item-title">
+                  <div className="case-work-item-heading">
+                    <span className="case-work-kind-icon">
+                      {row.kind === "tow" ? (
+                        <Truck size={19} aria-hidden="true" />
+                      ) : (
+                        <CarFront size={19} aria-hidden="true" />
+                      )}
+                    </span>
+                    <div>
+                      <small>Práca {index + 1}</small>
+                      <h4>{workKinds[row.kind]}</h4>
+                    </div>
+                  </div>
+                  {row.receipt ? (
+                    <span role="status">
+                      <CheckCircle2 size={15} />{" "}
+                      {row.receipt.owner === "branch"
+                        ? "V rade pobočky"
+                        : "Pridelené v aplikácii"}
+                    </span>
+                  ) : (
                     <button
                       type="button"
-                      disabled={busy}
-                      onClick={() => editRejected(row)}
+                      aria-label={`Odstrániť prácu ${index + 1}`}
+                      disabled={locked || rows.length === 1}
+                      onClick={() =>
+                        setRows((current) =>
+                          current.filter((r) => r.id !== row.id),
+                        )
+                      }
                     >
-                      Upraviť odmietnuté zadanie
+                      <Trash2 size={15} />
                     </button>
                   )}
-                </p>
-              )}
-              {row.pending && (
-                <p className="handoff-small">
-                  Zadanie je uchované. Opakovanie overí tú istú prácu a
-                  nevytvorí novú.
-                </p>
-              )}
-            </article>
-          );
-        })}
+                </div>
+                <fieldset disabled={locked} className="case-work-grid">
+                  <div className="case-work-fields">
+                    <label className="case-work-full">
+                      Príjemca
+                      <select
+                        aria-label="Príjemca"
+                        value={row.target}
+                        onChange={(e) =>
+                          edit(row.id, { target: e.target.value, end: "" })
+                        }
+                      >
+                        <option value="">Vyberte pobočku alebo človeka</option>
+                        <optgroup label="Pobočky">
+                          {groups.map((g) => (
+                            <option key={g.id} value={`branch:${g.id}`}>
+                              {g.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Ľudia">
+                          {people.map((p) => (
+                            <option key={p.id} value={`person:${p.id}`}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      </select>
+                    </label>
+                    <div className="case-work-kind-time">
+                      <label>
+                        Druh práce
+                        <select
+                          aria-label="Druh práce"
+                          value={row.kind}
+                          onChange={(e) =>
+                            edit(row.id, {
+                              kind: e.target.value as Row["kind"],
+                              target: "",
+                              fleetAssetId: "",
+                              cycleId: "",
+                            })
+                          }
+                        >
+                          {Object.entries(workKinds).map(([v, label]) => (
+                            <option key={v} value={v}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Dohodnutý termín
+                        <span className="case-work-date-input">
+                          <input
+                            aria-label="Dohodnutý termín"
+                            type="datetime-local"
+                            value={row.scheduled}
+                            onChange={(e) =>
+                              edit(row.id, {
+                                scheduled: e.target.value,
+                                scheduledAuto: false,
+                              })
+                            }
+                          />
+                          <button
+                            type="button"
+                            aria-label={`Nastaviť aktuálny čas pre prácu ${index + 1}`}
+                            onClick={() =>
+                              edit(row.id, {
+                                scheduled: localInputTime(new Date()),
+                                scheduledAuto: false,
+                              })
+                            }
+                          >
+                            <Clock3 size={14} aria-hidden="true" />
+                            Teraz
+                          </button>
+                        </span>
+                      </label>
+                    </div>
+                    <label>
+                      Začiatok / nakládka
+                      <input
+                        value={row.pickup}
+                        maxLength={1000}
+                        onChange={(e) => edit(row.id, { pickup: e.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Cieľ / vykládka
+                      <input
+                        value={row.destination}
+                        maxLength={1000}
+                        onChange={(e) =>
+                          edit(row.id, { destination: e.target.value })
+                        }
+                      />
+                    </label>
+                    {row.target.startsWith("person:") && row.kind !== "tow" && (
+                      <label>
+                        Predpokladaný koniec
+                        <input
+                          type="datetime-local"
+                          value={row.end}
+                          min={row.scheduled || undefined}
+                          onChange={(e) => edit(row.id, { end: e.target.value })}
+                        />
+                      </label>
+                    )}
+                    {row.kind === "tow" && row.target.startsWith("person:") && (
+                      <label>
+                        Výkonná pobočka
+                        <select
+                          value={row.branchId}
+                          onChange={(e) =>
+                            edit(row.id, { branchId: e.target.value })
+                          }
+                        >
+                          <option value="">Vyberte pobočku</option>
+                          {context.branches.map((b) => (
+                            <option key={b.id} value={b.id}>
+                              {b.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    {row.kind !== "tow" && row.kind !== "collection" && (
+                      <label>
+                        Vozidlo (nepovinné)
+                        <select
+                          value={row.fleetAssetId}
+                          onChange={(e) =>
+                            edit(row.id, { fleetAssetId: e.target.value })
+                          }
+                        >
+                          <option value="">Bez výberu</option>
+                          {context.fleet.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    {row.kind === "collection" && (
+                      <label>
+                        Používanie vozidla
+                        <select
+                          value={row.cycleId}
+                          onChange={(e) =>
+                            edit(row.id, { cycleId: e.target.value })
+                          }
+                        >
+                          <option value="">Vyberte vozidlo na odvoz</option>
+                          {context.cycles.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.vehicle}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                  </div>
+                  <div className="case-work-notes">
+                    <p className="case-work-recipient-hint">
+                      {row.target.startsWith("branch:")
+                        ? "Pobočka prevezme prácu a pridelí vykonávateľa."
+                        : row.target.startsWith("person:")
+                          ? "Vybraný človek dostane vlastnú prácu v aplikácii."
+                          : "Pobočka ju zaradí do svojho radu; človek ju dostane priamo."}
+                    </p>
+                    <label className="case-work-full">
+                      Pokyny pre tohto príjemcu
+                      <textarea
+                        rows={2}
+                        maxLength={4000}
+                        value={row.instructions}
+                        onChange={(e) =>
+                          edit(row.id, { instructions: e.target.value })
+                        }
+                      />
+                    </label>
+                  </div>
+                </fieldset>
+                {row.error && (
+                  <p role="alert" className="handoff-error">
+                    {row.error}
+                    {row.errorStatus === 400 && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => editRejected(row)}
+                      >
+                        Upraviť odmietnuté zadanie
+                      </button>
+                    )}
+                  </p>
+                )}
+                {row.pending && (
+                  <p className="handoff-small">
+                    Zadanie je uchované. Opakovanie overí tú istú prácu a
+                    nevytvorí novú.
+                  </p>
+                )}
+              </article>
+            );
+          })}
+      </div>
       {context && (
         <div className="case-work-actions">
           <button

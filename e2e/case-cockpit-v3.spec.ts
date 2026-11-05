@@ -15,7 +15,7 @@ test.beforeAll(async () => {
   css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css
     + fixture.outputFiles.filter(file => file.path.endsWith(".css")).map(file => file.text).join("\n");
 });
-async function boot(page: Page, width: number, query = "") {
+async function boot(page: Page, width: number, query = "", workReads: string[] = []) {
   const errors: string[] = [];
   page.on("pageerror", error => { errors.push(error.message); console.error(error.message); });
   await page.setViewportSize({ width, height: 900 });
@@ -24,6 +24,14 @@ async function boot(page: Page, width: number, query = "") {
     if (url.origin === "https://case-card.test" && url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><body><div id="root"></div></body></html>' });
     if (url.origin === "https://case-card.test" && url.pathname === "/api/sms" && route.request().method() === "GET") return route.fulfill({ json: { messages: [], hasMore: false } });
     if (url.origin === "https://case-card.test" && url.pathname === "/api/sms/context" && route.request().method() === "GET") return route.fulfill({ json: { cases: [{ id: "case-fixture", caseNumber: "TEST-001", name: "Test Klient", phone: "+421900000001", validPhone: true }], tasks: [], sender: "PomocMotor", callbackNumber: "+421900000002", repliesEnabled: false } });
+    if (url.origin === "https://case-card.test" && route.request().method() === "GET") {
+      const caseQuery = url.searchParams.get("caseId") === "case-fixture";
+      if (url.pathname === "/api/operations" && caseQuery) { workReads.push(url.pathname); return route.fulfill({ json: { actor: { canDispatch: true }, operations: [], totalCount: 0, members: [], fleet: [] } }); }
+      if (url.pathname === "/api/pobocky" && caseQuery) { workReads.push(url.pathname); return route.fulfill({ json: { actor: { central: true, leadGroups: [] }, requests: [], totalCount: 0, groups: [], branches: [], people: [], cycles: [], fleet: [] } }); }
+      if (url.pathname === "/api/towing/workspace" && url.searchParams.get("sourceCaseId") === "case-fixture" && url.searchParams.get("view") === "office") { workReads.push(url.pathname); return route.fulfill({ json: { actor: { capabilities: [] }, orders: [], totalCount: 0, members: [], branches: [], fleet: [] } }); }
+      if (url.pathname === "/api/cases/case-fixture/work") return route.fulfill({ json: { actorKey: "fixture:operator", canOperateTowing: true, pickup: "Testovacia nakládka", destination: "Testovací servis", groups: [], people: [], branches: [], fleet: [], cycles: [] } });
+      if (url.pathname === "/api/cases/case-fixture/handoffs") return route.fulfill({ json: { preview: { caseNumber: "TEST-001", action: "Odťah a pristavenie", contact: { name: "Test Klient", phone: "+421900000001" }, vehicle: { make: "Škoda", model: "Octavia", plate: "TEST001" }, pickup: { address: "Testovacia nakládka", lat: null, lng: null }, destination: { address: "Testovací servis", lat: null, lng: null } }, previewVersion: "a".repeat(64), handoffs: [], branches: [], delivery: { members: [] } } });
+    }
     errors.push(`Unexpected network request: ${url.pathname}`);
     return route.abort();
   });
@@ -52,7 +60,7 @@ async function assertOrder(page: Page) {
   await expect(sms(page)).toHaveCount(1);
   if (selected) await page.locator(`[id="${selected}"]`).click();
 }
-for (const width of [360, 390, 768, 1024, 1279, 1280]) {
+for (const width of [320, 360, 390, 768, 1024, 1279, 1280, 1440]) {
   for (const filled of [false, true]) test(`case sections remain ordered and fit at ${width}px (${filled ? "filled" : "empty"})`, async ({ page }) => {
     const errors = await boot(page, width, `?filled=${filled}`);
     await expect(page.getByTestId("case-summary")).toBeVisible();
@@ -421,7 +429,32 @@ test("committed save with unavailable canonical reads retries only GET and keeps
   const priority = page.getByLabel("Priorita prípadu v hlavičke");
   await priority.selectOption("urgent");
   await expect(page.getByTestId("case-autosave-status")).toContainText("Zmena bola prijatá");
+  await page.getByRole("button", { name: "Overiť uložený stav" }).click();
+  await expect(page.getByTestId("case-autosave-status")).toContainText("Zmena bola prijatá");
+  await expect(page.getByRole("button", { name: "Načítať aktuálny stav prípadu" })).toHaveCount(0);
   await expect(priority).toHaveValue("urgent");
+  expect(requests).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test("equivalent revision keeps the dirty draft while a newer microsecond snapshot reports a conflict", async ({ page }) => {
+  const errors = await boot(page, 390);
+  const requests = await mockCaseSaves(page, { fail: true });
+  const priority = page.getByLabel("Priorita prípadu v hlavičke");
+  await priority.selectOption("urgent");
+  await expect(page.getByTestId("case-autosave-status")).toContainText("Uloženie zlyhalo");
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("case-fixture-snapshot", {
+    detail: { updatedAt: "2026-09-10T13:00:00.000000+02:00", priority: "low", nextStep: "Ekvivalentná verzia prípadu" },
+  })));
+  await expect(page.getByText("Ekvivalentná verzia prípadu", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("case-autosave-status")).toContainText("Uloženie zlyhalo");
+  await expect(priority).toHaveValue("urgent");
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("case-fixture-snapshot", {
+    detail: { updatedAt: "2026-09-10T11:00:00.000001Z", priority: "low" },
+  })));
+  await expect(page.getByTestId("case-autosave-status")).toContainText("Prípad medzitým zmenil iný používateľ");
+  await expect(priority).toHaveValue("urgent");
+  await expect(page.getByRole("button", { name: "Načítať aktuálny stav prípadu" })).toBeVisible();
   expect(requests).toHaveLength(1);
   expect(errors).toEqual([]);
 });
@@ -465,5 +498,37 @@ test("SMS tab opens the existing case-bound composer without sending", async ({ 
   await page.keyboard.press("Escape");
   await expect(composer).toBeHidden();
   await expect(caseTab(page, "SMS")).toHaveAttribute("aria-selected", "true");
+  expect(errors).toEqual([]);
+});
+
+test("initial overview shows tow and delivery once and keeps one read batch across work tabs", async ({ page }) => {
+  const reads: string[] = [];
+  const errors = await boot(page, 1440, "?dual=1", reads);
+  const work = page.getByRole("region", { name: "Prehľad odťahu a pristavenia", exact: true });
+  await expect(work.getByRole("heading", { name: "Odťah", exact: true })).toBeVisible();
+  await expect(work.getByRole("heading", { name: "Pristavenie", exact: true })).toBeVisible();
+  await expect.poll(() => reads.length).toBe(3);
+  await work.evaluate(node => { (window as unknown as { workNode: Element }).workNode = node; });
+  await caseTab(page, "Práca a jazdy").click();
+  await expect(work).toBeVisible();
+  await caseTab(page, "Poznámky a aktivita").click();
+  await expect(work).toBeHidden();
+  await caseTab(page, "Prehľad").click();
+  await expect(work).toBeVisible();
+  expect(await work.evaluate(node => (window as unknown as { workNode: Element }).workNode === node)).toBe(true);
+  await expect(page.locator('[aria-label="Prehľad odťahu a pristavenia"]')).toHaveCount(1);
+  expect(reads.sort()).toEqual(["/api/operations", "/api/pobocky", "/api/towing/workspace"].sort());
+  expect(errors).toEqual([]);
+});
+test("the overview handoff action opens the existing drawer with both requested work types", async ({ page }) => {
+  const errors = await boot(page, 1440, "?dual=1");
+  await page.getByRole("button", { name: "Odovzdať prácu", exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: "Odovzdať prípad", exact: true });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByLabel("Druh práce", { exact: true })).toHaveCount(2);
+  await expect(drawer.getByLabel("Druh práce", { exact: true }).nth(0)).toHaveValue("tow");
+  await expect(drawer.getByLabel("Druh práce", { exact: true }).nth(1)).toHaveValue("delivery");
+  await drawer.getByRole("button", { name: "Zavrieť odovzdanie" }).click();
+  await expect(drawer).toBeHidden();
   expect(errors).toEqual([]);
 });

@@ -45,7 +45,7 @@ export function CaseWorkspace({ caseItem, assets, operators, handoff, tasks, wor
   const asset = assets.find(item => item.id === caseItem.selectedAssetId);
   const panels: Record<TabId, ReactNode> = {
     overview: <div className={styles.overview}>
-      <div className={styles.nextStep}><span className={styles.stepIcon}><ClipboardList size={20} /></span><div><h3>Ďalší krok</h3><p>{caseItem.nextStep || "Ďalší krok zatiaľ nie je určený."}</p></div><button type="button" onClick={() => selectTab("work")}>Otvoriť prácu <ArrowRight size={15} /></button></div>
+      <div className={styles.nextStep}><span className={styles.stepIcon}><ClipboardList size={20} /></span><div><h3>Ďalší krok</h3><p>{caseItem.nextStep || "Ďalší krok zatiaľ nie je určený."}</p></div><button type="button" onClick={() => { selectTab("work"); document.getElementById(`${id}-tab-work`)?.focus(); }}>Otvoriť prácu <ArrowRight size={15} /></button></div>
       <dl className={styles.details}>
         <div><dt>Pridelená technika</dt><dd>{asset ? [asset.label, asset.assignedDriverName].filter(Boolean).join(" · ") : "Nepriradená"}</dd></div>
         <div><dt>Platba</dt><dd>{[caseItem.paymentDetails.method && paymentMethodLabels[caseItem.paymentDetails.method], caseItem.paymentDetails.status && paymentStatusLabels[caseItem.paymentDetails.status]].filter(Boolean).join(" · ") || "Zatiaľ neurčená"}</dd></div>
@@ -54,6 +54,8 @@ export function CaseWorkspace({ caseItem, assets, operators, handoff, tasks, wor
       {caseItem.summary && <div className={styles.description}><ExpandableText text={caseItem.summary} /></div>}
     </div>, work, tasks, partner, notes, sms,
   };
+  const mainPanelId = `${id}-panel-main`;
+  const mainTab = selected === "overview" || selected === "work";
   const tabs = [
     { id: "overview" as const, label: "Prehľad", icon: LayoutGrid },
     { id: "work" as const, label: "Práca a jazdy", icon: Route },
@@ -88,8 +90,12 @@ export function CaseWorkspace({ caseItem, assets, operators, handoff, tasks, wor
         <div className={styles.route}><MapPin size={15} /><span>{pickup || "Miesto zatiaľ nedoplnené"}</span><ArrowRight size={14} /><span>{destination || "Cieľ zatiaľ nedoplnený"}</span></div>
       </div>
     </div>
-    <div role="tablist" aria-label="Časti prípadu" className={styles.tabs}>{tabs.map(({ id: tab, label, icon: Icon, ...rest }, index) => <button key={tab} type="button" id={`${id}-tab-${tab}`} role="tab" aria-selected={selected === tab} aria-controls={`${id}-panel-${tab}`} tabIndex={selected === tab ? 0 : -1} onClick={() => selectTab(tab)} onKeyDown={event => onTabKey(event, index)}><Icon size={15} />{label}{"count" in rest && <span>{rest.count}</span>}</button>)}</div>
-    {tabs.map(({ id: tab }) => <div key={tab} id={`${id}-panel-${tab}`} role="tabpanel" aria-labelledby={`${id}-tab-${tab}`} hidden={selected !== tab} className={styles.panel}>{visited.has(tab) ? panels[tab] : null}</div>)}
+    <div role="tablist" aria-label="Časti prípadu" className={styles.tabs}>{tabs.map(({ id: tab, label, icon: Icon, ...rest }, index) => <button key={tab} type="button" id={`${id}-tab-${tab}`} role="tab" aria-selected={selected === tab} aria-controls={tab === "overview" || tab === "work" ? mainPanelId : `${id}-panel-${tab}`} tabIndex={selected === tab ? 0 : -1} onClick={() => selectTab(tab)} onKeyDown={event => onTabKey(event, index)}><Icon size={15} />{label}{"count" in rest && <span>{rest.count}</span>}</button>)}</div>
+    <div id={mainPanelId} role="tabpanel" aria-labelledby={`${id}-tab-${selected === "work" ? "work" : "overview"}`} hidden={!mainTab} className={styles.panel}>
+      <div hidden={selected !== "overview"} className={styles.overviewFacts}>{panels.overview}</div>
+      <div className={styles.workOverview}>{work}</div>
+    </div>
+    {tabs.filter(({id:tab})=>tab!=="overview"&&tab!=="work").map(({ id: tab }) => <div key={tab} id={`${id}-panel-${tab}`} role="tabpanel" aria-labelledby={`${id}-tab-${tab}`} hidden={selected !== tab} className={styles.panel}>{visited.has(tab) ? panels[tab] : null}</div>)}
     <footer className={styles.footer}><span>Uložené údaje · {formatTime(caseItem.updatedAt)}</span><button type="button" aria-expanded={!collapsed} aria-controls={`${id}-facts`} onClick={() => setCollapsed(value => !value)}>{collapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}{collapsed ? "Rozbaliť prehľad" : "Zbaliť prehľad"}</button></footer>
   </section>;
 }
