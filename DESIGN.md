@@ -18,6 +18,14 @@ V odovzdaní sa podľa aktuálne uloženého typu prípadu predvyplnia odťah a 
 
 Overenie: dual-default po zmene typov v skrytom paneli, lokálny čas otvorenia, zachovanie manuálneho času a frozen retry; jedna karta pre odťah + jeho projekciu + materializovanú požiadavku; rozdielne výkony zostávajú rozdielne. Pri 1440/1024 px dva stĺpce pri dostupnej šírke aspoň 720 px, pri 768/390/320 px čitateľné skladanie podľa kontajnera bez pretečenia stránky. Min. 44 px mobilné ovládanie, ikony doplnené názvami. Bez nových databázových operácií alebo zmeny finančných pravidiel.
 
+### Aktívne spresnenie 5. 11. 2026 — jeden prehľad prípadov na nástenke
+
+Screenshot majiteľa `cd5c858e.../image.png` nahrádza samostatné globálne vstupy Prípady, Úlohy a Poznámky lokálnymi záložkami nástenky Mapa · Úlohy · Poznámky · **Prehľad prípadov**. Interný identifikátor `table` zostáva kompatibilný. Pri otvorení prehľadu sa ľavý duplicitný zoznam automaticky zbalí; používateľ ho môže obnoviť. Odchod obnoví predchádzajúcu šírku, ak používateľ medzitým nezvolil inú. Riadok otvára rovnaký prípad priamo v pracovnej ploche, zachová výber, filtre a tabuľku; na mobile existuje jasný návrat.
+
+Prehľad má kompaktné riadky, malý základ stĺpcov, viditeľné hľadanie a rýchle rozsahy Aktívne / História / Všetky. Rozšírené filtre a výber/poradie stĺpcov sa otvárajú na požiadanie. Používateľom zvolený stav platí aj pri hľadaní. Dátumový rozsah znamená kalendárne dni založenia v Europe/Bratislava. Staršie ukončené prípady pochádzajú z existujúceho oprávneného snapshotu; počet načítaných záznamov sa nevydáva za nezávislé neobmedzené databázové sčítanie. Nezavádza sa nový produkt prenájmov ani čítanie inej aplikácie.
+
+Prístupnosť: označené ovládanie, aria-sort a tlačidlo otvorenia prípadu, zmena poradia stĺpcov aj klávesnicou, aspoň 44 px mobilné ciele, vodorovné posúvanie iba vo vnútri tabuľky. Zlúčenie nesmie stratiť rozpracované poznámky/úlohy, editor prípadu, identitu zápisu ani živú telefóniu.
+
 ### Historický východiskový návrh — 26. 10. 2026
 
 **Webová logistika: Draft · 26. 10. 2026.** Návrh webového modulu **Pristavenia a odvozy** v existujúcom dispečingu. Dokument pokrýva tento modul a jeho väzby; neurčuje nový dizajn celej aplikácie. Ide o produktový návrh, nie hotovú implementáciu ani overenie živého nasadenia.

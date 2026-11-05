@@ -28,21 +28,26 @@ describe("navigation preferences", () => {
     ]);
   });
 
+  it("drops retired global case, task and note shortcuts from stored preferences", () => {
+    expect(DEFAULT_PINNED_NAVIGATION_VIEWS).toEqual([]);
+    expect(parsePinnedNavigationViews(JSON.stringify(["cases", "tasks", "notes", "towing"]))).toEqual(["towing"]);
+  });
+
   it("preserves an intentionally empty set of shortcuts", () => {
     expect(parsePinnedNavigationViews("[]")).toEqual([]);
   });
 
   it("persists the towing module as a desktop and authorized mobile shortcut", () => {
-    expect(parsePinnedNavigationViews(JSON.stringify(["towing", "tasks"]))).toEqual(["towing", "tasks"]);
+    expect(parsePinnedNavigationViews(JSON.stringify(["towing", "tasks"]))).toEqual(["towing"]);
     expect(parseMobileNavigationShortcuts(JSON.stringify(["towing", "tasks"]), ["towing", "tasks"])).toEqual(["towing", "tasks"]);
     expect(parseMobileNavigationShortcuts(JSON.stringify(["towing", "tasks"]), ["tasks"])).toEqual(["tasks"]);
   });
 
   it("adds, removes, and caps shortcuts without silently replacing one", () => {
-    expect(togglePinnedNavigationView(["tasks"], "cases")).toEqual({ limitReached: false, views: ["tasks", "cases"] });
-    expect(togglePinnedNavigationView(["tasks", "cases"], "tasks")).toEqual({ limitReached: false, views: ["cases"] });
+    expect(togglePinnedNavigationView(["fleet"], "reports")).toEqual({ limitReached: false, views: ["fleet", "reports"] });
+    expect(togglePinnedNavigationView(["fleet", "reports"], "fleet")).toEqual({ limitReached: false, views: ["reports"] });
 
-    const full = ["tasks", "cases", "call-center"] as const;
+    const full = ["reports", "settings", "call-center"] as const;
     expect(full).toHaveLength(MAX_PINNED_NAVIGATION_VIEWS);
     expect(togglePinnedNavigationView(full, "fleet")).toEqual({ limitReached: true, views: [...full] });
   });

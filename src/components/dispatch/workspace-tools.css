@@ -53,3 +53,8 @@
   .workspace-center-tabs button, .workspace-tools-trigger, .workspace-panel-toggle, .widget-host-action, .widget-setting-label, .widget-reset, .widget-section-toggle { min-height: 44px; }
   .widget-host-action { min-width: 44px; }
 }
+
+@media (max-width: 1023px) {
+  /* A full case meets the footer; the overview keeps its usual outer gutter. */
+  .dispatch-map-workspace:has(.dispatch-workspace-shell[data-workspace-mode="expanded"]) { padding-bottom:0; }
+}

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { ArrowUpDown, Building2, CarFront, ChevronRight, Clock3, FileText, Filter, ListTodo, MapPinned, MapPin, Search, Table2 } from "lucide-react";
-import type { CasePriority, CaseStatus, DispatchCase, Operator } from "@/domain/types";
+import type { CasePriority, CaseStatus, DispatchCase, JobType, Operator } from "@/domain/types";
 import { casePriorityLabels, caseStatusLabels, caseStatusTone, priorityTone } from "@/domain/statuses";
 import { isTaskOpen } from "@/domain/tasks";
 import { caseAssistanceServiceName, formatDateTime, formatTime } from "@/lib/dispatch-calculations";
@@ -22,6 +22,10 @@ export type CaseFilters = {
   ownerId: "all" | string;
   sourceType: "all" | NonNullable<DispatchCase["sourceType"]>;
   assistanceService: "all" | string;
+  branchId?: string;
+  jobType?: "all" | JobType;
+  createdFrom?: string;
+  createdTo?: string;
 };
 
 type CaseListProps = {
@@ -176,7 +180,7 @@ export function CaseList({
         {filterOpen && (
           <div className="mt-3 grid gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-2">
             <div className="grid grid-cols-2 gap-2">
-              <CaseStatusFilter filters={filters} onChange={onFiltersChange} searching={Boolean(search.trim())} />
+              <CaseStatusFilter filters={filters} onChange={onFiltersChange} searching={Boolean(search.trim()) && !filters.statusTouched} />
               <FilterSelect
                 label="Priorita"
                 value={filters.priority}

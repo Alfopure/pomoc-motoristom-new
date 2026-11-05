@@ -67,6 +67,7 @@ for (const viewport of viewports) {
     await nav.getByRole("button", { name: "Menu", exact: true }).click();
     const menu = page.getByRole("dialog", { name: "Obrazovky aplikácie", exact: true });
     await expect(menu).toBeInViewport({ ratio: 1 });
+    for (const label of ["Prípady", "Úlohy", "Poznámky"]) await expect(menu.getByRole("button", { name: label, exact: true })).toHaveCount(0);
     await expectControlAboveFooter(menu, nav);
     await menu.getByRole("button", { name: "Nastavenia", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Upozornenia a zvuk", exact: true })).toBeVisible();
