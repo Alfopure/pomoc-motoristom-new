@@ -213,7 +213,7 @@ function object(value: unknown): Record<string, unknown> {
  * connection. That side has different control/leg IDs and no client_state.
  * It is not another application leg. Acknowledge only a proven mirror, without
  * adopting its IDs, taking the session lease or running any provider command.
- * The accepted dial + saved operator leg establish provenance; matching a
+ * The accepted dial + saved operator or supervisor leg establish provenance; matching a
  * provider session, credential connection or SIP address alone never does.
  */
 async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEvent): Promise<string | null> {
@@ -233,8 +233,8 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
   if (!username || !Number.isFinite(occurredAt)) return null;
   const sipUser: string = username, callControlAppId = config.callControlAppId;
   // The proof reads the address the session really dialled: its frozen SIP domain.
-  const proven = async (row: { id: string; metadata: unknown }) => {
-    if (!await provenMirror(row.id, telnyxSipUri(sipUser, sessionSipDomain(row.metadata)))) return null;
+  const proven = async (row: { id: string; metadata: unknown }, allowOperator = true) => {
+    if (!await provenMirror(row.id, telnyxSipUri(sipUser, sessionSipDomain(row.metadata)), allowOperator)) return null;
     if (sessionSipDomain(row.metadata) === "eu") logSipDomainSpike(deps, event, row.id, "mirror");
     return row.id;
   };
@@ -245,29 +245,28 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
       .contains("metadata", { environment: deps.environment }).abortSignal(signal).maybeSingle();
     if (candidate.error) return null;
     if (candidate.data) return await proven(candidate.data);
-    // S6 B′ (`start_mode.farLinkTo: false`): the far dial shares no provider
-    // session with the own leg, so its mirror's session is ours only through
-    // our own state — the operator leg dialled to this SIP address, then the
-    // same exact journal proof (that dial's own `call_session_id`).
+    // Unlinked operator dials (S6 B′) and direct supervision can have their own
+    // provider session. Find a candidate through the saved SIP leg, then require
+    // the same exact accepted-dial proof with that dial's `call_session_id`.
+    // Only supervisors may use this path without the unlinked start mode.
     const recent = await deps.admin.from("motorist_call_legs").select("session_id").eq("organization_id", deps.organizationId)
-      .eq("role", "operator").in("to_number", telnyxSipUris(sipUser)).gte("initiated_at", new Date(occurredAt - MIRROR_UNLINKED_WINDOW_MS).toISOString())
+      .in("role", ["operator", "supervisor"]).in("to_number", telnyxSipUris(sipUser)).gte("initiated_at", new Date(occurredAt - MIRROR_UNLINKED_WINDOW_MS).toISOString())
       .order("initiated_at", { ascending: false }).limit(MIRROR_PROOF_LIMIT).abortSignal(signal);
     if (recent.error || !recent.data?.length) return null;
     const unlinked = await deps.admin.from("motorist_call_sessions").select("id, metadata").eq("organization_id", deps.organizationId)
       .in("id", [...new Set(recent.data.map((leg) => leg.session_id))]).contains("metadata", { environment: deps.environment }).abortSignal(signal);
     if (unlinked.error) return null;
     for (const row of unlinked.data ?? []) {
-      if (readMeta(row).start_mode?.farLinkTo !== false) continue;
-      const id = await proven(row);
+      const id = await proven(row, readMeta(row).start_mode?.farLinkTo === false);
       if (id) return id;
     }
     return null;
   } catch { return null; }
 
-  async function provenMirror(sessionId: string, sip: string): Promise<boolean> {
+  async function provenMirror(sessionId: string, sip: string, allowOperator: boolean): Promise<boolean> {
     const [legs, commands, browsers, mobiles] = await Promise.all([
-      deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, telnyx_call_leg_id, profile_id, from_number")
-        .eq("organization_id", deps.organizationId).eq("session_id", sessionId).eq("role", "operator").eq("to_number", sip)
+      deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, telnyx_call_leg_id, profile_id, from_number, role")
+        .eq("organization_id", deps.organizationId).eq("session_id", sessionId).in("role", ["operator", "supervisor"]).eq("to_number", sip)
         .limit(MIRROR_PROOF_LIMIT + 1).abortSignal(signal),
       deps.admin.from("motorist_provider_commands").select("first_dispatched_at, request_payload, result")
         .eq("session_id", sessionId).eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
@@ -291,19 +290,20 @@ async function credentialMirrorSession(deps: ProcessorDeps, event: TelephonyEven
       const state = decodeClientState(payload.client_state);
       const dispatchedAt = Date.parse(command.first_dispatched_at);
       if (!Number.isFinite(dispatchedAt) || dispatchedAt > occurredAt || payload.from !== event.from ||
-          result.call_session_id !== event.callSessionId || state?.sid !== sessionId || state.role !== "operator" ||
+          result.call_session_id !== event.callSessionId || state?.sid !== sessionId ||
+          (state.role !== "operator" || !allowOperator) && (state.role !== "supervisor" || state.intent !== "supervise") ||
           state.operatorId !== enrolled[0].profile_id || typeof result.call_control_id !== "string" ||
           typeof result.call_leg_id !== "string" || result.call_control_id === event.callControlId || result.call_leg_id === event.callLegId) return false;
       return (legs.data ?? []).some(leg => leg.telnyx_call_control_id === result.call_control_id &&
-        leg.telnyx_call_leg_id === result.call_leg_id && leg.profile_id === state.operatorId && leg.from_number === event.from);
+        leg.telnyx_call_leg_id === result.call_leg_id && leg.role === state.role && leg.profile_id === state.operatorId && leg.from_number === event.from);
     });
   }
 }
 
 /**
- * S6 B′: how far back an unlinked far dial's operator leg is looked for when
- * its mirror arrives. The fallback reads only the `MIRROR_PROOF_LIMIT` (8)
- * newest operator legs to that SIP address in this window, and shares the
+ * How far back an unlinked operator or supervisor dial's leg is looked for
+ * when its mirror arrives. The fallback reads only `MIRROR_PROOF_LIMIT` (8)
+ * recent eligible legs to that SIP address in this window, and shares the
  * lookup's 1.5 s read budget (typically four sequential reads). A miss —
  * eight newer legs to the same address, or a slow read — attributes nothing:
  * the mirror waits for correlation, the session's drain and the cron retry it,
@@ -1382,7 +1382,7 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
   const limit = options.limit ?? 2;
   try {
     if (customerTerminalOnly && !session.customer_leg_id) return;
-    let legQuery = deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, telnyx_call_leg_id")
+    let legQuery = deps.admin.from("motorist_call_legs").select("telnyx_call_control_id, telnyx_call_leg_id, role")
       .eq("organization_id", deps.organizationId).eq("session_id", session.id);
     if (customerTerminalOnly && session.customer_leg_id) legQuery = legQuery.eq("id", session.customer_leg_id).eq("role", "customer");
     const [correlation, legs] = await Promise.all([
@@ -1412,9 +1412,10 @@ async function replayReadySessionEvents(deps: ProcessorDeps, session: SessionRow
         .in("call_control_id", [...controlIds]).in("event_type", drainTypes)
         .lt("claimed_at", new Date(nowOf(deps)().getTime() - WEBHOOK_CLAIM_STALE_AFTER_MS).toISOString()).neq("event_id", current?.id ?? "")
         .order("received_at", { ascending: true }).limit(DEFERRED_DRAIN_LIMIT) : { data: [], error: null },
-      // S6 B′ (`start_mode.farLinkTo: false`): an unlinked colleague dial has
-      // its own provider call session, named only by our journal of that dial.
-      !customerTerminalOnly && deps.config.configured && readMeta(session).start_mode?.farLinkTo === false
+      // Unlinked colleague dials and direct supervision can have independent
+      // provider sessions, named only by our journal of those accepted dials.
+      !customerTerminalOnly && deps.config.configured &&
+        (readMeta(session).start_mode?.farLinkTo === false || legs.data?.some(leg => leg.role === "supervisor"))
         ? deps.admin.from("motorist_provider_commands").select("result").eq("session_id", session.id)
           .eq("method", "POST").eq("path", "/calls").eq("outcome", "accepted")
           .contains("request_payload", { connection_id: deps.config.callControlAppId }).limit(MIRROR_PROOF_LIMIT) : { data: [], error: null },

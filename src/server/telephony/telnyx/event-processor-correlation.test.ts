@@ -8,22 +8,24 @@ import type { SessionRow } from "../state/types";
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-async function mirrorFixture() {
+async function mirrorFixture(role: "operator" | "supervisor" = "operator", unlinked = false) {
   const h = createTelephonyHarness({ writerContract: 2, sweepAfterEvent: false });
   const call = await h.inbound({ to: NUMBERS.allianz });
   if (!h.deps.config.configured) throw new Error("configured fixture required");
   const operator = h.legFor(call.sessionId, PROFILES.o1)!;
+  if (role === "supervisor") h.db.update("motorist_call_legs", { role }, row => row.id === operator.id);
+  const providerSessionId = unlinked ? "separate-supervisor-provider-session" : call.telnyxSessionId;
   // The harness intentionally journals its method-level (camelCase) doubles.
   // This extra accepted row reproduces the real HTTP /calls journal schema.
   h.db.insert("motorist_provider_commands", {
     session_id: call.sessionId, command_id: "mirror-proof-dial", method: "POST", path: "/calls", outcome: "accepted", http_status: 200,
     first_dispatched_at: h.now().toISOString(),
     request_payload: { connection_id: h.deps.config.callControlAppId, to: operator.to_number, from: operator.from_number,
-      client_state: encodeClientState({ sid: call.sessionId, role: "operator", operatorId: PROFILES.o1 }) },
-    result: { data: { call_control_id: operator.telnyx_call_control_id, call_leg_id: operator.telnyx_call_leg_id, call_session_id: call.telnyxSessionId } },
+      client_state: encodeClientState({ sid: call.sessionId, role, operatorId: PROFILES.o1, ...(role === "supervisor" ? { intent: "supervise" } : {}) }) },
+    result: { data: { call_control_id: operator.telnyx_call_control_id, call_leg_id: operator.telnyx_call_leg_id, call_session_id: providerSessionId } },
   });
   const envelope = (type = "call.initiated", extra: Record<string, unknown> = {}, id = `mirror-${type}`) => h.envelope(type, {
-    connection_id: h.deps.config.configured ? h.deps.config.credentialConnectionId : "", call_session_id: call.telnyxSessionId,
+    connection_id: h.deps.config.configured ? h.deps.config.credentialConnectionId : "", call_session_id: providerSessionId,
     call_control_id: "browser-counterpart", call_leg_id: "browser-counterpart-leg", to: "gencred001", from: operator.from_number,
     client_state: null, ...(type === "call.initiated" ? { direction: "incoming", state: "bridging" } : {}), ...extra,
   }, id);
@@ -31,8 +33,8 @@ async function mirrorFixture() {
 }
 
 describe("credential-side mirrored browser events", () => {
-  it("records exactly proven counterparts as ignored without changing call state or dispatching", async () => {
-    const { h, call, envelope } = await mirrorFixture();
+  it.each(["operator", "supervisor"] as const)("records exactly proven %s counterparts without changing call state or dispatching", async role => {
+    const { h, call, envelope } = await mirrorFixture(role);
     const sessions = structuredClone(h.rows("motorist_call_sessions")), legs = structuredClone(h.rows("motorist_call_legs"));
     const commands = [...h.telnyx.calls];
     for (const type of ["call.initiated", "call.answered", "call.bridged", "call.hangup"]) {
@@ -45,6 +47,61 @@ describe("credential-side mirrored browser events", () => {
     expect(h.rows("motorist_call_legs")).toEqual(legs);
     expect(h.telnyx.calls).toEqual(commands);
     expect(h.rows("motorist_job_incidents")).toHaveLength(0);
+  });
+
+  it("recognizes all four supervisor callbacks with an independent provider session on an ordinary linked call", async () => {
+    const { h, call, envelope } = await mirrorFixture("supervisor", true);
+    expect(h.session(call.sessionId).metadata).not.toMatchObject({ start_mode: { farLinkTo: false } });
+    const sessions = structuredClone(h.rows("motorist_call_sessions")), legs = structuredClone(h.rows("motorist_call_legs"));
+    const commands = [...h.telnyx.calls];
+    for (const type of ["call.initiated", "call.answered", "call.bridged", "call.hangup"]) {
+      expect(await h.process(envelope(type))).toMatchObject({ status: 200, outcome: "ignored", sessionId: call.sessionId,
+        notes: ["verified credential browser mirror"] });
+    }
+    expect(h.rows("motorist_call_sessions")).toEqual(sessions);
+    expect(h.rows("motorist_call_legs")).toEqual(legs);
+    expect(h.telnyx.calls).toEqual(commands);
+    expect(h.rows("motorist_job_incidents")).toHaveLength(0);
+  });
+
+  it("drains early unlinked supervisor mirrors once the accepted dial proof becomes durable", async () => {
+    const { h, call, envelope } = await mirrorFixture("supervisor", true);
+    const journal = h.db.storage("motorist_provider_commands").find(row => row.command_id === "mirror-proof-dial")!;
+    journal.outcome = "unknown";
+    const types = ["call.initiated", "call.answered", "call.bridged", "call.hangup"];
+    for (const type of types) expect(await h.process(envelope(type))).toMatchObject({ outcome: "awaiting_correlation" });
+    journal.outcome = "accepted";
+    const sessions = structuredClone(h.rows("motorist_call_sessions")), legs = structuredClone(h.rows("motorist_call_legs"));
+    const commands = [...h.telnyx.calls];
+    await replayDeferredSessionEvents(h.deps, call.sessionId);
+    expect(h.rows("motorist_telnyx_webhook_events").filter(row => String(row.event_id).startsWith("mirror-")))
+      .toEqual(expect.arrayContaining(types.map(type => expect.objectContaining({
+        event_id: `mirror-${type}`, status: "processed", retry_state: "ready", attempts: 2,
+      }))));
+    expect(h.rows("motorist_call_sessions")).toEqual(sessions);
+    expect(h.rows("motorist_call_legs")).toEqual(legs);
+    expect(h.telnyx.calls).toEqual(commands);
+  });
+
+  it.each(["wrong role", "wrong profile", "missing intent", "unaccepted dial", "missing saved leg", "foreign device environment"])(
+    "does not acknowledge an unlinked supervisor mirror with %s", async mode => {
+      const { h, call, operator, envelope } = await mirrorFixture("supervisor", true);
+      const journal = h.db.storage("motorist_provider_commands").find(row => row.command_id === "mirror-proof-dial")!;
+      const request = journal.request_payload as Record<string, unknown>;
+      if (mode === "wrong role") request.client_state = encodeClientState({ sid: call.sessionId, role: "operator", operatorId: PROFILES.o1 });
+      if (mode === "wrong profile") request.client_state = encodeClientState({ sid: call.sessionId, role: "supervisor", operatorId: PROFILES.o2, intent: "supervise" });
+      if (mode === "missing intent") request.client_state = encodeClientState({ sid: call.sessionId, role: "supervisor", operatorId: PROFILES.o1 });
+      if (mode === "unaccepted dial") journal.outcome = "unknown";
+      if (mode === "missing saved leg") h.db.update("motorist_call_legs", { telnyx_call_control_id: "not-saved" }, row => row.id === operator.id);
+      if (mode === "foreign device environment") h.db.update("motorist_operator_devices", { environment: "production" }, row => row.profile_id === PROFILES.o1);
+      const commands = [...h.telnyx.calls];
+      expect(await h.process(envelope())).toMatchObject({ status: 500, outcome: "awaiting_correlation" });
+      expect(h.telnyx.calls).toEqual(commands);
+    });
+
+  it("does not admit an ordinary operator's independent provider session without the unlinked start mode", async () => {
+    const { h, envelope } = await mirrorFixture("operator", true);
+    expect(await h.process(envelope())).toMatchObject({ status: 500, outcome: "awaiting_correlation" });
   });
 
   it.each([
@@ -105,8 +162,8 @@ describe("credential-side mirrored browser events", () => {
     expect(h.legs(call.sessionId).find(row => row.role === "customer")?.ended_at).toEqual(expect.any(String));
   });
 
-  it("keeps missing proof retryable, and never revives a historical terminal claim after proof arrives", async () => {
-    const { h, envelope } = await mirrorFixture();
+  it.each(["operator", "supervisor"] as const)("keeps missing %s proof retryable, and never revives a historical terminal claim", async role => {
+    const { h, envelope } = await mirrorFixture(role, role === "supervisor");
     const journal = h.db.storage("motorist_provider_commands").find(row => row.command_id === "mirror-proof-dial")!;
     journal.outcome = "unknown";
     expect(await h.process(envelope())).toMatchObject({ outcome: "awaiting_correlation" });
