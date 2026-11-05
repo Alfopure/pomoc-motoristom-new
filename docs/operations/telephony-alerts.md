@@ -22,7 +22,7 @@ Príjemca má dostať pri každom dotknutom hovore jeho čas, identifikátor, do
 
 Telnyx môže pri vytáčaní operátora alebo vedúceho poslať aj udalosti druhej strany SIP spojenia s vlastnými identifikátormi a bez `client_state`. Aplikácia ich uzná ako zrkadlené udalosti iba po overení prijatého vlastného príkazu, uloženej vetvy, roly a identity zariadenia v správnom prostredí. Pri vedúcom musí príkaz niesť aj zámer `supervise`. Taká udalosť nemení stav rozhovoru ani neposiela ďalší provider príkaz a sama nevytvára alarm chýbajúceho priradenia.
 
-Rovnaké overenie platí, keď odposluch dostane samostatnú provider reláciu alebo udalosť príde pred uložením výsledku vytáčania. Chýbajúci či nejednoznačný dôkaz zostáva chybou priradenia. Už terminálne záznamy `dead_letter` sa nasadením tejto opravy neprehrávajú ani spätne neoznačujú za spracované; ich prípadné vysporiadanie potrebuje samostatný overený postup pre konkrétne prostredie.
+Rovnaké overenie platí, keď odposluch dostane samostatnú provider reláciu alebo udalosť príde pred uložením výsledku vytáčania. Pri vedúcom sa dôkaz nevylučuje iba preto, že odposluch trvá viac než 15 minút; výber zostáva obmedzený počtom vetiev a časom čítania. Chýbajúci či nejednoznačný dôkaz zostáva chybou priradenia. Už terminálne záznamy `dead_letter` sa nasadením tejto opravy neprehrávajú ani spätne neoznačujú za spracované; ich prípadné vysporiadanie potrebuje samostatný overený postup pre konkrétne prostredie.
 
 ## Situácie pri spojení a ukončení
 
