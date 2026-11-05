@@ -127,7 +127,7 @@ const s = StyleSheet.create({
   miniBar: { minHeight: 68, paddingVertical: space.s, borderRadius: 28, backgroundColor: palette.background, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.separator, flexDirection: "row", alignItems: "center", paddingHorizontal: space.xs },
   miniItem: { flex: 1, minWidth: 0, alignItems: "center", gap: 2 },
   miniIcon: { height: 24, alignItems: "center", justifyContent: "center" },
-  miniLabel: { ...type.tabLabel, color: palette.secondaryLabel, textAlign: "center" },
+  miniLabel: { ...type.tabLabel, maxWidth: "100%", color: palette.secondaryLabel, textAlign: "center" },
   segment: { flexDirection: "row", flexWrap: "wrap", gap: 4, backgroundColor: palette.fill, borderRadius: radius.m, padding: 2 },
   segmentItem: { flexGrow: 1, minHeight: 44, borderRadius: 10, paddingVertical: space.s, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingHorizontal: space.xs },
   segmentSelected: { backgroundColor: palette.card, boxShadow: "0 1px 4px rgba(0,0,0,0.12)" },

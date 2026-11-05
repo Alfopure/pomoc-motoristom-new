@@ -130,13 +130,14 @@ export function FieldShell(props: Props) {
   const badges = { pristavenia: openDeliveries.length, praca: items.filter(awaitsMember).length, pobocka: queue.length };
   const tabs = barTabs(pins);
   const showAdd = pins.length < Math.min(PIN_LIMIT, available.length);
+  const barItemCount = tabs.length + (showAdd ? 1 : 0);
   const openedInModules = nav.tab === "moduly" && nav.opened !== null && !nav.account;
   const left = moduleBack && !nav.account ? { kind: "back" as const, label: moduleBack.label, onPress: moduleBack.onBack, disabled: moduleBack.disabled }
     : nav.account ? { kind: "back" as const, label: nav.tab === "moduly" && nav.opened ? moduleById(nav.opened).short : tabLabel(nav.tab), onPress: back }
       : openedInModules ? { kind: "back" as const, label: "Moduly", onPress: back }
         : { kind: "status" as const, label: status.label, tone: status.tone, onPress: () => navigate(status.target),
           accessibilityLabel: status.target === "pobocka" ? "Otvoriť pobočku" : "Poloha pre dispečing: " + status.label + ". Otvoriť " + moduleById(status.target).name };
-  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
+  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom, barItemCount) - NAVIGATION_CONTENT_BOTTOM);
   const openWork = (target: { kind: "operation" | "towing"; id: string }) => open(target);
   return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><View style={{ flex: 1, width: "100%", maxWidth: CONTENT_MAX_WIDTH, alignSelf: "center", paddingBottom: extraNavigationSpace }}>
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(session.me.data?.member.displayName ?? "?")} onAccount={() => go({ ...nav, account: true })} left={left} />

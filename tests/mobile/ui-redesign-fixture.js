@@ -3,7 +3,9 @@
   const realFetch = window.fetch.bind(window);
   const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
   const now = new Date().toISOString();
-  const fieldActor = new URL(location.href).searchParams.get('fixture') === 'field';
+  const fixture = new URL(location.href).searchParams.get('fixture');
+  const fieldActor = fixture === 'field';
+  const allModules = fixture === 'all';
   const scope = {ok:true,apiVersion:1,environment:'test',profileId:id(1),checkedAt:now};
   const orgScope = {...scope,organizationId:id(2)};
   const caps = {voice:false,presenceWrite:false};
@@ -30,11 +32,13 @@
     const path = url.pathname.replace('/api/mobile/v1/','');
     if(path === 'app-status') return response({ok:true,apiVersion:1,environment:'test',minimumVersion:null,updateUrl:null});
     if(path === 'me' && fieldActor) return response({ok:false,error:'Použite terénny profil.',code:'mobile_no_dispatch_profile'},403);
-    if(path === 'me') return response({...scope,profile:{id:id(1),displayName:'Jana Testovacia',email:user.email,role:'dispatcher'},capabilities:caps});
+    if(path === 'me') return response({...scope,profile:{id:id(1),displayName:'Jana Testovacia',email:user.email,role:allModules?'admin':'dispatcher'},capabilities:caps});
     if(path === 'drafts/scope') return response(orgScope);
     if(path === 'console') return response({...scope,presence:{status:'available',since:now},activeCalls:[],capabilities:caps});
     if(path === 'voice/readiness') return response({...scope,nativeCallingEnabled:false,backgroundIncomingEnabled:false});
     if(path === 'field/me' && fieldActor) return response({ok:true,apiVersion:1,environment:'test',memberId:id(10),checkedAt:now,member:{id:id(10),displayName:'Vodič Testovací',email:'vodic@example.invalid'},capabilities:['drive'],branches:[{id:id(11),name:'Bratislava'}]});
+    if(path === 'field/me' && allModules) return response({ok:true,apiVersion:1,environment:'test',memberId:id(10),checkedAt:now,member:{id:id(10),displayName:'Jana Testovacia',email:user.email},capabilities:['drive','deliver'],branches:[{id:id(11),name:'Bratislava'}]});
+    if(path === 'field/deliveries' && allModules) return response({ok:true,apiVersion:1,environment:'test',memberId:id(10),checkedAt:now,deliveries:[]});
     if(path === 'field/work') return window.__mobileFixture.mode === 'error' ? response({ok:false,error:'Prácu sa nepodarilo načítať.'},503) : response({ok:true,apiVersion:1,environment:'test',memberId:id(10),checkedAt:now,operations:[],towing:null,unavailable:[]});
     if(path.startsWith('field/branch')) return response({ok:false,error:'Požiadavky pobočky sa nepodarilo načítať.'},503);
     if(path === 'field/me') return response({ok:false,error:'Účet nemá terénny profil.',code:'mobile_no_field_membership'},403);

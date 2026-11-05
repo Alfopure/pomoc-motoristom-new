@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { loadSurface, surfaceKind } from "./glass-capabilities";
-import { navigationContentBottom, tabBarBottom, tabBarHeight } from "./theme";
+import { navigationContentBottom, tabBarBottom, tabBarHeight, tabBarLayout, tabBarWidth } from "./theme";
 
 const allowed = { reduceTransparency: false, reduceMotion: false };
 describe("optional native presentation boundary", () => {
@@ -23,6 +23,35 @@ describe("optional native presentation boundary", () => {
     expect(await loadSurface("glass", loaders)).toBe("native glass"); expect(loaders.blur).not.toHaveBeenCalled();
     loaders.blur.mockRejectedValueOnce(new Error("native view unavailable"));
     expect(await loadSurface("blur", loaders)).toBeNull();
+  });
+  it("keeps all six actual tab targets at least 44 points wide on supported narrow screens", () => {
+    for (const width of [320, 390, 768]) {
+      const bar = tabBarWidth(width, 0, 0);
+      expect((bar - 2 - 8) / 6).toBeGreaterThanOrEqual(44);
+      expect(bar).toBeLessThanOrEqual(width - 24);
+    }
+    expect(tabBarWidth(844, 47, 47)).toBeLessThanOrEqual(844 - 24 - 47 * 2);
+  });
+  it("uses wider two-row cells for larger text without expanding a three-item field bar", () => {
+    expect(tabBarLayout(1, 6)).toMatchObject({ rows: 1, columns: 6, height: 72 });
+    expect(tabBarLayout(1.1, 6).rows).toBe(1);
+    expect(tabBarLayout(1.2, 6).rows).toBe(2);
+    expect(tabBarLayout(2, 6)).toEqual({ rows: 2, columns: 3, rowHeight: 90, height: 190 });
+    expect(tabBarLayout(2, 3)).toEqual({ rows: 1, columns: 3, rowHeight: 90, height: 100 });
+    expect(tabBarLayout(2, 5)).toMatchObject({ rows: 2, columns: 3, height: 190 });
+  });
+  it("fits two scaled label lines in each row and keeps final content clear for the actual item count", () => {
+    for (const scale of [1, 1.1, 1.2, 1.5, 2]) {
+      for (const count of [3, 4, 5, 6]) {
+        const layout = tabBarLayout(scale, count);
+        expect(layout.rowHeight - 2).toBeGreaterThanOrEqual(30 + 2 + 14 * scale * 2);
+        expect(tabBarHeight(scale, count)).toBe(10 + layout.rows * layout.rowHeight);
+        for (const inset of [0, 34, 50]) {
+          expect(navigationContentBottom(scale, inset, count)).toBeGreaterThanOrEqual(tabBarBottom(inset) + tabBarHeight(scale, count) + 22);
+        }
+      }
+    }
+    expect(navigationContentBottom(2, 34, 3)).toBeLessThan(navigationContentBottom(2, 34, 6));
   });
   it("reserves overlay clearance as text and safe-area grow", () => {
     expect(navigationContentBottom(1, 0)).toBeGreaterThanOrEqual(124);
