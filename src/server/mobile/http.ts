@@ -4,6 +4,7 @@ import type { MotoristActor } from "@/server/api-auth";
 import type { MobileScope } from "@/lib/mobile-api";
 import { HistoryQueryError } from "@/lib/telephony/call-history-query";
 import { MutationError } from "@/server/mutation-error";
+import { FieldWorkConflictError } from "./field-work-conflict";
 import { mobileEnvironment } from "./auth";
 import { CallActionError, OperatorDeviceError, PresenceServiceError } from "@/server/telephony/service-errors";
 
@@ -20,7 +21,7 @@ export function mobileError(error: unknown, fallback: string) {
   const status = error instanceof HistoryQueryError ? 400 : known ? error.status : 503;
   const message = error instanceof HistoryQueryError || known && status < 500 ? error.message : fallback;
   const code = known && "code" in error && typeof error.code === "string" ? error.code : undefined;
-  return Response.json({ ok: false, error: message, ...(code ? { code } : {}) }, {
+  return Response.json({ ok: false, error: message, ...(code ? { code } : {}), ...(error instanceof FieldWorkConflictError ? { conflict: error.conflict } : {}) }, {
     status, headers: { ...headers, ...(status === 401 ? { "WWW-Authenticate": "Bearer" } : {}) },
   });
 }

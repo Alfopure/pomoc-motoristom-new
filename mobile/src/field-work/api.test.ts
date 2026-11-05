@@ -22,6 +22,47 @@ function api(reply: (url: string, init: RequestInit) => unknown, status = 200) {
 }
 
 describe("field work API", () => {
+  it("accepts older operation contracts and separates assistance from the internal number", async () => {
+    await expect(api(() => ({ ...scope, operation })).client.operation(OP)).resolves.not.toHaveProperty("assistance");
+    await expect(api(() => ({ ...scope, operation: { ...operation, assistance: { name: "Asistencia", reference: "AS-42" } } })).client.operation(OP))
+      .resolves.toMatchObject({ caseNumber: "PM-1", assistance: { name: "Asistencia", reference: "AS-42" } });
+    await expect(api(() => ({ ...scope, operation: { ...operation, assistance: { name: 42, reference: null } } })).client.operation(OP)).rejects.toMatchObject({ status: 502 });
+  });
+  it("validates physical blockers and rejects malformed or scheduled blocker links", async () => {
+    const conflict = { kind: "physical", blocker: { kind: "towing", id: ORDER, number: "OT-1" } };
+    await expect(api(() => ({ ok: false, error: "Dokončite inú prácu", code: "work_refused", conflict }), 409).client.operationCommand(OP, { commandId: CMD, action: "start", expectedRevision: 4, payload: {} }))
+      .rejects.toMatchObject({ status: 409, code: "work_refused", conflict });
+    for (const bad of [{ ...conflict, kind: "schedule" }, { ...conflict, blocker: { ...conflict.blocker, id: "../secret" } }]) {
+      await expect(api(() => ({ ok: false, conflict: bad }), 409).client.operationCommand(OP, { commandId: CMD, action: "start", expectedRevision: 4, payload: {} }))
+        .rejects.toMatchObject({ status: 502 });
+    }
+  });
+  it("projects optional requester and dispatch instructions without accepting malformed values", async () => {
+    const fields = { ...order.fields, requesterName: "Asistencia", dispatchInstructions: "Kľúče na recepcii" };
+    await expect(api(() => ({ ...scope, order: { ...order, fields } })).client.towing(ORDER)).resolves.toMatchObject({ fields: { requesterName: "Asistencia", dispatchInstructions: "Kľúče na recepcii" } });
+    await expect(api(() => ({ ...scope, order: { ...order, fields: { ...fields, dispatchInstructions: "x".repeat(4001) } } })).client.towing(ORDER)).rejects.toMatchObject({ status: 502 });
+  });
+  it("validates own cash and confirms proposals for the same immutable command", async () => {
+    const cash = { account: { id: id(40), balanceCents: 12000, reservedCents: 2000, revision: 4 }, handovers: [] };
+    await expect(api(() => ({ ...scope, cash })).client.cash()).resolves.toEqual(cash);
+    const command = { commandId: CMD, handoverId: id(41), type: "propose_handover" as const, expectedRevision: 0 as const, payload: { amountCents: 1000, accountRevision: 4 } };
+    const proposal = api(() => ({ ...scope, commandId: CMD, revision: 1, cash }));
+    await expect(proposal.client.cashCommand(command)).resolves.toEqual(cash);
+    expect(JSON.parse(String(proposal.transport.mock.calls[0][1].body))).toEqual(command);
+    await expect(api(() => ({ ...scope, commandId: id(99), revision: 1, cash })).client.cashCommand(command)).rejects.toMatchObject({ status: 502 });
+    await expect(api(() => ({ ...scope, cash: { ...cash, account: { ...cash.account, balanceCents: 1.25 } } })).client.cash()).rejects.toMatchObject({ status: 502 });
+  });
+  it("checks structured work and exact own receipts, without turning payment intent into money", async () => {
+    const fields = { ...order.fields, paymentIntent: "cash_terminal", odometer: "12345", owner: { name: "Ján", companyId: "123", address: "Adresa" }, realizedItems: [
+      { id: id(42), kind: "transport", description: "Prevoz", quantity: "10.5", unit: "km", destination: "Servis" },
+    ] };
+    const payment = { id: id(43), receiptId: id(44), amountCents: 1234, method: "card", createdAt: at };
+    await expect(api(() => ({ ...scope, order: { ...order, fields, payments: [], authorizedCollectionCents: 15000, dueCents: 16000 } })).client.towing(ORDER))
+      .resolves.toMatchObject({ fields, payments: [], authorizedCollectionCents: 15000, dueCents: 16000 });
+    await expect(api(() => ({ ...scope, order: { ...order, fields, payments: [payment] } })).client.towing(ORDER)).resolves.toMatchObject({ payments: [payment] });
+    await expect(api(() => ({ ...scope, order: { ...order, payments: [{ ...payment, amountCents: 12.34 }] } })).client.towing(ORDER)).rejects.toMatchObject({ status: 502 });
+    await expect(api(() => ({ ...scope, order: { ...order, fields: { ...fields, realizedItems: [fields.realizedItems[0], fields.realizedItems[0]] } } })).client.towing(ORDER)).rejects.toMatchObject({ status: 502 });
+  });
   it("reads own work and checks the whole contract", async () => {
     const { client, transport } = api(() => ({ ...scope, operations: [operation], towing: null, unavailable: [] }));
     await expect(client.work()).resolves.toMatchObject({ operations: [{ id: OP, customer: { name: "Klient" } }], towing: null, unavailable: [] });

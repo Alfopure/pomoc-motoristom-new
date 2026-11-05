@@ -30,6 +30,15 @@ export async function operationsWorkspaceFor(actor: OperationsUser, filters: Rec
   if (checkedFilters.view !== undefined && !['open', 'done', 'all', 'returns', 'damage'].includes(String(checkedFilters.view))) {
     throw new TowingError('invalid_input', 400, 'Neplatné zobrazenie jázd.');
   }
+  if (checkedFilters.query !== undefined) {
+    if (typeof checkedFilters.query !== 'string' || checkedFilters.query.length > 200) throw new TowingError('invalid_input', 400, 'Neplatné vyhľadávanie jázd.');
+    checkedFilters.query = checkedFilters.query.trim();
+  }
+  for (const [key, fallback, max] of [['limit', 50, 50], ['offset', 0, 100000]] as const) {
+    const value = checkedFilters[key] === undefined ? fallback : Number(checkedFilters[key]);
+    if (!Number.isSafeInteger(value) || value < (key === 'limit' ? 1 : 0) || value > max) throw new TowingError('invalid_input', 400, 'Neplatné stránkovanie jázd.');
+    checkedFilters[key] = value;
+  }
   const result = await admin().rpc('motorist_operations_workspace', { ...params(actor), p_filters: checkedFilters });
   mapRpcError(result.error);
   return result.data as OperationsWorkspace;

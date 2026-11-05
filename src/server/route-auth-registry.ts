@@ -64,11 +64,14 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/push/register": { class: "user-bearer", note: "This installation's Expo push token and per-type switches for a dispatcher profile or a pristavovač field member; off unless MOBILE_PUSH_ENABLED." },
   "mobile/v1/push/unregister": { class: "user-bearer", note: "Removes this installation from push delivery, for a dispatcher or a pristavovač." },
   "mobile/v1/field/me": { class: "field-bearer", note: "Field identity: any active field membership; returns capabilities and lead seats for module visibility only; off unless MOBILE_DELIVERY_ENABLED." },
+  "mobile/v1/field/towing/options": { class: "field-bearer", note: "Requires drive; active parking references from the authorized driver workspace only." },
+  "mobile/v1/field/cash": { class: "field-bearer", note: "Requires drive; only the verified member’s cash account and own handovers through the driver RPC projection." },
+  "mobile/v1/field/cash/commands": { class: "field-bearer", note: "Requires drive; propose_handover only, stable IDs and own account revision; no receiving or approving for another member." },
   "mobile/v1/field/work": { class: "field-bearer", note: "Moja práca: requires deliver or drive; own open logistics operations (mine) and own towing orders in the driver projection; RPCs re-check membership." },
   "mobile/v1/field/operations/[id]": { class: "field-bearer", note: "Requires deliver; one own logistics operation (mine filter, assignee re-checked); customer only while open." },
   "mobile/v1/field/operations/[id]/commands": { class: "field-bearer", note: "Requires deliver; accept/start/arrive/collect/complete/evidence on an own operation via motorist_operations_command with command id, expected revision and receipt replay." },
   "mobile/v1/field/operations/[id]/files": { class: "field-bearer", note: "Requires deliver; evidence file for an own open operation; private bucket, validated MIME/size, assignment re-checked after storage." },
-  "mobile/v1/field/operations/[id]/position": { class: "field-bearer", note: "Requires deliver; position only while the own operation is accepted/en_route/arrived/collected; throttled, kept 30 days." },
+  "mobile/v1/field/operations/[id]/position": { class: "field-bearer", note: "Requires deliver; position only while the own operation is en_route/arrived/collected; throttled, kept 30 days." },
   "mobile/v1/field/operations/[id]/tracker": { class: "field-bearer", note: "Requires deliver; issues or revokes the secret for background positions of the own accepted operation (not legacy-delivery work)." },
   "mobile/v1/field/operations/track": { class: "delivery-tracker", note: "Background positions by the per-operation secret (hash lookup); answers only stored count and whether to go on." },
   "mobile/v1/field/towing/[id]": { class: "field-bearer", note: "Requires drive and MOTORIST_TOWING_ENABLED; one own towing order in the allowlisted driver projection without finance." },
@@ -231,6 +234,7 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "cases/[id]/attachments": { class: "session" },
   "cases/[id]/sms": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
   "cases/[id]/pdf": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"] },
+  "cases/[id]/work": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Independent case work intents; verified central actor, per-item atomic create/assign, stable retry and scoped own instructions. Strict origin on mutations." },
   "cases/[id]/handoffs": { class: "session", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Actor- and case-authorized internal grant management, no token/session authority." },
 
   // fleet-assets

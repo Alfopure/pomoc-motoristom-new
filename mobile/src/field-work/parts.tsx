@@ -23,8 +23,8 @@ export function StorageNotice({ commands, state }: { commands: WorkCommands; sta
 }
 
 /** An unconfirmed step: retry the same command, or after a refusal read the current state and close it. */
-export function StepRecovery({ commands, record, busy, onResult, onReload }: {
-  commands: WorkCommands; record: PendingWork; busy: boolean; onResult: (result: unknown) => void; onReload: () => Promise<unknown>;
+export function StepRecovery({ commands, record, busy, onResult, onReload, onOpenBlocker }: {
+  commands: WorkCommands; record: PendingWork; busy: boolean; onResult: (result: unknown) => void; onReload: () => Promise<unknown>; onOpenBlocker?: (target: { kind: "operation" | "towing"; id: string }) => void;
 }) {
   return <View style={formLayout.notices}>
     <Text style={styles.label}>{"Krok: " + record.label}</Text>
@@ -33,11 +33,19 @@ export function StepRecovery({ commands, record, busy, onResult, onReload }: {
         : record.status === "rejected" ? "Server krok odmietol. Načítajte aktuálny stav a skontrolujte ho pred ďalším krokom."
           : "Potvrdenie kroku neprišlo. Krok už mohol byť uložený. Overte ho týmto tlačidlom; ďalší krok bude dostupný po vyriešení výsledku."}</Text>
     {record.message && record.status !== "confirmed" && <Text style={styles.muted}>{record.message}</Text>}
+    {record.conflict?.blocker && onOpenBlocker && <>
+      <Text style={styles.muted}>{(record.conflict.blocker.kind === "towing" ? "Odťah" : "Jazda") + (record.conflict.blocker.number ? " · " + record.conflict.blocker.number : "")}</Text>
+      <Button secondary label="Otvoriť rozpracovanú prácu" onPress={() => { if (record.conflict?.blocker) onOpenBlocker(record.conflict.blocker); }} />
+    </>}
     {record.status !== "rejected" && <Button label={busy ? "Overujem…" : "Overiť rovnaký krok"} disabled={busy} onPress={() => {
       void commands.retry(record.target).then(result => { if (result) onResult(result); });
     }} />}
     {record.status === "rejected" && <Button secondary label="Načítať aktuálny stav a uzavrieť krok" disabled={busy} onPress={() => {
-      void onReload().then(() => commands.dismiss(record.target));
+      void onReload().then(result => {
+        // Query refetch resolves even when its read failed; that is not a verified current state.
+        if (result && typeof result === "object" && "isError" in result && result.isError) return;
+        return commands.dismiss(record.target);
+      }).catch(() => undefined);
     }} />}
   </View>;
 }

@@ -313,6 +313,7 @@ function CaseDetailContent({
     exportSaveRef.current = saveDraft;
     onSaveDraftChange?.(saveDraft);
   }, [onSaveDraftChange]);
+  const [workRefreshToken, setWorkRefreshToken] = useState(0);
   const [editorControls, setEditorControls] = useState<CaseEditorControls | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [smsComposerOpen, setSmsComposerOpen] = useState(false);
@@ -745,8 +746,8 @@ function CaseDetailContent({
         assets={assets}
         operators={operators}
         focusedTaskId={focusedTaskId}
-        handoff={<CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} initiallyExpanded={openHandoff} presentation="drawer" />}
-        work={<div className="grid min-w-0 gap-5"><CaseOperationsPanel caseId={caseItem.id} embedded /><CaseTowingOrdersPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} embedded /></div>}
+        handoff={<CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} initiallyExpanded={openHandoff} presentation="drawer" initialWorkKinds={[...(caseItem.jobTypes.includes("tow") || caseItem.jobTypes.includes("vehicle_recovery") ? ["tow" as const] : []), ...(caseItem.jobTypes.includes("replacement_vehicle") ? ["delivery" as const] : [])]} onWorkCommitted={() => setWorkRefreshToken(value => value + 1)} />}
+        work={<div className="grid min-w-0 gap-5"><CaseOperationsPanel caseId={caseItem.id} embedded refreshToken={workRefreshToken} /><CaseTowingOrdersPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} embedded refreshToken={workRefreshToken} /></div>}
         partner={<CasePartnerPanel caseId={caseItem.id} embedded />}
         notes={!hideNotesAndActivity ? <CaseNotesAndActivity busy={isRunningAction} timeline={caseItem.timeline} onAddNote={(note) => postAction({ action: "add_note", note }, "Poznámka pridaná.")} /> : undefined}
         sms={<CaseSmsHistory caseId={caseItem.id} embedded onCompose={() => { setSmsTemplate("custom"); setSmsComposerOpen(true); }} />}

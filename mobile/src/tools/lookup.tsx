@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Text, TextInput, View } from "react-native";
+import { Linking, Text, TextInput, View } from "react-native";
 import type { MobileToolLookup } from "../../../src/lib/mobile-tools";
 import { isCzechPlate, isSlovakPlate, isVin, normalizeVehicleIdentifier, preferredVehicleFacts, vehicleFactConflicts, vehicleFieldLabels, vehicleSourceLabels, type VehicleCountry, type VehicleField, type VehicleLookupResult } from "../../../src/lib/vehicle-lookup";
 import type { ToolsApi } from "./api";
@@ -8,6 +8,8 @@ import { Button, Card, ErrorNotice, Loading, styles } from "../ui";
 import { Choice } from "../cases/form";
 import { formatTime } from "../lib/display";
 
+import { pzpFallbackMessage, SKP_MANUAL_URL } from "../../../src/lib/pzp-fallback";
+
 const sourceStatus = { found: "Údaje nájdené", not_found: "Zdroj nenašiel záznam", ambiguous: "Viac možných vozidiel", challenge_required: "Vyžaduje sa overenie u zdroja", rate_limited: "Zdroj dočasne obmedzil požiadavky", unavailable: "Zdroj nie je dostupný", unsupported: "Zdroj tento dotaz nepodporuje" };
 export function VehicleLookup({ api, active }: { api: ToolsApi; active: boolean }) {
   const [value, setValue] = useState(""), [country, setCountry] = useState<VehicleCountry>("SK");
@@ -15,10 +17,12 @@ export function VehicleLookup({ api, active }: { api: ToolsApi; active: boolean 
   const result = useToolRequest<MobileToolLookup>(active);
   const normalized = normalizeVehicleIdentifier(value);
   const valid = isVin(normalized) || (country === "CZ" ? isCzechPlate(normalized) : isSlovakPlate(normalized));
-  const clear = () => { result.request.invalidate(); setExpanded([]); };
+  const clear = () => { result.request.invalidate(); setExpanded([]); setLinkError(""); };
   const sourceResult: VehicleLookupResult | null = result.data ? { version: 1, query: result.data.query, ...result.data.result, sources: result.data.result.sources.map(source => ({ ...source, url: "" })) } : null;
   const facts = sourceResult ? preferredVehicleFacts(sourceResult) : {}, conflicts = sourceResult ? vehicleFactConflicts(sourceResult, true) : {};
   const description = !result.data?.conflict && [!conflicts.make && facts.make?.value, !conflicts.model && facts.model?.value].filter(Boolean).join(" ");
+  const manualMessage = result.data || result.error ? pzpFallbackMessage(sourceResult, country, Boolean(result.data?.conflict)) : null;
+  const [linkError, setLinkError] = useState("");
   return <>
     <Text style={styles.subheading}>Overenie EČV / VIN</Text>
     <Text style={styles.muted}>Technické údaje slovenských a českých vozidiel. Dostupnosť PZP závisí od zdroja.</Text>
@@ -34,6 +38,13 @@ export function VehicleLookup({ api, active }: { api: ToolsApi; active: boolean 
     {result.remaining > 0 && <Text accessibilityRole="alert" style={styles.muted}>Ďalšie overenie môžete spustiť o {result.remaining} s.</Text>}
     {result.busy && <Loading label="Načítavam dostupné zdroje…" />}
     {result.error && <ErrorNotice message={result.error} />}
+    {manualMessage && <Card><Text style={styles.subheading}>PZP neoverené</Text><Text style={styles.text}>{manualMessage}</Text>
+      <Text style={styles.muted}>Na SKP overte EČV alebo VIN a dátum. Výpadok ani chýbajúci nález nepotvrdzuje nepoistenie.</Text>
+      <Text selectable style={styles.text}>{normalized}{result.data ? ` · k ${result.data.query.checkedForDate}` : ''}</Text>
+      <Button secondary label="Overiť PZP ručne na SKP" onPress={() => { setLinkError(''); void Linking.openURL(SKP_MANUAL_URL).catch(() => setLinkError('Stránku sa nepodarilo otvoriť. Skúste znova po obnovení spojenia.')); }} />
+      {linkError ? <ErrorNotice message={linkError} /> : null}
+      <Text style={styles.muted}>Poisťovňu z ručného overenia doplňte do prípadu na webe. Otvorenie stránky samo neoznačí vozidlo za overené.</Text>
+    </Card>}
     {result.data && <>
       <Card><Text style={styles.subheading}>{result.data.query.value}</Text>
         {description && <Text style={styles.text}>{description}</Text>}

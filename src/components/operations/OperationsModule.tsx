@@ -18,7 +18,7 @@ const iso = (value: FormDataEntryValue | null) => typeof value === "string" && v
 const value = (form: FormData, name: string) => String(form.get(name) ?? "").trim();
 const storageKey = (workspace: OperationsWorkspace) => `motorist:operation-command:v1:${workspace.actor.organizationId}:${workspace.actor.userId}`;
 
-export function OperationsModule({ caseId, fleetAssetId, initialView = "open", cases = [], mine = false, onOpenCase }: { caseId?: string; fleetAssetId?: string; initialView?: OperationsView; cases?: { id: string; caseNumber: string }[]; mine?: boolean; onOpenCase?: (id: string) => void }) {
+export function OperationsModule({ caseId, fleetAssetId, initialView = "open", cases = [], mine = false, onOpenCase, refreshToken = 0 }: { caseId?: string; fleetAssetId?: string; initialView?: OperationsView; cases?: { id: string; caseNumber: string }[]; mine?: boolean; onOpenCase?: (id: string) => void; refreshToken?: number }) {
   const [workspace, setWorkspace] = useState<OperationsWorkspace | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -29,18 +29,24 @@ export function OperationsModule({ caseId, fleetAssetId, initialView = "open", c
   const [filter, setFilter] = useState<OperationsView>(initialView);
   const [offset, setOffset] = useState(0);
   const [search, setSearch] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
+  useEffect(() => {
+    if (search.trim() === appliedSearch) return;
+    const timer = setTimeout(() => { setAppliedSearch(search.trim()); setOffset(0); setSelectedId(null); setLoading(true); }, 300);
+    return () => clearTimeout(timer);
+  }, [search, appliedSearch]);
   const [pending, setPending] = useState<OperationCommand | null>(null);
   const pendingRef = useRef<OperationCommand | null>(null);
   const inFlight = useRef(false);
   const workspaceRef = useRef<OperationsWorkspace | null>(null);
 
   const load = useCallback(async (signal?: AbortSignal) => {
-    const query = new URLSearchParams({ limit: "50", offset: String(offset), view: filter, ...(caseId ? { caseId } : {}), ...(fleetAssetId ? { fleetAssetId } : {}), ...(mine ? { mine: "true" } : {}) });
+    const query = new URLSearchParams({ limit: "50", offset: String(offset), view: filter, ...(appliedSearch ? { query: appliedSearch } : {}), ...(caseId ? { caseId } : {}), ...(fleetAssetId ? { fleetAssetId } : {}), ...(mine ? { mine: "true" } : {}) });
     const response = await fetch(`/api/operations?${query}`, { cache: "no-store", signal });
     const body = await response.json();
     if (!response.ok) throw new Error(body.message ?? body.error ?? "Jazdy sa nepodarilo načítať.");
     return body as OperationsWorkspace;
-  }, [caseId, fleetAssetId, filter, mine, offset]);
+  }, [appliedSearch, caseId, fleetAssetId, filter, mine, offset]);
 
   async function refreshWorkspace() {
     const data = await load();
@@ -60,7 +66,7 @@ export function OperationsModule({ caseId, fleetAssetId, initialView = "open", c
       } catch { /* Session storage is optional. */ }
     }).catch(error => { if (!controller.signal.aborted) setError(error.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [load]);
+  }, [load, refreshToken]);
 
   async function run(command: OperationCommand) {
     if (inFlight.current) return;
@@ -93,7 +99,7 @@ export function OperationsModule({ caseId, fleetAssetId, initialView = "open", c
     void run({ commandId: crypto.randomUUID(), action, expectedRevision: operation?.revision ?? 0, ...(operation ? { operationId: operation.id } : {}), payload });
   }
   const selected = workspace?.operations.find(item => item.id === selectedId);
-  const rows = workspace?.operations.filter(item => `${item.caseNumber ?? ""} ${item.vehicle ?? ""} ${item.from} ${item.to} ${item.assignee ?? ""}`.toLocaleLowerCase("sk").includes(search.toLocaleLowerCase("sk"))) ?? [];
+  const rows = workspace?.operations ?? [];
   const blocked = busy || Boolean(pending);
 
   return <section className={styles.module} aria-label={mine ? "Moje jazdy" : "Výjazdy a odvozy"}>
@@ -103,7 +109,7 @@ export function OperationsModule({ caseId, fleetAssetId, initialView = "open", c
     {filter === "returns" && <Notice>Každé auto sa zobrazuje raz podľa svojho cyklu používania. Návrat alebo kontrola ostávajú otvorené aj po dokončení pristavenia a uzavretí prípadu.</Notice>}
     {pending && <Notice>Výsledok predchádzajúceho príkazu ešte nie je potvrdený. <Button disabled={busy} onClick={() => void run(pending)}>Overiť a zopakovať ten istý príkaz</Button></Notice>}
     {showCreate && workspace && <form className={styles.panel} onSubmit={event => { event.preventDefault(); const form = new FormData(event.currentTarget); command("create", { kind: value(form, "kind"), caseId: caseId ?? (value(form, "caseId") || null), fleetAssetId: value(form, "fleetAssetId") || null, cycleId: value(form, "cycleId") || null, from: value(form, "from"), to: value(form, "to"), scheduledAt: iso(form.get("scheduledAt")), plannedEndAt: iso(form.get("plannedEndAt")), returnMode: "undecided" }); }}><div className={styles.panelHeading}><h2>Nová logistická jazda</h2><Button onClick={() => setShowCreate(false)} aria-label="Zavrieť novú jazdu"><X size={16} /></Button></div><div className={styles.fields}><Select label="Druh jazdy" name="kind" required><option value="delivery">Pristavenie náhradného vozidla</option><option value="collection">Odvoz vozidla</option><option value="transfer">Presun vozidla</option></Select>{!caseId && <Select label="Súvisiaci prípad" name="caseId"><option value="">Samostatná jazda</option>{cases.map(item => <option key={item.id} value={item.id}>{item.caseNumber}</option>)}</Select>}<Select label="Vozidlo" name="fleetAssetId" defaultValue={fleetAssetId ?? ""} required><option value="">Vyberte vozidlo</option>{workspace.fleet.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select><Select label="Cyklus používania (pri odvoze povinné)" name="cycleId"><option value="">Nové pristavenie alebo samostatný presun</option>{(workspace.cycles ?? []).map(cycle => <option key={cycle.id} value={cycle.id}>{cycle.vehicle ?? cycle.fleetAssetId} · {cycle.caseNumber ?? "bez prípadu"}</option>)}</Select><Field label="Odkiaľ" name="from" required maxLength={500} /><Field label="Kam" name="to" required maxLength={500} /><Field label="Dohodnutý začiatok (voliteľné)" name="scheduledAt" type="datetime-local" /><Field label="Predpokladaný koniec (voliteľné)" name="plannedEndAt" type="datetime-local" /></div><p className={styles.muted}>Pridelenie vodičovi ešte nepotvrdzuje čas ani dostupnosť. Odťah vytvorte z prípadu v časti Odťahové zákazky.</p><Button primary type="submit" disabled={blocked}>Vytvoriť jazdu</Button></form>}
-    <div className={styles.toolbar}><Field label="Hľadať jazdu" value={search} onChange={event => setSearch(event.target.value)} placeholder="Prípad, vozidlo, miesto, vodič…" /><Select label="Zobraziť" value={filter} onChange={event => { setFilter(event.target.value as OperationsView); setOffset(0); setSelectedId(null); setLoading(true); }}><option value="open">Otvorené jazdy</option><option value="returns">Návraty a kontroly</option><option value="damage">Hlásenia poškodenia</option><option value="done">Dokončené a zrušené</option><option value="all">Všetky jazdy</option></Select><span className={styles.muted}>{rows.length} z {workspace?.totalCount ?? 0} jázd</span></div>
+    <div className={styles.toolbar}><Field label="Hľadať jazdu" maxLength={200} value={search} onChange={event => setSearch(event.target.value)} placeholder="Prípad, vozidlo, miesto, vodič…" /><Select label="Zobraziť" value={filter} onChange={event => { setFilter(event.target.value as OperationsView); setOffset(0); setSelectedId(null); setLoading(true); }}><option value="open">Otvorené jazdy</option><option value="returns">Návraty a kontroly</option><option value="damage">Hlásenia poškodenia</option><option value="done">Dokončené a zrušené</option><option value="all">Všetky jazdy</option></Select><span className={styles.muted}>{rows.length} z {workspace?.totalCount ?? 0} jázd</span></div>
     <div className={styles.actions}><Button disabled={offset === 0 || busy} onClick={() => setOffset(Math.max(0, offset - 50))}>Predchádzajúce</Button><span className={styles.muted}>{workspace?.totalCount ? `${offset + 1}–${offset + workspace.operations.length} z ${workspace.totalCount}` : "0 jázd"}</span><Button disabled={!workspace || offset + workspace.operations.length >= workspace.totalCount || busy} onClick={() => setOffset(offset + 50)}>Ďalšie</Button></div>
     {loading ? <p role="status">Načítavam jazdy…</p> : <div className={`${styles.layout} ${selected ? styles.layoutWithDetail : ""}`}><div className={styles.list}>{rows.length === 0 && <div className={styles.empty}><ClipboardList size={28} /><h2>Žiadne jazdy v tomto zobrazení</h2><p>Nová jazda môže čakať v poradí aj bez dohodnutého termínu.</p></div>}{rows.map(item => <button type="button" className={`${styles.row} ${selectedId === item.id ? styles.selected : ""}`} key={item.id} onClick={() => setSelectedId(item.id)}><div className={styles.rowTop}><span className={styles.kind}>{kinds[item.kind]}</span><span className={styles.status}>{filter === "returns" && item.cycle ? item.cycle.status === "returned" ? "Čaká na kontrolu" : returnModes[item.cycle.returnMode] : statuses[item.status] ?? item.status}</span></div><strong>{item.from || "Miesto vyzdvihnutia"} <ArrowRight size={14} /> {item.to || "Cieľ jazdy"}</strong><span><Car size={14} /> {item.vehicle ?? "Vozidlo neurčené"} · {item.caseNumber ?? "Samostatná jazda"}</span><span><CalendarClock size={14} /> {date(filter === "returns" ? item.cycle?.returnAt ?? null : item.scheduledAt)}</span>{filter === "returns" && item.cycle && <span>Ďalší krok: {item.cycle.nextOwner ?? "Zodpovedná osoba neurčená"}</span>}{item.evidence.some(evidence => evidence.stage === "damage" && evidence.damageStatus === "open") && <span className={styles.waiting}>Otvorené poškodenie vozidla</span>}<div className={styles.rowTop}><span>{item.assignee ?? "Bez vodiča"}{item.startedAt ? " · skutočný štart zaznamenaný" : item.confirmedAt ? " · termín potvrdený" : " · čaká v poradí"}</span>{item.status === "completed" && item.evidenceState !== "complete" && <span className={styles.waiting}>Dôkazy čakajú</span>}</div></button>)}</div>{selected && workspace && <OperationDetail key={`${selected.id}:${selected.revision}`} operation={selected} workspace={workspace} disabled={blocked} onCommand={(action, payload) => command(action, payload, selected)} onOpenCase={onOpenCase} onClose={() => setSelectedId(null)} />}</div>}
   </section>;
@@ -133,11 +139,11 @@ function OperationDetail({ operation: item, workspace, disabled, onCommand, onOp
   </aside>;
 }
 
-export function CaseOperationsPanel({ caseId, embedded = false }: { caseId: string; embedded?: boolean }) {
+export function CaseOperationsPanel({ caseId, embedded = false, refreshToken = 0 }: { caseId: string; embedded?: boolean; refreshToken?: number }) {
   const [open, setOpen] = useState(false);
   const [visited, setVisited] = useState(false);
-  if (embedded) return <div className="case-operations-embedded min-w-0"><OperationsModule caseId={caseId} /></div>;
-  return <section className={styles.casePanel}><button type="button" className={styles.caseToggle} aria-expanded={open} onClick={() => { setOpen(!open); setVisited(true); }}><Route size={17} /> Pristavenia, odvozy a návraty <span>{open ? "Zavrieť" : "Otvoriť"}</span></button>{visited && <div hidden={!open}><OperationsModule caseId={caseId} /></div>}</section>;
+  if (embedded) return <div className="case-operations-embedded min-w-0"><OperationsModule caseId={caseId} refreshToken={refreshToken} /></div>;
+  return <section className={styles.casePanel}><button type="button" className={styles.caseToggle} aria-expanded={open} onClick={() => { setOpen(!open); setVisited(true); }}><Route size={17} /> Pristavenia, odvozy a návraty <span>{open ? "Zavrieť" : "Otvoriť"}</span></button>{visited && <div hidden={!open}><OperationsModule caseId={caseId} refreshToken={refreshToken} /></div>}</section>;
 }
 
 export function FleetOperationsPanel({ fleetAssetId }: { fleetAssetId: string }) {

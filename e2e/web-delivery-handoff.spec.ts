@@ -55,6 +55,7 @@ async function boot(page: Page, options: {
     if (url.pathname === "/sender" && request.method() === "GET") {
       return route.fulfill({ contentType: "text/html", body: `<!doctype html><html lang="sk"><head><style>${css}</style></head><body><div id="root"></div><script>${script}</script></body></html>` });
     }
+    if (url.pathname === `/api/cases/${caseId}/work`) return route.fulfill({ json: { actorKey: 'fixture:sender', canOperateTowing: false, pickup: '', destination: '', groups: [], people: [], branches: [], fleet: [], cycles: [] } });
     if (url.pathname === `/api/cases/${caseId}/handoffs`) {
       if (request.method() === "GET") return route.fulfill({ json: {
         preview: published, previewVersion: "c".repeat(64), handoffs: grant ? [grant] : [],
@@ -98,6 +99,7 @@ async function boot(page: Page, options: {
   });
   await page.goto(`${origin}/sender?sender=1${options.drawer ? "&drawer=1" : ""}`);
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Príjemca uvidí" })).toBeVisible();
   await page.addStyleTag({ content: "*{box-sizing:border-box}body{font-family:Arial,sans-serif}" });
   return { commands, unexpected, errors, removeMember: () => { memberRemoved = true; } };
@@ -291,7 +293,7 @@ test("an existing active personal handoff still allows selecting a branch and re
 test("a branch handling only towing submits towing instead of the delivery default", async ({ page }) => {
   const trace = await boot(page, { towOnly: true });
   await page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true }).selectOption("branch:40000000-0000-4000-8000-000000000002");
-  await expect(page.getByRole("combobox", { name: "Druh práce", exact: true })).toHaveValue("tow");
+  await expect(page.getByRole("region", { name: "Pobočky", exact: true }).getByRole("combobox", { name: "Druh práce", exact: true })).toHaveValue("tow");
   await page.getByRole("button", { name: "Odoslať", exact: true }).click();
   await expect(page.getByText("Požiadavka bola odoslaná pobočke.", { exact: true })).toBeVisible();
   expect(trace.commands[0]).toMatchObject({ action: "create", payload: { kind: "tow", groupId: "40000000-0000-4000-8000-000000000002" } });

@@ -9,11 +9,11 @@ import { orderTitle, workLabels } from "@/components/towing/model";
 import styles from "@/components/towing/towing.module.css";
 
 /** A case owns several deliberate towing intents; retries keep the original order identity. */
-export function CaseTowingOrdersPanel({ caseId, caseNumber, embedded = false }: { caseId: string; caseNumber?: string; embedded?: boolean }) {
-  return <CaseTowingOrders key={caseId} caseId={caseId} caseNumber={caseNumber} embedded={embedded} />;
+export function CaseTowingOrdersPanel({ caseId, caseNumber, embedded = false, refreshToken = 0 }: { caseId: string; caseNumber?: string; embedded?: boolean; refreshToken?: number }) {
+  return <CaseTowingOrders key={caseId} caseId={caseId} caseNumber={caseNumber} embedded={embedded} refreshToken={refreshToken} />;
 }
 
-function CaseTowingOrders({ caseId, caseNumber, embedded }: { caseId: string; caseNumber?: string; embedded: boolean }) {
+function CaseTowingOrders({ caseId, caseNumber, embedded, refreshToken }: { caseId: string; caseNumber?: string; embedded: boolean; refreshToken: number }) {
   const [createOpen, setCreateOpen] = useState(!embedded);
   const [workspace, setWorkspace] = useState<TowingWorkspace | null>(null);
   const [loading, setLoading] = useState(true);
@@ -32,7 +32,7 @@ function CaseTowingOrders({ caseId, caseNumber, embedded }: { caseId: string; ca
     alive.current = true;
     void load().catch(cause => { if (alive.current) setError(cause instanceof Error ? cause.message : "Odťahy sa nepodarilo načítať."); }).finally(() => { if (alive.current) setLoading(false); });
     return () => { alive.current = false; };
-  }, [load]);
+  }, [load, refreshToken]);
   const create = async () => {
     if (!workspace || running.current) return;
     running.current = true; setBusy(true); setError("");

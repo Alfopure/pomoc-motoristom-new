@@ -8,11 +8,16 @@ export type TowingPaymentStatus = 'unpriced' | 'unpaid' | 'partial' | 'paid' | '
 export type TowingServiceType = 'tow' | 'repair' | 'transport' | 'storage' | 'relocation';
 export interface TowingMember { id: string; userId: string; organizationId: string; displayName: string; roles: TowingRole[]; capabilities: TowingCapability[]; active: boolean; version: number; email?: string; passwordCompleted?: boolean }
 export interface TowingParty { name: string; phone?: string; email?: string; address?: string; companyId?: string; taxId?: string }
+export type TowingPaymentIntent = 'partner_invoice' | 'deferred_invoice' | 'card_terminal' | 'cash_terminal' | 'cash_other';
+export interface TowingRealizedItem { id: string; kind: TowingServiceType; description: string; quantity: string; unit: string; parkingId?: string; parkingName?: string; parkingAddress?: string; destination?: string }
 export interface TowingFields {
   serviceType: TowingServiceType; subjectType: 'vehicle' | 'machine' | 'material'; subjectDescription: string;
   plate?: string; vin?: string; pickup: string; destination?: string; contact?: string; noContactReason?: string;
   branchId?: string; fleetAssetId?: string; plannedAt?: string; startedAt?: string; finishedAt?: string;
-  startSource?: 'assignment' | 'manual'; driverNotes?: string; performedQuantity?: string; photoException?: string;
+  startSource?: 'assignment' | 'manual'; dispatchInstructions?: string; driverNotes?: string; performedQuantity?: string; photoException?: string;
+  handoverRecipientName?: string; handedOverAt?: string; handoverException?: string;
+  odometer?: string; paymentIntent?: TowingPaymentIntent | null; realizedItems?: TowingRealizedItem[];
+  requesterType?: 'assistance' | 'selfpayer' | null; requesterId?: string | null;
   requester?: TowingParty; owner?: TowingParty; customer?: TowingParty; recipient?: TowingParty;
   executionOrigin?: 'local' | 'awp_record_only'; externalReference?: string;
   assistanceReference?: string; assistancePartnerId?: string; assistancePartnerName?: string; parkingId?: string; parkingName?: string; parkingAddress?: string;

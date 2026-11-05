@@ -1,6 +1,7 @@
 "use client";
 
 import type { TowingFields, TowingParty, TowingWorkspace } from "@/domain/towing/types";
+import { RealizationFields } from "./RealizationFields";
 import { Field, Panel, Select, TextArea } from "./primitives";
 import { isoDateInput, localDateInput, serviceLabels } from "./model";
 import styles from "./towing.module.css";
@@ -8,6 +9,12 @@ import styles from "./towing.module.css";
 export function OrderFields({ fields, onChange, workspace, driver = false, allowOriginSelection = false }: { fields: TowingFields; onChange: (fields: TowingFields) => void; workspace: TowingWorkspace; driver?: boolean; allowOriginSelection?: boolean }) {
   const set = <K extends keyof TowingFields>(key: K, value: TowingFields[K]) => onChange({ ...fields, [key]: value });
   return <>
+    {driver && <Panel title="Vozidlo a majiteľ"><div className={styles.grid3}>
+      <Field label="Značka / model" value={fields.subjectDescription} onChange={event => set("subjectDescription", event.target.value)} />
+      <Field label="EČV (ak má)" value={fields.plate ?? ""} onChange={event => set("plate", event.target.value.toUpperCase())} />
+      <Field label="VIN" value={fields.vin ?? ""} onChange={event => set("vin", event.target.value.toUpperCase())} />
+      {([['name', 'Meno / firma'], ['phone', 'Telefón'], ['address', 'Adresa'], ['companyId', 'IČO']] as const).map(([key, label]) => <Field key={key} label={`Majiteľ: ${label}`} type={key === "phone" ? "tel" : "text"} value={fields.owner?.[key] ?? ""} onChange={event => set("owner", { ...fields.owner, name: fields.owner?.name ?? "", [key]: event.target.value })} />)}
+    </div></Panel>}
     {!driver && <Panel title="Výkon a predmet zákazky"><div className={styles.grid3}>
       {allowOriginSelection && <Select label="Spôsob vykonania" value={fields.executionOrigin ?? "local"} onChange={event => set("executionOrigin", event.target.value as TowingFields["executionOrigin"])}><option value="local">Lokálny výkon · pridelenie nášmu vodičovi</option><option value="awp_record_only">AWP · iba evidencia externého výkonu</option></Select>}
       {(allowOriginSelection || fields.executionOrigin === "awp_record_only") && <Field label="Externá referencia výkonu AWP" value={fields.externalReference ?? ""} onChange={event => set("externalReference", event.target.value)} />}
@@ -15,10 +22,11 @@ export function OrderFields({ fields, onChange, workspace, driver = false, allow
       <Select label="Predmet" value={fields.subjectType} onChange={event => set("subjectType", event.target.value as TowingFields["subjectType"])}><option value="vehicle">Vozidlo</option><option value="machine">Stroj</option><option value="material">Materiál</option></Select>
       <Field label={fields.subjectType === "vehicle" ? "Značka / model" : "Opis predmetu"} value={fields.subjectDescription} onChange={event => set("subjectDescription", event.target.value)} />
       {fields.subjectType !== "material" && <><Field label="EČV (ak má)" value={fields.plate ?? ""} onChange={event => set("plate", event.target.value.toUpperCase())} /><Field label={fields.subjectType === "vehicle" ? "VIN" : "VIN / identifikátor (ak má)"} value={fields.vin ?? ""} onChange={event => set("vin", event.target.value.toUpperCase())} /></>}
+      <Select label="Typ objednávateľa" value={fields.requesterType ?? ""} onChange={event => set("requesterType", event.target.value as TowingFields["requesterType"] || null)}><option value="">Zatiaľ neurčený</option><option value="assistance">Asistencia</option><option value="selfpayer">Samoplatca / priamy objednávateľ</option></Select>
       <Field label="Referencia asistencie" value={fields.assistanceReference ?? ""} onChange={event => set("assistanceReference", event.target.value)} />
-      <Select label="Asistenčná služba / partner" value={fields.assistancePartnerId ?? ""} onChange={event => { const partner = workspace.partners?.find(item => item.id === event.target.value); onChange({ ...fields, assistancePartnerId: partner?.id, assistancePartnerName: partner?.name }); }}><option value="">Samoplatca / bez partnera</option>{workspace.partners?.map(partner => <option key={partner.id} value={partner.id}>{partner.name}</option>)}</Select>
+      <Select label="Asistenčná služba / partner" value={fields.assistancePartnerId ?? ""} onChange={event => { const partner = workspace.partners?.find(item => item.id === event.target.value); onChange({ ...fields, assistancePartnerId: partner?.id, assistancePartnerName: partner?.name, requesterId: partner?.id ?? null }); }}><option value="">Bez vybraného partnera</option>{workspace.partners?.map(partner => <option key={partner.id} value={partner.id}>{partner.name}</option>)}</Select>
     </div></Panel>}
-    <Panel title="Miesta a termíny"><div className={styles.grid}>
+    <Panel title="Miesta a termíny"><div className={styles.grid3}>
       {!driver && <Field label="Miesto nakládky" value={fields.pickup} onChange={event => set("pickup", event.target.value)} />}
       <Field label="Miesto vykládky / cieľ" value={fields.destination ?? ""} onChange={event => set("destination", event.target.value)} />
       {!driver && fields.serviceType === "storage" && <Select label="Parkovisko uloženia" value={fields.parkingId ?? ""} onChange={event => { const parking = workspace.parking?.find(item => item.id === event.target.value); onChange({ ...fields, parkingId: parking?.id, parkingName: parking?.name, parkingAddress: parking?.address, destination: parking?.address ?? fields.destination }); }}><option value="">Vyberte konkrétne parkovisko</option>{workspace.parking?.map(site => <option key={site.id} value={site.id} disabled={!site.active}>{site.name} · {site.address}{site.active ? "" : " · neaktívne"}</option>)}</Select>}
@@ -30,6 +38,7 @@ export function OrderFields({ fields, onChange, workspace, driver = false, allow
     {!driver && <Panel title="Kontakty a odberateľ"><div className={styles.grid}><Field label="Operatívny kontakt / telefón" value={fields.contact ?? ""} onChange={event => set("contact", event.target.value)} /><Field label="Dôvod chýbajúceho kontaktu" value={fields.noContactReason ?? ""} onChange={event => set("noContactReason", event.target.value)} /></div>
       {([['requester', 'Objednávateľ'], ['owner', 'Majiteľ'], ['customer', 'Fakturačný odberateľ'], ['recipient', 'Príjemca']] as const).map(([key, label]) => <details className={styles.details} key={key} open={key === "requester" || undefined}><summary>{label}{fields[key]?.name ? ` · ${fields[key]?.name}` : ""}</summary><PartyFields label={label} party={fields[key] ?? { name: "" }} onChange={party => set(key, party)} /></details>)}
     </Panel>}
+    <RealizationFields fields={fields} onChange={onChange} workspace={workspace} />
     <Panel title="Realizácia a poznámky"><TextArea label="Poznámka vodiča" value={fields.driverNotes ?? ""} onChange={event => set("driverNotes", event.target.value)} /></Panel>
   </>;
 }

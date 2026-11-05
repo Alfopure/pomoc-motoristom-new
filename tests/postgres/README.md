@@ -67,3 +67,14 @@ Presence writer inventory for the stability implementation:
 | Existing cron/console sweeps | Route wrap-up and session effects through the shared owner checks; existing contracts must be recovered even with new admission disabled. |
 
 Activation remains disabled until migration application is explicitly authorized and incompatible deployments/provider entry points are proven unable to write. Local fixture results do not establish that deployment boundary, browser audio, or actual Telnyx audio quality.
+
+`python3 tests/postgres/towing-book-query.py` starts a disposable Unix-socket
+PostgreSQL cluster and applies the actual towing foundation/current shared-dispatch
+command plus the book, realized-item, optional handover and card-receipt migrations.
+It checks authorized global count/sums, deterministic 50-row pages, date provenance,
+explicit requester categories, operational item validation, own-driver editing,
+historical parking snapshots, optional handover completeness and card/cash receipt
+replay and cash ledger separation. The operations search portion uses the actual
+workspace SQL over schema primitives with focused actor/DTO stubs; it proves global
+search/pagination, not the full operations authorization stack. No hosted database,
+provider, or copied customer data is contacted. Receipt: `.context/book-postgres-receipt.json`.

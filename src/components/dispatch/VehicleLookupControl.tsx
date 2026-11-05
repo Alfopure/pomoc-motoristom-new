@@ -138,7 +138,7 @@ export function VehicleLookupControl(props: Props) {
         ))}
       </div>
       {loading && <p role="status" className="mt-2 text-xs text-zinc-600">{waiting ? `Prebieha iné dohľadávanie. Automaticky skúsim znova o ${waiting} s…` : country === "CZ" ? "Overujem české vozidlo a dostupné údaje o známke…" : "Overujem slovenské vozidlo a PZP k dnešnému dňu…"} Formulár môžete ďalej vypĺňať.</p>}
-      {error && <p role="alert" className="mt-2 rounded-md bg-amber-50 p-2 text-xs text-amber-900">{error}</p>}
+      {error && <><p role="alert" className="mt-2 rounded-md bg-amber-50 p-2 text-xs text-amber-900">{error}</p><SkpManualFallback country={country} showEntryHint={props.manualInsurerEntry} className="mt-2" /></>}
       {snapshot && <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50">
         <button type="button" onClick={event => { opener.current = event.currentTarget; setExpanded(true); }} aria-haspopup="dialog" className="flex w-full items-center justify-between gap-3 rounded-lg p-3 text-left hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-yellow-500">
           <span className="min-w-0"><span className="block text-sm font-semibold">{proposal ? "Dohľadané údaje · návrh" : "Uložené overenie vozidla"}</span>

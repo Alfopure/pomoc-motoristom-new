@@ -1,6 +1,6 @@
 import type {
   MobileBranchCommand, MobileBranchExecution, MobileBranchGroup, MobileBranchRequest, MobileBranchView, MobileBranchWorkspace, MobileDeliveryPositionInput,
-  MobileOperation, MobileOperationCommand, MobileOperationEvidence, MobileTowingAttachment, MobileTowingCommand, MobileTowingFields, MobileTowingOrder,
+  MobileFieldTowingOptions, MobileFieldCash, MobileFieldCashCommand, MobileTowingOwner, MobileTowingRealizedItem, MobileWorkConflict, MobileOperation, MobileOperationCommand, MobileOperationEvidence, MobileTowingAttachment, MobileTowingCommand, MobileTowingFields, MobileTowingOrder,
 } from "../../../src/lib/mobile-api";
 import { MobileApiError, type MobileTransport } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
@@ -27,6 +27,17 @@ function list<T>(v: unknown, max: number, parse: (item: unknown) => T): T[] {
 }
 const one = <T extends string>(v: unknown, values: readonly T[]): T => { check(values.includes(v as T)); return v as T; };
 
+/** Conflict metadata is checked as strictly as successful work projections. */
+export class FieldWorkConflictError extends MobileApiError {
+  constructor(message: string, code: string | undefined, readonly conflict: MobileWorkConflict) { super(message, 409, code); }
+}
+function parseConflict(value: unknown): MobileWorkConflict {
+  const v = object(value), kind = one(v.kind, ["physical", "schedule"] as const);
+  if (v.blocker === null) return { kind, blocker: null };
+  const b = object(v.blocker);
+  check(kind === "physical" && id(b.id) && nullable(b.number, 160));
+  return { kind, blocker: { kind: one(b.kind, ["operation", "towing"] as const), id: (b.id as string).toLowerCase(), number: b.number as string | null } };
+}
 function evidence(value: unknown): MobileOperationEvidence {
   const v = object(value);
   check(id(v.id) && date(v.observedAt) && nullable(v.person, 300) && text(v.note, 2000) && typeof v.photo === "boolean"
@@ -43,7 +54,12 @@ export function parseOperation(value: unknown): MobileOperation {
     && typeof v.vehicleConfirmed === "boolean");
   let customer: MobileOperation["customer"] = null;
   if (v.customer !== null) { const c = object(v.customer); check(text(c.name, 300) && text(c.phone, 64)); customer = { name: c.name as string, phone: c.phone as string }; }
-  return { id: (v.id as string).toLowerCase(), kind: one(v.kind, ["delivery", "collection", "transfer"] as const),
+  let assistance: MobileOperation["assistance"];
+  if (v.assistance !== undefined) {
+    if (v.assistance === null) assistance = null;
+    else { const a = object(v.assistance); check(nullable(a.name, 300) && nullable(a.reference, 300)); assistance = { name: a.name as string | null, reference: a.reference as string | null }; }
+  }
+  return { ...(assistance !== undefined ? { assistance } : {}), id: (v.id as string).toLowerCase(), kind: one(v.kind, ["delivery", "collection", "transfer"] as const),
     status: one(v.status, ["assigned", "accepted", "en_route", "arrived", "collected", "completed", "cancelled"] as const), revision: v.revision as number,
     caseNumber: v.caseNumber as string | null, vehicle: v.vehicle as string | null, from: v.from as string, to: v.to as string,
     scheduledAt: v.scheduledAt as string | null, plannedEndAt: v.plannedEndAt as string | null, startedAt: v.startedAt as string | null, updatedAt: v.updatedAt as string,
@@ -56,19 +72,62 @@ function attachment(value: unknown): MobileTowingAttachment {
   return { id: (v.id as string).toLowerCase(), kind: one(v.kind, ["work", "handover", "scan"] as const), name: v.name as string, mimeType: v.mimeType as string,
     status: one(v.status, ["pending", "ready", "abandoned"] as const), createdAt: v.createdAt as string };
 }
+function parseRealizedItems(value: unknown): MobileTowingRealizedItem[] {
+  const ids = new Set<string>();
+  return list(value, 50, raw => {
+    const v = object(raw);
+    check(id(v.id) && !ids.has(v.id.toLowerCase()) && text(v.description, 2000) && text(v.quantity, 20) && (v.quantity === "" || /^[0-9]{1,9}(\.[0-9]{1,3})?$/.test(v.quantity)) && text(v.unit, 40));
+    ids.add((v.id as string).toLowerCase());
+    const item: MobileTowingRealizedItem = { id: v.id as string, kind: one(v.kind, ["tow", "repair", "transport", "storage", "relocation"] as const), description: v.description as string, quantity: v.quantity as string, unit: v.unit as string };
+    for (const key of ["parkingId", "parkingName", "parkingAddress", "destination"] as const) {
+      if (v[key] === undefined) continue;
+      check(text(v[key], 2000) && (key !== "parkingId" || id(v[key]))); item[key] = v[key] as string;
+    }
+    return item;
+  });
+}
+function parseOwner(value: unknown): MobileTowingOwner | null {
+  if (value === null) return null;
+  const v = object(value); check(text(v.name, 2000));
+  const result: MobileTowingOwner = { name: v.name as string };
+  for (const key of ["phone", "address", "companyId"] as const) { if (v[key] === undefined) continue; check(text(v[key], 2000)); result[key] = v[key] as string; }
+  return result;
+}
+function parseCash(value: unknown): MobileFieldCash {
+  const v = object(value); let account: MobileFieldCash["account"] = null;
+  if (v.account !== null) { const a = object(v.account); check(id(a.id) && Number.isSafeInteger(a.balanceCents) && count(a.reservedCents) && positive(a.revision)); account = { id: a.id as string, balanceCents: a.balanceCents as number, reservedCents: a.reservedCents as number, revision: a.revision as number }; }
+  return { account, handovers: list(v.handovers, 100, raw => { const h = object(raw); check(id(h.id) && positive(h.amountCents) && positive(h.revision) && date(h.createdAt));
+    return { id: h.id as string, amountCents: h.amountCents as number, revision: h.revision as number, createdAt: h.createdAt as string, status: one(h.status, ["pending", "accepted", "rejected", "cancelled"] as const) }; }) };
+}
 const FIELD_TEXT = ["plate", "vin", "destination", "contact", "noContactReason", "driverNotes", "performedQuantity", "photoException", "assistanceReference", "assistancePartnerName", "parkingName", "parkingAddress"] as const;
 export function parseTowingOrder(value: unknown): MobileTowingOrder {
   const v = object(value), f = object(v.fields);
   check(id(v.id) && text(v.number, 64) && positive(v.revision) && positive(v.assignmentGeneration) && date(v.updatedAt)
     && text(f.subjectDescription, 10_000) && text(f.pickup, 10_000) && nullableDate(f.plannedAt) && nullableDate(f.startedAt) && nullableDate(f.finishedAt)
     && FIELD_TEXT.every(key => nullable(f[key], 10_000)));
+  check((f.requesterName === undefined || nullable(f.requesterName, 300)) && (f.dispatchInstructions === undefined || nullable(f.dispatchInstructions, 4000)));
   let customer: MobileTowingFields["customer"] = null;
   if (f.customer !== null) { const c = object(f.customer); check(text(c.name, 2000) && nullable(c.phone, 2000)); customer = { name: c.name as string, phone: c.phone as string | null }; }
-  const fields = { serviceType: one(f.serviceType, ["tow", "repair", "transport", "storage", "relocation"] as const), subjectType: one(f.subjectType, ["vehicle", "machine", "material"] as const),
+  check((f.odometer === undefined || nullable(f.odometer, 100)) && (f.handoverRecipientName === undefined || nullable(f.handoverRecipientName, 300))
+    && (f.handedOverAt === undefined || nullableDate(f.handedOverAt)) && (f.handoverException === undefined || nullable(f.handoverException, 4000)));
+  const fields = {
+    ...(f.odometer !== undefined ? { odometer: f.odometer as string | null } : {}),
+    ...(f.paymentIntent !== undefined ? { paymentIntent: f.paymentIntent === null ? null : one(f.paymentIntent, ["partner_invoice", "deferred_invoice", "card_terminal", "cash_terminal", "cash_other"] as const) } : {}),
+    ...(f.realizedItems !== undefined ? { realizedItems: parseRealizedItems(f.realizedItems) } : {}),
+    ...(f.owner !== undefined ? { owner: parseOwner(f.owner) } : {}),
+    ...(f.handoverRecipientName !== undefined ? { handoverRecipientName: f.handoverRecipientName as string | null } : {}),
+    ...(f.handedOverAt !== undefined ? { handedOverAt: f.handedOverAt as string | null } : {}),
+    ...(f.handoverException !== undefined ? { handoverException: f.handoverException as string | null } : {}),
+    ...(f.requesterName !== undefined ? { requesterName: f.requesterName as string | null } : {}),
+    ...(f.dispatchInstructions !== undefined ? { dispatchInstructions: f.dispatchInstructions as string | null } : {}), serviceType: one(f.serviceType, ["tow", "repair", "transport", "storage", "relocation"] as const), subjectType: one(f.subjectType, ["vehicle", "machine", "material"] as const),
     subjectDescription: f.subjectDescription as string, pickup: f.pickup as string, plannedAt: f.plannedAt as string | null, startedAt: f.startedAt as string | null,
     finishedAt: f.finishedAt as string | null, startSource: f.startSource === null ? null : one(f.startSource, ["assignment", "manual"] as const), customer,
     ...Object.fromEntries(FIELD_TEXT.map(key => [key, f[key] as string | null])) } as MobileTowingFields;
-  return { id: (v.id as string).toLowerCase(), number: v.number as string, revision: v.revision as number, assignmentGeneration: v.assignmentGeneration as number,
+  check((v.authorizedCollectionCents === undefined || v.authorizedCollectionCents === null || count(v.authorizedCollectionCents)) && (v.dueCents === undefined || v.dueCents === null || count(v.dueCents)));
+  const payments = v.payments === undefined ? undefined : list(v.payments, 100, raw => { const p = object(raw); check(id(p.id) && id(p.receiptId) && Number.isSafeInteger(p.amountCents) && date(p.createdAt));
+    return { id: p.id as string, receiptId: p.receiptId as string, amountCents: p.amountCents as number, method: one(p.method, ["cash", "card", "bank", "other"] as const), createdAt: p.createdAt as string }; });
+  return { ...(v.authorizedCollectionCents !== undefined ? { authorizedCollectionCents: v.authorizedCollectionCents as number | null } : {}),
+    ...(v.dueCents !== undefined ? { dueCents: v.dueCents as number | null } : {}), ...(payments !== undefined ? { payments } : {}), id: (v.id as string).toLowerCase(), number: v.number as string, revision: v.revision as number, assignmentGeneration: v.assignmentGeneration as number,
     workStatus: one(v.workStatus, ["assigned", "in_progress", "needs_changes"] as const), updatedAt: v.updatedAt as string, fields, attachments: list(v.attachments, 60, attachment) };
 }
 function execution(value: unknown): MobileBranchExecution | null {
@@ -86,7 +145,12 @@ export function parseBranchRequest(value: unknown): MobileBranchRequest {
     && text(v.destination, 1000) && nullableDate(v.dueAt) && text(v.note, 4000) && date(v.routedAt) && typeof v.claimedByMe === "boolean" && nullable(v.claimedByName, 300) && nullableDate(v.claimedAt));
   let customer: MobileBranchRequest["customer"] = null;
   if (v.customer !== null) { const c = object(v.customer); check(text(c.name, 300) && text(c.phone, 64)); customer = { name: c.name as string, phone: c.phone as string }; }
-  return { id: (v.id as string).toLowerCase(), kind: one(v.kind, ["delivery", "collection", "transfer", "tow"] as const), status: one(v.status, ["queued", "claimed", "assigned", "cancelled"] as const),
+  let assistance: MobileOperation["assistance"];
+  if (v.assistance !== undefined) {
+    if (v.assistance === null) assistance = null;
+    else { const a = object(v.assistance); check(nullable(a.name, 300) && nullable(a.reference, 300)); assistance = { name: a.name as string | null, reference: a.reference as string | null }; }
+  }
+  return { ...(assistance !== undefined ? { assistance } : {}), id: (v.id as string).toLowerCase(), kind: one(v.kind, ["delivery", "collection", "transfer", "tow"] as const), status: one(v.status, ["queued", "claimed", "assigned", "cancelled"] as const),
     revision: v.revision as number, groupId: (v.groupId as string).toLowerCase(), groupName: v.groupName as string, caseNumber: v.caseNumber as string | null, customer,
     vehicle: v.vehicle as string | null, pickup: v.pickup as string, destination: v.destination as string, dueAt: v.dueAt as string | null, note: v.note as string,
     routedAt: v.routedAt as string, claimedByMe: v.claimedByMe as boolean, claimedByName: v.claimedByName as string | null, claimedAt: v.claimedAt as string | null, execution: execution(v.execution) };
@@ -127,6 +191,8 @@ export function createFieldWorkApi(config: MobileConfig, memberId: string, getTo
       try { body = await response.json(); } catch { throw invalid(); }
       if (!current()) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
       const record = object(body);
+      if (!response.ok && response.status === 409 && record.conflict !== undefined) throw new FieldWorkConflictError(
+        text(record.error, 1000) ? record.error : "Prácu blokuje iná jazda.", typeof record.code === "string" ? record.code : undefined, parseConflict(record.conflict));
       if (!response.ok) throw new MobileApiError(text(record.error, 1000) ? record.error : "Požiadavku sa nepodarilo dokončiť.", response.status, typeof record.code === "string" ? record.code : undefined);
       if (record.ok !== true || record.apiVersion !== 1 || record.environment !== config.environment || record.memberId !== memberId) throw invalid();
       return record;
@@ -138,6 +204,16 @@ export function createFieldWorkApi(config: MobileConfig, memberId: string, getTo
   }
   const pathId = (value: string, message: string) => { if (!id(value)) throw new MobileApiError(message, 404); return value.toLowerCase(); };
   return {
+    towingOptions: async (signal?: AbortSignal): Promise<MobileFieldTowingOptions> => {
+      const body = await request("towing/options", { method: "GET", signal });
+      return { parking: list(body.parking, 200, raw => { const p = object(raw); check(id(p.id) && text(p.name, 2000) && text(p.address, 4000)); return { id: p.id as string, name: p.name as string, address: p.address as string }; }) };
+    },
+    cash: async (signal?: AbortSignal): Promise<MobileFieldCash> => parseCash((await request("cash", { method: "GET", signal })).cash),
+    cashCommand: async (command: MobileFieldCashCommand): Promise<MobileFieldCash> => {
+      const body = await request("cash/commands", { method: "POST", body: command });
+      check(body.commandId === command.commandId && positive(body.revision));
+      return parseCash(body.cash);
+    },
     work: async (signal?: AbortSignal): Promise<FieldWorkList> => {
       const body = await request("work", { method: "GET", signal });
       const unavailable = list(body.unavailable ?? [], 2, item => one(item, ["operations", "towing"] as const));
@@ -185,14 +261,15 @@ export function createFieldWorkApi(config: MobileConfig, memberId: string, getTo
       return order;
     },
     /** `order` null: it left the driver's list (e.g. after Odovzdať). */
-    towingCommand: async (orderId: string, command: MobileTowingCommand): Promise<{ order: MobileTowingOrder | null }> => {
+    towingCommand: async (orderId: string, command: MobileTowingCommand): Promise<{ order: MobileTowingOrder | null; cash?: MobileFieldCash }> => {
       const target = pathId(orderId, "Zákazka sa nenašla.");
       const body = await request("towing/" + target + "/commands", { method: "POST", body: command });
       check(body.commandId === command.commandId && positive(body.revision));
-      if (body.order === null) return { order: null };
+      const cash = body.cash === undefined ? undefined : parseCash(body.cash);
+      if (body.order === null) return { order: null, ...(cash !== undefined ? { cash } : {}) };
       const order = parseTowingOrder(body.order);
       check(order.id === target);
-      return { order };
+      return { order, ...(cash !== undefined ? { cash } : {}) };
     },
     /** Multipart with the form fields the server's attachment intent needs; the ids make a retry replay-safe. */
     towingAttachment: async (orderId: string, form: { bytes: Uint8Array; contentType: string }, commandId: string): Promise<{ attachmentId: string; revision: number }> => {
