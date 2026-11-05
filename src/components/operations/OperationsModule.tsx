@@ -133,9 +133,10 @@ function OperationDetail({ operation: item, workspace, disabled, onCommand, onOp
   </aside>;
 }
 
-export function CaseOperationsPanel({ caseId }: { caseId: string }) {
+export function CaseOperationsPanel({ caseId, embedded = false }: { caseId: string; embedded?: boolean }) {
   const [open, setOpen] = useState(false);
   const [visited, setVisited] = useState(false);
+  if (embedded) return <div className="case-operations-embedded min-w-0"><OperationsModule caseId={caseId} /></div>;
   return <section className={styles.casePanel}><button type="button" className={styles.caseToggle} aria-expanded={open} onClick={() => { setOpen(!open); setVisited(true); }}><Route size={17} /> Pristavenia, odvozy a návraty <span>{open ? "Zavrieť" : "Otvoriť"}</span></button>{visited && <div hidden={!open}><OperationsModule caseId={caseId} /></div>}</section>;
 }
 

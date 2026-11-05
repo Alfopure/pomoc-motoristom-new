@@ -57,6 +57,8 @@ async function boot(page: Page) {
 }
 
 async function countCards(page: Page, evidence: Awaited<ReturnType<typeof boot>>, step: string) {
+  await page.getByRole("tab", { name: "SMS", exact: true }).click();
+  await expect(page.locator("[data-case-sms-history]")).toBeVisible();
   evidence.counts.push({ step, histories: await page.locator("[data-case-sms-history]").count(), editors: await page.getByTestId("case-edit-form-main").count() });
 }
 
@@ -98,7 +100,7 @@ test("same-case saved GPS revision does not duplicate history or replace the edi
   await expect(dialog).toContainText("Miesto incidentu bolo nahradené");
   await page.keyboard.press("Escape");
   await countCards(page, evidence, "after committed revision and editor reset");
-  await page.locator("[data-case-sms-history]").last().locator("summary").click();
+  await page.getByRole("tab", { name: "SMS", exact: true }).click();
   await expect(page.locator("[data-case-sms-history]").last()).toContainText("Zatiaľ žiadne SMS.");
   await countCards(page, evidence, "history refreshed");
   await writeFile(".context/sms-history-browser/update-evidence.json", JSON.stringify(evidence, null, 2));

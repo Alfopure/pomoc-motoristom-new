@@ -139,7 +139,7 @@ import type { SaveCaseDraft } from "./NewCaseDrawer";
 import { CaseLocationDialog } from "./CaseLocationDialog";
 import { CaseEditorHeader, CaseLocationButton, CasePdfButton, type CaseEditorControls, type CaseHeaderControls } from "./CaseEditorHeader";
 import { changedCaseFields } from "./case-editor-save";
-import { CaseSummary } from "./CaseSummary";
+import { CaseWorkspace } from "./CaseWorkspace";
 import styles from "./case-detail.module.css";
 import { CaseSmsHistory } from "./CaseSmsHistory";
 import { SmsComposerDialog } from "./SmsComposerDialog";
@@ -147,7 +147,6 @@ import { CaseHandoffPanel } from "./CaseHandoffPanel";
 import { CaseOperationsPanel } from "@/components/operations/OperationsModule";
 import { CasePartnerPanel } from "@/components/partners/CasePartnerPanel";
 import { CaseTowingOrdersPanel } from "./CaseTowingOrdersPanel";
-import { useLayoutPreview } from "./LayoutPreview";
 import { CaseEditorBoundary } from "./CaseEditorBoundary";
 
 type CaseDetailProps = {
@@ -740,53 +739,19 @@ function CaseDetailContent({
 
       {embedded && !onEditorControlsChange && editorControls && <CaseEditorHeader controls={headerControls!} />}
 
-      <CaseSummary caseItem={caseItem} assets={assets} operators={operators} identityInHeader={compactEditor && embedded && Boolean(onEditorControlsChange)} />
-      <CaseSectionNavigation editing={isEditing} />
-      <CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} initiallyExpanded={openHandoff} />
-      <CaseOperationsPanel key={`operations:${caseItem.id}`} caseId={caseItem.id} />
-      <CasePartnerPanel key={`partner:${caseItem.id}`} caseId={caseItem.id} />
-      <CaseTowingOrdersPanel key={`towing:${caseItem.id}`} caseId={caseItem.id} caseNumber={caseItem.caseNumber} />
-
-      {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
-
-      {onLinkCall && callLinkCandidates.length > 0 && selectedCall && (
-        <section className="rounded-lg border border-yellow-300 bg-yellow-50 p-3 shadow-sm" aria-labelledby={`case-call-link-${caseItem.id}`}>
-          <div className="flex items-start gap-3">
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-zinc-950">
-              <PhoneIncoming size={17} aria-hidden="true" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <h3 id={`case-call-link-${caseItem.id}`} className="text-sm font-bold text-zinc-950">Priradiť prichádzajúci hovor</h3>
-              <p className="mt-0.5 text-xs leading-5 text-zinc-600">Telefónne číslo sa s touto kartou neprepája automaticky. Vyberte hovor a potvrďte priradenie.</p>
-              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                <select
-                  value={selectedCall.sessionId}
-                  onChange={(event) => setSelectedCallSessionId(event.target.value)}
-                  aria-label="Aktívny prichádzajúci hovor"
-                  className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-2 text-xs font-semibold text-zinc-800 outline-none ring-yellow-400 focus:ring-2"
-                >
-                  {callLinkCandidates.map((call) => {
-                    const number = formatPhoneNumberForDisplay(call.number) || call.number || "Neznáme číslo";
-                    return <option key={call.sessionId} value={call.sessionId}>{number} · {call.lineLabel}</option>;
-                  })}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => void linkSelectedCall()}
-                  disabled={!selectedCall.callId || linkingCallSessionId !== null}
-                  title={selectedCall.callId ? "Priradiť vybraný hovor k tomuto prípadu" : "Hovor sa dá priradiť po zápise do call logu"}
-                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-xs font-bold text-white hover:bg-zinc-800 disabled:cursor-wait disabled:bg-zinc-300 disabled:text-zinc-600"
-                >
-                  {linkingCallSessionId === selectedCall.sessionId ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Link2 size={15} aria-hidden="true" />}
-                  Priradiť k prípadu
-                </button>
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-          <details open={Boolean(focusedTaskId)} data-testid="case-tasks" className={`group ${styles.section}`} aria-labelledby="case-tasks-heading">
+      <CaseWorkspace
+        key={`workspace:${caseItem.id}`}
+        caseItem={caseItem}
+        assets={assets}
+        operators={operators}
+        focusedTaskId={focusedTaskId}
+        handoff={<CaseHandoffPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} active={active} initiallyExpanded={openHandoff} presentation="drawer" />}
+        work={<div className="grid min-w-0 gap-5"><CaseOperationsPanel caseId={caseItem.id} embedded /><CaseTowingOrdersPanel caseId={caseItem.id} caseNumber={caseItem.caseNumber} embedded /></div>}
+        partner={<CasePartnerPanel caseId={caseItem.id} embedded />}
+        notes={!hideNotesAndActivity ? <CaseNotesAndActivity busy={isRunningAction} timeline={caseItem.timeline} onAddNote={(note) => postAction({ action: "add_note", note }, "Poznámka pridaná.")} /> : undefined}
+        sms={<CaseSmsHistory caseId={caseItem.id} embedded onCompose={() => { setSmsTemplate("custom"); setSmsComposerOpen(true); }} />}
+        tasks={
+          <details open data-testid="case-tasks" className={`group ${styles.section}`} aria-labelledby="case-tasks-heading">
             <summary className={`${styles.sectionHeader} cursor-pointer`}>
               <span id="case-tasks-heading" className={styles.sectionTitle}>Úlohy prípadu <span className={styles.sectionHelp}>· {openTasks.length} otvorených · {openTasks.filter((task) => isTaskOverdue(task)).length} po termíne</span></span>
               <span className="flex shrink-0 items-center gap-2">
@@ -891,6 +856,49 @@ function CaseDetailContent({
               </div>
             </div>
           </details>
+        }
+      />
+
+      {notice && <div role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900">{notice}</div>}
+
+      {onLinkCall && callLinkCandidates.length > 0 && selectedCall && (
+        <section className="rounded-lg border border-yellow-300 bg-yellow-50 p-3 shadow-sm" aria-labelledby={`case-call-link-${caseItem.id}`}>
+          <div className="flex items-start gap-3">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-[#FCD703] text-zinc-950">
+              <PhoneIncoming size={17} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h3 id={`case-call-link-${caseItem.id}`} className="text-sm font-bold text-zinc-950">Priradiť prichádzajúci hovor</h3>
+              <p className="mt-0.5 text-xs leading-5 text-zinc-600">Telefónne číslo sa s touto kartou neprepája automaticky. Vyberte hovor a potvrďte priradenie.</p>
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                <select
+                  value={selectedCall.sessionId}
+                  onChange={(event) => setSelectedCallSessionId(event.target.value)}
+                  aria-label="Aktívny prichádzajúci hovor"
+                  className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-2 text-xs font-semibold text-zinc-800 outline-none ring-yellow-400 focus:ring-2"
+                >
+                  {callLinkCandidates.map((call) => {
+                    const number = formatPhoneNumberForDisplay(call.number) || call.number || "Neznáme číslo";
+                    return <option key={call.sessionId} value={call.sessionId}>{number} · {call.lineLabel}</option>;
+                  })}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => void linkSelectedCall()}
+                  disabled={!selectedCall.callId || linkingCallSessionId !== null}
+                  title={selectedCall.callId ? "Priradiť vybraný hovor k tomuto prípadu" : "Hovor sa dá priradiť po zápise do call logu"}
+                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-xs font-bold text-white hover:bg-zinc-800 disabled:cursor-wait disabled:bg-zinc-300 disabled:text-zinc-600"
+                >
+                  {linkingCallSessionId === selectedCall.sessionId ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Link2 size={15} aria-hidden="true" />}
+                  Priradiť k prípadu
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+
 
       {isEditing ? (
         <>
@@ -1079,10 +1087,6 @@ function CaseDetailContent({
           </InfoPanel>
         </div>
       )}
-      {!hideNotesAndActivity && (
-        <CaseNotesAndActivity busy={isRunningAction} timeline={caseItem.timeline} onAddNote={(note) => postAction({ action: "add_note", note }, "Poznámka pridaná.")} />
-      )}
-      <CaseSmsHistory key={`sms-history:${caseItem.id}`} caseId={caseItem.id} />
       <CaseLocationDialog key={`location-dialog:${caseItem.id}`} open={locationDialogOpen} onClose={() => setLocationDialogOpen(false)}
         caseItem={caseItem} disabled={draftDirty || isEditSaveLocked || isRunningAction}
         onShowOnMap={onShowCustomerLocation}
@@ -1247,23 +1251,6 @@ function ActivityRow({ event }: { event: CaseTimelineEntry }) {
   );
 }
 
-function CaseSectionNavigation({ editing }: { editing: boolean }) {
-  const modern = useLayoutPreview().mode === "modern";
-  if (!modern) return null;
-  const links = [
-    { label: "Úlohy prípadu", selector: '[data-testid="case-tasks"]', icon: ClipboardList },
-    ...(editing ? [{ label: "Upraviť údaje", selector: '[data-testid="case-edit-form-main"]', icon: Edit3 }] : []),
-    { label: "Poznámky a aktivita", selector: '[aria-labelledby="case-notes-heading"]', icon: MessageSquareText },
-    { label: "Odoslané SMS", selector: '[data-case-sms-history]', icon: Phone },
-  ];
-  return <nav className="case-section-navigation" aria-label="Časti prípadu">{links.map(({ label, selector, icon: Icon }) => <button type="button" key={label} onClick={event => {
-    const target = event.currentTarget.closest('[data-case-detail-root]')?.querySelector<HTMLElement>(selector);
-    if (!target) return;
-    if (target instanceof HTMLDetailsElement) target.open = true;
-    target.scrollIntoView({ block: "start", behavior: "auto" });
-    target.querySelector<HTMLElement>('summary, input, textarea, button')?.focus({ preventScroll: true });
-  }}><Icon size={14} aria-hidden="true" />{label}</button>)}</nav>;
-}
 
 function actorInitials(actor: string) {
   const parts = actor.trim().split(/\s+/).filter(Boolean);

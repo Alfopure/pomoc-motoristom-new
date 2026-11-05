@@ -1,6 +1,9 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
-import { Copy, Link2, MapPin, MessageSquareText, RefreshCw, Send, ShieldCheck, Smartphone } from "lucide-react";
+import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useCaseCollaboration } from "./CaseCollaborationProvider";
+import { useLayoutPreview } from "./LayoutPreview";
+import { Copy, Link2, MapPin, MessageSquareText, RefreshCw, Send, ShieldCheck, Smartphone, X } from "lucide-react";
 import { isHandoffDeliveryReceipt, isHandoffReceipt, handoffDate, handoffEventLabels, handoffIsActive, handoffLabels, type CaseHandoff, type HandoffCommand, type HandoffContext } from "@/domain/case-handoff";
 import { BranchWorkspace } from "@/components/branches/BranchWorkspace";
 import { HandoffSummary } from "./HandoffSummary";
@@ -10,10 +13,18 @@ import { previewEditablePhone } from "@/lib/telephony/phone-entry";
 import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 import "./case-handoff.css";
 
-export function CaseHandoffPanel(props: { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean }) {
+type CaseHandoffPanelProps = { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean; presentation?: "accordion" | "drawer" };
+
+export function CaseHandoffPanel(props: CaseHandoffPanelProps) {
   return <CaseHandoffSession key={props.caseId} {...props} />;
 }
-function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpanded = false }: { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean }) {
+function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpanded = false, presentation = "accordion" }: CaseHandoffPanelProps) {
+  const drawer = presentation === "drawer";
+  const titleId = useId();
+  const [drawerStarted, setDrawerStarted] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null), drawerRef = useRef<HTMLDivElement>(null);
+  const { state: caseAccess } = useCaseCollaboration();
+  const { mode: layoutMode } = useLayoutPreview();
   const [expanded, setExpanded] = useState(initiallyExpanded), [context, setContext] = useState<HandoffContext | null>(null);
   const [name, setName] = useState(""), [phone, setPhone] = useState(""), [instructions, setInstructions] = useState(""), [scheduled, setScheduled] = useState(""), [hours, setHours] = useState(24);
   const [recipientMemberId, setRecipientMemberId] = useState(""), [deliveryMemberId, setDeliveryMemberId] = useState("");
@@ -25,10 +36,10 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
   const [smsIntent, setSmsIntent] = useState<{ phone: string; message: string } | null>(null);
   const inFlight = useRef(false), detailsDirty = useRef(false), sectionRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (!active || !initiallyExpanded) return;
+    if (drawer || !active || !initiallyExpanded) return;
     const frame = requestAnimationFrame(() => sectionRef.current?.scrollIntoView({ block: "start" }));
     return () => cancelAnimationFrame(frame);
-  }, [active, initiallyExpanded]);
+  }, [active, initiallyExpanded, drawer]);
   const reader = useHandoffRead({
     enabled: active && expanded,
     read: signal => readHandoff<HandoffContext>(`/api/cases/${encodeURIComponent(caseId)}/handoffs`, signal),
@@ -71,6 +82,50 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
     const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); };
     window.addEventListener("beforeunload", guard); return () => window.removeEventListener("beforeunload", guard);
   }, [pending]);
+  function closeDrawer() {
+    // A submitted request stays mounted, including its command ID and retry state.
+    if (!busy && !smsOpen) setExpanded(false);
+  }
+  const handleDrawerKeys = useEffectEvent((event: KeyboardEvent) => {
+    if (smsOpen) return; // The nested SMS composer owns focus while open.
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation(); closeDrawer();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const elements = Array.from(drawerRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], summary') ?? []).filter(element => element.getClientRects().length > 0);
+    const first = elements[0], last = elements.at(-1);
+    if (!drawerRef.current?.contains(document.activeElement)) { event.preventDefault(); (event.shiftKey ? last : first)?.focus(); }
+    else if (event.shiftKey && (document.activeElement === first || document.activeElement === drawerRef.current)) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  });
+  const keepDrawerFocus = useEffectEvent((event: FocusEvent) => {
+    if (!smsOpen && event.target instanceof Node && !drawerRef.current?.contains(event.target)) drawerRef.current?.focus();
+  });
+  useEffect(() => {
+    // An initially open case also renders on the server; mount its portal only
+    // after hydration, while user-triggered opening can mount it immediately.
+    if (!drawer || !expanded || drawerStarted) return;
+    const frame = requestAnimationFrame(() => setDrawerStarted(true));
+    return () => cancelAnimationFrame(frame);
+  }, [drawer, expanded, drawerStarted]);
+  useEffect(() => {
+    if (!drawer || !drawerStarted || !expanded || !active || caseAccess.hidden) return;
+    const previousOverflow = document.body.style.overflow;
+    const previousFocus = document.activeElement;
+    const trigger = triggerRef.current;
+    document.body.style.overflow = "hidden";
+    drawerRef.current?.focus();
+    document.addEventListener("keydown", handleDrawerKeys, true);
+    document.addEventListener("focusin", keepDrawerFocus);
+    return () => {
+      document.removeEventListener("keydown", handleDrawerKeys, true);
+      document.removeEventListener("focusin", keepDrawerFocus);
+      document.body.style.overflow = previousOverflow;
+      const restore = previousFocus instanceof HTMLElement && previousFocus.isConnected ? previousFocus : trigger;
+      restore?.focus();
+    };
+  }, [drawer, drawerStarted, expanded, active, caseAccess.hidden]);
   async function command(action: string, grant?: CaseHandoff, memberId?: string) {
     if (!context || inFlight.current || reader.halted) return;
     if (!pending && context.enhanced && action === "renew" && !window.confirm("Zneplatniť pôvodný odkaz a všetky jeho otvorené prístupy? Príjemcovi bude treba poslať nový odkaz.")) return;
@@ -122,9 +177,7 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
   const disabled = busy || !!pending;
   const validRecipientPhone = !phone.trim() || Boolean(previewEditablePhone(phone));
   const appChannel = channel === "app";
-  return <section className="case-handoff-panel" ref={sectionRef} hidden={!active} aria-label="Externé odovzdanie prípadu">
-    <button type="button" className="handoff-panel-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><Link2 size={17} /><span><strong>Odovzdať prípad</strong><small>Pobočke alebo človeku do aplikácie; odkaz a SMS podľa potreby</small></span><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
-    <div hidden={!expanded} className="handoff-panel-body">
+  const body = <div hidden={!expanded} className="handoff-panel-body">
       {context && <label>Príjemca odovzdania<select value={channel === "branch" ? `branch:${branchGroupId}` : current ? "existing" : channel === "app" ? recipientMemberId : "link"} disabled={disabled || branchPending} onChange={event => {
         const value = event.target.value;
         if (value.startsWith("branch:")) { setBranchGroupId(value.slice(7)); setChannel("branch"); setRecipientMemberId(""); }
@@ -181,7 +234,20 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
       {reader.loading && !context && <p role="status">Načítavam odovzdania…</p>}
       {reader.error && <p role="alert" className="handoff-error">{reader.error}{!reader.halted && <button type="button" disabled={reader.loading || busy} onClick={reader.retry}>Skúsiť znova načítať</button>}</p>}
       {pending && !reader.halted && <button type="button" disabled={busy} onClick={() => void command(pending.action)}>{busy ? "Overujem výsledok…" : "Overiť výsledok tej istej požiadavky"}</button>}
-    </div>
-    {!reader.halted && <SmsComposerDialog externalRecipientLabel={`SMS pre kolegu · ${caseNumber}`} initialPhone={smsIntent?.phone ?? ""} initialMessage={smsIntent?.message ?? ""} initialTemplate="custom" open={smsOpen} onClose={() => setSmsOpen(false)} />}
+    </div>;
+  const smsComposer = !reader.halted && <SmsComposerDialog externalRecipientLabel={`SMS pre kolegu · ${caseNumber}`} initialPhone={smsIntent?.phone ?? ""} initialMessage={smsIntent?.message ?? ""} initialTemplate="custom" open={smsOpen && (!drawer || active)} onClose={() => setSmsOpen(false)} />;
+  if (!drawer) return <section className="case-handoff-panel" ref={sectionRef} hidden={!active} aria-label="Externé odovzdanie prípadu">
+    <button type="button" className="handoff-panel-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><Link2 size={17} /><span><strong>Odovzdať prípad</strong><small>Pobočke alebo človeku do aplikácie; odkaz a SMS podľa potreby</small></span><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
+    {body}{smsComposer}
   </section>;
+  return <>
+    <button ref={triggerRef} type="button" hidden={!active} className="handoff-drawer-trigger" aria-haspopup="dialog" aria-expanded={expanded} onClick={() => { setDrawerStarted(true); setExpanded(true); }}><Send size={16} aria-hidden="true" />Odovzdať prípad</button>
+    {drawerStarted && typeof document !== "undefined" && createPortal(<div data-layout-preview={layoutMode} inert={caseAccess.hidden || !active || !expanded} style={caseAccess.hidden || !active || !expanded ? { display: "none" } : undefined} className="handoff-drawer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) closeDrawer(); }}>
+      <div ref={drawerRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby={titleId} inert={smsOpen} className="case-handoff-panel handoff-drawer">
+        <header className="handoff-drawer-header"><div><h2 id={titleId}>Odovzdať prípad</h2><p>{caseNumber} · pobočke alebo človeku do aplikácie</p></div><button type="button" disabled={busy} aria-label="Zavrieť odovzdanie" onClick={() => closeDrawer()}><X size={18} aria-hidden="true" /></button></header>
+        {body}
+      </div>
+    </div>, document.body)}
+    {smsComposer}
+  </>;
 }

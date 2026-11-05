@@ -42,11 +42,11 @@ test.beforeAll(async () => {
 });
 
 async function boot(page: Page, options: {
-  grant?: CaseHandoff; legacy?: boolean; issueDeliveryFailed?: boolean; loseDeliveryAck?: boolean; missingIssueLink?: boolean; noPhone?: boolean; towOnly?: boolean;
+  grant?: CaseHandoff; legacy?: boolean; issueDeliveryFailed?: boolean; loseDeliveryAck?: boolean; missingIssueLink?: boolean; noPhone?: boolean; towOnly?: boolean; drawer?: boolean; loseBranchAck?: boolean;
 } = {}) {
   const commands: Record<string, unknown>[] = [], unexpected: string[] = [], errors: string[] = [];
   let grant = options.grant ? structuredClone(options.grant) : null;
-  let ackLost = false, memberRemoved = false;
+  let ackLost = false, branchAckLost = false, memberRemoved = false;
   await page.clock.install({ time: new Date("2026-10-23T08:00:00Z") });
   page.on("pageerror", error => errors.push(error.message));
   await page.route("**/*", async route => {
@@ -78,9 +78,11 @@ async function boot(page: Page, options: {
         return route.fulfill({ json: { commandId: command.commandId, handoffId, memberId, sent: true, currentRevision: grant.revision } });
       }
     }
+    if (url.pathname === "/api/sms/context" && options.drawer) return route.fulfill({ json: { cases: [], tasks: [], callbackNumber: "", sender: "TEST", repliesEnabled: false } });
     if (url.pathname === "/api/pobocky") {
       if (request.method() === "POST") {
         const command = request.postDataJSON(); commands.push(command);
+        if (options.loseBranchAck && !branchAckLost) { branchAckLost = true; return route.abort("failed"); }
         return route.fulfill({ json: { commandId: command.commandId, committedRevision: 1, request: { id: "50000000-0000-4000-8000-000000000001" } } });
       }
       return route.fulfill({ json: {
@@ -94,7 +96,7 @@ async function boot(page: Page, options: {
     unexpected.push(`${request.method()} ${url.pathname}`);
     return route.fulfill({ status: 503, json: { error: "Unexpected request in isolated browser regression" } });
   });
-  await page.goto(`${origin}/sender?sender=1`);
+  await page.goto(`${origin}/sender?sender=1${options.drawer ? "&drawer=1" : ""}`);
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
   await expect(page.getByRole("heading", { name: "Príjemca uvidí" })).toBeVisible();
   await page.addStyleTag({ content: "*{box-sizing:border-box}body{font-family:Arial,sans-serif}" });
@@ -293,5 +295,93 @@ test("a branch handling only towing submits towing instead of the delivery defau
   await page.getByRole("button", { name: "Odoslať", exact: true }).click();
   await expect(page.getByText("Požiadavka bola odoslaná pobočke.", { exact: true })).toBeVisible();
   expect(trace.commands[0]).toMatchObject({ action: "create", payload: { kind: "tow", groupId: "40000000-0000-4000-8000-000000000002" } });
+  expectIsolated(trace);
+});
+
+
+test("drawer traps focus, closes with Escape and restores its recipient draft", async ({ page }) => {
+  const trace = await boot(page, { drawer: true, noPhone: true });
+  const dialog = page.getByRole("dialog", { name: "Odovzdať prípad", exact: true });
+  await expect(dialog).toBeVisible();
+  await page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true }).selectOption(memberId);
+  await expect(page.getByRole("textbox", { name: /^Telefón pristavovača/ })).toHaveValue("");
+  await page.getByRole("textbox", { name: "Pokyny pre kolegu", exact: true }).fill("Počkať pri recepcii.");
+  await page.getByRole("button", { name: "Zavrieť odovzdanie", exact: true }).focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect.poll(() => page.evaluate(() => document.querySelector('[role="dialog"]')?.contains(document.activeElement))).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("button", { name: "Odovzdať prípad", exact: true })).toBeFocused();
+  await page.getByRole("button", { name: "Odovzdať prípad", exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true })).toHaveValue(memberId);
+  await expect(page.getByRole("textbox", { name: "Pokyny pre kolegu", exact: true })).toHaveValue("Počkať pri recepcii.");
+  await expect(page.getByRole("button", { name: "Odovzdať do aplikácie", exact: true })).toBeEnabled();
+  expect(trace.commands).toHaveLength(0);
+  expectIsolated(trace);
+});
+
+test("drawer preserves the command identity across closing an unconfirmed app assignment", async ({ page }) => {
+  const trace = await boot(page, { drawer: true, issueDeliveryFailed: true });
+  await selectNewRecipient(page);
+  await page.getByRole("button", { name: "Odovzdať do aplikácie", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Overiť výsledok tej istej požiadavky", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Zavrieť odovzdanie", exact: true }).click();
+  await page.getByRole("button", { name: "Odovzdať prípad", exact: true }).click();
+  await page.getByRole("button", { name: "Overiť výsledok tej istej požiadavky", exact: true }).click();
+  await expect(page.getByText("V aplikácii", { exact: true })).toBeVisible();
+  expect(trace.commands.map(command => command.action)).toEqual(["issue", "deliver"]);
+  expect(trace.commands[1].commandId).toBe(trace.commands[0].commandId);
+  expectIsolated(trace);
+});
+
+test("drawer gives nested SMS its own focus and Escape without closing the parent", async ({ page }) => {
+  const trace = await boot(page, { drawer: true });
+  await selectNewRecipient(page);
+  await page.getByRole("button", { name: "Odovzdať do aplikácie", exact: true }).click();
+  await page.getByRole("button", { name: "Otvoriť SMS pre kolegu", exact: true }).click();
+  const sms = page.getByRole("dialog", { name: "SMS", exact: true });
+  await expect(sms).toBeVisible();
+  await expect(sms).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(sms).toBeHidden();
+  await expect(page.getByRole("dialog", { name: "Odovzdať prípad", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Otvoriť SMS pre kolegu", exact: true })).toBeFocused();
+  expect(trace.commands).toHaveLength(1);
+  expectIsolated(trace);
+});
+
+test("drawer fits a narrow screen and can route a branch request without a phone", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const trace = await boot(page, { drawer: true });
+  await page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true }).selectOption("branch:40000000-0000-4000-8000-000000000002");
+  await page.getByRole("button", { name: "Odoslať", exact: true }).click();
+  await expect(page.getByText("Požiadavka bola odoslaná pobočke.", { exact: true })).toBeVisible();
+  const bounds = await page.getByRole("dialog", { name: "Odovzdať prípad", exact: true }).boundingBox();
+  expect(bounds!.width).toBeLessThanOrEqual(390);
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(trace.commands[0]).toMatchObject({ action: "create", payload: { groupId: "40000000-0000-4000-8000-000000000002" } });
+  expect(trace.commands[0]).not.toHaveProperty("recipientPhone");
+  expectIsolated(trace);
+});
+
+
+test("drawer can close a failed branch request and retry the same command after reopening", async ({ page }) => {
+  const trace = await boot(page, { drawer: true, loseBranchAck: true });
+  const dialog = page.getByRole("dialog", { name: "Odovzdať prípad", exact: true });
+  const recipient = page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true });
+  await recipient.selectOption("branch:40000000-0000-4000-8000-000000000002");
+  await page.getByRole("button", { name: "Odoslať", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Zopakovať ten istý príkaz", exact: true })).toBeEnabled();
+  await expect(recipient).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Zavrieť odovzdanie", exact: true })).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: "Odovzdať prípad", exact: true }).click();
+  await expect(recipient).toHaveValue("branch:40000000-0000-4000-8000-000000000002");
+  await expect(recipient).toBeDisabled();
+  await page.getByRole("button", { name: "Zopakovať ten istý príkaz", exact: true }).click();
+  await expect(page.getByText("Príkaz bol overený.", { exact: true })).toBeVisible();
+  expect(trace.commands).toHaveLength(2);
+  expect(trace.commands[1]).toEqual(trace.commands[0]);
   expectIsolated(trace);
 });
