@@ -42,11 +42,11 @@ test.beforeAll(async () => {
 });
 
 async function boot(page: Page, options: {
-  grant?: CaseHandoff; legacy?: boolean; issueDeliveryFailed?: boolean; loseDeliveryAck?: boolean; missingIssueLink?: boolean;
+  grant?: CaseHandoff; legacy?: boolean; issueDeliveryFailed?: boolean; loseDeliveryAck?: boolean; missingIssueLink?: boolean; noPhone?: boolean; towOnly?: boolean;
 } = {}) {
   const commands: Record<string, unknown>[] = [], unexpected: string[] = [], errors: string[] = [];
   let grant = options.grant ? structuredClone(options.grant) : null;
-  let ackLost = false;
+  let ackLost = false, memberRemoved = false;
   await page.clock.install({ time: new Date("2026-10-23T08:00:00Z") });
   page.on("pageerror", error => errors.push(error.message));
   await page.route("**/*", async route => {
@@ -58,7 +58,8 @@ async function boot(page: Page, options: {
     if (url.pathname === `/api/cases/${caseId}/handoffs`) {
       if (request.method() === "GET") return route.fulfill({ json: {
         preview: published, previewVersion: "c".repeat(64), handoffs: grant ? [grant] : [],
-        ...(options.legacy ? {} : { delivery: { members: [member] } }),
+        branches: [{ id: "40000000-0000-4000-8000-000000000001", name: "TEST Žilina" }, { id: "40000000-0000-4000-8000-000000000002", name: "TEST Bratislava" }],
+        ...(options.legacy ? {} : { delivery: { members: memberRemoved ? [] : [{ ...member, ...(options.noPhone ? { lastPhone: null } : {}) }] } }),
       } });
       const command = request.postDataJSON();
       commands.push(command);
@@ -77,13 +78,27 @@ async function boot(page: Page, options: {
         return route.fulfill({ json: { commandId: command.commandId, handoffId, memberId, sent: true, currentRevision: grant.revision } });
       }
     }
+    if (url.pathname === "/api/pobocky") {
+      if (request.method() === "POST") {
+        const command = request.postDataJSON(); commands.push(command);
+        return route.fulfill({ json: { commandId: command.commandId, committedRevision: 1, request: { id: "50000000-0000-4000-8000-000000000001" } } });
+      }
+      return route.fulfill({ json: {
+        actor: { central: true, manage: true, userId: "fixture", leadGroups: [] }, requests: [], totalCount: 0,
+        groups: [
+          { id: "40000000-0000-4000-8000-000000000001", name: "TEST Žilina", active: true, serviceKinds: ["delivery"], counts: { queued: 0, claimed: 0, active: 0, overdue: 0 }, members: [] },
+          { id: "40000000-0000-4000-8000-000000000002", name: "TEST Bratislava", active: true, serviceKinds: options.towOnly ? ["tow"] : ["delivery"], counts: { queued: 0, claimed: 0, active: 0, overdue: 0 }, members: [] },
+        ], fleet: [], cycles: [], branches: [], people: [],
+      } });
+    }
     unexpected.push(`${request.method()} ${url.pathname}`);
     return route.fulfill({ status: 503, json: { error: "Unexpected request in isolated browser regression" } });
   });
   await page.goto(`${origin}/sender?sender=1`);
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
   await expect(page.getByRole("heading", { name: "Príjemca uvidí" })).toBeVisible();
-  return { commands, unexpected, errors };
+  await page.addStyleTag({ content: "*{box-sizing:border-box}body{font-family:Arial,sans-serif}" });
+  return { commands, unexpected, errors, removeMember: () => { memberRemoved = true; } };
 }
 
 function expectIsolated(trace: Awaited<ReturnType<typeof boot>>) {
@@ -157,7 +172,7 @@ test("lost delivery acknowledgement replays the identical assignment command", a
 
 test("missing delivery capability preserves manual recipient and link issuance", async ({ page }) => {
   const trace = await boot(page, { legacy: true });
-  await expect(page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true }).locator('optgroup[label="Ľudia"] option')).toHaveCount(0);
   await page.getByLabel("Stredisko alebo kolega", { exact: true }).fill("Externý kolega");
   await page.getByRole("textbox", { name: /^Telefón príjemcu odkazu/ }).fill(member.lastPhone);
   await page.getByRole("button", { name: "Vytvoriť odkaz pre kolegu", exact: true }).click();
@@ -199,5 +214,84 @@ for (const state of ["completed", "expired"] as const) test(`${state} app handof
   await expect(page.getByText("V aplikácii", { exact: true })).toBeVisible();
   await expect(page.getByRole("link").filter({ hasText: /poloh|map/i })).toHaveCount(0);
   await expect(page.locator(".handoff-grant")).not.toContainText(/12\s*m/);
+  expectIsolated(trace);
+});
+
+
+test("app delivery without a recipient phone is enabled and sends no SMS", async ({ page }) => {
+  const trace = await boot(page, { noPhone: true });
+  await page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true }).selectOption(memberId);
+  await expect(page.getByRole("textbox", { name: /^Telefón pristavovača/ })).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Odovzdať do aplikácie", exact: true })).toBeEnabled();
+  await page.screenshot({ path: ".context/handoff-app-no-phone.png", fullPage: true });
+  await page.getByRole("button", { name: "Odovzdať do aplikácie", exact: true }).click();
+  await expect(page.getByText("V aplikácii", { exact: true })).toBeVisible();
+  expect(trace.commands).toHaveLength(1);
+  expect(trace.commands[0]).toMatchObject({ action: "issue", recipientMemberId: memberId, recipientPhone: "" });
+  expectIsolated(trace);
+});
+
+test("branch handoff selects a real branch and creates work without phone or a personal handoff", async ({ page }) => {
+  const trace = await boot(page);
+  const recipient = page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true });
+  expect(await recipient.locator("optgroup").evaluateAll(groups => groups.map(group => group.getAttribute("label")))).toEqual(["Pobočky", "Ľudia"]);
+  await recipient.selectOption("branch:40000000-0000-4000-8000-000000000002");
+  await expect(page.getByRole("textbox", { name: "Odkiaľ", exact: true })).toHaveValue(published.pickup!.address);
+  await page.getByRole("textbox", { name: "Odkiaľ", exact: true }).fill("DEMO miesto prevzatia");
+  await page.getByRole("textbox", { name: "Kam", exact: true }).fill("DEMO miesto odovzdania");
+  await expect(page.getByRole("textbox", { name: /Telefón/ })).toHaveCount(0);
+  await page.screenshot({ path: ".context/handoff-branch-no-phone.png", fullPage: true });
+  await page.getByRole("button", { name: "Odoslať", exact: true }).click();
+  await expect(page.getByText("Požiadavka bola odoslaná pobočke.", { exact: true })).toBeVisible();
+  expect(trace.commands).toHaveLength(1);
+  expect(trace.commands[0]).toMatchObject({ action: "create", expectedRevision: 0, payload: { groupId: "40000000-0000-4000-8000-000000000002", kind: "delivery", caseId } });
+  expect(trace.commands[0]).not.toHaveProperty("recipientPhone");
+  expectIsolated(trace);
+});
+
+test("copyable link without phone remains separate from explicit SMS", async ({ page }) => {
+  const trace = await boot(page);
+  await page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true }).selectOption("link");
+  await page.getByLabel("Stredisko alebo kolega", { exact: true }).fill("Externý kolega");
+  await expect(page.getByRole("button", { name: "Vytvoriť odkaz pre kolegu", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Vytvoriť odkaz pre kolegu", exact: true }).click();
+  await expect(page.getByLabel("Odkaz pre Externý kolega", { exact: true })).toHaveValue(`${origin}/handoff#token=${"a".repeat(43)}`);
+  expect(trace.commands).toHaveLength(1);
+  expect(trace.commands[0]).not.toHaveProperty("recipientMemberId");
+  expectIsolated(trace);
+});
+
+
+test("recipient removal during polling preserves app intent and blocks a stale assignment", async ({ page }) => {
+  const trace = await boot(page, { noPhone: true });
+  await page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true }).selectOption(memberId);
+  trace.removeMember();
+  await page.clock.runFor(35_000);
+  await expect(page.getByRole("alert")).toContainText("Vybraný pristavovač už nie je dostupný");
+  await expect(page.getByRole("button", { name: "Odovzdať do aplikácie", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Vytvoriť odkaz pre kolegu", exact: true })).toHaveCount(0);
+  expect(trace.commands).toHaveLength(0);
+  expectIsolated(trace);
+});
+
+
+test("an existing active personal handoff still allows selecting a branch and returning to its history", async ({ page }) => {
+  const trace = await boot(page, { grant: base });
+  const recipient = page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true });
+  await recipient.selectOption("branch:40000000-0000-4000-8000-000000000002");
+  await expect(page.getByRole("button", { name: "Odoslať", exact: true })).toBeEnabled();
+  await recipient.selectOption("existing");
+  await expect(page.locator(".handoff-grant")).toContainText(member.displayName);
+  expect(trace.commands).toHaveLength(0);
+  expectIsolated(trace);
+});
+
+test("a branch handling only towing submits towing instead of the delivery default", async ({ page }) => {
+  const trace = await boot(page, { towOnly: true });
+  await page.getByRole("combobox", { name: "Príjemca odovzdania", exact: true }).selectOption("branch:40000000-0000-4000-8000-000000000002");
+  await expect(page.getByRole("combobox", { name: "Druh práce", exact: true })).toHaveValue("tow");
+  await page.getByRole("button", { name: "Odoslať", exact: true }).click();
+  await expect(page.getByText("Požiadavka bola odoslaná pobočke.", { exact: true })).toBeVisible();
+  expect(trace.commands[0]).toMatchObject({ action: "create", payload: { kind: "tow", groupId: "40000000-0000-4000-8000-000000000002" } });
   expectIsolated(trace);
 });

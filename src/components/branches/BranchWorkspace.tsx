@@ -7,6 +7,7 @@ import styles from "@/components/operations/operations.module.css";
 import own from "./branches.module.css";
 import { formatDuration, workKinds, workState, type BranchCommand, type BranchReport, type BranchView, type BranchWorkspace as Workspace, type WorkGroup, type WorkRequest, type WorkRequestKind } from "@/domain/work-groups";
 
+type RequestDefaults = { pickup?: string; destination?: string; dueAt?: string | null; note?: string };
 type Tab = "overview" | "work" | "reports" | "team";
 const states: Record<ReturnType<typeof workState>, string> = { queued: "Čaká na prevzatie", claimed: "Prevzaté · na pridelenie", assigned: "Pridelené vykonávateľovi", accepted: "Prijaté vykonávateľom", in_progress: "Prebieha", done: "Vykonané", cancelled: "Zrušené" };
 const executionStatuses: Record<string, string> = { draft: "Na naplánovanie", assigned: "Pridelené", accepted: "Prijaté vykonávateľom", en_route: "Na ceste", arrived: "Na mieste", collected: "Vozidlo prevzaté", completed: "Vykonané", cancelled: "Zrušené", in_progress: "Prebieha", submitted: "Odovzdané na kontrolu", needs_changes: "Na doplnenie" };
@@ -16,19 +17,20 @@ const iso = (value: FormDataEntryValue | null) => typeof value === "string" && v
 const text = (form: FormData, name: string) => String(form.get(name) ?? "").trim();
 const day = (offset: number) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + offset); return d.toISOString().slice(0, 10); };
 
-export function BranchWorkspace({ caseId, cases = [], onOpenCase, standalone = false }: { caseId?: string; cases?: { id: string; caseNumber: string }[]; onOpenCase?: (id: string) => void; standalone?: boolean }) {
+export function BranchWorkspace({ caseId, cases = [], onOpenCase, standalone = false, initiallyCreating = false, onPendingChange, initialRequest, targetGroupId }: { caseId?: string; cases?: { id: string; caseNumber: string }[]; onOpenCase?: (id: string) => void; standalone?: boolean; initiallyCreating?: boolean; onPendingChange?: (pending: boolean) => void; initialRequest?: RequestDefaults; targetGroupId?: string }) {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [tab, setTab] = useState<Tab>(caseId ? "work" : "overview");
-  const [groupId, setGroupId] = useState("");
+  const [groupId, setGroupId] = useState(targetGroupId ?? "");
   const [view, setView] = useState<BranchView>("open");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
+  const [showCreate, setShowCreate] = useState(initiallyCreating);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<BranchCommand | null>(null);
   const inFlight = useRef(false);
+  useEffect(() => { onPendingChange?.(Boolean(pending)); }, [pending, onPendingChange]);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     const query = new URLSearchParams({ view, limit: "100", ...(groupId ? { groupId } : {}), ...(caseId ? { caseId } : {}) });
@@ -82,7 +84,7 @@ export function BranchWorkspace({ caseId, cases = [], onOpenCase, standalone = f
     {error && <Notice kind="error">{error}</Notice>}{notice && <Notice kind="success">{notice}</Notice>}
     {pending && !busy && <Notice>Výsledok predchádzajúceho príkazu nie je potvrdený. <Button disabled={busy} onClick={() => void run(pending, "Príkaz bol overený.")}>Zopakovať ten istý príkaz</Button></Notice>}
     {workspace.groups.length === 0 && <Notice>{actor.manage ? "Zatiaľ nie je nastavená žiadna pobočka. Vytvorte ju v časti Tím a nastavenie." : "Zatiaľ nie je nastavená žiadna pobočka. Požiadajte vedúceho o nastavenie."}</Notice>}
-    {showCreate && actor.central && <CreateRequest workspace={workspace} caseId={caseId} cases={cases} groupId={groupId} disabled={blocked} onClose={() => setShowCreate(false)} onSubmit={payload => command("create", payload, "Požiadavka bola odoslaná pobočke.", undefined, 0)} />}
+    {showCreate && actor.central && <CreateRequest fixedGroup={Boolean(targetGroupId)} initialRequest={initialRequest} workspace={workspace} caseId={caseId} cases={cases} groupId={groupId} disabled={blocked} onClose={() => setShowCreate(false)} onSubmit={payload => command("create", payload, "Požiadavka bola odoslaná pobočke.", undefined, 0)} />}
     {tab === "overview" && !caseId && <Overview workspace={workspace} groupId={groupId} onOpen={id => { setSelectedId(id); setView("open"); setTab("work"); }} onGroup={id => { setGroupId(id); setTab("work"); setView("queue"); }} />}
     {tab === "work" && <>
       <div className={styles.toolbar}><Select label="Zobraziť" value={view} onChange={event => { setView(event.target.value as BranchView); setSelectedId(null); }}><option value="open">Otvorená práca</option><option value="queue">Čaká na prevzatie a pridelenie</option><option value="active">Pridelená, prijatá a prebiehajúca</option><option value="done">Vykonaná a zrušená</option><option value="all">Všetko</option></Select><span className={styles.muted}>{workspace.requests.length} z {workspace.totalCount} požiadaviek</span></div>
@@ -119,27 +121,28 @@ function Overview({ workspace, groupId, onOpen, onGroup }: { workspace: Workspac
     </button>)}</div>
     <div className={styles.panel}><div className={styles.panelHeading}><h3><Inbox size={16} /> Nová práca na prevzatie</h3></div>
       {waiting.length === 0 ? <p className={styles.muted}>Momentálne nič nečaká na prevzatie.</p> : <div className={styles.list}>{waiting.map(item => <RequestRow key={item.id} request={item} selected={false} onSelect={() => onOpen(item.id)} />)}</div>}
-      <p className={styles.muted}>Zoznam sa obnovuje každých 30 sekúnd. Systémové upozornenia na mobile prídu v ďalšej verzii aplikácie.</p></div>
+      <p className={styles.muted}>Zoznam sa obnovuje každých 30 sekúnd. Upozornenie na novú prácu dostanú miestni dispečeri s nastavením „Prijíma novú prácu“ a povolenými mobilnými upozorneniami.</p></div>
   </div>;
 }
 
-function CreateRequest({ workspace, caseId, cases, groupId, disabled, onClose, onSubmit }: { workspace: Workspace; caseId?: string; cases: { id: string; caseNumber: string }[]; groupId: string; disabled: boolean; onClose: () => void; onSubmit: (payload: Record<string, unknown>) => void }) {
-  const [kind, setKind] = useState<WorkRequestKind>("delivery");
-  const [target, setTarget] = useState(groupId || workspace.groups.find(group => group.active)?.id || "");
+function CreateRequest({ fixedGroup, initialRequest, workspace, caseId, cases, groupId, disabled, onClose, onSubmit }: { workspace: Workspace; caseId?: string; cases: { id: string; caseNumber: string }[]; groupId: string; disabled: boolean; onClose: () => void; onSubmit: (payload: Record<string, unknown>) => void; initialRequest?: RequestDefaults; fixedGroup?: boolean }) {
+  const initialGroup = workspace.groups.find(group => group.id === groupId) ?? workspace.groups.find(group => group.active);
+  const [kind, setKind] = useState<WorkRequestKind>(() => initialGroup?.serviceKinds.includes("delivery") ? "delivery" : initialGroup?.serviceKinds[0] ?? "delivery");
+  const [target, setTarget] = useState(groupId || initialGroup?.id || "");
   const group = workspace.groups.find(item => item.id === target);
   const cycles = workspace.cycles.filter(cycle => !caseId || cycle.caseId === caseId);
   return <form className={styles.panel} onSubmit={event => { event.preventDefault(); const form = new FormData(event.currentTarget);
     onSubmit({ groupId: target, kind, caseId: caseId ?? (text(form, "caseId") || null), pickup: text(form, "pickup"), destination: text(form, "destination"), dueAt: iso(form.get("dueAt")), note: text(form, "note"), fleetAssetId: text(form, "fleetAssetId") || null, cycleId: text(form, "cycleId") || null }); }}>
     <div className={styles.panelHeading}><h2>Odoslať prácu pobočke</h2><Button type="button" onClick={onClose} aria-label="Zavrieť"><X size={16} /></Button></div>
     <div className={styles.fields}>
-      <Select label="Pobočka" value={target} onChange={event => { const next = workspace.groups.find(item => item.id === event.target.value); setTarget(event.target.value); if (next && !next.serviceKinds.includes(kind)) setKind(next.serviceKinds[0]); }} required><option value="">Vyberte pobočku</option>{workspace.groups.filter(item => item.active).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>
+      {fixedGroup ? <p><strong>Pobočka:</strong> {group?.name ?? "Nedostupná pobočka"}</p> : <Select label="Pobočka" value={target} onChange={event => { const next = workspace.groups.find(item => item.id === event.target.value); setTarget(event.target.value); if (next && !next.serviceKinds.includes(kind)) setKind(next.serviceKinds[0]); }} required><option value="">Vyberte pobočku</option>{workspace.groups.filter(item => item.active).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}
       <Select label="Druh práce" value={kind} onChange={event => setKind(event.target.value as WorkRequestKind)} required>{(Object.keys(workKinds) as WorkRequestKind[]).filter(item => !group || group.serviceKinds.includes(item)).map(item => <option key={item} value={item}>{workKinds[item]}</option>)}</Select>
       {!caseId && <Select label="Súvisiaci prípad" name="caseId"><option value="">Bez prípadu</option>{cases.map(item => <option key={item.id} value={item.id}>{item.caseNumber}</option>)}</Select>}
-      <Field label="Odkiaľ" name="pickup" maxLength={1000} /><Field label="Kam" name="destination" maxLength={1000} /><Field label="Požadovaný termín" type="datetime-local" name="dueAt" />
+      <Field label="Odkiaľ" name="pickup" maxLength={1000} defaultValue={initialRequest?.pickup} /><Field label="Kam" name="destination" maxLength={1000} defaultValue={initialRequest?.destination} /><Field label="Požadovaný termín" type="datetime-local" name="dueAt" defaultValue={localDate(initialRequest?.dueAt ?? null)} />
       {kind === "delivery" && <Select label="Náhradné vozidlo (nepovinné)" name="fleetAssetId"><option value="">Vyberie pobočka / zatiaľ neurčené</option>{workspace.fleet.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}
       {kind === "collection" && <Select label="Vozidlo u zákazníka" name="cycleId" required><option value="">Vyberte používané vozidlo</option>{cycles.map(item => <option key={item.id} value={item.id}>{item.vehicle}</option>)}</Select>}
     </div>
-    <TextArea label="Pokyny pre pobočku" name="note" maxLength={4000} />
+    <TextArea label="Pokyny pre pobočku" name="note" maxLength={4000} defaultValue={initialRequest?.note} />
     <div className={styles.actions}><Button primary type="submit" disabled={disabled || !target}><Send size={16} /> Odoslať</Button><span className={styles.muted}>Pobočka uvidí iba údaje potrebné na vykonanie, nie celý spis prípadu.</span></div>
   </form>;
 }

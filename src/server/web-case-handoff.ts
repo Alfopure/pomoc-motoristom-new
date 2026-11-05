@@ -1,4 +1,5 @@
 import "server-only";
+import { branchWorkspaceFor } from "./branches/service";
 import { isUuid } from "@/lib/telephony/uuid";
 import { MutationError } from "./mutation-error";
 import type { HandoffContext, HandoffDeliveryReceipt, HandoffReceipt } from "@/domain/case-handoff";
@@ -10,10 +11,13 @@ import { deliveryUnavailable, mobileDeliveryEnabled } from "./mobile/field-auth"
 export async function getWebCaseHandoffContext(caseId: string): Promise<HandoffContext> {
   const session = await handoffSession();
   const context = await getCaseHandoffContext(caseId, session);
-  if (!mobileDeliveryEnabled()) return context;
-  const delivery = await getHandoffDeliveryContext(session, caseId, true);
+  const branchesRead = branchWorkspaceFor({ p_user_id: session.actor.userId, p_organization_id: session.actor.organizationId }, { caseId, view: "open", limit: 1 })
+    .then(workspace => ({ branches: workspace.groups.filter(group => group.active).map(group => ({ id: group.id, name: group.name })) }))
+    .catch(() => ({ branchesError: "Pobočky sa nepodarilo načítať. Obnovte zoznam pred odoslaním pobočke." }));
+  if (!mobileDeliveryEnabled()) return { ...context, ...await branchesRead };
+  const [branches, delivery] = await Promise.all([branchesRead, getHandoffDeliveryContext(session, caseId, true)]);
   if (!delivery) throw new MutationError("Údaje o pristavovačoch sa nepodarilo načítať. Skúste to znova.", 503, "delivery_read_unavailable");
-  return { ...context, delivery: { members: delivery.members },
+  return { ...context, ...branches, delivery: { members: delivery.members },
     handoffs: context.handoffs.map(handoff => ({ ...handoff, app: delivery.app.get(handoff.id) ?? null })) };
 }
 
