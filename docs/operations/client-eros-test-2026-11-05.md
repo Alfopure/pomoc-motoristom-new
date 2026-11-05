@@ -50,3 +50,7 @@ MCP eviduje čas aplikovania odlišne od času vytvorenia lokálneho súboru. Pr
 | 20261105202702 | 20261105204524 |
 
 Po aplikovaní nevzniklo oproti východiskovému stavu žiadne nové bezpečnostné ani výkonnostné odporúčanie Supabase advisora. Nové prípadové RPC má `EXECUTE` iba pre service_role, nie pre anon/authenticated.
+
+### Poznámka k mobilnému CI
+
+Online `expo install --check` v CI 2026-11-05 začal odporúčať novšie patch verzie Expo 57 a desiatich balíkov. Tento krok zlyhal; predchádzajúce typy, lint a testy prešli. Zamknuté závislosti sa v tejto dodávke neaktualizujú. JS exporty existujúcich verzií pre web, iOS aj Android lokálne prešli. Offline porovnanie nie je náhradou za online kontrolu kompatibility. Pred zostavením nového inštalačného klienta treba rozhodnúť o týchto aktualizáciách a vykonať zariadeniové prijatie.
