@@ -26,7 +26,7 @@ export type CaseHandoff = {
   openedAt: string | null; eta: string | null; published: HandoffPublished | null; events: HandoffEvent[];
   app?: HandoffApp | null;
 };
-export type HandoffContext = { preview: HandoffPublished; previewVersion: string; handoffs: CaseHandoff[]; enhanced?: boolean; delivery?: { members: HandoffDeliveryMember[] } };
+export type HandoffContext = { preview: HandoffPublished; previewVersion: string; handoffs: CaseHandoff[]; enhanced?: boolean; branches?: { id: string; name: string }[]; branchesError?: string; delivery?: { members: HandoffDeliveryMember[] } };
 export type HandoffCommand = { action: string; commandId: string; expectedRevision?: number; publishedVersion?: number; comment?: string; eta?: string | null; [key: string]: unknown };
 export type HandoffReceipt = { handoff: CaseHandoff; commandId?: string; committedRevision?: number; tokenAccepted?: boolean; url?: string; linkWarning?: "link_unavailable"; delivery?: { status: "sent" | "failed"; memberId: string } };
 export type HandoffDeliveryReceipt = { commandId: string; handoffId: string; memberId: string; sent: true; currentRevision: number };

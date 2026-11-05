@@ -80,6 +80,7 @@ class DeliveryHandoffContract(unittest.TestCase):
         cls.db.execute(sql(ROOT / "supabase/migrations/20261020210000_mobile_push_devices.sql"))
         cls.db.execute(sql(ROOT / "supabase/migrations/20261022100000_mobile_delivery_handoffs.sql"))
         cls.db.execute(sql(ROOT / "supabase/migrations/20261022180000_mobile_delivery_background.sql"))
+        cls.db.execute(sql(ROOT / "supabase/migrations/20261105114553_optional_handoff_recipient_phone.sql"))
         cls.members = {}
         for key, roles, org in [("pavol", ["delivery"], ORG), ("peter", ["delivery", "driver"], ORG), ("vodic", ["driver"], ORG), ("cudzi", ["delivery"], OTHER_ORG)]:
             user, member = str(uuid.uuid4()), str(uuid.uuid4())
@@ -140,17 +141,28 @@ class DeliveryHandoffContract(unittest.TestCase):
         with self.client("service_role") as client:
             return client.execute("select motorist_member_handoff(%s,%s,%s,%s,%s::jsonb)", args).fetchone()[0]
 
-    def issue(self, case=None):
+    def issue(self, case=None, **fields):
         case = case or self.new_case()
         context = self.internal(case, "context")
         command = {"commandId": str(uuid.uuid4()), "previewVersion": context["previewVersion"], "recipientName": "Pavol", "recipientPhone": "+421900000111",
-                   "instructions": "Kľúče sú na vrátnici", "hours": 24, "tokenHash": digest("grant-" + uuid.uuid4().hex)}
+                   "instructions": "Kľúče sú na vrátnici", "hours": 24, "tokenHash": digest("grant-" + uuid.uuid4().hex), **fields}
         return case, self.internal(case, "issue", command)["handoff"]
 
     def sent(self, key="pavol"):
         case, handoff = self.issue()
         result = self.app(case, "assign", {"handoffId": handoff["id"], "memberId": self.members[key]["id"], "commandId": str(uuid.uuid4())})
         return case, result["handoff"]
+
+    def test_app_assignment_needs_no_phone_and_does_not_duplicate_on_retry(self):
+        case, handoff = self.issue(recipientPhone="")
+        command = {"handoffId": handoff["id"], "memberId": self.members["pavol"]["id"], "commandId": str(uuid.uuid4())}
+        first = self.app(case, "assign", command)
+        replay = self.app(case, "assign", command)
+        self.assertEqual(first["handoff"]["recipientPhone"], "")
+        self.assertEqual(first["handoff"]["id"], replay["handoff"]["id"])
+        self.assertEqual(first["memberId"], self.members["pavol"]["id"])
+        self.assertIn(handoff["id"], [item["id"] for item in self.member("pavol", "list")["handoffs"]])
+        self.assertEqual(self.db.execute("select count(*) from motorist_case_handoffs where case_id=%s", (case,)).fetchone()[0], 1)
 
     def step(self, key, handoff, action, **fields):
         command = {"handoffId": handoff["id"], "action": action, "commandId": str(uuid.uuid4()), "expectedRevision": handoff["revision"], "publishedVersion": handoff["publishedVersion"], **fields}

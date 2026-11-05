@@ -59,6 +59,7 @@ class ExternalHandoffContract(unittest.TestCase):
         create table motorist_calls(id uuid primary key,organization_id uuid,case_id uuid,direction text,started_at timestamptz,transcript text);
         """)
         cls.db.execute(sql(ROOT / "supabase/migrations/20261009100000_external_case_handoff_expansion.sql"))
+        cls.db.execute(sql(ROOT / "supabase/migrations/20261105114553_optional_handoff_recipient_phone.sql"))
 
     @classmethod
     def tearDownClass(cls):
@@ -132,6 +133,21 @@ class ExternalHandoffContract(unittest.TestCase):
         with self.client("anon") as client:
             self.rejected("42501", lambda: self.internal(case, "context", conn=client))
             self.rejected("42501", lambda: self.public("read", digest("none"), conn=client))
+
+    def test_optional_recipient_phone_keeps_link_and_replay_identity(self):
+        for phone in [None, "", "   "]:
+            case, token, handoff, command = self.issue(recipientPhone=phone)
+            self.assertEqual(handoff["recipientPhone"], "")
+            replay = self.internal(case, "issue", command)
+            self.assertEqual(replay["handoff"]["id"], handoff["id"])
+            self.assertEqual(self.session(token)[1]["id"], handoff["id"])
+        case = self.new_case()
+        context = self.internal(case, "context")
+        command = {"commandId": str(uuid.uuid4()), "previewVersion": context["previewVersion"], "recipientName": "Kolega", "tokenHash": digest(uuid.uuid4().hex)}
+        receipt = self.internal(case, "issue", command)
+        self.assertEqual(receipt["handoff"]["recipientPhone"], "")
+        for phone in ["bad", "1234", "x" * 31]:
+            self.rejected("22023", lambda: self.issue(recipientPhone=phone))
 
     def test_02_public_dto_has_only_explicit_published_fields_and_no_private_source_data(self):
         case, token, handoff, _ = self.issue()
