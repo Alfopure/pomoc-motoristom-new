@@ -1,5 +1,9 @@
 # TestFlight — Dispatching TEST
 
+## Šesť položiek spodnej lišty · 5. 11. 2026
+
+TEST build **1.0.0 (35)** zo zdroja `dev` **`34af98b5`** je dostupný v existujúcej internej skupine **Team (Expo)**. Apple o **10:46:38 UTC** potvrdil `COMPLETE`, `VALID`, `IN_BETA_TESTING` a prístup skupiny ku konkrétnemu buildu. Obsahuje dve pevné položky Prehľad a Moduly a štyri vlastné moduly. Prešiel všetkými 36 kontrolami IPA. Majiteľ tento konkrétny interný upload výslovne schválil bez štyroch simulátorových štartov: **„Áno, nahrať TEST 35; štart overím na iPhone“**. Natívny štart zostáva neoverený. [Artefakt, súhlas, náhľad a dôkazy distribúcie](six-tab-navigation-2026-11-05.md#test-odovzdanie). V TestFlighte aktualizovať **Dispatching TEST na 1.0.0 (35)** a použiť TEST účet. Produkcia zostáva bez zmeny; staršie záznamy nižšie opisujú svoje historické vydania.
+
 ## UX/UI redizajn · 4. 11. 2026
 
 Redizajn je zlúčený do `dev` `21d9b44` a overený na stabilnom TEST. iPhone náhľad bol publikovaný do existujúcej EAS vetvy `iphone-m1-test`; [úplné odovzdanie, odkaz a dôkazy](redesign-plan-2026-11-04.md#test-odovzdanie--4-11-2026).
