@@ -4,7 +4,7 @@
 
 Redizajn je zlúčený do `dev` `21d9b44` a overený na stabilnom TEST. iPhone náhľad bol publikovaný do existujúcej EAS vetvy `iphone-m1-test`; [úplné odovzdanie, odkaz a dôkazy](redesign-plan-2026-11-04.md#test-odovzdanie--4-11-2026).
 
-Natívny TEST build **1.0.0 (34)** sa dokončil a IPA prešla 36 kontrolami podpisu, identity a obsahu. **Upload do TestFlightu sa nevykonal:** čerstvý Release simulátor bol spustený, no spojenie s Macom pri jeho kontrole skončilo `Timed out waiting for client`. Pred pokračovaním zistiť stav existujúceho simulátora a prípadného QA behu; neopakovať build ani upload naslepo. Staršie záznamy nižšie opisujú svoje historické vydania, nie potvrdenie tohto redizajnu v TestFlighte.
+Natívny TEST build **1.0.0 (34)** zo zdroja `21d9b44` prešiel 36 kontrolami IPA. Dňa **5. 11. 2026** majiteľ výslovne povolil tento interný TEST upload bez štyroch simulátorových štartov: **„Áno, nahrať interný TEST; štart overím na iPhone“**. Samotný simulátor zostáva na logu Apple aj bez novej aplikácie; natívny štart sa neoznačuje za overený. [Presný súhlas, artefakt a stav distribúcie](redesign-plan-2026-11-04.md#test-odovzdanie--4-11-2026). Apple o **07:09:38 UTC** potvrdil upload `COMPLETE`, build `VALID`, `IN_BETA_TESTING` a konkrétny build v existujúcej internej skupine **Team (Expo)**. V TestFlighte aktualizovať **Dispatching TEST na 1.0.0 (34)** a použiť TEST účet. Produkcia zostáva bez zmeny. Staršie záznamy nižšie opisujú svoje historické vydania.
 
 Cieľ: TEST aplikácia v iPhone cez interný TestFlight, bez App Review. Je to TEST
 variant (TEST server, TEST databáza, telefonovanie zapnuté v aplikácii, OTA vypnuté).
