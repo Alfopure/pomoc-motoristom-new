@@ -15,13 +15,13 @@ export function Row({ title, subtitle, leading, trailing, onPress, first, access
     {!first && <View style={[s.separator, { left: leading ? 52 : space.m }]} />}
     {leading}
     <View style={{ flex: 1, minWidth: 0 }}>
-      <Text numberOfLines={2} style={[s.rowTitle, tone === "link" && { color: palette.brandInk }, tone === "danger" && { color: palette.redText }, disabled && { color: palette.tertiaryLabel }]}>{title}</Text>
-      {subtitle ? <Text numberOfLines={2} style={s.rowSubtitle}>{subtitle}</Text> : null}
+      <Text style={[s.rowTitle, tone === "link" && { color: palette.brandInk }, tone === "danger" && { color: palette.redText }, disabled && { color: palette.tertiaryLabel }]}>{title}</Text>
+      {subtitle ? <Text style={s.rowSubtitle}>{subtitle}</Text> : null}
     </View>
     {trailing}
   </>;
   if (!onPress) return <View style={s.row}>{body}</View>;
-  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? title} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? [title, subtitle].filter(Boolean).join(". ")} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
     style={({ pressed }) => [s.row, pressed && !disabled && { backgroundColor: "#ECECF0" }]}>{body}</Pressable>;
 }
 /** A setting that is on or off. The whole row is the control, so the touch target
@@ -33,8 +33,8 @@ export function SwitchRow({ title, subtitle, value, onChange, first, disabled }:
     aria-checked={value} disabled={disabled} onPress={() => onChange(!value)} style={({ pressed }) => [s.row, pressed && !disabled && { backgroundColor: "#ECECF0" }]}>
     {!first && <View style={[s.separator, { left: space.m }]} />}
     <View style={{ flex: 1, minWidth: 0 }}>
-      <Text numberOfLines={2} style={[s.rowTitle, disabled && { color: palette.tertiaryLabel }]}>{title}</Text>
-      {subtitle ? <Text numberOfLines={2} style={s.rowSubtitle}>{subtitle}</Text> : null}
+      <Text style={[s.rowTitle, disabled && { color: palette.tertiaryLabel }]}>{title}</Text>
+      {subtitle ? <Text style={s.rowSubtitle}>{subtitle}</Text> : null}
     </View>
     <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
       <Switch value={value} disabled={disabled} trackColor={{ true: palette.green, false: palette.fillStrong }} thumbColor={palette.card} ios_backgroundColor={palette.fillStrong} />
@@ -42,16 +42,16 @@ export function SwitchRow({ title, subtitle, value, onChange, first, disabled }:
   </Pressable>;
 }
 export function SectionHeader({ title, detail }: { title: string; detail?: string | null }) {
-  return <View style={s.sectionHeader}><Text accessibilityRole="header" style={s.sectionTitle}>{title}</Text>{detail ? <Text numberOfLines={1} style={s.sectionDetail}>{detail}</Text> : null}</View>;
+  return <View style={s.sectionHeader}><Text accessibilityRole="header" style={s.sectionTitle}>{title}</Text>{detail ? <Text style={s.sectionDetail}>{detail}</Text> : null}</View>;
 }
 
 const s = StyleSheet.create({
-  group: { marginHorizontal: space.l, backgroundColor: palette.card, borderRadius: radius.l, overflow: "hidden" },
-  row: { minHeight: 46, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: space.m, paddingVertical: 7, backgroundColor: palette.card },
+  group: { marginHorizontal: space.l, backgroundColor: palette.card, borderRadius: radius.l, borderCurve: "continuous", overflow: "hidden" },
+  row: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: space.m, paddingHorizontal: space.l, paddingVertical: 11, backgroundColor: palette.card },
   separator: { position: "absolute", top: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
   rowTitle: { ...type.rowTitle, color: palette.label },
   rowSubtitle: { ...type.subhead, color: palette.secondaryLabel },
-  sectionHeader: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: space.s, paddingHorizontal: 20, paddingTop: space.l, paddingBottom: 6 },
-  sectionTitle: { ...type.section, color: palette.label },
+  sectionHeader: { flexDirection: "row", flexWrap: "wrap", alignItems: "baseline", justifyContent: "space-between", gap: space.s, paddingHorizontal: 20, paddingTop: space.xl, paddingBottom: space.s },
+  sectionTitle: { ...type.section, color: palette.label, flexShrink: 1 },
   sectionDetail: { ...type.caption, color: palette.secondaryLabel, flexShrink: 1, textAlign: "right" },
 });

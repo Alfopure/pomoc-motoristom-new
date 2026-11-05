@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { AccessibilityInfo, Linking, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { AccessibilityInfo, Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MapPin } from "lucide-react-native";
 import type { MobileConfig } from "../lib/config";
@@ -9,8 +9,8 @@ import { useAndroidBack } from "../lib/use-android-back";
 import { InfoRow } from "../design/detail";
 import { formLayout } from "../design/form";
 import { Group, Row, SectionHeader } from "../design/list";
-import { palette, radius, space, type } from "../design/tokens";
-import { ErrorNotice, styles } from "../ui";
+import { CONTENT_MAX_WIDTH, palette, radius, space, type } from "../design/tokens";
+import { ErrorNotice, Loading, styles } from "../ui";
 import { NAVIGATION_CONTENT_BOTTOM, navigationContentBottom } from "../ui/theme";
 import { DeliveryModule, DeliveryRow } from "../delivery/module";
 import { canUseDeliveryCache, isOpen, sortDeliveries, visibleDelivery } from "../delivery/model";
@@ -130,21 +130,23 @@ export function FieldShell(props: Props) {
   const badges = { pristavenia: openDeliveries.length, praca: items.filter(awaitsMember).length, pobocka: queue.length };
   const tabs = barTabs(pins);
   const showAdd = pins.length < Math.min(PIN_LIMIT, available.length);
+  const barItemCount = tabs.length + (showAdd ? 1 : 0);
   const openedInModules = nav.tab === "moduly" && nav.opened !== null && !nav.account;
   const left = moduleBack && !nav.account ? { kind: "back" as const, label: moduleBack.label, onPress: moduleBack.onBack, disabled: moduleBack.disabled }
     : nav.account ? { kind: "back" as const, label: nav.tab === "moduly" && nav.opened ? moduleById(nav.opened).short : tabLabel(nav.tab), onPress: back }
       : openedInModules ? { kind: "back" as const, label: "Moduly", onPress: back }
         : { kind: "status" as const, label: status.label, tone: status.tone, onPress: () => navigate(status.target),
           accessibilityLabel: status.target === "pobocka" ? "Otvoriť pobočku" : "Poloha pre dispečing: " + status.label + ". Otvoriť " + moduleById(status.target).name };
-  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM);
+  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom, barItemCount) - NAVIGATION_CONTENT_BOTTOM);
   const openWork = (target: { kind: "operation" | "towing"; id: string }) => open(target);
-  return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
+  return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><View style={{ flex: 1, width: "100%", maxWidth: CONTENT_MAX_WIDTH, alignSelf: "center", paddingBottom: extraNavigationSpace }}>
     <ShellTopBar test={config.environment === "test"} initials={initialsOf(session.me.data?.member.displayName ?? "?")} onAccount={() => go({ ...nav, account: true })} left={left} />
     {view === "home" && <FieldHome modules={modules} deliveries={openDeliveries} work={items} queue={queue.length} now={now}
       location={location.status === "sharing" || !modules.work ? location : workLocation} status={status}
       tip={preferences.loaded && !preferences.tipDismissed} onDismissTip={() => prefs.dismissTip()} onOpenDelivery={id => open({ kind: "delivery", id })} onOpenWork={openWork}
-      onModule={navigate} errors={{ delivery: modules.delivery && session.list.isError, work: Boolean(work?.list.isError) }}
-      onRefresh={() => { void props.accessRefresh.refresh(); if (modules.work) void work?.list.refetch(); }} />}
+      onModule={navigate} errors={{ delivery: modules.delivery && session.list.isError, work: modules.work && Boolean(work?.list.isError), branch: modules.branch && Boolean(work?.branch.isError) }}
+      pending={{ delivery: session.list.isPending, work: !work || work.list.isPending, branch: !work || work.branch.isPending }}
+      onRefresh={() => Promise.allSettled([props.accessRefresh.refresh(), ...(modules.delivery ? [session.list.refetch()] : []), ...(modules.work && work ? [work.list.refetch()] : []), ...(modules.branch && work ? [work.branch.refetch()] : [])])} />}
     {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={showAdd} badges={badges}
       onOpen={id => navigate(id)} onMenu={() => setEditing(true)} onEdit={() => setEditing(true)} onAccount={() => go({ ...nav, account: true })} accessRefresh={props.accessRefresh} />}
     {view === "account" && <FieldAccount {...props} modules={modules} name={session.me.data?.member.displayName ?? ""} email={session.me.data?.member.email ?? null} onEditBar={() => setEditing(true)} />}
@@ -179,16 +181,23 @@ export function locationText(location: SharingState, accepted: boolean): string 
 }
 
 /** Prehľad of a field member: what is waiting for them and whether dispatch sees them. */
-function FieldHome({ modules, deliveries, work, queue, now, location, status, tip, onDismissTip, onOpenDelivery, onOpenWork, onModule, errors, onRefresh }: {
+function FieldHome({ modules, deliveries, work, queue, now, location, status, tip, onDismissTip, onOpenDelivery, onOpenWork, onModule, errors, pending, onRefresh }: {
   modules: FieldModules; deliveries: ReturnType<typeof sortDeliveries>; work: ReturnType<typeof workItems>; queue: number; now: number; location: SharingState;
   status: { label: string; tone: PresenceTone; target: ModuleId }; tip: boolean; onDismissTip: () => void; onOpenDelivery: (id: string) => void;
-  onOpenWork: (target: { kind: "operation" | "towing"; id: string }) => void; onModule: (id: ModuleId) => void; errors: { delivery: boolean; work: boolean }; onRefresh: () => void;
+  onOpenWork: (target: { kind: "operation" | "towing"; id: string }) => void; onModule: (id: ModuleId) => void;
+  errors: { delivery: boolean; work: boolean; branch: boolean }; pending: { delivery: boolean; work: boolean; branch: boolean }; onRefresh: () => Promise<unknown>;
 }) {
+  const [refreshing, setRefreshing] = useState(false);
+  const refresh = () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    void onRefresh().finally(() => setRefreshing(false));
+  };
   const tones: Record<PresenceTone, [string, string]> = { green: [palette.greenSoft, palette.greenText], orange: [palette.orangeSoft, palette.orangeText],
     red: [palette.redSoft, palette.redText], gray: [palette.fill, palette.secondaryLabel] };
   const [soft, ink] = tones[status.tone];
   const tracksLocation = modules.delivery || modules.work;
-  return <ScrollView contentContainerStyle={{ paddingBottom: NAVIGATION_CONTENT_BOTTOM }}>
+  return <ScrollView contentContainerStyle={{ paddingBottom: NAVIGATION_CONTENT_BOTTOM }} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}>
     <View style={s.titleRow}><Text accessibilityRole="header" style={s.title}>Prehľad</Text><Text style={s.date}>{todayLabel()}</Text></View>
     {tracksLocation && <Pressable accessibilityRole="button" accessibilityLabel={"Poloha pre dispečing: " + status.label} onPress={() => onModule(status.target)} style={({ pressed }) => [s.card, pressed && { opacity: 0.85 }]}>
       <View style={[s.cardIcon, { backgroundColor: soft }]}><MapPin size={16} color={ink} accessible={false} /></View>
@@ -197,21 +206,21 @@ function FieldHome({ modules, deliveries, work, queue, now, location, status, ti
         <Text style={s.cardText}>{locationText(location, deliveries.some(delivery => delivery.tracking) || work.some(item => item.kind === "operation" && sharesOperationPosition(item.operation)))}</Text>
       </View>
     </Pressable>}
-    {(errors.delivery || errors.work) && <View style={formLayout.notices}><ErrorNotice message={errors.work ? "Prácu sa nepodarilo načítať." : "Pristavenia sa nepodarilo načítať."} onRetry={onRefresh} /></View>}
+    {(errors.delivery || errors.work || errors.branch) && <View style={formLayout.notices}><ErrorNotice message="Niektoré údaje prehľadu sa nepodarilo overiť. Obnovte ich pred ďalším krokom." onRetry={refresh} /></View>}
     {modules.work && <>
       <SectionHeader title="Moja práca" detail={work.length ? String(work.length) : null} />
-      {work.length ? <Group>{work.slice(0, 4).map((item, index) => <WorkRow key={item.key} item={item} first={index === 0} now={now} onOpen={onOpenWork} />)}</Group>
+      {pending.work ? <Loading label="Načítavam vašu prácu…" /> : work.length ? <Group>{work.slice(0, 4).map((item, index) => <WorkRow key={item.key} item={item} first={index === 0} now={now} onOpen={onOpenWork} />)}</Group>
         : <Text style={s.empty}>{errors.work ? "Zoznam práce sa nepodarilo overiť. Skúste obnoviť údaje." : "Teraz nemáte pridelenú žiadnu jazdu ani odťah."}</Text>}
       <Group style={{ marginTop: space.m }}><Row first title="Celá moja práca" tone="link" onPress={() => onModule("praca")} trailing={<Text style={s.chevron}>›</Text>} /></Group>
     </>}
     {modules.branch && <>
       <SectionHeader title="Pobočka" />
-      <Group><Row first title={queue ? queue + (queue === 1 ? " požiadavka čaká" : queue < 5 ? " požiadavky čakajú" : " požiadaviek čaká") : "Nič nečaká na prevzatie"}
+      <Group><Row first title={pending.branch ? "Načítavam požiadavky…" : errors.branch ? "Požiadavky pobočky sa nepodarilo overiť" : queue ? queue + (queue === 1 ? " požiadavka čaká" : queue < 5 ? " požiadavky čakajú" : " požiadaviek čaká") : "Nič nečaká na prevzatie"}
         subtitle="Prevziať, prideliť a sledovať prácu pobočky" tone="link" onPress={() => onModule("pobocka")} trailing={<Text style={s.chevron}>›</Text>} /></Group>
     </>}
     {modules.delivery && <>
       <SectionHeader title={modules.work ? "Pristavenia" : "Na vybavenie"} detail={deliveries.length ? String(deliveries.length) : null} />
-      {deliveries.length ? <Group>{deliveries.map((delivery, index) => <DeliveryRow key={delivery.id} delivery={delivery} first={index === 0} onOpen={onOpenDelivery} />)}</Group>
+      {pending.delivery ? <Loading label="Načítavam pristavenia…" /> : deliveries.length ? <Group>{deliveries.map((delivery, index) => <DeliveryRow key={delivery.id} delivery={delivery} first={index === 0} onOpen={onOpenDelivery} />)}</Group>
         : <Text style={s.empty}>{errors.delivery ? "Zoznam pristavení sa nepodarilo overiť. Skúste obnoviť údaje." : "Teraz nemáte žiadne pristavenie. Keď vám ho dispečer pošle, príde aj notifikácia."}</Text>}
       <Group style={{ marginTop: space.l }}><Row first title="Všetky pristavenia" subtitle="Aj dokončené za posledný deň" tone="link" onPress={() => onModule("pristavenia")} trailing={<Text style={s.chevron}>›</Text>} /></Group>
     </>}
@@ -222,6 +231,8 @@ function FieldHome({ modules, deliveries, work, queue, now, location, status, ti
       <Pressable accessibilityRole="button" accessibilityLabel="Rozumiem, skryť tip" onPress={onDismissTip} hitSlop={8} style={({ pressed }) => [s.tipButton, pressed && { opacity: 0.7 }]}>
         <Text style={shellStyles.yellowButtonText}>OK</Text></Pressable>
     </View>}
+    <View style={formLayout.actions}><Pressable accessibilityRole="button" disabled={refreshing} accessibilityState={{ disabled: refreshing, busy: refreshing }} onPress={refresh}
+      style={({ pressed }) => [shellStyles.yellowButton, pressed && { opacity: 0.7 }]}><Text style={shellStyles.yellowButtonText}>{refreshing ? "Obnovujem…" : "Obnoviť prehľad"}</Text></Pressable></View>
   </ScrollView>;
 }
 
@@ -265,7 +276,7 @@ const s = StyleSheet.create({
   empty: { ...type.subhead, color: palette.secondaryLabel, paddingHorizontal: 20 },
   chevron: { fontSize: 20, color: palette.tertiaryLabel },
   tip: { flexDirection: "row", alignItems: "center", gap: space.m, marginHorizontal: space.l, marginTop: space.l, padding: space.m, borderRadius: radius.l, backgroundColor: palette.card },
-  tipTitle: { ...type.rowTitle, fontSize: 14, color: palette.label },
+  tipTitle: { ...type.rowTitle, color: palette.label },
   tipText: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel },
-  tipButton: { minHeight: 36, minWidth: 48, borderRadius: 18, backgroundColor: palette.brand, alignItems: "center", justifyContent: "center", paddingHorizontal: space.m },
+  tipButton: { minHeight: 44, minWidth: 48, borderRadius: 22, backgroundColor: palette.brand, alignItems: "center", justifyContent: "center", paddingHorizontal: space.m },
 });

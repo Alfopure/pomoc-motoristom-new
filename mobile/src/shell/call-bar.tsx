@@ -8,7 +8,7 @@ export { CALL_BAR_SPACE, callBarCall, type CallBarCall } from "./call-bar-model"
 
 /** A green bar above the tab bar while a call runs on the account; one tap opens it.
  * The shell hides it with the keyboard, on Ústredňa and in that call's detail. */
-export function CallBar({ call, active, onPress }: { call: CallBarCall; active: boolean; onPress: () => void }) {
+export function CallBar({ call, active, onPress, itemCount }: { call: CallBarCall; active: boolean; onPress: () => void; itemCount: number }) {
   const insets = useSafeAreaInsets();
   const { fontScale } = useWindowDimensions();
   const [now, setNow] = useState(Date.now);
@@ -20,7 +20,7 @@ export function CallBar({ call, active, onPress }: { call: CallBarCall; active: 
   }, [active, timed]);
   const time = timed ? elapsed(call.startedAt, now) : "";
   const label = timed ? "Prebiehajúci hovor: " + call.title + ", " + call.status + ". Otvoriť detail hovoru" : "Prebiehajúce hovory: " + call.title + ". Otvoriť Ústredňu";
-  return <View pointerEvents="box-none" style={[s.position, { bottom: tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 8, left: 12 + insets.left, right: 12 + insets.right }]}>
+  return <View pointerEvents="box-none" style={[s.position, { bottom: tabBarBottom(insets.bottom) + tabBarHeight(fontScale, itemCount) + 8, left: 12 + insets.left, right: 12 + insets.right }]}>
     <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress}
       style={({ pressed }) => [s.bar, pressed && { opacity: 0.85 }]}>
       <View style={s.icon}><Phone size={14} strokeWidth={2.6} color="#FFFFFF" accessible={false} /></View>

@@ -13,7 +13,7 @@ import type { LogoutState } from "../lib/logout";
 import { formatNumber, presenceLabels } from "../lib/display";
 import { useAndroidBack } from "../lib/use-android-back";
 import { ErrorNotice } from "../ui";
-import { palette, space } from "../design/tokens";
+import { CONTENT_MAX_WIDTH, palette, space } from "../design/tokens";
 import { NAVIGATION_CONTENT_BOTTOM, navigationContentBottom, tabBarBottom, tabBarHeight } from "../ui/theme";
 import { usePhoneOverlay } from "../ui/phone-overlays";
 import { DraftWorkspace } from "../drafts/workspace";
@@ -270,6 +270,8 @@ export function DispatchShell(props: Props) {
   const openedInModules = nav.tab === "moduly" && nav.opened !== null && !nav.account;
   const sheetModule = sheet.value && sheet.value.kind !== "edit" ? sheet.value.id : null;
   const tabs = barTabs(pins);
+  const showAdd = pins.length < PIN_LIMIT;
+  const barItemCount = tabs.length + (showAdd ? 1 : 0);
   const hovoryVisible = (view === "console" || view === "history" || view === "callbacks") && !callTarget;
   // The bar lists calls on the account outside this phone; the call panel shows the phone's own.
   const barCall = callBarCall(consoleQuery.data?.activeCalls ?? [], phoneSession ? [phoneSession, ...sessions.ended] : sessions.ended);
@@ -281,14 +283,14 @@ export function DispatchShell(props: Props) {
     setCallSelection({ target: { kind: "session", id: call.id.toLowerCase() }, view: "history" });
   };
   // Larger text or a taller system bar grows the floating bar; content ends above it.
-  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom) - NAVIGATION_CONTENT_BOTTOM) + (callBar ? CALL_BAR_SPACE : 0);
+  const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom, barItemCount) - NAVIGATION_CONTENT_BOTTOM) + (callBar ? CALL_BAR_SPACE : 0);
   // A module sub-screen (detail, form) owns Back first; then account, then the module opened in Moduly.
   const layerOpen = nav.account || nav.search || nav.alerts;
   const left = moduleBack && !layerOpen ? { kind: "back" as const, label: moduleBack.label, onPress: moduleBack.onBack, disabled: moduleBack.disabled }
     : layerOpen ? { kind: "back" as const, label: nav.tab === "moduly" && nav.opened ? moduleById(nav.opened).short : tabLabel(nav.tab), onPress: back }
       : openedInModules ? { kind: "back" as const, label: "Moduly", onPress: back }
         : { kind: "status" as const, label: statusLabel, tone: presence ? presenceTone[presence] : "gray" as const, onPress: () => navigate("hovory", "console") };
-  return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><CallActionContext.Provider value={callAction}><View style={{ flex: 1, paddingBottom: extraNavigationSpace }}>
+  return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><CallActionContext.Provider value={callAction}><View style={{ flex: 1, width: "100%", maxWidth: CONTENT_MAX_WIDTH, alignSelf: "center", paddingBottom: extraNavigationSpace }}>
     {ownCall && phone && !callScreen.open && <AppErrorBoundary key={"strip:" + (callScreen.id ?? "ending")} reporter={reporter} onReset={() => undefined}
       fallback={() => <CallStripFallback attention={Boolean(phoneState.error) || ownCall.holdUncertain} onExpand={() => setCallScreen(value => ({ ...value, open: true }))} />}>
       <CallStrip view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} attention={Boolean(phoneState.error) || ownCall.holdUncertain}
@@ -302,7 +304,7 @@ export function DispatchShell(props: Props) {
       phone={phone} phoneState={phoneState} onCallContext={openCallContext} />}
     {view === "history" && !callTarget && <History api={api} me={identity} queryKey={queryKey} active={active} category={category} onCategory={setCategory}
       search={search} onSearch={setSearch} onCallContext={openCallContext} onSelect={value => { setNumber(value); navigate("hovory", "console"); }} />}
-    {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={pins.length < PIN_LIMIT} badges={{ hovory: waiting, ...fieldBadges }}
+    {view === "modules" && <ModulesScreen available={available} pins={pins} tabs={tabs} showAdd={showAdd} badges={{ hovory: waiting, ...fieldBadges }}
       onOpen={id => navigate(id)} onMenu={id => sheet.open({ kind: "menu", id })} onEdit={() => sheet.open({ kind: "edit" })} onAccount={() => go({ ...nav, account: true })} accessRefresh={props.accessRefresh} />}
     <DraftWorkspace key={identity.profileId} config={config} client={props.client} identity={identity} userId={userId} liveUser={props.liveUser} active={active}
       view={view} onView={target => {
@@ -332,7 +334,7 @@ export function DispatchShell(props: Props) {
             detail: work.list.isError ? "Práca nie je dostupná" : !workList.length ? "Žiadna pridelená"
               : workList[0].kind === "operation" ? operationStatusLabels[workList[0].operation.status] : towingStatusLabels[workList[0].order.workStatus] } : null}
           onOpen={homeTarget} onCall={id => openCallContext({ kind: "session", id })}
-          onRefresh={() => { void Promise.allSettled([props.accessRefresh.refresh(), callbackSummary.refetch(), consoleQuery.refetch(), queryClient.invalidateQueries({ queryKey: [...queryKey, identity.profileId] })]); }} />;
+          onRefresh={() => Promise.allSettled([props.accessRefresh.refresh(), callbackSummary.refetch(), consoleQuery.refetch(), queryClient.invalidateQueries({ queryKey: [...queryKey, identity.profileId] })])} />;
       }}
       bar={{ customized: preferences.customized, onEdit: () => sheet.open({ kind: "edit" }), onReset: () => { prefs.reset(); notify("Lišta je podľa roly " + roleNames[identity.profile.role]); } }}
       logoutState={props.logoutState} logoutError={props.logoutError} logoutBusy={props.logoutBusy}
@@ -347,14 +349,14 @@ export function DispatchShell(props: Props) {
     </AppErrorBoundary>
     </View></CallActionContext.Provider></ShellBackContext.Provider>
     {callBar && <AppErrorBoundary key={"bar:" + callBar.id} reporter={reporter} onReset={() => undefined} fallback={() => null}>
-      <CallBar call={callBar} active={active} onPress={() => openBarCall(callBar)} /></AppErrorBoundary>}
-    <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting, ...fieldBadges }} showAdd={pins.length < PIN_LIMIT}
+      <CallBar call={callBar} active={active} itemCount={barItemCount} onPress={() => openBarCall(callBar)} /></AppErrorBoundary>}
+    <DockTabBar tabs={tabs} selected={nav.account ? null : nav.tab} badges={{ hovory: waiting, ...fieldBadges }} showAdd={showAdd}
       onSelect={(tab: ShellTab) => go(selectTab(nav, tab))} onAdd={() => sheet.open({ kind: "edit" })} />
     <Sheet visible={sheet.value !== null} large={sheet.value?.kind === "edit"} onClose={sheet.close}
       title={sheet.value?.kind === "edit" ? "Upraviť lištu" : sheet.value?.kind === "pin" ? "Do lišty" : sheetModule ? moduleById(sheetModule).name : ""}
       left={sheet.value?.kind === "pin" ? <Pressable accessibilityRole="button" onPress={sheet.close} style={s.cancel}><Text style={s.link}>Zrušiť</Text></Pressable> : undefined}
       right={sheet.value?.kind === "edit" ? <DoneButton onPress={sheet.close} />
-        : sheet.value?.kind === "menu" ? <GlassButton round accessibilityLabel="Zavrieť" onPress={sheet.close} icon={<X size={18} strokeWidth={2.4} color={palette.label} accessible={false} />} /> : undefined}>
+        : sheet.value?.kind === "menu" ? <GlassButton label="Zavrieť" accessibilityLabel="Zavrieť" onPress={sheet.close} icon={<X size={18} strokeWidth={2.4} color={palette.label} accessible={false} />} /> : undefined}>
       {sheet.value?.kind === "edit" && <EditBarContent pins={pins} available={available} roleLabel={roleNames[identity.profile.role]}
         customized={preferences.customized} saveError={preferences.saveError}
         onChange={(next, message) => { prefs.setPins(next); AccessibilityInfo.announceForAccessibility?.(message); }}
@@ -376,7 +378,7 @@ export function DispatchShell(props: Props) {
         <Row title="Upraviť lištu…" leading={<View style={s.menuIcon}><Pencil size={17} color={palette.label} accessible={false} /></View>} onPress={sheet.guard(() => sheet.open({ kind: "edit" }))} />
       </Group>}
     </Sheet>
-    <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale) + 12 + (callBar ? CALL_BAR_SPACE : 0)} />
+    <Toast key={toast?.key} message={toast?.message ?? null} bottom={tabBarBottom(insets.bottom) + tabBarHeight(fontScale, barItemCount) + 12 + (callBar ? CALL_BAR_SPACE : 0)} />
     {ownCall && phone && <AppErrorBoundary key={callScreen.id ?? "ending"} reporter={reporter} onReset={() => undefined}
       fallback={retry => callScreen.open ? <CallScreenFallback phone={phone} state={phoneState} onRetry={retry} onMinimize={() => setCallScreen(value => ({ ...value, open: false, focusStrip: true }))} /> : null}>
       <CallScreen visible={callScreen.open} view={ownCall} facts={callFacts} connectedAt={callScreen.connectedAt} phone={phone} state={phoneState}

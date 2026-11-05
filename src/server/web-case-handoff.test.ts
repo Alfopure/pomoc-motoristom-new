@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TEST_APP_ORIGIN, TEST_SUPABASE_REF, TEST_VERCEL_PROJECT_ID } from "@/lib/app-environment";
-const mocks = vi.hoisted(() => ({ rpc: vi.fn(), actor: vi.fn(), queue: vi.fn(), push: vi.fn(), admin: vi.fn() }));
+const mocks = vi.hoisted(() => ({ rpc: vi.fn(), actor: vi.fn(), queue: vi.fn(), push: vi.fn(), admin: vi.fn(), branches: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createSupabaseServerClient: async () => ({ rpc: mocks.rpc }) }));
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: mocks.admin }));
+vi.mock("./branches/service", () => ({ branchWorkspaceFor: mocks.branches }));
 vi.mock("./api-auth", () => ({ requireDefaultMotoristActor: mocks.actor }));
 vi.mock("./mobile/push", () => ({ queueMobilePush: mocks.queue, sendMemberPush: mocks.push }));
 import { getHandoffDeliveryContext } from "./mobile/case-handoff";
@@ -20,7 +21,8 @@ function request(body?: unknown, headers: HeadersInit = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   for (const [key, value] of Object.entries({ MOTORIST_HANDOFF_V3_ENABLED: "false", MOBILE_DELIVERY_ENABLED: "true", MOTORIST_APP_ENV: "test", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "dev", VERCEL_PROJECT_ID: TEST_VERCEL_PROJECT_ID, APP_BASE_URL: TEST_APP_ORIGIN, NEXT_PUBLIC_SUPABASE_URL: `https://${TEST_SUPABASE_REF}.supabase.co` })) vi.stubEnv(key, value);
-  mocks.actor.mockResolvedValue({ organizationId, profileId });
+  mocks.actor.mockResolvedValue({ organizationId, profileId, userId: id(7) });
+  mocks.branches.mockResolvedValue({ groups: [{ id: id(8), name: "Žilina", active: true }, { id: id(9), name: "Neaktívna", active: false }] });
   mocks.admin.mockReturnValue({});
   mocks.rpc.mockImplementation(async (_name, args) => {
     if (args.p_action === "context") return { data: { preview: {}, previewVersion: "a".repeat(64), handoffs: [handoff] }, error: null };
@@ -38,6 +40,7 @@ describe("cookie web handoff delivery adapter", () => {
     await GET(request(), params);
     await POST(request(deliver, { Authorization: "Bearer mobile-token" }), params);
     expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.branches).not.toHaveBeenCalled();
   });
   it.each(["", "null", "https://foreign.test"])("rejects Origin %s before actor and database access", async Origin => {
     expect((await POST(request(deliver, { Origin }), params)).status).toBe(403);
@@ -45,6 +48,8 @@ describe("cookie web handoff delivery adapter", () => {
   });
   it("adds eligible members and latest location using the authenticated organization", async () => {
     const result = await (await GET(request(), params)).json();
+    expect(result.branches).toEqual([{ id: id(8), name: "Žilina" }]);
+    expect(mocks.branches).toHaveBeenCalledWith({ p_user_id: id(7), p_organization_id: organizationId }, { caseId, view: "open", limit: 1 });
     expect(result.delivery.members).toEqual([{ id: memberId, displayName: "Ján", lastPhone: null }]);
     expect(result.handoffs[0].app).toMatchObject({ memberId, lastPosition: { lat: 48, lng: 17 } });
     for (const [, args] of mocks.rpc.mock.calls) expect(args).toMatchObject({ p_organization_id: organizationId, p_actor_id: profileId, p_case_id: caseId });

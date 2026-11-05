@@ -1,14 +1,15 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { AccessibilityInfo, Animated, Modal, Pressable, ScrollView, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { AccessibilityInfo, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions, type StyleProp, type ViewStyle } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Briefcase, Building, Car, ClipboardList, FolderOpen, House, LayoutGrid, Phone, Plus, Wrench, type LucideIcon } from "lucide-react-native";
-import { palette, space, type } from "../design/tokens";
+import { palette, radius, space, type } from "../design/tokens";
+import { columnsForWidth, gridItemWidth } from "../design/layout";
 import { GlassSurface } from "../ui/glass";
 import { moduleById, type ModuleId } from "./modules";
 import type { ShellTab } from "./navigation";
 
 export const moduleIcons: Record<ModuleId, LucideIcon> = { hovory: Phone, pripady: FolderOpen, ulohy: ClipboardList, nastroje: Wrench, pristavenia: Car, praca: Briefcase, pobocka: Building };
-export const tabLabel = (tab: ShellTab) => tab === "prehlad" ? "Prehľad" : tab === "moduly" ? "Moduly" : moduleById(tab).short;
+export const tabLabel = (tab: ShellTab) => tab === "prehlad" ? "Prehľad" : tab === "moduly" ? "Moduly" : tab === "pristavenia" ? "Pristav." : moduleById(tab).short;
 
 /** Settings-style colored square used for modules in grids and lists. */
 export function ModuleTile({ id, size = 28 }: { id: ModuleId; size?: number }) {
@@ -40,7 +41,7 @@ export function MiniBar({ tabs, showAdd, style }: { tabs: ShellTab[]; showAdd: b
   return <View accessible accessibilityLabel={"Spodná lišta: " + tabs.map(tabLabel).join(", ")} style={[s.miniBar, style]}>
     {items.map(item => <View key={item} style={s.miniItem}>
       <View style={s.miniIcon}>{item === "add" ? <AddMark size={19} /> : <TabGlyph tab={item} size={19} color="#3A3A3C" />}</View>
-      <Text numberOfLines={1} maxFontSizeMultiplier={1.2} style={[s.miniLabel, item === "add" && { color: palette.tertiaryLabel }]}>{item === "add" ? "voľné" : tabLabel(item)}</Text>
+      <Text numberOfLines={2} maxFontSizeMultiplier={1.5} style={[s.miniLabel, item === "add" && { color: palette.tertiaryLabel }]}>{item === "add" ? "voľné" : tabLabel(item)}</Text>
     </View>)}
   </View>;
 }
@@ -48,11 +49,14 @@ export function MiniBar({ tabs, showAdd, style }: { tabs: ShellTab[]; showAdd: b
 export function Segmented<T extends string>({ items, value, onChange, accessibilityLabel }: {
   items: { id: T; label: string; badge?: number | null }[]; value: T; onChange: (value: T) => void; accessibilityLabel: string;
 }) {
-  return <View accessibilityRole="tablist" accessibilityLabel={accessibilityLabel} style={s.segment}>{items.map(item => {
+  const { width: windowWidth, fontScale } = useWindowDimensions();
+  const [width, setWidth] = useState(windowWidth - space.l * 2);
+  const columns = columnsForWidth(width - 4, fontScale, 76, items.length, 4);
+  return <View accessibilityRole="tablist" accessibilityLabel={accessibilityLabel} style={s.segment} onLayout={event => setWidth(event.nativeEvent.layout.width)}>{items.map(item => {
     const selected = item.id === value;
     return <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected }} accessibilityLabel={item.label + (item.badge ? ", " + item.badge : "")}
-      hitSlop={{ top: 6, bottom: 6 }} onPress={() => onChange(item.id)} style={({ pressed }) => [s.segmentItem, selected && s.segmentSelected, pressed && !selected && { opacity: 0.6 }]}>
-      <Text numberOfLines={1} style={[s.segmentText, selected && { color: palette.label }]}>{item.label}</Text>
+      onPress={() => onChange(item.id)} style={({ pressed }) => [s.segmentItem, { width: gridItemWidth(width - 4, columns, 4) }, selected && s.segmentSelected, pressed && !selected && { opacity: 0.6 }]}>
+      <Text style={[s.segmentText, selected && { color: palette.label }]}>{item.label}</Text>
       {Boolean(item.badge) && <View style={s.badge}><Text style={s.badgeText}>{item.badge! > 99 ? "99+" : item.badge}</Text></View>}
     </Pressable>;
   })}</View>;
@@ -62,9 +66,9 @@ export function Segmented<T extends string>({ items, value, onChange, accessibil
 export function GlassButton({ label, accessibilityLabel, icon, onPress, tone = "glass", round, disabled }: {
   label?: string; accessibilityLabel: string; icon?: ReactNode; onPress: () => void; tone?: "glass" | "brand"; round?: boolean; disabled?: boolean;
 }) {
-  const content = <View style={[s.glassContent, round && s.round, disabled && { opacity: 0.4 }]}>{icon}{label ? <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.glassLabel}>{label}</Text> : null}</View>;
-  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress} hitSlop={4}
-    style={({ pressed }) => [s.glassShadow, pressed && !disabled && { transform: [{ scale: 0.96 }] }]}>
+  const content = <View style={[s.glassContent, round && !label && s.round, disabled && { opacity: 0.4 }]}>{icon}{label ? <Text style={s.glassLabel}>{label}</Text> : null}</View>;
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityShowsLargeContentViewer accessibilityLargeContentTitle={label ?? accessibilityLabel} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress} hitSlop={4}
+    style={({ pressed }) => [s.glassShadow, pressed && !disabled && { opacity: 0.72 }]}>
     {tone === "brand" ? <View style={[s.glass, s.brand]}>{content}</View> : <GlassSurface style={s.glass} interactive>{content}</GlassSurface>}
   </Pressable>;
 }
@@ -73,17 +77,25 @@ export function Badge({ count }: { count: number }) {
   return <View style={s.badge}><Text style={s.badgeText}>{count > 99 ? "99+" : count}</Text></View>;
 }
 
+function useReduceMotion() {
+  const [reduced, setReduced] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    let changed = false;
+    const subscription = AccessibilityInfo.addEventListener("reduceMotionChanged", value => { changed = true; if (alive) setReduced(value); });
+    void AccessibilityInfo.isReduceMotionEnabled().then(value => { if (alive && !changed) setReduced(value); }).catch(() => undefined);
+    return () => { alive = false; subscription.remove(); };
+  }, []);
+  return reduced;
+}
+
 /** Short confirmation above the bar; also announced to VoiceOver. */
 export function Toast({ message, bottom }: { message: string | null; bottom: number }) {
-  const [opacity] = useState(() => new Animated.Value(0));
   useEffect(() => {
-    if (!message) return;
-    AccessibilityInfo.announceForAccessibility?.(message);
-    opacity.setValue(0);
-    Animated.timing(opacity, { toValue: 1, duration: 160, useNativeDriver: false }).start();
-  }, [message, opacity]);
+    if (message) AccessibilityInfo.announceForAccessibility?.(message);
+  }, [message]);
   if (!message) return null;
-  return <Animated.View pointerEvents="none" style={[s.toast, { bottom, opacity }]}><Text numberOfLines={2} style={s.toastText}>{message}</Text></Animated.View>;
+  return <View pointerEvents="none" style={[s.toast, { bottom }]}><Text style={s.toastText}>{message}</Text></View>;
 }
 
 /** One bottom sheet over a dimmed backdrop; its content may change while open. */
@@ -91,64 +103,51 @@ export function Sheet({ visible, title, onClose, left, right, children, large }:
   visible: boolean; title: string; onClose: () => void; left?: ReactNode; right?: ReactNode; children: ReactNode; large?: boolean;
 }) {
   const insets = useSafeAreaInsets();
-  const head = <><View style={s.grab} /><View style={s.sheetHead}>
-    <View style={[s.sheetSide, { justifyContent: "flex-start" }]}>{left}</View>
-    <Text accessibilityRole="header" numberOfLines={1} style={s.sheetTitle}>{title}</Text>
-    <View style={[s.sheetSide, { justifyContent: "flex-end" }]}>{right}</View>
-  </View></>;
-  return <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-    <View style={s.backdropRoot}>
+  const reduceMotion = useReduceMotion();
+  return <Modal visible={visible} transparent animationType={reduceMotion ? "none" : "fade"} onRequestClose={onClose}>
+    <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={s.backdropRoot}>
       <Pressable accessibilityRole="button" accessibilityLabel="Zavrieť" style={StyleSheet.absoluteFill} onPress={onClose} />
-      <SlideUp style={[s.sheet, large && s.sheetLarge, { paddingBottom: insets.bottom + space.m }]}>
-        {head}<ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.sheetBody}>{children}</ScrollView>
-      </SlideUp>
-    </View>
+      <View accessibilityViewIsModal style={[s.sheet, large && s.sheetLarge, { paddingBottom: insets.bottom + space.m }]}>
+        <View style={s.grab} />
+        <Text accessibilityRole="header" style={s.sheetTitle}>{title}</Text>
+        <View style={s.sheetHead}>
+          <View style={s.sheetSide}>{left}</View>
+          <View style={[s.sheetSide, { alignItems: "flex-end" }]}>{right ?? (!left ? <GlassButton label="Zavrieť" accessibilityLabel="Zavrieť okno" onPress={onClose} /> : null)}</View>
+        </View>
+        <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={s.sheetBody}>{children}</ScrollView>
+      </View>
+    </KeyboardAvoidingView>
   </Modal>;
 }
-/** The sheet rises while the backdrop fades; Reduce Motion only fades. */
-function SlideUp({ style, children }: { style: StyleProp<ViewStyle>; children: ReactNode }) {
-  const [offset] = useState(() => new Animated.Value(320));
-  useEffect(() => {
-    let alive = true;
-    void AccessibilityInfo.isReduceMotionEnabled().then(reduce => {
-      if (!alive) return;
-      if (reduce) offset.setValue(0);
-      else Animated.spring(offset, { toValue: 0, useNativeDriver: true, speed: 16, bounciness: 2 }).start();
-    }).catch(() => offset.setValue(0));
-    return () => { alive = false; };
-  }, [offset]);
-  return <Animated.View accessibilityViewIsModal style={[style, { transform: [{ translateY: offset }] }]}>{children}</Animated.View>;
-}
-
 export const shellStyles = StyleSheet.create({
   yellowButton: { minHeight: 44, borderRadius: 22, backgroundColor: palette.brand, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: space.s, paddingHorizontal: space.l },
   yellowButtonText: { ...type.rowTitle, color: palette.label },
 });
 const s = StyleSheet.create({
-  miniBar: { height: 56, borderRadius: 28, backgroundColor: palette.background, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.separator, flexDirection: "row", alignItems: "center", paddingHorizontal: space.xs },
+  miniBar: { minHeight: 68, paddingVertical: space.s, borderRadius: 28, backgroundColor: palette.background, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.separator, flexDirection: "row", alignItems: "center", paddingHorizontal: space.xs },
   miniItem: { flex: 1, minWidth: 0, alignItems: "center", gap: 2 },
   miniIcon: { height: 24, alignItems: "center", justifyContent: "center" },
-  miniLabel: { fontSize: 9.5, lineHeight: 12, fontWeight: "600", color: "#3A3A3C" },
-  segment: { flexDirection: "row", backgroundColor: palette.fill, borderRadius: 9, padding: 2 },
-  segmentItem: { flex: 1, minHeight: 32, borderRadius: 7, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingHorizontal: space.xs },
+  miniLabel: { ...type.tabLabel, maxWidth: "100%", color: palette.secondaryLabel, textAlign: "center" },
+  segment: { flexDirection: "row", flexWrap: "wrap", gap: 4, backgroundColor: palette.fill, borderRadius: radius.m, padding: 2 },
+  segmentItem: { flexGrow: 1, minHeight: 44, borderRadius: 10, paddingVertical: space.s, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingHorizontal: space.xs },
   segmentSelected: { backgroundColor: palette.card, boxShadow: "0 1px 4px rgba(0,0,0,0.12)" },
-  segmentText: { fontSize: 13, lineHeight: 17, fontWeight: "600", color: "#3A3A3C" },
-  badge: { minWidth: 18, height: 18, borderRadius: 9, backgroundColor: palette.red, alignItems: "center", justifyContent: "center", paddingHorizontal: 5 },
-  badgeText: { color: "#FFFFFF", fontSize: 11, lineHeight: 13, fontWeight: "700", fontVariant: ["tabular-nums"] },
-  glassShadow: { borderRadius: 20, boxShadow: "0 4px 14px rgba(0,0,0,0.08)" },
-  glass: { borderRadius: 20, minHeight: 40, minWidth: 40, justifyContent: "center" },
+  segmentText: { ...type.subhead, fontWeight: "600", color: palette.secondaryLabel, flexShrink: 1, textAlign: "center" },
+  badge: { minWidth: 20, minHeight: 20, borderRadius: 12, backgroundColor: palette.redText, alignItems: "center", justifyContent: "center", paddingHorizontal: 5 },
+  badgeText: { color: palette.card, ...type.tag, fontVariant: ["tabular-nums"] },
+  glassShadow: { borderRadius: 22, maxWidth: "100%", flexShrink: 1, boxShadow: "0 4px 14px rgba(0,0,0,0.08)" },
+  glass: { borderRadius: 22, minHeight: 44, minWidth: 44, justifyContent: "center" },
   brand: { backgroundColor: palette.brand, borderWidth: 1, borderColor: "#F1DF6E", overflow: "hidden" },
-  glassContent: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: space.m, minHeight: 40 },
-  round: { paddingHorizontal: 0, width: 40 },
-  glassLabel: { fontSize: 14, lineHeight: 18, fontWeight: "600", color: palette.label, flexShrink: 1 },
+  glassContent: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: space.m, minHeight: 44, paddingVertical: space.s },
+  round: { paddingHorizontal: 0, width: 44 },
+  glassLabel: { ...type.subhead, fontWeight: "600", color: palette.label, flexShrink: 1 },
   toast: { position: "absolute", alignSelf: "center", maxWidth: "88%", backgroundColor: "rgba(28,28,30,0.92)", borderRadius: 18, paddingHorizontal: space.l, paddingVertical: 9, zIndex: 50 },
   toastText: { color: "#FFFFFF", fontSize: 13, lineHeight: 17, fontWeight: "600", textAlign: "center" },
   backdropRoot: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.28)" },
   sheet: { backgroundColor: palette.background, borderTopLeftRadius: 28, borderTopRightRadius: 28, maxHeight: "88%", boxShadow: "0 -6px 30px rgba(0,0,0,0.18)" },
   sheetLarge: { height: "92%", maxHeight: "92%" },
   grab: { width: 38, height: 5, borderRadius: 3, backgroundColor: palette.tertiaryLabel, alignSelf: "center", marginTop: 7, marginBottom: 2 },
-  sheetHead: { flexDirection: "row", alignItems: "center", gap: space.s, paddingHorizontal: 14, paddingVertical: 6 },
-  sheetSide: { width: 96, flexDirection: "row" },
-  sheetTitle: { ...type.headline, fontWeight: "700", color: palette.label, flex: 1, textAlign: "center" },
+  sheetHead: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: space.s, paddingHorizontal: space.l, paddingBottom: space.s },
+  sheetSide: { flexShrink: 1, minWidth: 0 },
+  sheetTitle: { ...type.headline, fontWeight: "700", color: palette.label, textAlign: "center", paddingHorizontal: space.l, paddingVertical: space.m },
   sheetBody: { paddingBottom: space.xl },
 });

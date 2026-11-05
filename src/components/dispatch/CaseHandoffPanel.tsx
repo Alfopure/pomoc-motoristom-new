@@ -1,7 +1,11 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
-import { Copy, Link2, MapPin, MessageSquareText, RefreshCw, Send, ShieldCheck, Smartphone } from "lucide-react";
+import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useCaseCollaboration } from "./CaseCollaborationProvider";
+import { useLayoutPreview } from "./LayoutPreview";
+import { Copy, Link2, MapPin, MessageSquareText, RefreshCw, Send, ShieldCheck, Smartphone, X } from "lucide-react";
 import { isHandoffDeliveryReceipt, isHandoffReceipt, handoffDate, handoffEventLabels, handoffIsActive, handoffLabels, type CaseHandoff, type HandoffCommand, type HandoffContext } from "@/domain/case-handoff";
+import { BranchWorkspace } from "@/components/branches/BranchWorkspace";
 import { HandoffSummary } from "./HandoffSummary";
 import { SmsComposerDialog } from "./SmsComposerDialog";
 import { readHandoff, useHandoffRead } from "./use-handoff-read";
@@ -9,28 +13,39 @@ import { previewEditablePhone } from "@/lib/telephony/phone-entry";
 import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 import "./case-handoff.css";
 
-export function CaseHandoffPanel(props: { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean }) {
+type CaseHandoffPanelProps = { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean; presentation?: "accordion" | "drawer" };
+
+export function CaseHandoffPanel(props: CaseHandoffPanelProps) {
   return <CaseHandoffSession key={props.caseId} {...props} />;
 }
-function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpanded = false }: { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean }) {
+function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpanded = false, presentation = "accordion" }: CaseHandoffPanelProps) {
+  const drawer = presentation === "drawer";
+  const titleId = useId();
+  const [drawerStarted, setDrawerStarted] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null), drawerRef = useRef<HTMLDivElement>(null);
+  const { state: caseAccess } = useCaseCollaboration();
+  const { mode: layoutMode } = useLayoutPreview();
   const [expanded, setExpanded] = useState(initiallyExpanded), [context, setContext] = useState<HandoffContext | null>(null);
   const [name, setName] = useState(""), [phone, setPhone] = useState(""), [instructions, setInstructions] = useState(""), [scheduled, setScheduled] = useState(""), [hours, setHours] = useState(24);
   const [recipientMemberId, setRecipientMemberId] = useState(""), [deliveryMemberId, setDeliveryMemberId] = useState("");
+  const [channel, setChannel] = useState<"app" | "branch" | "link">("app");
+  const [branchGroupId, setBranchGroupId] = useState(""), [branchPending, setBranchPending] = useState(false);
   const [now, setNow] = useState(Date.now);
   const [comment, setComment] = useState(""), [error, setError] = useState(""), [notice, setNotice] = useState(""), [busy, setBusy] = useState(false), [pending, setPending] = useState<HandoffCommand | null>(null);
   const [link, setLink] = useState<{ id: string; url: string; phone: string; name: string; generation?: number } | null>(null), [smsOpen, setSmsOpen] = useState(false);
   const [smsIntent, setSmsIntent] = useState<{ phone: string; message: string } | null>(null);
   const inFlight = useRef(false), detailsDirty = useRef(false), sectionRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (!active || !initiallyExpanded) return;
+    if (drawer || !active || !initiallyExpanded) return;
     const frame = requestAnimationFrame(() => sectionRef.current?.scrollIntoView({ block: "start" }));
     return () => cancelAnimationFrame(frame);
-  }, [active, initiallyExpanded]);
+  }, [active, initiallyExpanded, drawer]);
   const reader = useHandoffRead({
     enabled: active && expanded,
     read: signal => readHandoff<HandoffContext>(`/api/cases/${encodeURIComponent(caseId)}/handoffs`, signal),
     accept: data => {
       setContext(data);
+      if (!context && !data.delivery) setChannel(current => current === "app" ? "link" : current);
       const activeGrant = data.handoffs.find(handoffIsActive);
       if (!detailsDirty.current) {
         setInstructions(activeGrant?.published?.instructions || "");
@@ -67,6 +82,50 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
     const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); };
     window.addEventListener("beforeunload", guard); return () => window.removeEventListener("beforeunload", guard);
   }, [pending]);
+  function closeDrawer() {
+    // A submitted request stays mounted, including its command ID and retry state.
+    if (!busy && !smsOpen) setExpanded(false);
+  }
+  const handleDrawerKeys = useEffectEvent((event: KeyboardEvent) => {
+    if (smsOpen) return; // The nested SMS composer owns focus while open.
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation(); closeDrawer();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const elements = Array.from(drawerRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], summary') ?? []).filter(element => element.getClientRects().length > 0);
+    const first = elements[0], last = elements.at(-1);
+    if (!drawerRef.current?.contains(document.activeElement)) { event.preventDefault(); (event.shiftKey ? last : first)?.focus(); }
+    else if (event.shiftKey && (document.activeElement === first || document.activeElement === drawerRef.current)) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  });
+  const keepDrawerFocus = useEffectEvent((event: FocusEvent) => {
+    if (!smsOpen && event.target instanceof Node && !drawerRef.current?.contains(event.target)) drawerRef.current?.focus();
+  });
+  useEffect(() => {
+    // An initially open case also renders on the server; mount its portal only
+    // after hydration, while user-triggered opening can mount it immediately.
+    if (!drawer || !expanded || drawerStarted) return;
+    const frame = requestAnimationFrame(() => setDrawerStarted(true));
+    return () => cancelAnimationFrame(frame);
+  }, [drawer, expanded, drawerStarted]);
+  useEffect(() => {
+    if (!drawer || !drawerStarted || !expanded || !active || caseAccess.hidden) return;
+    const previousOverflow = document.body.style.overflow;
+    const previousFocus = document.activeElement;
+    const trigger = triggerRef.current;
+    document.body.style.overflow = "hidden";
+    drawerRef.current?.focus();
+    document.addEventListener("keydown", handleDrawerKeys, true);
+    document.addEventListener("focusin", keepDrawerFocus);
+    return () => {
+      document.removeEventListener("keydown", handleDrawerKeys, true);
+      document.removeEventListener("focusin", keepDrawerFocus);
+      document.body.style.overflow = previousOverflow;
+      const restore = previousFocus instanceof HTMLElement && previousFocus.isConnected ? previousFocus : trigger;
+      restore?.focus();
+    };
+  }, [drawer, drawerStarted, expanded, active, caseAccess.hidden]);
   async function command(action: string, grant?: CaseHandoff, memberId?: string) {
     if (!context || inFlight.current || reader.halted) return;
     if (!pending && context.enhanced && action === "renew" && !window.confirm("Zneplatniť pôvodný odkaz a všetky jeho otvorené prístupy? Príjemcovi bude treba poslať nový odkaz.")) return;
@@ -116,29 +175,42 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
   const members = context?.delivery?.members ?? [];
   const selectedMember = members.find(member => member.id === recipientMemberId);
   const disabled = busy || !!pending;
-  const validRecipientPhone = Boolean(previewEditablePhone(phone));
-  return <section className="case-handoff-panel" ref={sectionRef} hidden={!active} aria-label="Externé odovzdanie prípadu">
-    <button type="button" className="handoff-panel-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><Link2 size={17} /><span><strong>Odovzdať prípad</strong><small>Pristavovačovi do aplikácie alebo odkaz pre kolegu</small></span><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
-    <div hidden={!expanded} className="handoff-panel-body">
+  const validRecipientPhone = !phone.trim() || Boolean(previewEditablePhone(phone));
+  const appChannel = channel === "app";
+  const body = <div hidden={!expanded} className="handoff-panel-body">
+      {context && <label>Príjemca odovzdania<select value={channel === "branch" ? `branch:${branchGroupId}` : current ? "existing" : channel === "app" ? recipientMemberId : "link"} disabled={disabled || branchPending} onChange={event => {
+        const value = event.target.value;
+        if (value.startsWith("branch:")) { setBranchGroupId(value.slice(7)); setChannel("branch"); setRecipientMemberId(""); }
+        else if (value === "existing") { setChannel("app"); }
+        else if (value === "link") { setChannel("link"); setRecipientMemberId(""); setName(""); setPhone(""); }
+        else { const member = members.find(item => item.id === value); setChannel("app"); setRecipientMemberId(value); setName(member?.displayName ?? ""); setPhone(member?.lastPhone ?? ""); }
+      }}>
+        <option value="">Vyberte pobočku alebo človeka</option>
+        {current && <option value="existing">Aktuálne odovzdanie · {current.recipientName}</option>}
+        <optgroup label="Pobočky">{context.branches?.map(branch => <option key={branch.id} value={`branch:${branch.id}`}>{branch.name}</option>)}</optgroup>
+        <optgroup label="Ľudia" disabled={Boolean(current)}>{members.map(member => <option key={member.id} value={member.id}>{member.displayName}</option>)}</optgroup>
+        {!current && <option value="link">Iný príjemca · odkaz / SMS</option>}
+      </select></label>}
+      {context?.branchesError && <p role="alert" className="handoff-error">{context.branchesError} <button type="button" disabled={busy || branchPending} onClick={reader.retry}>Obnoviť príjemcov</button></p>}
+      <div hidden={channel !== "branch"}>
+        {branchGroupId && <><p className="handoff-small">Vyberte pobočku. Požiadavku uvidia jej miestni dispečeri, ktorí ju prevezmú a pridelia konkrétnemu pracovníkovi. Telefón sa nevyžaduje.</p><BranchWorkspace key={branchGroupId} targetGroupId={branchGroupId} caseId={caseId} initiallyCreating onPendingChange={setBranchPending} initialRequest={{ pickup: context?.preview.pickup?.address, destination: context?.preview.destination?.address, dueAt: scheduled || null, note: instructions }} /></>}
+      </div>
+      <div hidden={channel === "branch"}>
       <p className="handoff-access-note"><ShieldCheck size={16} />Držiteľ odkazu uvidí iba potvrdené údaje nižšie. Prijatie ani dokončenie úkonu samo neuzavrie interný prípad.</p>
       {context && <>
         <div className="handoff-sender-grid"><div className="handoff-sender-form">
           {!current && <>
-            {(members.length > 0 || recipientMemberId) && <label>Príjemca odovzdania<select value={recipientMemberId} disabled={disabled} onChange={event => {
-              const id = event.target.value, member = members.find(item => item.id === id);
-              setRecipientMemberId(id); setName(member?.displayName ?? ""); setPhone(member?.lastPhone ?? "");
-            }}><option value="">Iný príjemca · iba odkaz</option>{members.map(member => <option key={member.id} value={member.id}>{member.displayName} · v aplikácii</option>)}</select></label>}
             {recipientMemberId && !selectedMember && <p role="alert" className="handoff-error">Vybraný pristavovač už nie je dostupný. Vyberte príjemcu znova.</p>}
-            <label>{recipientMemberId ? "Pristavovač" : "Stredisko alebo kolega"}<input maxLength={160} value={name} disabled={disabled} readOnly={!!recipientMemberId} onChange={event => setName(event.target.value)} placeholder="Napr. Peter · Bratislava" /></label>
-            <label>{recipientMemberId ? "Telefón pristavovača" : "Telefón príjemcu odkazu"}<PhoneNumberInput maxLength={30} value={phone} disabled={disabled} onChange={setPhone} /><PhoneNumberHint value={phone} className="text-xs font-normal text-slate-500" /></label>
+            <label>{appChannel ? "Pristavovač" : "Stredisko alebo kolega"}<input maxLength={160} value={name} disabled={disabled} readOnly={!!recipientMemberId} onChange={event => setName(event.target.value)} placeholder="Napr. Peter · Bratislava" /></label>
+            <label>{appChannel ? "Telefón pristavovača (nepovinné, pre SMS)" : "Telefón príjemcu odkazu (nepovinné, pre SMS)"}<PhoneNumberInput maxLength={30} value={phone} disabled={disabled} onChange={setPhone} /><PhoneNumberHint value={phone} className="text-xs font-normal text-slate-500" /></label>
             {recipientMemberId && <p className="handoff-small">Pristavovač ho uvidí vo svojej aplikácii. Ak má povolené upozornenia, odošle sa aj notifikácia.</p>}
           </>}
           <label>Pokyny pre kolegu<textarea aria-label="Pokyny pre kolegu" maxLength={2000} rows={3} value={instructions} disabled={disabled} onChange={event => { detailsDirty.current = true; setInstructions(event.target.value); }} placeholder="Iba pokyny určené príjemcovi odkazu" /></label>
           <label>Dohodnutý čas<input type="datetime-local" value={scheduled} disabled={disabled} onChange={event => { detailsDirty.current = true; setScheduled(event.target.value); }} /></label>
           <label>Platnosť pri vytvorení alebo predĺžení<select value={hours} disabled={disabled} onChange={event => setHours(Number(event.target.value))}><option value={12}>12 hodín</option><option value={24}>24 hodín</option><option value={48}>48 hodín</option><option value={72}>72 hodín</option></select></label>
-          {!current ? <button type="button" className="handoff-primary" disabled={disabled || !name.trim() || !validRecipientPhone || !!recipientMemberId && !selectedMember} onClick={() => void command("issue")}><Send size={15} />{recipientMemberId ? "Odovzdať do aplikácie" : "Vytvoriť odkaz pre kolegu"}</button> : <button type="button" disabled={disabled} onClick={() => void command("publish", current)}>Zverejniť tento výber údajov</button>}
+          {!current ? <button type="button" className="handoff-primary" disabled={disabled || !name.trim() || !validRecipientPhone || appChannel && !selectedMember || !!recipientMemberId && !selectedMember} onClick={() => void command("issue")}><Send size={15} />{appChannel ? "Odovzdať do aplikácie" : "Vytvoriť odkaz pre kolegu"}</button> : <button type="button" disabled={disabled} onClick={() => void command("publish", current)}>Zverejniť tento výber údajov</button>}
         </div><div className="handoff-share-preview"><h3>Príjemca uvidí</h3><strong>{context.preview.caseNumber} · {context.preview.action}</strong><HandoffSummary value={{ ...context.preview, instructions, scheduledAt: scheduled || null }} /></div></div>
-        {context.handoffs.map(grant => <article key={grant.id} className="handoff-grant"><div className="handoff-grant-heading"><strong>{grant.recipientName}</strong><span className="handoff-status" data-status={grant.status}>{handoffLabels[grant.status]}</span></div><p>{grant.recipientPhone} · platnosť do {handoffDate(grant.expiresAt)}</p><p>{grant.openedAt ? `Karta otvorená ${handoffDate(grant.openedAt)}` : "Karta zatiaľ nebola otvorená"} · verzia údajov {grant.publishedVersion}</p>
+        {context.handoffs.map(grant => <article key={grant.id} className="handoff-grant"><div className="handoff-grant-heading"><strong>{grant.recipientName}</strong><span className="handoff-status" data-status={grant.status}>{handoffLabels[grant.status]}</span></div><p>{grant.recipientPhone || "Telefón nezadaný"} · platnosť do {handoffDate(grant.expiresAt)}</p><p>{grant.openedAt ? `Karta otvorená ${handoffDate(grant.openedAt)}` : "Karta zatiaľ nebola otvorená"} · verzia údajov {grant.publishedVersion}</p>
           {grant.app && <p className="handoff-app-status"><Smartphone size={14} />V aplikácii</p>}
           {grant.app && grant.status !== "offered" && handoffIsActive(grant) && Date.parse(grant.expiresAt) > now && <div className="handoff-position">
             <p>{grant.app.lastPosition ? `Posledná poloha · pred ${Math.max(0, Math.floor((now - Date.parse(grant.app.lastPosition.recordedAt)) / 60_000))} min · ${handoffDate(grant.app.lastPosition.recordedAt)}` : "Poloha pristavovača zatiaľ neprišla."}</p>
@@ -157,11 +229,25 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
           {grant.events.length > 0 && <details className="handoff-history"><summary>Priebeh ({grant.events.length})</summary>{grant.events.map(event => <div key={event.id}><strong>{event.actor} · {handoffEventLabels[event.action] || "Zmena odovzdania"}</strong><span>{new Date(event.createdAt).toLocaleString("sk-SK")}</span>{event.comment && <p>{event.comment}</p>}</div>)}</details>}
         </article>)}
       </>}
+      </div>
       {notice && <p role="status" className="handoff-notice">{notice}</p>}{error && <p role="alert" className="handoff-error">{error}</p>}
       {reader.loading && !context && <p role="status">Načítavam odovzdania…</p>}
       {reader.error && <p role="alert" className="handoff-error">{reader.error}{!reader.halted && <button type="button" disabled={reader.loading || busy} onClick={reader.retry}>Skúsiť znova načítať</button>}</p>}
       {pending && !reader.halted && <button type="button" disabled={busy} onClick={() => void command(pending.action)}>{busy ? "Overujem výsledok…" : "Overiť výsledok tej istej požiadavky"}</button>}
-    </div>
-    {!reader.halted && <SmsComposerDialog externalRecipientLabel={`SMS pre kolegu · ${caseNumber}`} initialPhone={smsIntent?.phone ?? ""} initialMessage={smsIntent?.message ?? ""} initialTemplate="custom" open={smsOpen} onClose={() => setSmsOpen(false)} />}
+    </div>;
+  const smsComposer = !reader.halted && <SmsComposerDialog externalRecipientLabel={`SMS pre kolegu · ${caseNumber}`} initialPhone={smsIntent?.phone ?? ""} initialMessage={smsIntent?.message ?? ""} initialTemplate="custom" open={smsOpen && (!drawer || active)} onClose={() => setSmsOpen(false)} />;
+  if (!drawer) return <section className="case-handoff-panel" ref={sectionRef} hidden={!active} aria-label="Externé odovzdanie prípadu">
+    <button type="button" className="handoff-panel-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><Link2 size={17} /><span><strong>Odovzdať prípad</strong><small>Pobočke alebo človeku do aplikácie; odkaz a SMS podľa potreby</small></span><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
+    {body}{smsComposer}
   </section>;
+  return <>
+    <button ref={triggerRef} type="button" hidden={!active} className="handoff-drawer-trigger" aria-haspopup="dialog" aria-expanded={expanded} onClick={() => { setDrawerStarted(true); setExpanded(true); }}><Send size={16} aria-hidden="true" />Odovzdať prípad</button>
+    {drawerStarted && typeof document !== "undefined" && createPortal(<div data-layout-preview={layoutMode} inert={caseAccess.hidden || !active || !expanded} style={caseAccess.hidden || !active || !expanded ? { display: "none" } : undefined} className="handoff-drawer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) closeDrawer(); }}>
+      <div ref={drawerRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby={titleId} inert={smsOpen} className="case-handoff-panel handoff-drawer">
+        <header className="handoff-drawer-header"><div><h2 id={titleId}>Odovzdať prípad</h2><p>{caseNumber} · pobočke alebo človeku do aplikácie</p></div><button type="button" disabled={busy} aria-label="Zavrieť odovzdanie" onClick={() => closeDrawer()}><X size={18} aria-hidden="true" /></button></header>
+        {body}
+      </div>
+    </div>, document.body)}
+    {smsComposer}
+  </>;
 }

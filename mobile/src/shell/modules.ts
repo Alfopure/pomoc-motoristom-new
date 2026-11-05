@@ -22,8 +22,8 @@ export const GROUPS: readonly { id: ModuleGroup; name: string }[] = [
   { id: "komunikacia", name: "Komunikácia" }, { id: "zasahy", name: "Zásahy" },
   { id: "kancelaria", name: "Kancelária" }, { id: "nastroje", name: "Nástroje" },
 ];
-/** Prehľad, three own modules and Moduly fit the five-item system bar. */
-export const PIN_LIMIT = 3;
+/** Prehľad and Moduly stay fixed around up to four chosen modules. */
+export const PIN_LIMIT = 4;
 
 /** Field modules of a member: Pristavenia (legacy handoffs) and Moja práca with
  * `deliver`, Moja práca with `drive`, Pobočka with a lead seat. Presentation only. */
@@ -48,8 +48,8 @@ const roleModules: Record<MobileRole, readonly ModuleId[]> = {
   dispatcher: dispatchModules, senior_dispatcher: dispatchModules, manager: dispatchModules, admin: dispatchModules,
 };
 const rolePinDefaults: Record<MobileRole, readonly ModuleId[]> = {
-  dispatcher: ["hovory", "pripady", "ulohy"], senior_dispatcher: ["hovory", "pripady", "ulohy"],
-  manager: ["hovory", "pripady", "ulohy"], admin: ["hovory", "pripady", "ulohy"],
+  dispatcher: dispatchModules, senior_dispatcher: dispatchModules,
+  manager: dispatchModules, admin: dispatchModules,
 };
 export const roleNames: Record<MobileRole, string> = {
   dispatcher: "Dispečer", senior_dispatcher: "Vedúci dispečer", manager: "Manažér", admin: "Administrátor",

@@ -225,7 +225,25 @@ nenasadzuje; ostáva jediný existujúci päťminútový telephony cron.
 Produkčné native zapnutie vyžaduje samostatný, konkrétny release scope,
 produkčnú konfiguráciu a výslovné schválenie majiteľa po TEST akceptácii.
 
-## Produkčné telefonovanie (pripravené, vypnuté)
+## Produkčné telefonovanie (zapnuté 3. 11. 2026)
+
+**Stav 3. 11. 2026:** po schválení majiteľa je produkčné telefonovanie zapnuté a overené
+na produkčnom TestFlight builde (odchádzajúci hovor 17:41 UTC, prichádzajúci na zamknutom
+iPhone 18:13 UTC):
+
+- Vercel produkcia: `MOTORIST_NATIVE_VOICE_ENABLED=true`, `MOTORIST_NATIVE_VOIP_PUSH_ENABLED=true`,
+  `MOBILE_PUSH_ENABLED=true`; nasadené čerstvým buildom `main`.
+- Telnyx: produkčný iOS push credential `421c315e-19fc-4e1c-9f57-2e4da8455d49`
+  (VoIP certifikát `7VXUH8LBC6`) na credential connection `pomoc-motoristom-webrtc`
+  (`3040092094321394986`), ktorá má zablokovaný OVP `pomoc-motoristom-webrtc-blocked`.
+- **Credential connection musí mať webhook** `https://dispecing.linkapomoci.sk/api/telephony/telnyx/webhook`.
+  Bez neho server nedostane `call.initiated` pre SDK leg, ponuka hovoru ostane
+  „Ponuka hovoru sa ešte overuje“ a mobilný hovor sa po 5 s zruší (chýbal do 3. 11.).
+- Expo: produkčný APNs kľúč `NVGAUGKD6Q` (iba téma `sk.linkapomoci.dispecing`).
+- Mobilné latency flagy stage D v produkcii zatiaľ nie sú; zapnúť po schválení App Store.
+
+Pôvodný opis prípravy (pred zapnutím):
+
 
 Majiteľ 29. 10. 2026 rozhodol, že produkčná iPhone aplikácia
 `sk.linkapomoci.dispecing` (EAS profil `production`) bude telefonovať rovnako

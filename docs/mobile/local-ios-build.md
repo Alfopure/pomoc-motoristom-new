@@ -13,14 +13,7 @@ Pred ďalším odovzdaním overiť scenár spustenia zo skutočného Release
 simulátorového buildu alebo na fyzickom iPhone. Manifest bez presunutia
 React Native štartu do scene delegate nestačí; oficiálny plugin robí oboje.
 
-Aktuálny lokálny build je **0.1.0 (23)** zo zdroja `dev` `f3926dc4`.
-Apple 24. 10. o 18:18 UTC potvrdil `VALID`, `IN_BETA_TESTING` a prístup
-existujúcej internej skupiny. Mobilná fáza 1 prešla 34 kontrolami IPA
-a čerstvým vizuálnym overením štyroch scenárov v Release simulátore
-iOS 27. Historická negatívna kontrola z overovania buildu 22 zostala oddelená
-a jej hashe aj nezmenené natívne vstupy boli znovu overené.
-Build 21 sa pre pád pri štarte nepoužíva. Časovanie, SHA-256 a rozsah sú v
-[zázname buildu 23](testflight.md#build-23--mobilná-fáza-1).
+Najnovší lokálny TEST build je **1.0.0 (35)** zo zdroja `dev` `34af98b5f89774afa28c2cf6e182118a243d055f` so šiestimi položkami spodnej lišty; jeho [aktuálny stav a dôkazy](six-tab-navigation-2026-11-05.md#test-odovzdanie) zahŕňajú 36 úspešných kontrol IPA. Dňa 5. 11. 2026 majiteľ výslovne povolil pre tento konkrétny interný TEST artefakt výnimku zo štyroch simulátorových štartov: **„Áno, nahrať TEST 35; štart overím na iPhone“**. Simulátor sa zasekával už pri štarte samotného iOS pred novou aplikáciou. Táto zaznamenaná výnimka nemení všeobecný postup nižšie ani nepredstavuje potvrdenie natívneho štartu, živého audia či produkčného schválenia. Predošlá výnimka pre build 34 je [zaznamenaná samostatne](redesign-plan-2026-11-04.md#test-odovzdanie--4-11-2026). Build 21 sa pre historický pád pri štarte nepoužíva.
 
 Pri Release skúške v simulátore ponechať `CODE_SIGNING_ALLOWED=YES` a
 `CODE_SIGN_IDENTITY=-`, cieľ `generic/platform=iOS Simulator`. Xcode vloží

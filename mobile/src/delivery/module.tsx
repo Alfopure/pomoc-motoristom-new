@@ -12,6 +12,7 @@ import { Field, FormSection, formLayout } from "../design/form";
 import { Group, SectionHeader } from "../design/list";
 import { palette, space, type } from "../design/tokens";
 import { useShellBack } from "../shell/back";
+import { useKeyboardShown } from "../shell/keyboard";
 import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import { Button, ErrorNotice, Loading, styles } from "../ui";
 import type { DeliveryApi } from "./api";
@@ -91,7 +92,7 @@ export function DeliveryRow({ delivery, first, onOpen }: { delivery: MobileDeliv
     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
       <Text numberOfLines={2} style={s.rowTitle}>{deliveryTitle(delivery)}</Text>
       <View style={s.rowHead}><Tag text={deliveryStatusLabels[delivery.status]} tone={deliveryStatusTones[delivery.status]} />
-        <Text numberOfLines={1} style={[s.rowDetail, { flexShrink: 1 }]}>{"Prípad " + delivery.caseNumber + (delivery.card?.scheduledAt ? " · " + timeLabel(delivery.card.scheduledAt) : "")}</Text></View>
+        <Text style={[s.rowDetail, { flexShrink: 1 }]}>{"Prípad " + delivery.caseNumber + (delivery.card?.scheduledAt ? " · " + timeLabel(delivery.card.scheduledAt) : "")}</Text></View>
       {place ? <Text numberOfLines={2} style={s.rowDetail}>{"Pristavenie: " + place}</Text> : null}
     </View>
     <Text style={s.chevron}>›</Text>
@@ -99,6 +100,7 @@ export function DeliveryRow({ delivery, first, onOpen }: { delivery: MobileDeliv
 }
 
 function DeliveryDetail({ api, id, active, queryKey, tracker, commands, onChanged }: { api: DeliveryApi; id: string; active: boolean; queryKey: readonly string[]; tracker: LocationSharing; commands: DeliveryCommands; onChanged: () => void }) {
+  const keyboard = useKeyboardShown();
   const queryClient = useQueryClient();
   const detailKey = useMemo(() => [...queryKey, "delivery", id], [queryKey, id]);
   const query = useQuery({ queryKey: detailKey, queryFn: ({ signal }) => api.read(id, signal), refetchInterval: active ? 15_000 : false,
@@ -147,7 +149,7 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, commands, onChange
   };
   const mapHeight = Math.max(180, Math.round(height * 0.3));
   return <View style={{ flex: 1 }}>
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: space.l }} keyboardShouldPersistTaps="handled">
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: reason || keyboard ? NAVIGATION_CONTENT_BOTTOM : space.l }} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" automaticallyAdjustKeyboardInsets>
       <DetailHeader title={deliveryTitle(delivery)} subtitle={"Prípad " + delivery.caseNumber + (card ? " · " + card.action : "")}
         tags={<Tag text={deliveryStatusLabels[delivery.status]} tone={deliveryStatusTones[delivery.status]} />}
         meta={(delivery.createdBy ? "Poslal " + delivery.createdBy + " · " : "") + timeLabel(delivery.createdAt)} />
@@ -214,7 +216,7 @@ function DeliveryDetail({ api, id, active, queryKey, tracker, commands, onChange
       </>}
     </ScrollView>
     {/* The map reaches under the floating bar; its legend stays above it. */}
-    {card && <DeliveryMap points={deliveryPoints(delivery)} showsUser={location.status === "sharing"} height={mapHeight + NAVIGATION_CONTENT_BOTTOM} inset={NAVIGATION_CONTENT_BOTTOM} />}
+    {card && !reason && !keyboard && <DeliveryMap points={deliveryPoints(delivery)} showsUser={location.status === "sharing"} height={mapHeight + NAVIGATION_CONTENT_BOTTOM} inset={NAVIGATION_CONTENT_BOTTOM} />}
   </View>;
 }
 
@@ -265,12 +267,12 @@ const s = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: space.m, paddingHorizontal: space.m, paddingVertical: 10, minHeight: 64, backgroundColor: palette.card },
   separator: { position: "absolute", top: 0, left: 60, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
   icon: { width: 36, height: 36, borderRadius: 18, backgroundColor: palette.blueSoft, alignItems: "center", justifyContent: "center" },
-  rowHead: { flexDirection: "row", alignItems: "center", gap: 6 },
+  rowHead: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 },
   rowTitle: { ...type.rowTitle, color: palette.label, flexShrink: 1 },
   rowDetail: { ...type.subhead, color: palette.secondaryLabel },
   chevron: { fontSize: 20, color: palette.tertiaryLabel },
   chips: { flexDirection: "row", flexWrap: "wrap", gap: space.s, paddingHorizontal: space.l },
-  chip: { minHeight: 36, borderRadius: 18, paddingHorizontal: 14, alignItems: "center", justifyContent: "center", backgroundColor: palette.card },
+  chip: { minHeight: 44, maxWidth: "100%", borderRadius: 22, paddingHorizontal: space.m, paddingVertical: space.s, alignItems: "center", justifyContent: "center", backgroundColor: palette.card },
   chipText: { ...type.rowTitle, color: palette.label },
   note: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, paddingHorizontal: 20, paddingTop: space.m },
 });

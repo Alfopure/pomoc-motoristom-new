@@ -44,7 +44,7 @@ export function FieldAction({ icon: Icon, label, accessibilityLabel, onPress, di
   return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ disabled: Boolean(disabled) }} onPress={disabled ? undefined : onPress}
     hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }} style={({ pressed }) => [s.action, disabled && { opacity: 0.4 }, pressed && !disabled && { opacity: 0.6 }]}>
     <Icon size={13} strokeWidth={2.4} color={palette.brandInk} accessible={false} />
-    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={s.actionLabel}>{label}</Text>
+    <Text style={s.actionLabel}>{label}</Text>
   </Pressable>;
 }
 
@@ -53,7 +53,7 @@ export function PickerRow({ label, value, onPress, disabled, accessibilityLabel 
   return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label + ": " + value} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
     style={({ pressed }) => [s.field, s.picker, pressed && { backgroundColor: "#ECECF0" }]}>
     <View style={{ flex: 1, minWidth: 0, gap: 2 }}><Text style={s.label}>{label}</Text>
-      <Text numberOfLines={1} style={[s.text, disabled && { color: palette.secondaryLabel }]}>{value}</Text></View>
+      <Text style={[s.text, disabled && { color: palette.secondaryLabel }]}>{value}</Text></View>
     <ChevronRight size={17} strokeWidth={2.2} color={palette.tertiaryLabel} accessible={false} />
   </Pressable>;
 }
@@ -62,7 +62,7 @@ export function PickerRow({ label, value, onPress, disabled, accessibilityLabel 
 export function SelectRow({ label, detail, selected, onPress, disabled }: { label: string; detail?: string | null; selected: boolean; onPress: () => void; disabled?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected, disabled: Boolean(disabled) }} aria-selected={selected} disabled={disabled} onPress={onPress}
     style={({ pressed }) => [s.select, disabled && { opacity: 0.5 }, pressed && { backgroundColor: "#ECECF0" }]}>
-    <View style={{ flex: 1, minWidth: 0 }}><Text numberOfLines={2} style={[s.text, selected && { fontWeight: "600" }]}>{label}</Text>
+    <View style={{ flex: 1, minWidth: 0 }}><Text style={[s.text, selected && { fontWeight: "600" }]}>{label}</Text>
       {detail ? <Text style={s.hint}>{detail}</Text> : null}</View>
     {selected ? <Check size={18} strokeWidth={2.6} color={palette.brandInk} accessible={false} /> : null}
   </Pressable>;
@@ -71,7 +71,7 @@ export function SelectRow({ label, detail, selected, onPress, disabled }: { labe
 /** A label with chips (or other controls) below it. */
 export function ChoiceField({ label, detail, children }: { label: string; detail?: string | null; children: ReactNode }) {
   return <View style={s.field}>
-    <View style={s.labelLine}><Text style={s.label}>{label}</Text>{detail ? <Text numberOfLines={1} style={s.detail}>{detail}</Text> : null}</View>
+    <View style={s.labelLine}><Text style={s.label}>{label}</Text>{detail ? <Text style={s.detail}>{detail}</Text> : null}</View>
     <View style={s.choices}>{children}</View>
   </View>;
 }
@@ -82,18 +82,18 @@ export function FormText({ children, tone }: { children: ReactNode; tone?: "mute
 }
 
 const s = StyleSheet.create({
-  group: { marginHorizontal: space.l, backgroundColor: palette.card, borderRadius: radius.l, overflow: "hidden" },
+  group: { marginHorizontal: space.l, backgroundColor: palette.card, borderRadius: radius.l, borderCurve: "continuous", overflow: "hidden" },
   separator: { position: "absolute", top: 0, left: space.m, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator, zIndex: 1 },
   footer: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, paddingHorizontal: 20, paddingTop: 6 },
-  field: { paddingHorizontal: space.m, paddingTop: 8, paddingBottom: 9, minHeight: 56, gap: 2, backgroundColor: palette.card },
-  labelLine: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.s, minHeight: 18 },
+  field: { paddingHorizontal: space.l, paddingTop: 11, paddingBottom: 11, minHeight: 64, gap: 4, backgroundColor: palette.card },
+  labelLine: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: space.s, minHeight: 18 },
   label: { ...type.caption, color: palette.secondaryLabel, flexShrink: 1 },
   detail: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, flexShrink: 1, textAlign: "right" },
-  input: { fontSize: 16, color: palette.label, minHeight: 26, paddingVertical: 2, paddingHorizontal: 0 },
-  multiline: { minHeight: 44, lineHeight: 21 },
+  input: { ...type.body, color: palette.label, minHeight: 44, paddingVertical: 6, paddingHorizontal: 0 },
+  multiline: { minHeight: 88 },
   hint: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel },
-  action: { flexDirection: "row", alignItems: "center", gap: 4, minHeight: 28, borderRadius: 14, paddingHorizontal: 10, backgroundColor: palette.brandSoft },
-  actionLabel: { fontSize: 12, lineHeight: 16, fontWeight: "600", color: palette.brandInk },
+  action: { flexDirection: "row", alignItems: "center", justifyContent: "center", maxWidth: "100%", gap: 6, minHeight: 44, borderRadius: 22, paddingHorizontal: space.m, paddingVertical: space.s, backgroundColor: palette.brandSoft },
+  actionLabel: { ...type.caption, fontWeight: "600", flexShrink: 1, color: palette.brandInk },
   choices: { flexDirection: "row", flexWrap: "wrap", gap: space.s, paddingTop: 6, paddingBottom: 2 },
   text: { ...type.body, color: palette.label },
   picker: { flexDirection: "row", alignItems: "center", gap: space.s },

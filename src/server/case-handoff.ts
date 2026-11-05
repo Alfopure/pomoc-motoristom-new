@@ -64,11 +64,10 @@ export function validateHandoffCommand(input: Record<string, unknown>, external 
   if (["reject", "blocked", "revoke"].includes(command.action) && !command.comment) throw new MutationError("Napíšte dôvod.", 400);
   if (!external && ["issue", "publish"].includes(command.action) && !/^[a-f0-9]{64}$/.test(String(command.previewVersion))) throw new MutationError("Najprv načítajte náhľad zdieľaných údajov.", 400);
   if (command.action === "issue") {
-    if (!command.recipientName) throw new MutationError("Vyplňte stredisko alebo kolegu a jeho telefón.", 400);
+    if (!command.recipientName) throw new MutationError("Vyplňte stredisko alebo kolegu.", 400);
     try {
       const phone = normalizeEditablePhone(command.recipientPhone ?? "");
-      if (!phone) throw new Error("Missing recipient phone");
-      command.recipientPhone = phone;
+      command.recipientPhone = phone ?? "";
     } catch { throw new MutationError("Zadajte platné telefónne číslo príjemcu odkazu.", 400); }
   }
   if (!external && ["issue", "renew", "extend"].includes(command.action)) { const hours = input.hours ?? 24; if (!Number.isInteger(hours) || Number(hours) < 1 || Number(hours) > 72) throw new MutationError("Platnosť môže byť 1 až 72 hodín.", 400); command.hours = hours; }
