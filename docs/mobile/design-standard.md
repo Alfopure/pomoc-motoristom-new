@@ -1,6 +1,6 @@
 # Mobilný dizajnový štandard
 
-Aktualizované **4. 11. 2026** podľa [auditu a realizačného plánu](redesign-plan-2026-11-04.md) a [33 primárnych zdrojov](ux-ui-sources-2026-11-04.md).
+Aktualizované **5. 11. 2026** podľa [auditu a realizačného plánu](redesign-plan-2026-11-04.md) a [33 primárnych zdrojov](ux-ui-sources-2026-11-04.md).
 
 Platí pre každú obrazovku mobilnej appky Linka pomoci. Režim: iba svetlý
 (tmavý a režim „Rukavice“ pre terén prídu neskôr). Majiteľ 18. 10. 2026
@@ -33,14 +33,15 @@ module otvorenom z Modulov, štítok TEST a žlté tlačidlo s iniciálami a vid
 (detail, formulár, prílohy, úlohy…) nemajú vlastné tlačidlo Späť v obsahu –
 zaregistrujú ho cez `useShellBack(active, "Prípady", back, ukladanie)`.
 
-**Spodná lišta** (`mobile/src/shell/tab-bar.tsx`): `Prehľad · 3 vlastné moduly · Moduly`.
+**Spodná lišta** (`mobile/src/shell/tab-bar.tsx`): `Prehľad · 4 vlastné moduly · Moduly`.
 
-- Všetky položky majú ikonu aj text. Vybraná je na sivom podklade (šošovka sa presúva).
+- Prehľad a Moduly sú pevné; štyri vlastné položky sa vyberajú, odoberajú a menia v **Upraviť lištu**. Predvolené pre dispečing: Hovory, Prípady, Úlohy, Nástroje. Skôr uložené tri moduly ostanú v rovnakom poradí a štvrtý sa dá pridať. Účet s menej povolenými modulmi nezíska nepovolenú položku.
+- Všetky položky majú ikonu aj text. Vybraná je na sivom podklade (šošovka sa presúva). Pri bežnom písme a 320 b má každá zo šiestich položiek približne 47,7 b šírku, nad minimom 44 b.
 - **Moduly** majú žltý štvorec: všetky povolené moduly ako plocha iPhonu.
 - Voľné miesto po odobratí modulu je položka **+ Pridať** (otvorí úpravu lišty).
 - Odznak iba pre to, čo čaká na človeka (napr. čakajúce spätné volania).
 - Lupa v lište nie je. Hľadanie je pole na obrazovke (Moduly, História, Prípady, Úlohy).
-- Pri písaní sa lišta skryje; zväčšené písmo zväčší lištu najviac 2×.
+- Pri písaní sa lišta skryje. Písmo rastie do 2×; nad 1,1× sa viac ako tri položky rozložia do dvoch riadkov so širšími bunkami a najviac dvoma riadkami názvu. Moduly zostanú v poslednom pravom stĺpci; pri piatich položkách je pred nimi neprístupné prázdne miesto. Šesť položiek má 72 b pri bežnom písme a 190 b pri 2×. Najviac tri položky ostávajú v jednom rade. Obsah, pás hovoru aj toast používajú rovnaký výpočet podľa skutočného počtu položiek, aby sa posledná akcia neskryla.
 
 **Moduly** (`modules-screen.tsx`): hľadanie modulu a adaptívna mriežka povolených modulov. Karta má celý názov, popis, označenie V lište a samostatné viditeľné tlačidlo **Možnosti**. Počet stĺpcov sa prispôsobí nameranej šírke a veľkosti písma (1–3); názvy sa nezmenšujú. Pod modulmi je **Moja lišta** s náhľadom a **Upraviť lištu**, potom **Účet a prístupy**. Pri viac ako ôsmich moduloch ostáva zoskupenie.
 

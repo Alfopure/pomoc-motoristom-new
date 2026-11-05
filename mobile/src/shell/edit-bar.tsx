@@ -22,6 +22,7 @@ export function DoneButton({ onPress }: { onPress: () => void }) {
  * immediately; a full bar asks which module the new one replaces. */
 export function EditBarContent({ pins, available, roleLabel, customized, saveError, onChange, onReset }: Props) {
   const [pick, setPick] = useState<ModuleId | null>(null);
+  const capacity = Math.min(PIN_LIMIT, available.length);
   const others = GROUPS.flatMap(group => available.filter(id => moduleById(id).group === group.id && !pins.includes(id)));
   const pickable = pick && !pins.includes(pick) ? pick : null;
   function add(id: ModuleId) {
@@ -29,14 +30,14 @@ export function EditBarContent({ pins, available, roleLabel, customized, saveErr
     setPick(null); onChange(withPin(pins, id), moduleById(id).name + " je v lište");
   }
   return <>
-    <MiniBar tabs={barTabs(pins)} showAdd={pins.length < PIN_LIMIT} style={s.mini} />
+    <MiniBar tabs={barTabs(pins)} showAdd={pins.length < capacity} style={s.mini} />
     <Text style={[s.note, { textAlign: "center" }]}>Prehľad a Moduly sú v lište vždy. Zmena sa uloží hneď.</Text>
     {saveError && <Text accessibilityRole="alert" style={[s.note, { color: palette.redText, textAlign: "center" }]}>Zmenu sa nepodarilo uložiť v telefóne. Platí, kým appku nezatvoríte.</Text>}
     {pickable && <View style={s.pickBar}><ArrowLeftRight size={16} color="#3D3000" accessible={false} />
       <Text style={s.pickText}>Lišta je plná. Ťuknite na modul, ktorý nahradí <Text style={{ fontWeight: "700" }}>{moduleById(pickable).name}</Text>.</Text>
       <Pressable accessibilityRole="button" accessibilityLabel="Zrušiť výber" onPress={() => setPick(null)} hitSlop={13}><Text style={s.pickCancel}>Zrušiť</Text></Pressable>
     </View>}
-    <SectionHeader title="V lište" detail={pins.length + " z " + PIN_LIMIT + (pins.length > 1 && !pickable ? " · poradie menia šípky" : "")} />
+    <SectionHeader title="V lište" detail={pins.length + " z " + capacity + (pins.length > 1 && !pickable ? " · poradie menia šípky" : "")} />
     <View style={s.group}>
       {pins.map((id, index) => pickable
         ? <Pressable key={id} accessibilityRole="button" accessibilityLabel={"Nahradiť " + moduleById(id).name} onPress={() => {
@@ -46,7 +47,7 @@ export function EditBarContent({ pins, available, roleLabel, customized, saveErr
         </Pressable>
         : <PinRow key={id} id={id} index={index} count={pins.length} onRemove={() => onChange(withoutPin(pins, id), moduleById(id).name + " odobraté z lišty")}
           onMove={to => onChange(movingPin(pins, index, to), "Poradie lišty je zmenené")} />)}
-      {Array.from({ length: PIN_LIMIT - pins.length }, (_, index) => <View key={"empty" + index} style={[s.row, (pins.length + index) > 0 && s.rowBorder]}>
+      {Array.from({ length: Math.max(0, capacity - pins.length) }, (_, index) => <View key={"empty" + index} style={[s.row, (pins.length + index) > 0 && s.rowBorder]}>
         <AddMark size={22} /><Text style={s.empty}>Voľné miesto – pridajte modul nižšie</Text></View>)}
     </View>
     {others.length > 0 && <>

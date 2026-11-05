@@ -13,6 +13,13 @@ export type DispatchView = "home" | "modules" | "console" | "history" | "callbac
 export const initialShell: ShellState = { tab: "prehlad", opened: null, account: false, search: false, alerts: false, hovory: "console" };
 
 export function barTabs(pins: readonly ModuleId[]): ShellTab[] { return ["prehlad", ...pins, "moduly"]; }
+export type BarItem = ShellTab | "add" | null;
+/** An odd two-row bar leaves an inert space before the final fixed Moduly tab. */
+export function barItems(tabs: readonly ShellTab[], showAdd: boolean, rows: 1 | 2 = 1): BarItem[] {
+  const items: BarItem[] = showAdd ? [...tabs.slice(0, -1), "add", tabs[tabs.length - 1]] : [...tabs];
+  if (rows === 2 && items.length % 2 !== 0) items.splice(items.length - 1, 0, null);
+  return items;
+}
 export function shellLocation(state: ShellState): ShellLocation {
   return state.tab === "moduly" ? state.opened ?? "moduly" : state.tab;
 }

@@ -142,7 +142,7 @@ Použiť existujúci `dispatch-app-shell`: systémové písmo a kompaktnú husto
 
 ## Components
 
-**Mobil:** rozšíriť existujúce Group/Row, Field/FormSection, DetailHeader/InfoRow/ActionBar, Sheet, Segmented a DockTabBar. Rozloženie riešia spoločné `columnsForWidth`/`gridItemWidth`; nevytvárať druhý dizajnový systém. Dlhé detaily a akcie sa zalomia.
+**Mobil:** rozšíriť existujúce Group/Row, Field/FormSection, DetailHeader/InfoRow/ActionBar, Sheet, Segmented a DockTabBar. Rozloženie riešia spoločné `columnsForWidth`/`gridItemWidth`; nevytvárať druhý dizajnový systém. Dlhé detaily a akcie sa zalomia. Spodná lišta má pevné **Prehľad** a **Moduly** a najviac **štyri vlastné moduly** (spolu šesť položiek). Zachovať skôr uložené poradie; rozšírenie nepridáva práva k modulom. Pri väčšom písme sa viac ako tri položky rozložia do dvoch riadkov; rastie výška aj priestor pod obsahom, názvy sa nezmenšujú.
 
 - Opätovne použiť spôsob navigácie dispečingu, jeho tabuľky, filtre, formuláre adries, dialóg SMS, otvorenie prípadu a detail auta. Zdieľanú logiku vyčleniť podľa potreby, nekopírovať celý `DispatchConsole`.
 - Existujúce `CaseHandoffPanel` a `HandoffSummary` sú východisko pre pridelenie, náhľad a históriu; nepredstierajú hotové plánovanie odvozov.

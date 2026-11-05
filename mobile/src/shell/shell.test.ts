@@ -3,7 +3,7 @@ import { memoryStorage } from "../lib/session-storage";
 import { MODULES, PIN_LIMIT, accessLabel, fieldModules, fieldRoleLabel, isModuleId, moduleAccess, moduleById, rolePins, type ModuleId } from "./modules";
 import { pushKinds, pushOffer } from "../notifications/kinds";
 import { movingPin, normalizePins, pinsFull, replacingPin, samePins, withPin, withoutPin } from "./pins";
-import { barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, shellLocation, type ShellState } from "./navigation";
+import { barItems, barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, shellLocation, type ShellState } from "./navigation";
 import { ShellPreferences, parseShellPreferences, shellPreferencesKey } from "./preferences";
 import { ShellBackStore } from "./back-store";
 
@@ -12,7 +12,7 @@ const all: ModuleId[] = ["hovory", "pripady", "ulohy", "nastroje"];
 describe("module registry", () => {
   it("has unique ids and readable names", () => {
     expect(new Set(MODULES.map(item => item.id)).size).toBe(MODULES.length);
-    // The bar shrinks a long label a little; anything longer would not fit five items at 320 points.
+    // Short visible labels accompany the full accessible module name in the six-item bar.
     for (const item of MODULES) { expect(item.name.length).toBeGreaterThan(2); expect(item.short.length).toBeLessThanOrEqual(11); }
   });
   it("derives access and role defaults", () => {
@@ -22,8 +22,8 @@ describe("module registry", () => {
     expect(moduleAccess(null, true)).toEqual(["pristavenia"]);
     expect(moduleAccess(null)).toEqual([]);
     expect(rolePins(null, true)).toEqual(["pristavenia"]);
-    expect(rolePins("dispatcher", true)).toEqual(["hovory", "pripady", "ulohy"]);
-    expect(rolePins("manager")).toEqual(["hovory", "pripady", "ulohy"]);
+    expect(rolePins("dispatcher", true)).toEqual(all);
+    expect(rolePins("manager")).toEqual(all);
     expect(rolePins("dispatcher")).toHaveLength(PIN_LIMIT);
     expect(moduleAccess("unknown" as never)).toEqual([]);
     expect(rolePins("unknown" as never)).toEqual([]);
@@ -44,7 +44,7 @@ describe("module registry", () => {
     expect(moduleAccess("dispatcher", { delivery: false, work: true, branch: false })).toEqual([...all, "praca"]);
     expect(rolePins(null, { delivery: true, work: true, branch: false })).toEqual(["praca", "pristavenia"]);
     expect(rolePins(null, { delivery: false, work: false, branch: true })).toEqual(["pobocka"]);
-    expect(rolePins("dispatcher", { delivery: true, work: true, branch: true })).toEqual(["hovory", "pripady", "ulohy"]);
+    expect(rolePins("dispatcher", { delivery: true, work: true, branch: true })).toEqual(all);
     expect(dispatchView({ ...initialShell, tab: "praca" })).toBe("work");
     expect(dispatchView({ ...initialShell, tab: "moduly", opened: "pobocka" })).toBe("branch");
     expect(fieldRoleLabel({ delivery: true, work: true, branch: true }, ["deliver", "drive"])).toBe("Pristavovač · Vodič · Miestny dispečer");
@@ -57,18 +57,28 @@ describe("module registry", () => {
 });
 
 describe("pins", () => {
+  it("keeps four authorized unique pins and refuses a fifth", () => {
+    const available = MODULES.map(item => item.id);
+    expect(PIN_LIMIT).toBe(4);
+    expect(normalizePins(["praca", "pobocka", "pristavenia", "hovory", "pripady"], available, [])).toEqual(["praca", "pobocka", "pristavenia", "hovory"]);
+    expect(withPin(all, "pristavenia")).toEqual(all);
+    expect(replacingPin(all, "nastroje", "pristavenia")).toEqual(["hovory", "pripady", "ulohy", "pristavenia"]);
+    expect(movingPin(all, 3, 0)).toEqual(["nastroje", "hovory", "pripady", "ulohy"]);
+    expect(all).toEqual(["hovory", "pripady", "ulohy", "nastroje"]);
+  });
   it("normalizes stored values against access", () => {
     expect(normalizePins(["nastroje", "nastroje", "vozidla", 3, "hovory"], all, ["pripady"])).toEqual(["nastroje", "hovory"]);
-    expect(normalizePins(["hovory", "pripady", "ulohy", "nastroje"], all, [])).toEqual(["hovory", "pripady", "ulohy"]);
+    expect(normalizePins(["hovory", "pripady", "ulohy", "nastroje"], all, [])).toEqual(all);
     expect(normalizePins(null, all, ["ulohy", "vozidla" as ModuleId])).toEqual(["ulohy"]);
     expect(normalizePins([], all, ["ulohy"])).toEqual([]);
     expect(normalizePins(["nastroje"], ["hovory"], ["hovory"])).toEqual([]);
   });
   it("adds, removes, replaces and moves", () => {
     expect(withPin(["hovory"], "nastroje")).toEqual(["hovory", "nastroje"]);
-    expect(withPin(["hovory", "pripady", "ulohy"], "nastroje")).toEqual(["hovory", "pripady", "ulohy"]);
+    expect(withPin(["hovory", "pripady", "ulohy"], "nastroje")).toEqual(all);
     expect(withPin(["hovory"], "hovory")).toEqual(["hovory"]);
-    expect(pinsFull(["hovory", "pripady", "ulohy"])).toBe(true);
+    expect(pinsFull(["hovory", "pripady", "ulohy"])).toBe(false);
+    expect(pinsFull(all)).toBe(true);
     expect(withoutPin(["hovory", "pripady"], "hovory")).toEqual(["pripady"]);
     expect(replacingPin(["hovory", "pripady", "ulohy"], "pripady", "nastroje")).toEqual(["hovory", "nastroje", "ulohy"]);
     expect(replacingPin(["hovory", "pripady"], "ulohy", "nastroje")).toEqual(["hovory", "pripady"]);
@@ -82,6 +92,19 @@ describe("pins", () => {
 });
 
 describe("shell navigation", () => {
+  it("keeps Moduly in the final column of a five-item two-row bar without adding a selectable tab", () => {
+    const tabs = barTabs(["praca", "pristavenia", "pobocka"]);
+    expect(barItems(tabs, false, 2)).toEqual(["prehlad", "praca", "pristavenia", "pobocka", null, "moduly"]);
+    expect(barItems(tabs, false, 1)).toEqual(tabs);
+    expect(barItems(tabs, true, 2)).toEqual(["prehlad", "praca", "pristavenia", "pobocka", "add", "moduly"]);
+    expect(barItems(barTabs(["hovory", "pripady", "ulohy", "nastroje"]), false, 2)).toEqual(["prehlad", "hovory", "pripady", "ulohy", "nastroje", "moduly"]);
+  });
+  it("keeps the two fixed tabs around all four chosen modules", () => {
+    const pins: ModuleId[] = ["praca", "pobocka", "pristavenia", "nastroje"];
+    expect(barTabs(pins)).toEqual(["prehlad", "praca", "pobocka", "pristavenia", "nastroje", "moduly"]);
+    expect(openModule(initialShell, pins, "nastroje")).toMatchObject({ tab: "nastroje", opened: null });
+    expect(reconcileShell({ ...initialShell, tab: "nastroje" }, withoutPin(pins, "nastroje"), MODULES.map(item => item.id))).toMatchObject({ tab: "moduly", opened: "nastroje" });
+  });
   const pins: ModuleId[] = ["hovory", "pripady", "ulohy"];
   it("maps locations to existing module screens", () => {
     expect(barTabs(pins)).toEqual(["prehlad", "hovory", "pripady", "ulohy", "moduly"]);
@@ -139,6 +162,21 @@ describe("shell preferences", () => {
     expect(parseShellPreferences(JSON.stringify({ version: 2, pins: ["hovory"] })).pins).toBeNull();
     expect(parseShellPreferences(JSON.stringify({ version: 1, pins: ["hovory", 4] })).pins).toBeNull();
     expect(parseShellPreferences(JSON.stringify({ version: 1, pins: [], tipDismissed: true }))).toEqual({ version: 1, pins: [], tipDismissed: true });
+  });
+  it("preserves a saved three-module bar and persists its fourth module without a storage migration", async () => {
+    const storage = memoryStorage();
+    const key = shellPreferencesKey(scope);
+    const old = ["ulohy", "hovory", "pripady"] as ModuleId[];
+    await storage.setItem(key, JSON.stringify({ version: 1, pins: old, tipDismissed: true }));
+    const prefs = new ShellPreferences(storage, key, all, rolePins("admin"));
+    await prefs.load();
+    expect(prefs.snapshot()).toMatchObject({ pins: old, customized: true, tipDismissed: true });
+    prefs.setPins(withPin(prefs.snapshot().pins, "nastroje"));
+    await prefs.flush();
+    const reloaded = new ShellPreferences(storage, key, all, rolePins("admin"));
+    await reloaded.load();
+    expect(reloaded.snapshot()).toMatchObject({ pins: [...old, "nastroje"], customized: true, tipDismissed: true });
+    expect(parseShellPreferences(await storage.getItem(key)).version).toBe(1);
   });
   it("loads, changes, persists and resets", async () => {
     const storage = memoryStorage();

@@ -72,7 +72,7 @@ export function ModulesScreen({ available, pins, tabs, showAdd, badges, onOpen, 
       <SectionHeader title="Moja lišta" />
       <View style={s.card}>
         <Text style={s.cardText}>Vyberte si moduly, ktoré chcete mať vždy po ruke.</Text>
-        <MiniBar tabs={tabs} showAdd={showAdd} style={{ marginVertical: space.m }} />
+        <MiniBar tabs={tabs} showAdd={showAdd} style={{ marginVertical: space.m, marginHorizontal: -space.l }} />
         <Pressable accessibilityRole="button" accessibilityLabel="Upraviť lištu" onPress={onEdit} style={({ pressed }) => [shellStyles.yellowButton, pressed && { opacity: 0.85 }]}>
           <Pencil size={18} strokeWidth={2} color={palette.label} accessible={false} /><Text style={shellStyles.yellowButtonText}>Upraviť lištu</Text>
         </Pressable>
