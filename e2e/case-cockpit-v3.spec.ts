@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { build } from "esbuild";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/postcss";
@@ -9,6 +9,7 @@ const postcss = createRequire(require.resolve("@tailwindcss/postcss"))("postcss"
 let script: string;
 let css: string;
 test.beforeAll(async () => {
+  await mkdir(".context/case-workspace-browser", { recursive: true });
   const fixture = await build({ entryPoints: ["src/components/dispatch/CaseCockpitPanel.fixture.tsx"], outfile: "case-cockpit-fixture.js", bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic", define: { "process.env": JSON.stringify({ NODE_ENV: "production", NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY: "isolated-browser-key" }) } });
   script = fixture.outputFiles.find(file => file.path.endsWith(".js"))!.text;
   css = (await postcss([tailwindcss({ base: process.cwd(), optimize: true })]).process(await readFile("src/app/globals.css", "utf8"), { from: path.resolve("src/app/globals.css") })).css
@@ -21,6 +22,8 @@ async function boot(page: Page, width: number, query = "") {
   await page.route("**/*", route => {
     const url = new URL(route.request().url());
     if (url.origin === "https://case-card.test" && url.pathname === "/") return route.fulfill({ contentType: "text/html", body: '<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><body><div id="root"></div></body></html>' });
+    if (url.origin === "https://case-card.test" && url.pathname === "/api/sms" && route.request().method() === "GET") return route.fulfill({ json: { messages: [], hasMore: false } });
+    if (url.origin === "https://case-card.test" && url.pathname === "/api/sms/context" && route.request().method() === "GET") return route.fulfill({ json: { cases: [{ id: "case-fixture", caseNumber: "TEST-001", name: "Test Klient", phone: "+421900000001", validPhone: true }], tasks: [], sender: "PomocMotor", callbackNumber: "+421900000002", repliesEnabled: false } });
     errors.push(`Unexpected network request: ${url.pathname}`);
     return route.abort();
   });
@@ -29,19 +32,25 @@ async function boot(page: Page, width: number, query = "") {
   await page.addScriptTag({ content: script });
   return errors;
 }
-const sms = (page: Page) => page.locator("summary").filter({ hasText: /^História SMS prípadu$/ });
+const sms = (page: Page) => page.locator("[data-case-sms-history]");
+const caseTab = (page: Page, name: string | RegExp) => page.locator("[data-case-workspace]").getByRole("tab", { name, exact: typeof name === "string" });
 const pdfButton = (page: Page) => page.getByRole("button", { name: "Stiahnuť PDF", exact: true });
 const pdfFixture = "%PDF-1.4\n% Isolated case download fixture\n%%EOF";
 async function assertOrder(page: Page) {
+  const selected = await page.locator('[data-case-workspace] [role="tab"][aria-selected="true"]').getAttribute("id");
+  await caseTab(page, /^Úlohy/).click();
+  await caseTab(page, "Poznámky a aktivita").click();
+  await caseTab(page, "SMS").click();
   const order = await page.evaluate(() => {
-    const selectors = ['[data-testid="case-summary"]', '[data-testid="case-tasks"]', '[data-testid="case-edit-form-main"]', '[aria-labelledby="case-notes-heading"]'];
-    const nodes = selectors.map(selector => document.querySelector(selector)!);
-    const history = [...document.querySelectorAll("summary")].find(node => node.textContent === "História SMS prípadu")!;
-    nodes.push(history);
-    return nodes.every((node, index) => node && (index === 0 || Boolean(nodes[index - 1].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)));
+    const workspace = document.querySelector("[data-case-workspace]")!;
+    const form = document.querySelector('[data-testid="case-edit-form-main"]')!;
+    const selectors = ['[data-testid="case-summary"]', '[data-testid="case-tasks"]', '[aria-labelledby="case-notes-heading"]', '[data-case-sms-history]'];
+    return Boolean(workspace && form && workspace.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING)
+      && selectors.every(selector => workspace.contains(document.querySelector(selector)));
   });
   expect(order).toBe(true);
   await expect(sms(page)).toHaveCount(1);
+  if (selected) await page.locator(`[id="${selected}"]`).click();
 }
 for (const width of [360, 390, 768, 1024, 1279, 1280]) {
   for (const filled of [false, true]) test(`case sections remain ordered and fit at ${width}px (${filled ? "filled" : "empty"})`, async ({ page }) => {
@@ -52,17 +61,19 @@ for (const width of [360, 390, 768, 1024, 1279, 1280]) {
     await expect(pdfButton(page)).toHaveCount(1);
     await expect(pdfButton(page)).toBeEnabled();
     await assertOrder(page);
+    if (filled && [390, 1280].includes(width)) await page.screenshot({ path: `.context/case-workspace-browser/app-${width === 390 ? "mobile" : "desktop"}.png` });
     const tasks = page.getByTestId("case-tasks");
     await expect(tasks.locator(":scope > summary")).toContainText(filled ? "1 otvorených · 1 po termíne" : "0 otvorených · 0 po termíne");
     await expect(tasks.getByRole("textbox", { name: "Názov novej úlohy" })).toBeHidden();
-    await tasks.locator(":scope > summary").click();
+    await caseTab(page, /^Úlohy/).click();
     await tasks.getByRole("textbox", { name: "Názov novej úlohy" }).fill("Rozpracovaná úloha");
     await tasks.locator(":scope > summary").click();
     await expect(tasks.getByRole("textbox", { name: "Názov novej úlohy" })).toBeHidden();
     await tasks.locator(":scope > summary").click();
     await expect(tasks.getByRole("textbox", { name: "Názov novej úlohy" })).toHaveValue("Rozpracovaná úloha");
     if (filled) {
-      const overview = page.getByTestId("case-summary");
+      await caseTab(page, "Prehľad").click();
+      const overview = page.getByRole("tabpanel", { name: "Prehľad", exact: true });
       await overview.getByRole("button", { name: "Zobraziť viac", exact: true }).click();
       await expect(overview).toContainText("KONIEC CELÉHO OPISU");
     }
@@ -70,8 +81,9 @@ for (const width of [360, 390, 768, 1024, 1279, 1280]) {
     expect(errors).toEqual([]);
   });
 }
-test("collapse and restore retain the same case editor and one final SMS section", async ({ page }) => {
+test("collapse and restore retain the same case editor and one SMS tab", async ({ page }) => {
   const errors = await boot(page, 1280);
+  await assertOrder(page);
   const editor = page.getByTestId("case-edit-form-main");
   await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
   const plate = editor.getByLabel("EČV", { exact: true });
@@ -85,29 +97,37 @@ test("collapse and restore retain the same case editor and one final SMS section
   await assertOrder(page);
   expect(errors).toEqual([]);
 });
-test("focused task opens its section while the ordinary case keeps it compact", async ({ page }) => {
+test("focused task selects the tasks tab and opens its section", async ({ page }) => {
   const errors = await boot(page, 1280, "?task=task-fixture");
+  await expect(caseTab(page, /^Úlohy/)).toHaveAttribute("aria-selected", "true");
   await expect(page.getByTestId("case-tasks")).toHaveAttribute("open", "");
   await expect(page.getByTestId("case-tasks").getByRole("textbox", { name: "Názov novej úlohy" })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
-test("compact GPS strip keeps the saved incident separate and mobile controls usable", async ({ page }) => {
+test("compact GPS action keeps received coordinates separate from the saved incident", async ({ page }) => {
   const errors = await boot(page, 1280);
-  const gps = page.getByRole("region", { name: "Doplnková GPS poloha od klienta" });
-  await expect(gps).toContainText("48.1486, 17.1077");
   await expect(page.getByTestId("case-summary")).toContainText("Dlhá ulica 1, Nitra");
-  await expect(gps.getByRole("button", { name: "Použiť ako miesto incidentu" })).toBeEnabled();
-  expect((await gps.boundingBox())!.height).toBeLessThan(100);
   const priority = page.getByLabel("Priorita prípadu v hlavičke");
   expect(await priority.evaluate(node => parseFloat(getComputedStyle(node).fontSize))).toBeLessThanOrEqual(13);
   await page.setViewportSize({ width: 390, height: 900 });
   expect(await priority.evaluate(node => parseFloat(getComputedStyle(node).fontSize))).toBeGreaterThanOrEqual(16);
-  expect((await gps.getByRole("button", { name: "Použiť ako miesto incidentu" }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  const locationTrigger = page.getByTestId("case-location-trigger");
+  expect((await locationTrigger.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  await locationTrigger.click();
+  const dialog = page.getByRole("dialog", { name: "Poloha klienta", exact: true });
+  await expect(dialog).toBeVisible();
+  const gps = dialog.getByRole("region", { name: "Prijatá poloha klienta" });
+  await expect(gps).toContainText("48.148600, 17.107700");
+  await expect(gps.getByRole("button", { name: "Nahradiť miesto incidentu", exact: true })).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.getByTestId("case-summary")).toContainText("Dlhá ulica 1, Nitra");
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   expect(errors).toEqual([]);
 });
-test("drawer keeps draft after close and reopen and has only final SMS", async ({ page }) => {
+
+test("drawer keeps draft after close and reopen and has one SMS tab", async ({ page }) => {
   const errors = await boot(page, 390, "?view=drawer");
   await page.getByRole("button", { name: "Upraviť", exact: true }).click();
   await assertOrder(page);
@@ -155,7 +175,7 @@ test("case remains usable at 200 percent zoom and after orientation change", asy
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   await page.setViewportSize({ width: 900, height: 390 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
-  await page.getByTestId("case-tasks").locator(":scope > summary").click();
+  await caseTab(page, /^Úlohy/).click();
   await page.getByTestId("case-tasks").getByRole("textbox", { name: "Názov novej úlohy" }).fill("Po otočení");
   await expect(page.getByTestId("case-tasks").getByRole("textbox", { name: "Názov novej úlohy" })).toHaveValue("Po otočení");
   expect(errors).toEqual([]);
@@ -288,7 +308,7 @@ for (const width of [390, 1280]) {
     const header = page.getByRole("group", { name: "Stav a priorita prípadu", exact: true });
     await expect(header.getByRole("button", { name: "Stiahnuť PDF", exact: true })).toBeVisible();
     await expect(header.getByLabel("Priorita prípadu v hlavičke")).toBeVisible();
-    await expect(page.getByTestId("case-summary").getByRole("definition").filter({ hasText: "TEST-001" })).toBeVisible();
+    await expect(page.locator("[data-case-workspace]")).toContainText("TEST-001");
     await expect(pdfButton(page)).toHaveCount(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
     await page.route("**/api/cases/case-fixture/pdf", route => route.fulfill({ contentType: "application/pdf", body: pdfFixture }));
@@ -403,5 +423,47 @@ test("committed save with unavailable canonical reads retries only GET and keeps
   await expect(page.getByTestId("case-autosave-status")).toContainText("Zmena bola prijatá");
   await expect(priority).toHaveValue("urgent");
   expect(requests).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+
+test("tab switches retain task, note and mandatory form drafts", async ({ page }) => {
+  const errors = await boot(page, 1280);
+  // A rejected autosave keeps the form draft pending; switching tabs must not reset it.
+  await mockCaseSaves(page, { fail: true });
+  const editor = page.getByTestId("case-edit-form-main");
+  await editor.locator("summary").filter({ hasText: "3. Vozidlo a incident" }).click();
+  const plate = editor.getByLabel("EČV", { exact: true });
+  await plate.fill("RETAIN123");
+  await caseTab(page, /^Úlohy/).click();
+  const task = page.getByTestId("case-tasks").getByRole("textbox", { name: "Názov novej úlohy" });
+  await task.fill("Zavolať klientovi po pristavení");
+  await caseTab(page, "Poznámky a aktivita").click();
+  const note = page.getByRole("textbox", { name: "Nová poznámka k prípadu" });
+  await note.fill("Rozpracovaná interná poznámka");
+  await caseTab(page, "SMS").click();
+  await expect(sms(page)).toContainText("Zatiaľ žiadne SMS.");
+  await caseTab(page, "Prehľad").click();
+  await caseTab(page, /^Úlohy/).click();
+  await expect(task).toHaveValue("Zavolať klientovi po pristavení");
+  await caseTab(page, "Poznámky a aktivita").click();
+  await expect(note).toHaveValue("Rozpracovaná interná poznámka");
+  await expect(plate).toHaveValue("RETAIN123");
+  await expect(sms(page)).toHaveCount(1);
+  await assertOrder(page);
+  expect(errors).toEqual([]);
+});
+
+test("SMS tab opens the existing case-bound composer without sending", async ({ page }) => {
+  const errors = await boot(page, 390);
+  await caseTab(page, "SMS").click();
+  await expect(sms(page)).toContainText("Zatiaľ žiadne SMS.");
+  await sms(page).getByRole("button", { name: "Nová SMS", exact: true }).click();
+  const composer = page.getByRole("dialog");
+  await expect(composer).toBeVisible();
+  await expect(composer).toContainText("TEST-001");
+  await page.keyboard.press("Escape");
+  await expect(composer).toBeHidden();
+  await expect(caseTab(page, "SMS")).toHaveAttribute("aria-selected", "true");
   expect(errors).toEqual([]);
 });
