@@ -17,3 +17,16 @@ describe('actual towing start confirmation', () => {
     expect(towingCompletionProblems({ fields: { ...previous, startSource: 'manual' }, attachments: [] })).toEqual([]);
   });
 });
+
+it('imports realization identities once without overwriting negotiated prices', async () => {
+  const { importRealizedItems } = await import('./model');
+  const existing = { id: '11111111-1111-4111-8111-111111111111', description: 'Existing agreed line', quantity: '2', unit: 'km', unitPrice: '15', taxRate: '5' };
+  const items = [
+    { id: existing.id, kind: 'tow' as const, description: 'Changed operational description', quantity: '9', unit: 'km' },
+    { id: '22222222-2222-4222-8222-222222222222', kind: 'storage' as const, description: 'Uloženie', quantity: '3', unit: 'deň' },
+  ];
+  const imported = importRealizedItems([existing], items);
+  expect(imported[0]).toEqual(existing);
+  expect(imported[1]).toEqual({ id: items[1].id, description: 'Uloženie', quantity: '3', unit: 'deň', unitPrice: '', taxRate: '' });
+  expect(importRealizedItems(imported, items)).toEqual(imported);
+});

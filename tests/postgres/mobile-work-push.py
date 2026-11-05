@@ -190,6 +190,44 @@ with tempfile.TemporaryDirectory(prefix='pm-push-pg-') as temp:
         j("select public.motorist_towing_command('%s','%s',%s,'%s'::jsonb)" % (LT, ORG, lt_version, json.dumps({'commandId': uid(971), 'targetId': t5['ownerId'], 'type': 'assign', 'expectedRevision': trev5, 'payload': {'driverId': T}})))
         check('malformed planned time does not block assignment', value(f"select driver_id from motorist_towing_orders where id='{t5['ownerId']}'") == T
               and [x['event'] for x in outbox(f"subject_id='{t5['ownerId']}'")] == ['tow_assigned'])
+        # Revalidate identity/roles at claim, after a queued notice was created.
+        def enqueue(event,subject_type,subject,member=None,profile=None):
+            serial[0]+=1
+            member_sql="'%s'" % member if member else 'null'
+            profile_sql="'%s'" % profile if profile else 'null'
+            run("select app_private.push_enqueue('%s',%s,%s,'branch','%s','%s','%s','identity-check-%s','Fixture','Fixture')" % (ORG,member_sql,profile_sql,event,subject_type,subject,serial[0]))
+            return value("select id from motorist_push_outbox where dedupe_key='identity-check-%s'" % serial[0])
+        def notice_valid(notice): return value(f"select app_private.push_still_valid(o) from motorist_push_outbox o where id='{notice}'")=='t'
+        pending_request=cmd(CENTRAL,'create',{'groupId':gb,'kind':'transfer'},rev=0)['request']['id']
+        manager_profile=value(f"select id from motorist_profiles where user_id='{MANAGER}'")
+        central_notice=enqueue('branch_waiting','branch_request',pending_request,profile=manager_profile)
+        counterpart=enqueue('branch_waiting','branch_request',pending_request,member=LB)
+        check('authorized central escalation and branch-only lead remain valid',notice_valid(central_notice) and notice_valid(counterpart))
+        run(f"update motorist_profiles set role='dispatcher' where id='{manager_profile}'")
+        check('demoted escalation recipient invalidated while branch lead remains authorized',not notice_valid(central_notice) and notice_valid(counterpart))
+        claimed_ids={x['id'] for x in claim()}
+        check('claim drops demoted queued escalation and claims authorized counterpart',central_notice not in claimed_ids and counterpart in claimed_ids and value(f"select status from motorist_push_outbox where id='{central_notice}'")=='dropped')
+        run(f"update motorist_profiles set role='manager' where id='{manager_profile}'")
+        # A linked office identity is part of effective membership authorization.
+        linked_profile=uid(920)
+        run(f"insert into motorist_profiles(id,organization_id,user_id,display_name,role,active,access_status) values('{linked_profile}','{ORG}','{LB}','Linked lead','dispatcher',true,'active');update motorist_towing_memberships set office_profile_id='{linked_profile}' where id='{LB}'")
+        linked_notice=enqueue('branch_waiting','branch_request',pending_request,member=LB)
+        check('authorized linked branch-only lead remains valid',notice_valid(linked_notice))
+        run(f"update motorist_profiles set access_status='disabled' where id='{linked_profile}'")
+        check('disabled linked office profile revokes queued member notice',not notice_valid(linked_notice))
+        claim()
+        check('revoked linked identity is dropped before send',value(f"select status from motorist_push_outbox where id='{linked_notice}'")=='dropped')
+        run(f"update motorist_profiles set access_status='active' where id='{linked_profile}'")
+        # Use a dedicated still-open execution to avoid completed historical work.
+        new_op=j("select public.motorist_operations_command('%s','%s','%s'::jsonb)" % (CENTRAL,ORG,json.dumps({'commandId':uid(921),'action':'create','expectedRevision':0,'payload':{'kind':'transfer','from':'Fixture','to':'Fixture'}})))['operation']['id']
+        j("select public.motorist_operations_command('%s','%s','%s'::jsonb)" % (CENTRAL,ORG,json.dumps({'commandId':uid(922),'action':'assign','operationId':new_op,'expectedRevision':1,'payload':{'assigneeId':P}})))
+        executor_notice=enqueue('work_assigned','operation',new_op,member=P)
+        check('ordinary assigned executor remains eligible without a branch seat',notice_valid(executor_notice))
+        run(f"update motorist_towing_memberships set capabilities=array[]::text[] where id='{P}'")
+        check('removed executor capability revokes queued assignment notice',not notice_valid(executor_notice))
+        claim()
+        check('revoked executor capability is dropped before send',value(f"select status from motorist_push_outbox where id='{executor_notice}'")=='dropped')
+        run(f"update motorist_towing_memberships set capabilities=app_private.towing_capabilities(roles) where id='{P}'")
         for role in ['anon', 'authenticated']:
             check(f'{role} cannot claim or read the outbox', denied(f"set role {role};select public.motorist_push_outbox_claim('{ORG}',1)") and denied(f"set role {role};select * from motorist_push_outbox"))
         print(json.dumps({'passed': len(checks), 'checks': checks}, ensure_ascii=False, indent=1))

@@ -26,11 +26,21 @@ describe("Moja práca model", () => {
       .toEqual(["accept", "start", "arrive", "collect", "complete", undefined]);
     expect(nextOperationStep({ kind: "delivery", status: "arrived" })).toMatchObject({ action: "complete", confirm: expect.any(String) });
   });
-  it("follows the position only of accepted open work, the earliest one", () => {
+  it("offers three delivery steps without inventing an arrival", () => {
+    expect(["assigned", "accepted", "en_route", "arrived", "completed", "cancelled"].map(status => nextOperationStep({ kind: "delivery", status: status as MobileOperation["status"] })?.action))
+      .toEqual(["accept", "start", "complete", "complete", undefined, undefined]);
+    expect(["assigned", "accepted", "en_route"].map(status => nextOperationStep({ kind: "delivery", status: status as MobileOperation["status"] })?.label))
+      .toEqual(["Prijať", "Vyraziť", "Odovzdané"]);
+    expect(nextOperationStep({ kind: "transfer", status: "en_route" })?.action).toBe("arrive");
+  });
+  it("follows the position only of started open work, the earliest one", () => {
     expect(sharesOperationPosition({ status: "assigned" })).toBe(false);
+    expect(sharesOperationPosition({ status: "accepted" })).toBe(false);
+    expect(sharesOperationPosition({ status: "completed" })).toBe(false);
+    expect(sharesOperationPosition({ status: "cancelled" })).toBe(false);
     expect(sharesOperationPosition({ status: "collected" })).toBe(true);
     const list = { operations: [operation(1, { status: "en_route", scheduledAt: at(15) }), operation(2, { status: "accepted", scheduledAt: at(12) }), operation(3, { scheduledAt: at(9) })], towing: null, unavailable: [] };
-    expect(trackedOperation(list)).toBe(id(2));
+    expect(trackedOperation(list)).toBe(id(1));
     expect(trackedOperation({ operations: [operation(4)], towing: null, unavailable: [] })).toBeNull();
   });
   it("counts for the bar badge only what waits for the member", () => {
@@ -47,6 +57,16 @@ describe("Moja práca model", () => {
     expect(towingMissing(order(1, { attachments: photos }))).toEqual([]);
     expect(towingMissing(order(1, {}, { photoException: "Tma", startSource: "assignment", destination: null, finishedAt: null }))).toEqual(["skutočný začiatok práce", "koniec práce", "cieľ"]);
     expect(towingMissing(order(1, {}, { serviceType: "repair", destination: null, photoException: "x" }))).toEqual([]);
+  });
+  it("blocks completion for incomplete realized services and partial handover facts", () => {
+    const missing = towingMissing(order(1, {}, { photoException: "Výnimka", realizedItems: [
+      { id: id(70), kind: "storage", description: "", quantity: "0", unit: "" },
+      { id: id(71), kind: "transport", description: "Prevoz", quantity: "1", unit: "ks" },
+    ], handoverRecipientName: "Príjemca", handedOverAt: null }));
+    expect(missing).toContain("úkon 1: opis, kladné množstvo a jednotka");
+    expect(missing).toContain("úkon 1: konkrétne parkovisko");
+    expect(missing).toContain("úkon 2: cieľ");
+    expect(missing).toContain("príjemca a čas odovzdania alebo výnimka");
   });
   it("checks a doklad like the server and keeps only what was entered", () => {
     const draft = { ...emptyEvidence("handover"), person: "Ján", odometer: "12 500", fuel: "1/2" };

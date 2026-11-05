@@ -107,7 +107,12 @@ with tempfile.TemporaryDirectory(prefix='pm-opbg-pg-') as temp:
         check('another member gets no secret for this work', denied(tracker_sql(Q, op, 'issue', first), 'PT409', 'Not tracking'))
         check('a malformed hash is refused', denied(tracker_sql(P, op, 'issue', 'x'), '22023') and denied(tracker_sql(P, op, 'issue', None), '22023'))
         check('an unknown action is refused', denied(tracker_sql(P, op, 'pause', first), '22023'))
+        check('acceptance alone issues no tracker', denied(tracker_sql(P, op, 'issue', first), 'PT409', 'Not tracking'))
+        step(P, 'start', op)
+        # A just-started operation rejects even the last predeparture second.
         issued = issue(P, op, first)
+        check('predeparture buffered second is never stored', track(first, [reading(-1)]) == {'stored': 0, 'active': True})
+        run(f"update motorist_operation_events set created_at=now()-interval '2 minutes' where operation_id='{op}' and action='assign';update motorist_operation_events set created_at=now()-interval '1 minute' where operation_id='{op}' and action='start';update motorist_logistics_executions set started_at=now()-interval '1 minute' where operation_id='{op}'")
         expires = datetime.fromisoformat(issued['expiresAt'])
         check('the secret lasts 8 days', timedelta(days=7, hours=23) < expires - datetime.now(timezone.utc) <= timedelta(days=8))
         check('only the hash is kept', value(f"select count(*) from motorist_operation_trackers where token_hash='{first}' and member_id='{P}' and operation_id='{op}'") == '1')
@@ -128,18 +133,18 @@ with tempfile.TemporaryDirectory(prefix='pm-opbg-pg-') as temp:
 
         # A phone long without signal sends what it kept: up to half a day, never before the assignment.
         old = op_cmd(OFFICE, 'create', payload={'kind': 'transfer', 'from': 'Klient', 'to': 'Sklad'})['operation']['id']
-        step(OFFICE, 'assign', old, {'assigneeId': P})
-        step(P, 'accept', old)
+        step(OFFICE, 'assign', old, {'assigneeId': Q})
+        step(Q, 'accept', old)
+        step(Q, 'start', old)
         run(f"update motorist_operation_events set created_at=now()-interval '7 hours' where operation_id='{old}' and action='assign';"
-            f"update motorist_operation_events set created_at=now()-interval '6 hours' where operation_id='{old}' and action='accept'")
-        kept = secret(); issue(P, old, kept)
+            f"update motorist_operation_events set created_at=now()-interval '6 hours' where operation_id='{old}' and action='start';update motorist_logistics_executions set started_at=now()-interval '6 hours' where operation_id='{old}'")
+        kept = secret(); issue(Q, old, kept)
         result = track(kept, [reading(-13 * 3600), reading(-6.5 * 3600), reading(-5 * 3600), reading(-4 * 3600)])
-        check('kept readings after the own acceptance are stored, older ones are not', result == {'stored': 2, 'active': True} and stored(old) == 2)
+        check('kept readings after own departure are stored, older ones are not', result == {'stored': 2, 'active': True} and stored(old) == 2)
 
-        step(P, 'start', old)
-        step(P, 'arrive', old)
+        step(Q, 'arrive', old)
         check('arrived still takes the position', track(kept, [reading(-60)]) == {'stored': 1, 'active': True})
-        step(P, 'complete', old)
+        step(Q, 'complete', old)
 
         # A new secret replaces the previous one; revoking ends the current one.
         second = secret(); issue(P, op, second)
@@ -151,27 +156,40 @@ with tempfile.TemporaryDirectory(prefix='pm-opbg-pg-') as temp:
 
         # The work ends or leaves the member: the phone is told to stop and the secret ends.
         third = secret(); issue(P, op, third)
-        step(P, 'start', op)
         check('en route keeps storing', track(third, [reading(40)]) == {'stored': 1, 'active': True})
         step(P, 'arrive', op)
         step(P, 'complete', op)
         check('completed work stops the phone and ends its secret', track(third, [reading(60)]) == {'stored': 0, 'active': False} and revoked(third))
         check('completed work issues no new secret', denied(tracker_sql(P, op, 'issue', secret()), 'PT409', 'Not tracking'))
 
+        office_started = op_cmd(OFFICE, 'create', payload={'kind': 'transfer', 'from': 'Office start', 'to': 'Destination'})['operation']['id']
+        step(OFFICE, 'assign', office_started, {'assigneeId': P})
+        step(OFFICE, 'start', office_started)
+        office_secret=secret(); issue(P, office_started, office_secret)
+        check('office-started operation rejects predeparture points',track(office_secret,[reading(-1)]) == {'stored': 0, 'active': True})
+        check('office-started operation stores postdeparture points',track(office_secret,[reading()]) == {'stored': 1, 'active': True})
+        step(OFFICE, 'cancel', office_started, {'reason':'Fixture cleanup'})
+
         moved = op_cmd(OFFICE, 'create', payload={'kind': 'delivery', 'from': 'Sklad', 'to': 'Klient 2'})['operation']['id']
         step(OFFICE, 'assign', moved, {'assigneeId': P})
         step(P, 'accept', moved)
-        former = secret(); issue(P, moved, former)
+        former = secret()
+        # A tracker left by the older acceptance-based client is never usable now.
+        run(f"insert into motorist_operation_trackers(organization_id,operation_id,member_id,token_hash,expires_at) values('{ORG}','{moved}','{P}','{former}',now()+interval '8 days')")
+        check('a historical accepted tracker stops without sending', track(former, [reading()]) == {'stored': 0, 'active': False})
         step(OFFICE, 'assign', moved, {'assigneeId': Q})
         check('a reassignment stops the former assignee', track(former, [reading()]) == {'stored': 0, 'active': False} and revoked(former))
         step(Q, 'accept', moved)
+        check('new assignee acceptance still issues no tracker', denied(tracker_sql(Q, moved, 'issue', secret()), 'PT409', 'Not tracking'))
+        step(Q, 'start', moved)
         newer = secret(); issue(Q, moved, newer)
-        check('the new assignee sends nothing from before own acceptance', track(newer, [reading(-5 * 60), reading()]) == {'stored': 1, 'active': True})
+        check('the new assignee sends nothing from before own departure', track(newer, [reading(-5 * 60), reading()]) == {'stored': 1, 'active': True})
 
         # Work of a legacy app delivery is tracked by Pristavenia only, never twice.
         legacy = op_cmd(OFFICE, 'create', payload={'kind': 'delivery', 'from': 'Sklad', 'to': 'Klient 3'})['operation']['id']
         step(OFFICE, 'assign', legacy, {'assigneeId': P})
         step(P, 'accept', legacy)
+        step(P, 'start', legacy)
         early = secret(); issue(P, legacy, early)
         case_id, contact = uid(60), uid(61)
         run(f"insert into motorist_contacts(id,organization_id,name,phone,role) values('{contact}','{ORG}','Klient','+421900000000','client');"
@@ -185,9 +203,11 @@ with tempfile.TemporaryDirectory(prefix='pm-opbg-pg-') as temp:
         # Lock order: a command holds the operation row and then wants its execution
         # while the phone sends or asks for a secret. The phone must wait without
         # holding the execution, so neither side is aborted as a deadlock.
+        step(OFFICE, 'cancel', legacy, {'reason': 'Fixture finished'})
         racy = op_cmd(OFFICE, 'create', payload={'kind': 'transfer', 'from': 'Sklad 4', 'to': 'Servis 4'})['operation']['id']
         step(OFFICE, 'assign', racy, {'assigneeId': P})
         step(P, 'accept', racy)
+        step(P, 'start', racy)
         racy_token = secret(); issue(P, racy, racy_token)
         def psql_session():
             return subprocess.Popen(['psql', '-X', '-q', '-h', str(sock), '-p', '56513', '-d', 'postgres', '-At'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,

@@ -374,3 +374,9 @@ Pripravený je samostatný [klikací HTML návrh](../../.context/eros-kniha-navr
 Podrobné meranie: [JSON dôkaz](../../.context/eros-layout-evidence.json). Východiskové snímky sú [súčasná kniha](../../.context/eros-current-1440.png) a [súčasný detail](../../.context/eros-current-detail-1440.png), vykreslené zo skutočného komponentu so syntetickými dátami. Počet celých riadkov v návrhu zohľadňuje aj orezanie vlastným kontajnerom tabuľky.
 
 Prototyp overuje rozloženie, nie serverové oprávnenia, daňové nastavenie, peňažný ledger, živé SMS/e-maily, push alebo natívnu polohu. Jeho ilustračné sumy nie sú predvolenou sadzbou aplikácie. Dlhé vyhľadateľné katalógy, finančné príkazy a celý pracovný tok sa overia až pri konkrétnej implementácii podľa scenárov vyššie. Existujúce unit testy ani celá build brána sa pre túto dokumentačnú etapu nespúšťali.
+
+## 13. Realizácia spoločnej dodávky
+
+Vetvy A/B/C/D0/D1/E/F/G/H/I/J sú implementované v spoločnej pracovnej vetve. Detaily skúšania a hranice dôkazov sú v [TEST postupe](../operations/client-eros-test-2026-11-05.md). Sekcia 12 zachytáva skorší návrhový prototyp pred implementáciou; dôkazom aktuálneho UI sú testy a screenshoty skutočných komponentov.
+
+Zostáva samostatné zariadeniové prijatie nového natívneho buildu a push/polohy na fyzických telefónoch. Podporovaná automatizácia SKP závisí od prístupu poskytovateľa. Braňo a voliteľný podpis na displeji zostávajú odložené podľa rozsahu plánu. Produkčná publikácia čaká na prijatie identifikovaného TEST rozsahu.

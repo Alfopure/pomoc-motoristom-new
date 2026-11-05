@@ -41,3 +41,17 @@ export function towingFieldsPatch(fields: Partial<TowingFields>, previous: Towin
 export function towingPriceLinesKey(lines: readonly TowingLine[]) {
   return JSON.stringify(lines.map(({ id, description, quantity, unit, unitPrice, taxRate }) => ({ id, description, quantity, unit, unitPrice, taxRate })));
 }
+
+export const paymentIntentLabels = { partner_invoice: "Faktúra partnerovi", deferred_invoice: "Faktúra so splatnosťou", card_terminal: "Karta cez terminál", cash_terminal: "Hotovosť cez terminál", cash_other: "Iná hotovosť · overiť doklad" };
+
+/** Matching stable realization IDs make explicit takeover repeatable without touching existing prices. */
+export function importRealizedItems(lines: readonly TowingLine[], items: NonNullable<TowingFields["realizedItems"]>): TowingLine[] {
+  const existing = new Set(lines.map(line => line.id));
+  const additions: TowingLine[] = [];
+  for (const item of items) {
+    if (existing.has(item.id)) continue;
+    existing.add(item.id);
+    additions.push({ id: item.id, description: item.description, quantity: item.quantity, unit: item.unit, unitPrice: "", taxRate: "" });
+  }
+  return [...lines, ...additions];
+}

@@ -3,7 +3,7 @@ import type { TowingMember, TowingWorkspace } from '@/domain/towing/types';
 
 const mocks = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn(), select: vi.fn(), eq: vi.fn(), in: vi.fn() }));
 vi.mock('./client', () => ({ towingAdmin: () => mocks }));
-import { loadTowingWorkspace, projectTowingDriverOrder } from './service';
+import { loadTowingWorkspace, projectTowingDriverOrder, workspaceFilters } from './service';
 
 const actor: TowingMember = { id: 'member', userId: 'user', organizationId: 'organization', displayName: 'Fixture', roles: ['manager','driver'], capabilities: ['operate','price','drive'], active: true, version: 1 };
 function workspace(view: 'office' | 'driver' = 'office'): TowingWorkspace {
@@ -63,5 +63,14 @@ describe('driver operational contacts', () => {
     expect(result.fields.assistanceReference).toBe('SYNTHETIC-REF');
     expect(result.fields.assistancePartnerName).toBe('Synthetic assistance');
     expect(result).not.toHaveProperty('officeNotes');
+  });
+});
+
+describe('book filter boundary', () => {
+  it('passes explicit query semantics and keeps the page bounded', () => {
+    expect(workspaceFilters(new URL('https://fixture.invalid?sort=driver_asc&stage=active&dateBasis=dispatch&requesterType=unknown&limit=50'))).toEqual({ sort: 'driver_asc', stage: 'active', dateBasis: 'dispatch', requesterType: 'unknown', limit: 50, offset: 0 });
+  });
+  it.each(['sort=sql', 'stage=paid_or_active', 'dateBasis=finished', 'requesterType=partner', 'limit=51', 'requesterId=bad'])('rejects unsupported filter %s', query => {
+    expect(() => workspaceFilters(new URL(`https://fixture.invalid?${query}`))).toThrow();
   });
 });

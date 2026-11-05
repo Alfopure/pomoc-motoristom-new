@@ -5,6 +5,8 @@ import { useCaseCollaboration } from "./CaseCollaborationProvider";
 import { useLayoutPreview } from "./LayoutPreview";
 import { Copy, Link2, MapPin, MessageSquareText, RefreshCw, Send, ShieldCheck, Smartphone, X } from "lucide-react";
 import { isHandoffDeliveryReceipt, isHandoffReceipt, handoffDate, handoffEventLabels, handoffIsActive, handoffLabels, type CaseHandoff, type HandoffCommand, type HandoffContext } from "@/domain/case-handoff";
+import type { WorkRequestKind } from "@/domain/work-groups";
+import { CaseWorkPanel } from "./CaseWorkPanel";
 import { BranchWorkspace } from "@/components/branches/BranchWorkspace";
 import { HandoffSummary } from "./HandoffSummary";
 import { SmsComposerDialog } from "./SmsComposerDialog";
@@ -13,12 +15,12 @@ import { previewEditablePhone } from "@/lib/telephony/phone-entry";
 import { PhoneNumberHint, PhoneNumberInput } from "./PhoneNumberInput";
 import "./case-handoff.css";
 
-type CaseHandoffPanelProps = { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean; presentation?: "accordion" | "drawer" };
+type CaseHandoffPanelProps = { caseId: string; caseNumber: string; active?: boolean; initiallyExpanded?: boolean; presentation?: "accordion" | "drawer"; onWorkCommitted?: () => void; initialWorkKinds?: WorkRequestKind[] };
 
 export function CaseHandoffPanel(props: CaseHandoffPanelProps) {
   return <CaseHandoffSession key={props.caseId} {...props} />;
 }
-function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpanded = false, presentation = "accordion" }: CaseHandoffPanelProps) {
+function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpanded = false, presentation = "accordion", onWorkCommitted, initialWorkKinds }: CaseHandoffPanelProps) {
   const drawer = presentation === "drawer";
   const titleId = useId();
   const [drawerStarted, setDrawerStarted] = useState(false);
@@ -178,6 +180,8 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
   const validRecipientPhone = !phone.trim() || Boolean(previewEditablePhone(phone));
   const appChannel = channel === "app";
   const body = <div hidden={!expanded} className="handoff-panel-body">
+      <CaseWorkPanel caseId={caseId} active={active && expanded} onCommitted={onWorkCommitted} initialKinds={initialWorkKinds} />
+      <details className="case-work-legacy"><summary>Externý odkaz a pôvodné odovzdania</summary>
       {context && <label>Príjemca odovzdania<select value={channel === "branch" ? `branch:${branchGroupId}` : current ? "existing" : channel === "app" ? recipientMemberId : "link"} disabled={disabled || branchPending} onChange={event => {
         const value = event.target.value;
         if (value.startsWith("branch:")) { setBranchGroupId(value.slice(7)); setChannel("branch"); setRecipientMemberId(""); }
@@ -234,7 +238,7 @@ function CaseHandoffSession({ caseId, caseNumber, active = true, initiallyExpand
       {reader.loading && !context && <p role="status">Načítavam odovzdania…</p>}
       {reader.error && <p role="alert" className="handoff-error">{reader.error}{!reader.halted && <button type="button" disabled={reader.loading || busy} onClick={reader.retry}>Skúsiť znova načítať</button>}</p>}
       {pending && !reader.halted && <button type="button" disabled={busy} onClick={() => void command(pending.action)}>{busy ? "Overujem výsledok…" : "Overiť výsledok tej istej požiadavky"}</button>}
-    </div>;
+    </details></div>;
   const smsComposer = !reader.halted && <SmsComposerDialog externalRecipientLabel={`SMS pre kolegu · ${caseNumber}`} initialPhone={smsIntent?.phone ?? ""} initialMessage={smsIntent?.message ?? ""} initialTemplate="custom" open={smsOpen && (!drawer || active)} onClose={() => setSmsOpen(false)} />;
   if (!drawer) return <section className="case-handoff-panel" ref={sectionRef} hidden={!active} aria-label="Externé odovzdanie prípadu">
     <button type="button" className="handoff-panel-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><Link2 size={17} /><span><strong>Odovzdať prípad</strong><small>Pobočke alebo človeku do aplikácie; odkaz a SMS podľa potreby</small></span><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>

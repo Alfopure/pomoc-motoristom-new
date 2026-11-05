@@ -17,3 +17,14 @@ it.runIf(process.env.TOWING_TEST_PDF_BROWSER === 'true')('renders a complete mul
   await mkdir('.context/towing-evidence',{recursive:true});await writeFile('.context/towing-evidence/multipage-synthetic-work-order.pdf',pdf);
   console.info('towing_pdf_acceptance',{pages,bytes:pdf.length});
 },45000);
+it.runIf(process.env.TOWING_TEST_PDF_BROWSER === 'true')('renders operational facts and paper handover spaces in a new document', async () => {
+  const pdf = await generateTowingPdf({ number: 'Z-NEW-FACTS', kind: 'work', fields: {
+    serviceType: 'tow', subjectType: 'vehicle', subjectDescription: 'Syntetické vozidlo', pickup: 'Syntetická nakládka', destination: 'Syntetický cieľ', odometer: '123456',
+    dispatchInstructions: 'Syntetický pokyn dispečingu', paymentIntent: 'card_terminal', handoverRecipientName: 'Syntetický príjemca', handedOverAt: '2026-11-05T11:00:00Z',
+    realizedItems: [{ id: 'fixture-storage', kind: 'storage', description: 'Syntetické uloženie', quantity: '2', unit: 'deň', parkingName: 'Syntetické parkovisko', parkingAddress: 'Syntetická ulica 1' }],
+  } }, 'synthetic-new-facts-hash');
+  expect(pdf.subarray(0, 5).toString()).toBe('%PDF-');
+  expect(pdf.toString('latin1').match(/\/Type\s*\/Page\b/g)?.length).toBeGreaterThan(0);
+  await mkdir('.context/towing-evidence', { recursive: true });
+  await writeFile('.context/towing-evidence/new-operational-facts.pdf', pdf);
+}, 45000);
