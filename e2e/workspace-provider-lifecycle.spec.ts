@@ -5,7 +5,7 @@ test.beforeAll(async () => {
   const output = (await build({ entryPoints: ["e2e/fixtures/workspace-provider-lifecycle.tsx"], bundle: true, write: false, outfile: "fixture.js", platform: "browser", format: "iife", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' } })).outputFiles;
   script = output.find(file => file.path.endsWith(".js"))!.text;
 });
-test("capability refresh preserves the surrounding case draft and clears private tool content before reauthorization", async ({ page }) => {
+for (const initiallyEnabled of [true, false]) test(`capability refresh preserves the case draft and clears published private tasks (${initiallyEnabled ? "initially enabled" : "enabled later"})`, async ({ page }) => {
   let revision = 1;
   await page.route("**/*", route => {
     const url = new URL(route.request().url());
@@ -16,17 +16,24 @@ test("capability refresh preserves the surrounding case draft and clears private
     if (url.pathname === "/api/tasks") return route.fulfill({ json: { tasks: [{ id: `task-${revision}`, title: `Súkromná úloha ${revision}`, revision }] } });
     return route.abort();
   });
-  await page.goto("https://provider-lifecycle.test/"); await page.addScriptTag({ content: script });
+  await page.goto(`https://provider-lifecycle.test/${initiallyEnabled ? "" : "?legacy=1"}`); await page.addScriptTag({ content: script });
+  if (!initiallyEnabled) {
+    await expect(page.getByLabel("Úlohy prípadu", { exact: true })).toHaveText("Pôvodná úloha prípadu");
+    await page.getByRole("button", { name: "Zmeniť dostupnosť nástrojov" }).click();
+  }
   await expect(page.getByText("Súkromná poznámka 1", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Úlohy prípadu", { exact: true })).toHaveText("Súkromná úloha 1");
   await page.getByLabel("Rozpracovaný kontakt prípadu").fill("Zachovať neuložený kontakt");
   await page.getByRole("button", { name: "Zmeniť dostupnosť nástrojov" }).click();
   await expect(page.getByLabel("Rozpracovaný kontakt prípadu")).toHaveValue("Zachovať neuložený kontakt");
   await expect(page.getByText("Súkromná poznámka 1", { exact: true })).toHaveCount(0);
   await expect(page.getByLabel("Načítané úlohy")).toBeEmpty();
+  await expect(page.getByLabel("Úlohy prípadu", { exact: true })).toBeEmpty();
   revision = 2;
   await page.getByRole("button", { name: "Zmeniť dostupnosť nástrojov" }).click();
   await expect(page.getByText("Súkromná poznámka 2", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Načítané úlohy")).toHaveText("Súkromná úloha 2");
+  await expect(page.getByLabel("Úlohy prípadu", { exact: true })).toHaveText("Súkromná úloha 2");
   await expect(page.getByLabel("Rozpracovaný kontakt prípadu")).toHaveValue("Zachovať neuložený kontakt");
   await expect(page.getByText("Súkromná poznámka 1", { exact: true })).toHaveCount(0);
 });

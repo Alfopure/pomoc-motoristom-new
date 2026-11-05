@@ -82,11 +82,13 @@ async function expectJoinedFooter(page: Page, viewport: { width: number; height:
   const geometry = await page.evaluate(() => {
     const shell = document.querySelector<HTMLElement>(".dispatch-app-shell")!;
     const nav = shell.querySelector<HTMLElement>(".dispatch-mobile-nav")!;
-    const main = shell.querySelector<HTMLElement>(":scope > main")!;
+    const visibleMains = [...shell.querySelectorAll<HTMLElement>(":scope > main")].filter(element => element.getClientRects().length > 0);
+    const main = visibleMains[0]!;
     const shellBox = shell.getBoundingClientRect();
     const navBox = nav.getBoundingClientRect();
     const mainBox = main.getBoundingClientRect();
     return {
+      visibleMainCount: visibleMains.length,
       shellBottom: shellBox.bottom,
       shellPadding: getComputedStyle(shell).paddingBottom,
       navTop: navBox.top,
@@ -100,6 +102,7 @@ async function expectJoinedFooter(page: Page, viewport: { width: number; height:
       verticalOverflow: document.documentElement.scrollHeight - document.documentElement.clientHeight,
     };
   });
+  expect(geometry.visibleMainCount).toBe(1);
   expect(geometry.shellPadding).toBe("0px");
   expect(geometry.navPosition).toBe("relative");
   expect(geometry.navHeight).toBe(52 + viewport.bottom);

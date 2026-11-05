@@ -260,7 +260,7 @@ export function CaseList({
               >
                 <div className="flex items-start justify-between gap-1">
                   <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 flex-wrap items-center gap-1">
+                    <div className="flex min-w-0 items-center gap-1">
                       {/* Text musí ostať v <span>: globals.css má nezaradené `button { font: inherit }`,
                           ktoré prebíja Tailwind text-* utility priamo na <button>. */}
                       <button type="button" onClick={() => onSelect(caseItem.id)} className="min-w-0 text-left">
@@ -294,10 +294,6 @@ export function CaseList({
                           {casePriorityLabels[caseItem.priority]}
                         </span>
                       )}
-                      <span className="inline-flex items-center gap-1 rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-700" title={`${openTaskCount} otvorených úloh, ${caseItem.tasks.length} celkom`}>
-                        <ListTodo size={10} />
-                        Úlohy {openTaskCount}
-                      </span>
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
@@ -317,7 +313,10 @@ export function CaseList({
                 </div>
 
                 <button type="button" onClick={() => onSelect(caseItem.id)} className="case-list-card-content block w-full text-left">
-                  {modern && <span className="case-list-client">{caseItem.contact.name || "Kontakt zatiaľ nezadaný"}</span>}
+                  {modern && <span className="case-list-client">
+                    <span className="case-list-client-name" title={assistanceServiceName === caseItem.contact.name ? `Asistenčná služba: ${assistanceServiceName}` : caseItem.contact.name}>{caseItem.contact.name || "Kontakt zatiaľ nezadaný"}</span>
+                    {assistanceServiceName && assistanceServiceName !== caseItem.contact.name && <span className="case-list-assistance" title={`Asistenčná služba: ${assistanceServiceName}`}><Building2 size={10} aria-hidden="true" /><span>{assistanceServiceName}</span></span>}
+                  </span>}
                   {/* Typografia musí byť na vnútornom prvku: globálne `button { font: inherit }`
                       zámerne drží natívne ovládanie konzistentné, no prebíja text-* na buttonoch. */}
                   <span className="grid w-full gap-0 text-[10px] leading-3.5 text-zinc-600">
@@ -329,17 +328,13 @@ export function CaseList({
                       <MapPin size={11} className="shrink-0 text-zinc-400" />
                       <span className="truncate">{caseItem.pickup?.address || "Poloha nezadaná"}</span>
                     </span>
-                    {assistanceServiceName && (
-                      <span className="inline-flex min-w-0 items-center gap-1.5 text-amber-800">
-                        <Building2 size={11} className="shrink-0 text-amber-600" />
-                        <span className="truncate" title={`Asistenčná služba: ${assistanceServiceName}`}>{assistanceServiceName}</span>
-                      </span>
-                    )}
+                    {!modern && assistanceServiceName && <span className="inline-flex min-w-0 items-center gap-1.5 text-amber-800"><Building2 size={11} aria-hidden="true" /><span className="truncate" title={`Asistenčná služba: ${assistanceServiceName}`}>{assistanceServiceName}</span></span>}
                     <span className="case-list-meta inline-flex min-w-0 items-center gap-1.5">
                       <Clock3 size={11} className="shrink-0 text-zinc-400" />
                       <span className="truncate" title={`Založené ${formatDateTime(caseItem.createdAt)} · posledná úprava ${formatTime(caseItem.updatedAt)}`}>
                         {formatDateTime(caseItem.createdAt)} · {ownerName(caseItem.ownerId)}
                       </span>
+                      <span className="case-list-task-count" title={`${openTaskCount} otvorených úloh, ${caseItem.tasks.length} celkom`}><ListTodo size={10} aria-hidden="true" />Úlohy {openTaskCount}</span>
                     </span>
                   </span>
                 </button>
