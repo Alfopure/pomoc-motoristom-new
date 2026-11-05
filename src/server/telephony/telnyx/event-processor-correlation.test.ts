@@ -64,6 +64,49 @@ describe("credential-side mirrored browser events", () => {
     expect(h.rows("motorist_job_incidents")).toHaveLength(0);
   });
 
+  it("recognizes a supervisor hangup after more than fifteen minutes without changing the call", async () => {
+    const { h, call, envelope } = await mirrorFixture("supervisor", true);
+    expect(await h.process(envelope())).toMatchObject({ outcome: "ignored" });
+    h.advance(16 * 60_000);
+    const sessions = structuredClone(h.rows("motorist_call_sessions")), legs = structuredClone(h.rows("motorist_call_legs"));
+    const commands = [...h.telnyx.calls];
+    expect(await h.process(envelope("call.hangup"))).toMatchObject({ status: 200, outcome: "ignored", sessionId: call.sessionId,
+      notes: ["verified credential browser mirror"] });
+    expect(h.rows("motorist_telnyx_webhook_events").find(row => row.event_id === "mirror-call.hangup"))
+      .toMatchObject({ status: "processed", retry_state: "ready", attempts: 1 });
+    expect(h.rows("motorist_call_sessions")).toEqual(sessions);
+    expect(h.rows("motorist_call_legs")).toEqual(legs);
+    expect(h.telnyx.calls).toEqual(commands);
+    expect(h.rows("motorist_job_incidents")).toHaveLength(0);
+  });
+
+  it.each(["wrong provider session", "missing accepted proof"])("still rejects a long supervisor callback with %s", async mode => {
+    const { h, envelope } = await mirrorFixture("supervisor", true);
+    expect(await h.process(envelope())).toMatchObject({ outcome: "ignored" });
+    h.advance(16 * 60_000);
+    if (mode === "missing accepted proof") {
+      h.db.update("motorist_provider_commands", { outcome: "unknown" }, row => row.command_id === "mirror-proof-dial");
+    }
+    const sessions = structuredClone(h.rows("motorist_call_sessions")), legs = structuredClone(h.rows("motorist_call_legs"));
+    const commands = [...h.telnyx.calls];
+    expect(await h.process(envelope("call.hangup", mode === "wrong provider session" ? { call_session_id: "foreign-session" } : {})))
+      .toMatchObject({ status: 500, outcome: "awaiting_correlation", sessionId: null });
+    expect(h.rows("motorist_call_sessions")).toEqual(sessions);
+    expect(h.rows("motorist_call_legs")).toEqual(legs);
+    expect(h.telnyx.calls).toEqual(commands);
+  });
+
+  it("retains the fifteen-minute candidate cutoff for unlinked operator mirrors", async () => {
+    const { h, call, envelope } = await mirrorFixture("operator", true);
+    h.db.update("motorist_call_sessions", { metadata: { ...(h.session(call.sessionId).metadata as object), start_mode: { farLinkTo: false } } },
+      row => row.id === call.sessionId);
+    expect(await h.process(envelope())).toMatchObject({ outcome: "ignored" });
+    h.advance(16 * 60_000);
+    const commands = [...h.telnyx.calls];
+    expect(await h.process(envelope("call.hangup"))).toMatchObject({ status: 500, outcome: "awaiting_correlation", sessionId: null });
+    expect(h.telnyx.calls).toEqual(commands);
+  });
+
   it("drains early unlinked supervisor mirrors once the accepted dial proof becomes durable", async () => {
     const { h, call, envelope } = await mirrorFixture("supervisor", true);
     const journal = h.db.storage("motorist_provider_commands").find(row => row.command_id === "mirror-proof-dial")!;
