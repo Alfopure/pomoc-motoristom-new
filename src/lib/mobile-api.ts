@@ -517,12 +517,22 @@ export type MobileTowingAttachment = { id: string; kind: "work" | "handover" | "
 export type MobileTowingPaymentIntent = "partner_invoice" | "deferred_invoice" | "card_terminal" | "cash_terminal" | "cash_other";
 export type MobileTowingRealizedItem = { id: string; kind: "tow" | "repair" | "transport" | "storage" | "relocation"; description: string; quantity: string; unit: string;
   parkingId?: string; parkingName?: string; parkingAddress?: string; destination?: string };
-export type MobileTowingOwner = { name: string; phone?: string; address?: string; companyId?: string };
-export type MobileTowingPayment = { id: string; receiptId: string; amountCents: number; method: "cash" | "card" | "bank" | "other"; createdAt: string };
-export type MobileFieldTowingOptions = { parking: { id: string; name: string; address: string }[] };
-export type MobileFieldCash = { account: { id: string; balanceCents: number; reservedCents: number; revision: number } | null;
-  handovers: { id: string; amountCents: number; status: "pending" | "accepted" | "rejected" | "cancelled"; revision: number; createdAt: string }[] };
-export type MobileFieldCashCommand = { commandId: string; handoverId: string; type: "propose_handover"; expectedRevision: 0; payload: { amountCents: number; accountRevision: number } };
+export type MobileTowingOwner = { name: string; phone?: string; email?: string; address?: string; companyId?: string };
+export type MobileCashCategory = "regular" | "other" | "unclassified";
+export type MobileCashBreakdown = Record<MobileCashCategory, number>;
+export type MobileCashCategories = Record<MobileCashCategory, { balanceCents: number; reservedCents: number }>;
+export type MobileTowingPayment = { id: string; receiptId: string; amountCents: number; method: "cash" | "card" | "bank" | "other"; cashCategory?: MobileCashCategory | null; createdAt: string };
+export type MobileFieldTowingOptions = {
+  parking: { id: string; name: string; address: string }[];
+  fleet?: { id: string; name: string; plate?: string; branchId?: string; status?: string }[];
+  branches?: { id: string; name: string }[];
+  partners?: { id: string; name: string }[];
+  /** Only towing office actors receive the driver picker. */
+  members?: { id: string; name: string }[];
+};
+export type MobileFieldCash = { account: { id: string; balanceCents: number; reservedCents: number; revision: number; categories?: MobileCashCategories } | null;
+  handovers: { id: string; amountCents: number; cashBreakdown?: MobileCashBreakdown; status: "pending" | "accepted" | "rejected" | "cancelled"; revision: number; createdAt: string }[] };
+export type MobileFieldCashCommand = { commandId: string; handoverId: string; type: "propose_handover"; expectedRevision: 0; payload: { amountCents: number; accountRevision: number; cashBreakdown?: MobileCashBreakdown } };
 export type MobileFieldCashReceipt = MobileFieldScope & { commandId: string; revision: number; cash: MobileFieldCash };
 export type MobileTowingFields = {
   serviceType: "tow" | "repair" | "transport" | "storage" | "relocation"; subjectType: "vehicle" | "machine" | "material"; subjectDescription: string;
@@ -532,6 +542,9 @@ export type MobileTowingFields = {
   assistanceReference: string | null; assistancePartnerName: string | null; parkingName: string | null; parkingAddress: string | null;
   customer: { name: string; phone: string | null } | null;
   requesterName?: string | null;
+  requesterType?: "assistance" | "selfpayer" | null;
+  requester?: MobileTowingOwner | null; recipient?: MobileTowingOwner | null;
+  branchId?: string | null; fleetAssetId?: string | null; requesterId?: string | null; assistancePartnerId?: string | null; parkingId?: string | null;
   odometer?: string | null; paymentIntent?: MobileTowingPaymentIntent | null; realizedItems?: MobileTowingRealizedItem[]; owner?: MobileTowingOwner | null;
   handoverRecipientName?: string | null; handedOverAt?: string | null; handoverException?: string | null;
   /** Read-only instruction from dispatch or the branch request. */
@@ -543,12 +556,14 @@ export type MobileTowingOrder = {
   authorizedCollectionCents?: number | null; dueCents?: number | null; payments?: MobileTowingPayment[];
 };
 /** The fields a driver may write; null clears one. */
-export type MobileTowingDriverFields = Partial<Record<"startedAt" | "finishedAt" | "driverNotes" | "performedQuantity" | "photoException" | "destination" | "subjectDescription" | "plate" | "vin" | "odometer" | "handoverRecipientName" | "handedOverAt" | "handoverException", string | null>>
-  & { paymentIntent?: MobileTowingPaymentIntent | null; realizedItems?: MobileTowingRealizedItem[]; owner?: MobileTowingOwner };
+export type MobileTowingDriverFields = Partial<Record<"startedAt" | "finishedAt" | "driverNotes" | "performedQuantity" | "photoException" | "destination" | "subjectDescription" | "plate" | "vin" | "odometer" | "handoverRecipientName" | "handedOverAt" | "handoverException" | "pickup" | "contact" | "noContactReason" | "branchId" | "fleetAssetId" | "plannedAt" | "assistanceReference" | "assistancePartnerId" | "requesterId" | "parkingId", string | null>>
+  & { paymentIntent?: MobileTowingPaymentIntent | null; realizedItems?: MobileTowingRealizedItem[]; owner?: MobileTowingOwner;
+    requester?: MobileTowingOwner; recipient?: MobileTowingOwner; requesterType?: "assistance" | "selfpayer" | null;
+    serviceType?: MobileTowingFields["serviceType"]; subjectType?: MobileTowingFields["subjectType"] };
 export type MobileTowingCommand = {
   commandId: string; type: "start" | "update_order" | "submit" | "abandon_attachment" | "receive_payment"; expectedRevision: number; assignmentGeneration: number;
   /** abandon_attachment: an own unfinished upload of the current assignment, with a reason. */
-  payload: Record<string, never> | { fields: MobileTowingDriverFields } | { id: string; reason: string } | { receiptId: string; amountCents: number; method: "cash" | "card"; accountRevision?: number };
+  payload: Record<string, never> | { fields: MobileTowingDriverFields } | { id: string; reason: string } | { receiptId: string; amountCents: number; method: "cash" | "card"; accountRevision?: number; cashCategory?: MobileCashCategory };
 };
 export type MobileTowingDetail = MobileFieldScope & { order: MobileTowingOrder };
 /** `order` is null once it left the driver's list (submitted, reassigned or cancelled). */

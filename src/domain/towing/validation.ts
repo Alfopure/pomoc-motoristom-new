@@ -10,12 +10,12 @@ export const towingRoleCapabilities: Record<TowingRole, readonly TowingCapabilit
 export function capabilitiesForTowingRoles(roles: TowingRole[]): TowingCapability[] {
   return [...new Set(roles.flatMap(role => towingRoleCapabilities[role]))];
 }
-export const towingDriverFieldNames = ['startedAt', 'finishedAt', 'driverNotes', 'performedQuantity', 'photoException', 'destination', 'subjectDescription', 'plate', 'vin', 'odometer', 'realizedItems', 'paymentIntent', 'handoverRecipientName', 'handedOverAt', 'handoverException', 'owner'] as const;
+export const towingDriverFieldNames = ['startedAt', 'finishedAt', 'driverNotes', 'performedQuantity', 'photoException', 'destination', 'subjectDescription', 'plate', 'vin', 'odometer', 'realizedItems', 'paymentIntent', 'handoverRecipientName', 'handedOverAt', 'handoverException', 'owner', 'pickup', 'contact', 'noContactReason', 'branchId', 'fleetAssetId', 'plannedAt', 'assistanceReference', 'assistancePartnerId', 'requesterId', 'parkingId', 'requesterType', 'requester', 'recipient', 'serviceType', 'subjectType'] as const;
 export function driverTowingFields(fields: TowingFields): Partial<TowingFields> {
   const result = Object.fromEntries(towingDriverFieldNames.filter(key => fields[key] !== undefined).map(key => [key, fields[key]]));
   if (fields.owner) {
-    const { name, phone, address, companyId } = fields.owner;
-    result.owner = { name, ...(phone !== undefined ? { phone } : {}), ...(address !== undefined ? { address } : {}), ...(companyId !== undefined ? { companyId } : {}) };
+    const { name, phone, email, address, companyId } = fields.owner;
+    result.owner = { name, ...(phone !== undefined ? { phone } : {}), ...(email !== undefined ? { email } : {}), ...(address !== undefined ? { address } : {}), ...(companyId !== undefined ? { companyId } : {}) };
   }
   return result;
 }

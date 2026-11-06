@@ -1,4 +1,6 @@
 import type { TowingCommand, TowingCommandResult, TowingView, TowingWorkspace } from "@/domain/towing/types";
+import type { TowingCreateInput } from "@/domain/towing/creation";
+import type { MobileFieldTowingOptions } from "@/lib/mobile-api";
 
 export class TowingRequestError extends Error {
   constructor(message: string, public status: number, public code?: string) { super(message); this.name = "TowingRequestError"; }
@@ -24,6 +26,15 @@ function acknowledge(result: TowingCommandResult, commandId: string, targetId: s
 
 /** Single online adapter seam: offline code may wrap these methods, never the legacy dispatch API. */
 export const towingClient = {
+  options(signal?: AbortSignal, userId?: string) {
+    return request<MobileFieldTowingOptions>("/api/towing/options", { signal,
+      ...(userId ? { headers: { "X-Towing-User": userId } } : {}) });
+  },
+  async create(input: TowingCreateInput, userId: string) {
+    const result = await request<TowingCommandResult>("/api/towing/orders", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-Towing-User": userId }, body: JSON.stringify(input) });
+    return acknowledge(result, input.commandId, input.targetId);
+  },
   workspace(view: TowingView, query: Record<string, string> = {}) {
     const search = new URLSearchParams({ view, ...query });
     return request<TowingWorkspace>(`/api/towing/workspace?${search}`);

@@ -84,22 +84,25 @@ export async function loadTowingWorkspace(actor: TowingMember, view: 'office' | 
 export function projectTowingDriverOrder(order: TowingOrder, actor: TowingMember): TowingOrder {
   const fields = { serviceType: order.fields.serviceType, subjectType: order.fields.subjectType,
     subjectDescription: order.fields.subjectDescription, pickup: order.fields.pickup };
-  for (const key of ['plate','vin','destination','contact','noContactReason','branchId','fleetAssetId','plannedAt','startedAt','finishedAt','startSource','odometer','paymentIntent','handoverRecipientName','handedOverAt','handoverException','realizedItems','dispatchInstructions','driverNotes','performedQuantity','photoException','assistanceReference','parkingId','parkingName','parkingAddress','assistancePartnerName'] as const) {
+  for (const key of ['plate','vin','destination','contact','noContactReason','branchId','fleetAssetId','plannedAt','startedAt','finishedAt','startSource','odometer','paymentIntent','handoverRecipientName','handedOverAt','handoverException','realizedItems','dispatchInstructions','driverNotes','performedQuantity','photoException','assistanceReference','assistancePartnerId','requesterType','requesterId','parkingId','parkingName','parkingAddress','assistancePartnerName'] as const) {
     if (order.fields[key] !== undefined) Object.assign(fields, { [key]: order.fields[key] });
   }
   for (const key of ['requester', 'customer', 'owner', 'recipient'] as const) {
     const party = order.fields[key];
-    if (party) Object.assign(fields, { [key]: { name: party.name, ...(party.phone ? { phone: party.phone } : {}) } });
+    if (party) Object.assign(fields, { [key]: { name: party.name, ...(party.phone ? { phone: party.phone } : {}),
+      ...(key !== 'customer' && party.email ? { email: party.email } : {}),
+      ...(key !== 'customer' && party.address ? { address: party.address } : {}),
+      ...(key !== 'customer' && party.companyId ? { companyId: party.companyId } : {}) } });
   }
   if (order.fields.owner) {
-    const { name, phone, address, companyId } = order.fields.owner;
-    Object.assign(fields, { owner: { name, ...(phone ? { phone } : {}), ...(address ? { address } : {}), ...(companyId ? { companyId } : {}) } });
+    const { name, phone, email, address, companyId } = order.fields.owner;
+    Object.assign(fields, { owner: { name, ...(phone ? { phone } : {}), ...(email ? { email } : {}), ...(address ? { address } : {}), ...(companyId ? { companyId } : {}) } });
   }
   return { id: order.id, number: order.number, sourceCaseId: null, revision: order.revision,
       assignmentGeneration: order.assignmentGeneration, driverId: order.driverId, workStatus: order.workStatus,
       billingStatus: order.billingStatus, paymentStatus: order.paymentStatus, fields,
       authorizedCollectionCents: order.authorizedCollectionCents, receivedCents: order.receivedCents, dueCents: order.dueCents,
       reconciliationRequired: order.reconciliationRequired, createdAt: order.createdAt, updatedAt: order.updatedAt, attachments: order.attachments,
-      payments: order.payments?.filter(payment => payment.driverId === actor.id).map(payment => ({id:payment.id,receiptId:payment.receiptId,amountCents:payment.amountCents,method:payment.method,driverId:payment.driverId,createdAt:payment.createdAt})) };
+      payments: order.payments?.filter(payment => payment.driverId === actor.id).map(payment => ({id:payment.id,receiptId:payment.receiptId,amountCents:payment.amountCents,method:payment.method,cashCategory:payment.cashCategory,driverId:payment.driverId,createdAt:payment.createdAt})) };
 
 }

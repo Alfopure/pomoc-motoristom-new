@@ -57,6 +57,7 @@ import { useDeliveryTime } from "../delivery/use-delivery-time";
 import type { DeliverySession } from "../delivery/session";
 import { BranchModule } from "../branch/module";
 import { waiting as awaitingLead } from "../branch/model";
+import { TowingOfficeModule } from "../field-work/towing-office";
 import { WorkModule, type WorkOpenRequest } from "../field-work/module";
 import { awaitsMember, isOpenOperation, operationStatusLabels, towingStatusLabels, workItems } from "../field-work/model";
 import type { FieldWorkSession } from "../field-work/session";
@@ -91,8 +92,8 @@ export function DispatchShell(props: Props) {
   const insets = useSafeAreaInsets();
   const { fontScale } = useWindowDimensions();
   const delivery = props.delivery?.memberId ? props.delivery : null, work = delivery ? props.work : null;
-  const { delivery: hasDelivery, work: hasWork, branch: hasBranch } = delivery?.modules ?? NO_FIELD;
-  const field = useMemo(() => ({ delivery: hasDelivery, work: hasWork, branch: hasBranch }), [hasDelivery, hasWork, hasBranch]);
+  const { delivery: hasDelivery, work: hasWork, branch: hasBranch, towingOffice: hasTowingOffice } = delivery?.modules ?? NO_FIELD;
+  const field = useMemo(() => ({ delivery: hasDelivery, work: hasWork, branch: hasBranch, towingOffice: hasTowingOffice }), [hasDelivery, hasWork, hasBranch, hasTowingOffice]);
   const available = useMemo(() => moduleAccess(identity.profile.role, field), [identity.profile.role, field]);
   const prefs = useMemo(() => new ShellPreferences(createShellPreferencesStorage(),
     shellPreferencesKey({ environment: config.environment, userId, profileId: identity.profileId }), available, rolePins(identity.profile.role, field)),
@@ -344,6 +345,9 @@ export function DispatchShell(props: Props) {
       <DeliveryModule session={delivery} active={active} visible={view === "deliveries"} openRequest={deliveryRequest} /></View>}
     {field.work && <View style={view === "work" ? { flex: 1 } : { display: "none" }}>
       <WorkModule session={work} active={active} visible={view === "work"} openRequest={workRequest} /></View>}
+    {field.towingOffice && <View style={view === "towing-office" ? { flex: 1 } : { display: "none" }}>
+      <TowingOfficeModule session={work} active={active} visible={view === "towing-office"} />
+    </View>}
     {field.branch && <View style={view === "branch" ? { flex: 1 } : { display: "none" }}>
       <BranchModule session={work} active={active} visible={view === "branch"} openRequest={branchRequest} /></View>}
     </AppErrorBoundary>

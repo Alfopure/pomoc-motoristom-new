@@ -7,8 +7,8 @@ import type { RunOperation } from "./OrderDetail";
 import { Button, Field, Notice, Panel } from "./primitives";
 import styles from "./towing.module.css";
 
-const roleNames: Record<TowingRole, string> = { driver: "Vodič", dispatch: "Dispečer", billing: "Fakturácia", manager: "Správca", delivery: "Pristavovač", branch: "Pobočkový dispečer" };
-const descriptions: Record<TowingRole, string> = { driver: "Vlastné zákazky, fotografie a hotovosť", dispatch: "Zákazky, priradenie, kontrola a nacenenie", billing: "Faktúry, platby a prevzatie hotovosti", manager: "Správa, opravy a prístupy", delivery: "Pristavenia náhradných áut v aplikácii Dispatching", branch: "Modul Pobočky: prevzatie a pridelenie práce vlastnej pobočky" };
+const roleNames: Record<TowingRole, string> = { driver: "Odťahovkár", dispatch: "Dispečer odťahov", billing: "Fakturácia", manager: "Správca", delivery: "Pristavovač", branch: "Pobočkový dispečer" };
+const descriptions: Record<TowingRole, string> = { driver: "Vlastné odťahy, založenie zákazky, fotografie a hotovosť", dispatch: "Zákazky, priradenie, kontrola a nacenenie", billing: "Faktúry, platby a prevzatie hotovosti", manager: "Správa, opravy a prístupy", delivery: "Pristavenia náhradných áut v aplikácii Dispatching", branch: "Modul Pobočky: prevzatie a pridelenie práce vlastnej pobočky" };
 
 export function Members({ workspace, busy, run }: { workspace: TowingWorkspace; busy: boolean; run: RunOperation }) {
   const [selected, setSelected] = useState<TowingMember | null>(null); const [creating, setCreating] = useState(false);

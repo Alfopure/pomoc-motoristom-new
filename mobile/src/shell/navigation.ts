@@ -8,7 +8,7 @@ export type HovoryView = "console" | "history" | "callbacks";
 export type ShellState = { tab: ShellTab; opened: ModuleId | null; account: boolean; search: boolean; alerts: boolean; hovory: HovoryView };
 export type ShellLocation = "prehlad" | "moduly" | ModuleId;
 /** Screen identifiers understood by the existing module components. */
-export type DispatchView = "home" | "modules" | "console" | "history" | "callbacks" | "cases" | "tasks" | "tools" | "deliveries" | "work" | "branch" | "account" | "search" | "alerts";
+export type DispatchView = "home" | "modules" | "console" | "history" | "callbacks" | "cases" | "tasks" | "tools" | "deliveries" | "work" | "branch" | "towing-office" | "account" | "search" | "alerts";
 
 export const initialShell: ShellState = { tab: "prehlad", opened: null, account: false, search: false, alerts: false, hovory: "console" };
 
@@ -38,6 +38,7 @@ export function dispatchView(state: ShellState): DispatchView {
     case "pristavenia": return "deliveries";
     case "praca": return "work";
     case "pobocka": return "branch";
+    case "odtahy": return "towing-office";
   }
 }
 /** Re-selecting Moduly returns to the module grid; other tabs keep their screen.

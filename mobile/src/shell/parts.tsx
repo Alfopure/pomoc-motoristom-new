@@ -1,14 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { AccessibilityInfo, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions, type StyleProp, type ViewStyle } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Briefcase, Building, Car, ClipboardList, FolderOpen, House, LayoutGrid, Phone, Plus, Wrench, type LucideIcon } from "lucide-react-native";
+import { Briefcase, Building, Car, ClipboardList, FolderOpen, House, LayoutGrid, Phone, Plus, Truck, Wrench, type LucideIcon } from "lucide-react-native";
 import { palette, radius, space, type } from "../design/tokens";
 import { columnsForWidth, gridItemWidth } from "../design/layout";
 import { GlassSurface } from "../ui/glass";
 import { moduleById, type ModuleId } from "./modules";
 import type { ShellTab } from "./navigation";
 
-export const moduleIcons: Record<ModuleId, LucideIcon> = { hovory: Phone, pripady: FolderOpen, ulohy: ClipboardList, nastroje: Wrench, pristavenia: Car, praca: Briefcase, pobocka: Building };
+export const moduleIcons: Record<ModuleId, LucideIcon> = { hovory: Phone, pripady: FolderOpen, ulohy: ClipboardList, nastroje: Wrench, pristavenia: Car, praca: Briefcase, pobocka: Building, odtahy: Truck };
 export const tabLabel = (tab: ShellTab) => tab === "prehlad" ? "Prehľad" : tab === "moduly" ? "Moduly" : tab === "pristavenia" ? "Pristav." : moduleById(tab).short;
 
 /** Settings-style colored square used for modules in grids and lists. */

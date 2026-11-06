@@ -19,6 +19,7 @@ import type { DeliverySession } from "../delivery/session";
 import type { SharingState } from "../delivery/sharing";
 import { BranchModule, type BranchOpenRequest } from "../branch/module";
 import { waiting } from "../branch/model";
+import { TowingOfficeModule } from "../field-work/towing-office";
 import { WorkModule, WorkRow, type WorkOpenRequest } from "../field-work/module";
 import { awaitsMember, isOpenOperation, sharesOperationPosition, workItems } from "../field-work/model";
 import type { FieldWorkSession } from "../field-work/session";
@@ -60,7 +61,7 @@ export function locationStatus(state: SharingState, open: number): { label: stri
 }
 /** The same status across Pristavenia and Moja práca; a lead without field work sees the branch. */
 export function fieldStatus(modules: FieldModules, delivery: SharingState, work: SharingState, open: number): { label: string; tone: PresenceTone; target: ModuleId } {
-  if (!modules.delivery && !modules.work) return { label: "Pobočka", tone: "gray", target: "pobocka" };
+  if (!modules.delivery && !modules.work) return modules.towingOffice ? { label: "Odťahová kancelária", tone: "gray", target: "odtahy" } : { label: "Pobočka", tone: "gray", target: "pobocka" };
   const states = [modules.delivery ? delivery : null, modules.work ? work : null].filter((state): state is SharingState => state !== null);
   const shown = states.find(state => state.status === "sharing") ?? states.find(state => state.status === "denied") ?? states.find(state => state.status === "error") ?? OFF;
   const status = locationStatus(shown, open);
@@ -75,8 +76,8 @@ export function FieldShell(props: Props) {
   const memberId = session.memberId!;
   const insets = useSafeAreaInsets();
   const { fontScale } = useWindowDimensions();
-  const { delivery: hasDelivery, work: hasWork, branch: hasBranch } = session.modules;
-  const modules = useMemo(() => ({ delivery: hasDelivery, work: hasWork, branch: hasBranch }), [hasDelivery, hasWork, hasBranch]);
+  const { delivery: hasDelivery, work: hasWork, branch: hasBranch, towingOffice: hasTowingOffice } = session.modules;
+  const modules = useMemo(() => ({ delivery: hasDelivery, work: hasWork, branch: hasBranch, towingOffice: hasTowingOffice }), [hasDelivery, hasWork, hasBranch, hasTowingOffice]);
   const available = useMemo(() => moduleAccess(null, modules), [modules]);
   const prefs = useMemo(() => new ShellPreferences(createShellPreferencesStorage(),
     shellPreferencesKey({ environment: config.environment, userId, profileId: memberId }), available, rolePins(null, modules)), [config.environment, userId, memberId, available, modules]);
@@ -136,7 +137,7 @@ export function FieldShell(props: Props) {
     : nav.account ? { kind: "back" as const, label: nav.tab === "moduly" && nav.opened ? moduleById(nav.opened).short : tabLabel(nav.tab), onPress: back }
       : openedInModules ? { kind: "back" as const, label: "Moduly", onPress: back }
         : { kind: "status" as const, label: status.label, tone: status.tone, onPress: () => navigate(status.target),
-          accessibilityLabel: status.target === "pobocka" ? "Otvoriť pobočku" : "Poloha pre dispečing: " + status.label + ". Otvoriť " + moduleById(status.target).name };
+          accessibilityLabel: status.target === "odtahy" ? "Otvoriť odťahovú kanceláriu" : status.target === "pobocka" ? "Otvoriť pobočku" : "Poloha pre dispečing: " + status.label + ". Otvoriť " + moduleById(status.target).name };
   const extraNavigationSpace = Math.max(0, navigationContentBottom(fontScale, insets.bottom, barItemCount) - NAVIGATION_CONTENT_BOTTOM);
   const openWork = (target: { kind: "operation" | "towing"; id: string }) => open(target);
   return <View style={{ flex: 1 }}><ShellBackContext.Provider value={backStore}><View style={{ flex: 1, width: "100%", maxWidth: CONTENT_MAX_WIDTH, alignSelf: "center", paddingBottom: extraNavigationSpace }}>
@@ -155,6 +156,9 @@ export function FieldShell(props: Props) {
     </View>}
     {modules.work && <View style={view === "work" ? { flex: 1 } : { display: "none" }}>
       <WorkModule session={work} active={active} visible={view === "work"} openRequest={tap && "module" in tap ? tap : null} />
+    </View>}
+    {modules.towingOffice && <View style={view === "towing-office" ? { flex: 1 } : { display: "none" }}>
+      <TowingOfficeModule session={work} active={active} visible={view === "towing-office"} />
     </View>}
     {modules.branch && <View style={view === "branch" ? { flex: 1 } : { display: "none" }}>
       <BranchModule session={work} active={active} visible={view === "branch"} openRequest={tap?.kind === "branch-request" ? tap as BranchOpenRequest : null} />
@@ -213,6 +217,7 @@ function FieldHome({ modules, deliveries, work, queue, now, location, status, ti
         : <Text style={s.empty}>{errors.work ? "Zoznam práce sa nepodarilo overiť. Skúste obnoviť údaje." : "Teraz nemáte pridelenú žiadnu jazdu ani odťah."}</Text>}
       <Group style={{ marginTop: space.m }}><Row first title="Celá moja práca" tone="link" onPress={() => onModule("praca")} trailing={<Text style={s.chevron}>›</Text>} /></Group>
     </>}
+    {modules.towingOffice ? <><SectionHeader title="Odťahová kancelária" /><Group><Row first title="Kniha odťahov" subtitle="Vytvoriť odťah, prideliť vodiča, história a hotovosť" tone="link" onPress={() => onModule("odtahy")} /></Group></> : null}
     {modules.branch && <>
       <SectionHeader title="Pobočka" />
       <Group><Row first title={pending.branch ? "Načítavam požiadavky…" : errors.branch ? "Požiadavky pobočky sa nepodarilo overiť" : queue ? queue + (queue === 1 ? " požiadavka čaká" : queue < 5 ? " požiadavky čakajú" : " požiadaviek čaká") : "Nič nečaká na prevzatie"}

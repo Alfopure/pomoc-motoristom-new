@@ -1,3 +1,6 @@
+import type { TowingCreateInput } from "../../../src/domain/towing/creation";
+import type { TowingCommand, TowingFields, TowingOrder, TowingWorkspace } from "../../../src/domain/towing/types";
+import { CASH_CATEGORIES, isCashCategory, isCashBreakdown, cashBreakdownTotal, isCashCategories } from "../../../src/domain/towing/cash-categories";
 import type {
   MobileBranchCommand, MobileBranchExecution, MobileBranchGroup, MobileBranchRequest, MobileBranchView, MobileBranchWorkspace, MobileDeliveryPositionInput,
   MobileFieldTowingOptions, MobileFieldCash, MobileFieldCashCommand, MobileTowingOwner, MobileTowingRealizedItem, MobileWorkConflict, MobileOperation, MobileOperationCommand, MobileOperationEvidence, MobileTowingAttachment, MobileTowingCommand, MobileTowingFields, MobileTowingOrder,
@@ -90,14 +93,19 @@ function parseOwner(value: unknown): MobileTowingOwner | null {
   if (value === null) return null;
   const v = object(value); check(text(v.name, 2000));
   const result: MobileTowingOwner = { name: v.name as string };
-  for (const key of ["phone", "address", "companyId"] as const) { if (v[key] === undefined) continue; check(text(v[key], 2000)); result[key] = v[key] as string; }
+  for (const key of ["phone", "email", "address", "companyId"] as const) { if (v[key] === undefined) continue; check(text(v[key], 2000)); result[key] = v[key] as string; }
   return result;
+}
+function cashCategory(value: unknown) { if (!isCashCategory(value)) throw invalid(); return value; }
+function cashSplit(value: unknown, total: number) { if (!isCashBreakdown(value) || cashBreakdownTotal(value) !== total) throw invalid(); return value; }
+function cashCategories(value: unknown, balance: number, reserved: number) {
+  if (!isCashCategories(value) || CASH_CATEGORIES.reduce((sum, key) => sum + value[key].balanceCents, 0) !== balance || CASH_CATEGORIES.reduce((sum, key) => sum + value[key].reservedCents, 0) !== reserved) throw invalid(); return value;
 }
 function parseCash(value: unknown): MobileFieldCash {
   const v = object(value); let account: MobileFieldCash["account"] = null;
-  if (v.account !== null) { const a = object(v.account); check(id(a.id) && Number.isSafeInteger(a.balanceCents) && count(a.reservedCents) && positive(a.revision)); account = { id: a.id as string, balanceCents: a.balanceCents as number, reservedCents: a.reservedCents as number, revision: a.revision as number }; }
+  if (v.account !== null) { const a = object(v.account); check(id(a.id) && Number.isSafeInteger(a.balanceCents) && count(a.reservedCents) && positive(a.revision)); account = { id: a.id as string, balanceCents: a.balanceCents as number, reservedCents: a.reservedCents as number, revision: a.revision as number, ...(a.categories === undefined ? {} : { categories: cashCategories(a.categories, a.balanceCents as number, a.reservedCents as number) }) }; }
   return { account, handovers: list(v.handovers, 100, raw => { const h = object(raw); check(id(h.id) && positive(h.amountCents) && positive(h.revision) && date(h.createdAt));
-    return { id: h.id as string, amountCents: h.amountCents as number, revision: h.revision as number, createdAt: h.createdAt as string, status: one(h.status, ["pending", "accepted", "rejected", "cancelled"] as const) }; }) };
+    return { id: h.id as string, amountCents: h.amountCents as number, revision: h.revision as number, createdAt: h.createdAt as string, ...(h.cashBreakdown === undefined ? {} : { cashBreakdown: cashSplit(h.cashBreakdown, h.amountCents as number) }), status: one(h.status, ["pending", "accepted", "rejected", "cancelled"] as const) }; }) };
 }
 const FIELD_TEXT = ["plate", "vin", "destination", "contact", "noContactReason", "driverNotes", "performedQuantity", "photoException", "assistanceReference", "assistancePartnerName", "parkingName", "parkingAddress"] as const;
 export function parseTowingOrder(value: unknown): MobileTowingOrder {
@@ -110,7 +118,14 @@ export function parseTowingOrder(value: unknown): MobileTowingOrder {
   if (f.customer !== null) { const c = object(f.customer); check(text(c.name, 2000) && nullable(c.phone, 2000)); customer = { name: c.name as string, phone: c.phone as string | null }; }
   check((f.odometer === undefined || nullable(f.odometer, 100)) && (f.handoverRecipientName === undefined || nullable(f.handoverRecipientName, 300))
     && (f.handedOverAt === undefined || nullableDate(f.handedOverAt)) && (f.handoverException === undefined || nullable(f.handoverException, 4000)));
-  const fields = {
+  const references: Partial<MobileTowingFields> = {};
+  for (const key of ["branchId", "fleetAssetId", "requesterId", "assistancePartnerId", "parkingId"] as const) {
+    if (f[key] !== undefined) { check(f[key] === null || id(f[key])); references[key] = f[key] as string | null; }
+  }
+  if (f.requesterType !== undefined) references.requesterType = f.requesterType === null ? null : one(f.requesterType, ["assistance", "selfpayer"] as const);
+  if (f.requester !== undefined) references.requester = parseOwner(f.requester);
+  if (f.recipient !== undefined) references.recipient = parseOwner(f.recipient);
+  const fields = { ...references,
     ...(f.odometer !== undefined ? { odometer: f.odometer as string | null } : {}),
     ...(f.paymentIntent !== undefined ? { paymentIntent: f.paymentIntent === null ? null : one(f.paymentIntent, ["partner_invoice", "deferred_invoice", "card_terminal", "cash_terminal", "cash_other"] as const) } : {}),
     ...(f.realizedItems !== undefined ? { realizedItems: parseRealizedItems(f.realizedItems) } : {}),
@@ -125,7 +140,7 @@ export function parseTowingOrder(value: unknown): MobileTowingOrder {
     ...Object.fromEntries(FIELD_TEXT.map(key => [key, f[key] as string | null])) } as MobileTowingFields;
   check((v.authorizedCollectionCents === undefined || v.authorizedCollectionCents === null || count(v.authorizedCollectionCents)) && (v.dueCents === undefined || v.dueCents === null || count(v.dueCents)));
   const payments = v.payments === undefined ? undefined : list(v.payments, 100, raw => { const p = object(raw); check(id(p.id) && id(p.receiptId) && Number.isSafeInteger(p.amountCents) && date(p.createdAt));
-    return { id: p.id as string, receiptId: p.receiptId as string, amountCents: p.amountCents as number, method: one(p.method, ["cash", "card", "bank", "other"] as const), createdAt: p.createdAt as string }; });
+    return { id: p.id as string, receiptId: p.receiptId as string, amountCents: p.amountCents as number, method: one(p.method, ["cash", "card", "bank", "other"] as const), ...(p.cashCategory === undefined ? {} : { cashCategory: p.cashCategory === null ? null : cashCategory(p.cashCategory) }), createdAt: p.createdAt as string }; });
   return { ...(v.authorizedCollectionCents !== undefined ? { authorizedCollectionCents: v.authorizedCollectionCents as number | null } : {}),
     ...(v.dueCents !== undefined ? { dueCents: v.dueCents as number | null } : {}), ...(payments !== undefined ? { payments } : {}), id: (v.id as string).toLowerCase(), number: v.number as string, revision: v.revision as number, assignmentGeneration: v.assignmentGeneration as number,
     workStatus: one(v.workStatus, ["assigned", "in_progress", "needs_changes"] as const), updatedAt: v.updatedAt as string, fields, attachments: list(v.attachments, 60, attachment) };
@@ -166,6 +181,50 @@ function group(value: unknown): MobileBranchGroup {
 
 export type FieldWorkList = { operations: MobileOperation[] | null; towing: MobileTowingOrder[] | null; unavailable: ("operations" | "towing")[] };
 export type BranchSnapshot = Omit<MobileBranchWorkspace, "ok" | "apiVersion" | "environment" | "memberId" | "checkedAt">;
+/** Office projections remain separate from the own-assignment driver projection. */
+function parseOfficeOrder(value: unknown): TowingOrder {
+  const v = object(value), f = object(v.fields);
+  check(id(v.id) && text(v.number, 160) && positive(v.revision) && count(v.assignmentGeneration)
+    && (v.driverId === null || id(v.driverId)) && date(v.createdAt) && date(v.updatedAt));
+  one(v.workStatus, ["draft", "assigned", "in_progress", "submitted", "needs_changes", "cancelled"] as const);
+  one(v.billingStatus, ["not_ready", "ready", "invoiced", "not_required"] as const);
+  one(v.paymentStatus, ["unpriced", "unpaid", "partial", "paid", "overpaid"] as const);
+  one(f.serviceType, ["tow", "repair", "transport", "storage", "relocation"] as const);
+  one(f.subjectType, ["vehicle", "machine", "material"] as const);
+  check(text(f.subjectDescription, 10000) && text(f.pickup, 10000));
+  for (const key of ["destination", "contact", "noContactReason", "plate", "vin", "driverNotes", "dispatchInstructions", "photoException", "assistanceReference", "handoverRecipientName", "handoverException"])
+    check(f[key] === undefined || text(f[key], 10000));
+  for (const key of ["plannedAt", "startedAt", "finishedAt", "handedOverAt"]) check(f[key] === undefined || date(f[key]));
+  for (const key of ["owner", "requester", "customer", "recipient"]) {
+    if (f[key] === undefined) continue;
+    const party = object(f[key]); check(text(party.name, 2000));
+    for (const field of ["phone", "email", "address", "companyId", "taxId"]) check(party[field] === undefined || text(party[field], 2000));
+  }
+  if (f.realizedItems !== undefined) parseRealizedItems(f.realizedItems);
+  check((v.authorizedCollectionCents === null || count(v.authorizedCollectionCents)) && (v.dueCents === null || Number.isSafeInteger(v.dueCents)) && Number.isSafeInteger(v.receivedCents));
+  check(Array.isArray(v.attachments) && v.attachments.length <= 1000);
+  return { ...v, fields: f as unknown as TowingFields } as unknown as TowingOrder;
+}
+function parseOfficeWorkspace(value: unknown, memberId: string): TowingWorkspace {
+  const v = object(value), actor = object(v.actor);
+  check(v.view === "office" && actor.id === memberId && actor.active === true && id(actor.organizationId) && text(actor.displayName, 300)
+    && Array.isArray(actor.capabilities) && actor.capabilities.every(item => typeof item === "string") && actor.capabilities.includes("operate"));
+  const orders = list(v.orders, 50, parseOfficeOrder);
+  for (const key of ["members", "branches", "fleet"]) check(Array.isArray(v[key]) && (v[key] as unknown[]).length <= 3000);
+  for (const member of v.members as unknown[]) { const m = object(member); check(id(m.id) && text(m.displayName, 300) && Array.isArray(m.capabilities)); }
+  for (const key of ["branches", "fleet"]) for (const raw of v[key] as unknown[]) { const item = object(raw); check(id(item.id) && text(item.name, 2000)); }
+  const cashAccounts = list(v.cashAccounts, 2000, raw => {
+    const account = object(raw); check(id(account.id) && (account.driverId === null || id(account.driverId)) && Number.isSafeInteger(account.balanceCents) && count(account.reservedCents) && positive(account.revision));
+    return { ...account, ...(account.categories === undefined ? {} : { categories: cashCategories(account.categories, account.balanceCents as number, account.reservedCents as number) }) };
+  });
+  const handovers = list(v.handovers, 2000, raw => {
+    const handover = object(raw); check(id(handover.id) && id(handover.driverId) && positive(handover.amountCents) && positive(handover.revision) && date(handover.createdAt));
+    one(handover.status, ["pending", "accepted", "rejected", "cancelled"] as const);
+    return { ...handover, ...(handover.cashBreakdown === undefined ? {} : { cashBreakdown: cashSplit(handover.cashBreakdown, handover.amountCents as number) }) };
+  });
+  return { ...v, orders, cashAccounts, handovers } as unknown as TowingWorkspace;
+}
+
 export type FieldWorkApi = ReturnType<typeof createFieldWorkApi>;
 /** `memberId` comes from the verified field identity; every answer must be for it. */
 export function createFieldWorkApi(config: MobileConfig, memberId: string, getToken: () => Promise<string | null>, transport: MobileTransport = fetch,
@@ -204,9 +263,41 @@ export function createFieldWorkApi(config: MobileConfig, memberId: string, getTo
   }
   const pathId = (value: string, message: string) => { if (!id(value)) throw new MobileApiError(message, 404); return value.toLowerCase(); };
   return {
+    towingOfficeUrl: (orderId: string) => config.apiOrigin + "/zakazky?orderId=" + pathId(orderId, "Odťah sa nenašiel."),
     towingOptions: async (signal?: AbortSignal): Promise<MobileFieldTowingOptions> => {
       const body = await request("towing/options", { method: "GET", signal });
-      return { parking: list(body.parking, 200, raw => { const p = object(raw); check(id(p.id) && text(p.name, 2000) && text(p.address, 4000)); return { id: p.id as string, name: p.name as string, address: p.address as string }; }) };
+      const references = (value: unknown, max: number) => list(value, max, raw => { const item = object(raw); check(id(item.id) && text(item.name, 2000)); return { id: item.id as string, name: item.name as string }; });
+      const fleet = body.fleet === undefined ? undefined : list(body.fleet, 2000, raw => {
+        const item = object(raw); check(id(item.id) && text(item.name, 2000) && (item.plate === undefined || text(item.plate, 100))
+          && (item.branchId === undefined || id(item.branchId)) && (item.status === undefined || text(item.status, 100)));
+        return item as { id: string; name: string; plate?: string; branchId?: string; status?: string };
+      });
+      return { parking: list(body.parking, 200, raw => { const p = object(raw); check(id(p.id) && text(p.name, 2000) && text(p.address, 4000)); return { id: p.id as string, name: p.name as string, address: p.address as string }; }),
+        ...(fleet ? { fleet } : {}), ...(body.branches === undefined ? {} : { branches: references(body.branches, 200) }),
+        ...(body.partners === undefined ? {} : { partners: references(body.partners, 2000) }), ...(body.members === undefined ? {} : { members: references(body.members, 200) }) };
+    },
+    createTowing: async (command: TowingCreateInput): Promise<{ commandId: string; targetId: string; revision: number; order: MobileTowingOrder | null }> => {
+      const body = await request("towing/create", { method: "POST", body: command });
+      check(body.commandId === command.commandId && body.targetId === command.targetId && positive(body.revision));
+      const order = body.order === null ? null : parseTowingOrder(body.order);
+      check(order === null || order.id === command.targetId);
+      return { commandId: command.commandId, targetId: command.targetId, revision: body.revision as number, order };
+    },
+    towingOffice: async (filters: Record<string, string> = {}, signal?: AbortSignal): Promise<TowingWorkspace> => {
+      const body = await request("towing/office?" + new URLSearchParams(filters), { method: "GET", signal });
+      return parseOfficeWorkspace(body.workspace, memberId);
+    },
+    towingOfficeOrder: async (orderId: string, signal?: AbortSignal): Promise<TowingOrder> => {
+      const target = pathId(orderId, "Odťah sa nenašiel.");
+      const order = parseOfficeOrder((await request("towing/office/" + target, { method: "GET", signal })).order);
+      check(order.id === target); return order;
+    },
+    towingOfficeCommand: async (command: TowingCommand): Promise<{ commandId: string; targetId: string; revision: number; order: TowingOrder | null }> => {
+      const body = await request("towing/office/commands", { method: "POST", body: command });
+      check(body.commandId === command.commandId && body.targetId === command.targetId && positive(body.revision));
+      const order = body.order === null ? null : parseOfficeOrder(body.order);
+      check(order === null || order.id === command.targetId);
+      return { commandId: command.commandId, targetId: command.targetId, revision: body.revision as number, order };
     },
     cash: async (signal?: AbortSignal): Promise<MobileFieldCash> => parseCash((await request("cash", { method: "GET", signal })).cash),
     cashCommand: async (command: MobileFieldCashCommand): Promise<MobileFieldCash> => {
