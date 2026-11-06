@@ -108,10 +108,17 @@ export function FieldShell(props: Props) {
   const tracker = work?.tracker ?? idle;
   const workLocation = useSyncExternalStore(tracker.subscribe, tracker.snapshot, tracker.snapshot);
   const [tap, setTap] = useState<FieldTap | null>(null);
+  const [taskRequest, setTaskRequest] = useState<{ taskId: string; nonce: number }>();
   const go = (next: ShellState) => setShell(next);
   const navigate = (id: ModuleId) => go(openModule(nav, pins, id));
   const back = () => { const next = shellBack(nav); if (next) go(next); };
   const open = (target: PushTarget) => {
+    if (target.kind === "employee-task") {
+      if (!modules.tasks || !available.includes("ulohy")) return;
+      setShell(current => openModule(reconcileShell(current, pins, available), pins, "ulohy"));
+      setTaskRequest(value => ({ taskId: target.id, nonce: (value?.nonce ?? 0) + 1 }));
+      return;
+    }
     const module: ModuleId | null = target.kind === "delivery" ? "pristavenia" : target.kind === "operation" || target.kind === "towing" ? "praca" : target.kind === "branch-request" ? "pobocka" : null;
     if (!module || !available.includes(module) || !("id" in target)) return;
     setShell(current => openModule(reconcileShell(current, pins, available), pins, module));
@@ -124,15 +131,15 @@ export function FieldShell(props: Props) {
   // A tapped field notice opens its work, in the account it was sent to.
   useEffect(() => {
     const consume = () => {
-      if (!isFieldTap(pushTaps.snapshot()?.target)) return;
-      const target = pushTaps.take(memberId);
+      if (!isFieldTap(pushTaps.snapshot()?.target) && pushTaps.snapshot()?.target.kind !== "employee-task") return;
+      const target = pushTaps.take(memberId, userId);
       if (target) open(target);
     };
     const unsubscribe = pushTaps.subscribe(consume);
     const pending = setTimeout(consume, 0);
     return () => { unsubscribe(); clearTimeout(pending); };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- `open` reads the current pins and modules through them.
-  }, [memberId, pins, available]);
+  }, [memberId, userId, pins, available]);
   // A detail opened in a module owns Back first; then the account and Moduly.
   useAndroidBack(active && (nav.account || nav.tab === "moduly" && nav.opened !== null && !moduleBack), back);
   const now = useDeliveryTime(active);
@@ -175,7 +182,7 @@ export function FieldShell(props: Props) {
     </View>}
     {modules.tasks && session.me.data?.organizationId && (tasksVisited || view === "tasks") && <View style={view === "tasks" ? { flex: 1 } : { display: "none" }}>
       <FieldEmployeeTaskWorkspace config={config} userId={userId} memberId={memberId} organizationId={session.me.data.organizationId}
-        getToken={getTaskToken} current={currentEmployee} active={active && view === "tasks"} onLeave={back} />
+        getToken={getTaskToken} current={currentEmployee} active={active && view === "tasks"} onLeave={back} openTaskRequest={taskRequest} />
     </View>}
     {modules.branch && <View style={view === "branch" ? { flex: 1 } : { display: "none" }}>
       <BranchModule session={work} active={active} visible={view === "branch"} openRequest={tap?.kind === "branch-request" ? tap as BranchOpenRequest : null} />

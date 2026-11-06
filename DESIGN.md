@@ -2,13 +2,22 @@
 
 ## Source of truth
 
-**Mobilné úlohy: Draft · 6. 11. 2026.** Aktuálny rozsah a pravidlá určuje
+**Mobilné úlohy: Active · 6. 11. 2026.** Aktuálny rozsah a pravidlá určuje
 [kontrakt jednoduchých úloh](docs/mobile/simple-tasks-2026-11-06.md): rýchle
 samostatné vytvorenie, kolega alebo pobočka, jasné prevzatie/pridelenie a práca
 pre každého aktívneho zamestnanca vrátane terénu. Pre tento modul rozširuje skoršiu
 hranicu „nemeniť funkčný rozsah rolí“; nepridáva dispečerský prístup terénnym účtom.
 Vzhľad, komponenty, prístupnosť a navigácia naďalej vychádzajú z mobilného
 štandardu a častí Visual language, Components a Accessibility nižšie.
+
+[Rozšírenie úloh](docs/mobile/task-extensions-2026-11-06.md) pridáva výbery
+Dnes / Po termíne, voliteľnú fotografiu, checklist a jednoduché denné/týždenné
+opakovanie. Základný formulár zostáva názov/príjemca/termín; checklist a séria sú
+pod Ďalšie možnosti. Dokončenie s nehotovými bodmi má výslovné potvrdenie.
+Úprava času série zachová pôvodný obsah a príjemcu; zmena jedného výskytu
+neprepíše budúcu sériu. Nedostupný autor alebo príjemca má jasnú cestu vytvoriť
+novú sériu. Termíny aj filtre používajú časové pásmo organizácie. Stav natívneho
+vydania a fyzického overenia sa eviduje oddelene od tohto dizajnového kontraktu.
 
 **Mobilný dizajn: Active · 4. 11. 2026.** Platí [mobilný štandard](docs/mobile/design-standard.md), [audit a realizačný plán](docs/mobile/redesign-plan-2026-11-04.md) a [33 preštudovaných primárnych zdrojov](docs/mobile/ux-ui-sources-2026-11-04.md). Mobilná časť pokrýva spoločný dizajnový systém, navigáciu a existujúce moduly Expo aplikácie. Overenia a stav vydania sú v pláne; tento status sám nepotvrdzuje natívnu akceptáciu.
 

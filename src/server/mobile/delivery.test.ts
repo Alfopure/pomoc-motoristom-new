@@ -96,7 +96,9 @@ describe("pristavovač identity", () => {
     await expect(requireMobilePerson(new Request("https://x"))).resolves.toEqual({ dispatcher, field: null });
     vi.stubEnv("MOBILE_DELIVERY_ENABLED", "");
     mocks.dispatcher.mockResolvedValueOnce(dispatcher);
-    await expect(requireMobilePerson(new Request("https://x"))).resolves.toEqual({ dispatcher, field: null });
+    await expect(requireMobilePerson(new Request("https://x"))).resolves.toMatchObject({ dispatcher, field: { memberId: MEMBER } });
+    mocks.dispatcher.mockRejectedValueOnce(new MutationError("x", 403, "mobile_no_dispatch_profile"));
+    await expect(requireMobilePerson(new Request("https://x"))).resolves.toMatchObject({ dispatcher: null, field: { memberId: MEMBER } });
     mocks.dispatcher.mockRejectedValueOnce(new MutationError("expired", 401));
     await expect(requireMobilePerson(new Request("https://x"))).rejects.toMatchObject({ status: 401 });
   });

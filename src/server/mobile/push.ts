@@ -257,6 +257,10 @@ export async function deliverPushNotices(admin: Admin, notices: readonly PushNot
   const token = process.env.EXPO_ACCESS_TOKEN?.trim();
   for (let offset = 0; offset < notices.length; offset += 100) {
     const batch = notices.slice(offset, offset + 100);
+    if (batch.some(notice => notice.data.kind === "employee-task" && (!isUuid(notice.data.userId ?? "") || !isUuid(notice.data.id)))) {
+      outcomes.push(...batch.map(() => "failed" as const));
+      continue;
+    }
     let results: PushOutcome[] = batch.map(() => "failed");
     try {
       const response = await transport(EXPO_SEND, {
@@ -264,7 +268,10 @@ export async function deliverPushNotices(admin: Admin, notices: readonly PushNot
         method: "POST", signal: AbortSignal.timeout(10_000),
         headers: { Accept: "application/json", "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
         body: JSON.stringify(batch.map(notice => ({ to: notice.device.token, title: notice.title.slice(0, 120), body: notice.body.slice(0, 240),
-          data: { ...notice.data, profileId: notice.device.profileId } satisfies MobilePushPayload, sound: "default", priority: "high" }))),
+          data: notice.data.kind === "employee-task"
+            ? { kind: "employee-task", id: notice.data.id, userId: notice.data.userId! } satisfies MobilePushPayload
+            : { ...notice.data, profileId: notice.device.profileId } satisfies MobilePushPayload,
+          sound: "default", priority: "high" }))),
       });
       const result = await response.json().catch(() => null) as { data?: { status?: string; details?: { error?: string } }[] } | null;
       if (response.ok && Array.isArray(result?.data) && result.data.length === batch.length) {

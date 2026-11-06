@@ -91,6 +91,7 @@ describe("task and case events", () => {
   });
 
   it("tells the reviewer about a handed-over task and the assignee about a return", async () => {
+    fake.db.seed("motorist_case_tasks", [{ id: TASK, organization_id: ORG, employee_extensions: false, assigned_to: ME, assigned_user_id: null }]);
     fake.db.seed("motorist_notifications", [
       { id: "00000000-0000-4000-8000-0000000000d1", organization_id: ORG, task_id: TASK, case_id: CASE, recipient_profile_id: COLLEAGUE, status: "unread", created_at: NOW.toISOString(),
         dedupe_key: "task-review:" + TASK + ":generation:1:submit_review:recipient:" + COLLEAGUE },
@@ -105,6 +106,34 @@ describe("task and case events", () => {
       [token("theirs"), "Úloha na kontrolu", "Kolega vám poslal úlohu k prípadu PM-2026-0042 na kontrolu."],
       [token("mine"), "Úloha vrátená na dopracovanie", "Kontrolór vám vrátil úlohu."],
     ]);
+  });
+  it("keeps employee review bells while leaving their one push to the canonical outbox", async () => {
+    fake.db.seed("motorist_case_tasks", [{ id: TASK, organization_id: ORG, employee_extensions: true }]);
+    fake.db.seed("motorist_notifications", [
+      { id: "00000000-0000-4000-8000-0000000000d1", organization_id: ORG, task_id: TASK, case_id: CASE, recipient_profile_id: COLLEAGUE, status: "unread", created_at: NOW.toISOString(),
+        dedupe_key: "task-review:" + TASK + ":generation:1:submit_review:recipient:" + COLLEAGUE },
+    ]);
+    pushTaskReview(fake.admin, { organizationId: ORG, taskId: TASK, action: "submit_review" });
+    pushTaskReview(fake.admin, { organizationId: ORG, taskId: TASK, action: "return" });
+    await drain();
+    expect(sent).toEqual([]);
+    expect(fake.db.storage("motorist_notifications")).toHaveLength(1);
+    expect(fake.db.storage("motorist_notifications")[0].status).toBe("unread");
+  });
+  it("does not deliver a historical office fallback return for a field assignee, while retaining its office reviewer submission", async () => {
+    fake.db.seed("motorist_case_tasks", [{ id: TASK, organization_id: ORG, employee_extensions: false, assigned_to: null,
+      assigned_user_id: "10000000-0000-4000-8000-000000000001" }]);
+    fake.db.seed("motorist_notifications", [
+      { id: "00000000-0000-4000-8000-0000000000d1", organization_id: ORG, task_id: TASK, case_id: null, recipient_profile_id: ME, status: "unread", created_at: NOW.toISOString(),
+        dedupe_key: "task-review:" + TASK + ":generation:1:return:recipient:" + ME },
+      { id: "00000000-0000-4000-8000-0000000000d2", organization_id: ORG, task_id: TASK, case_id: null, recipient_profile_id: COLLEAGUE, status: "unread", created_at: NOW.toISOString(),
+        dedupe_key: "task-review:" + TASK + ":generation:1:submit_review:recipient:" + COLLEAGUE },
+    ]);
+    pushTaskReview(fake.admin, { organizationId: ORG, taskId: TASK, action: "return" });
+    pushTaskReview(fake.admin, { organizationId: ORG, taskId: TASK, action: "submit_review" });
+    await drain();
+    expect(sent.map(item => [item.to, item.title])).toEqual([[token("theirs"), "Úloha na kontrolu"]]);
+    expect(fake.db.storage("motorist_notifications").filter(row => String(row.dedupe_key).startsWith("task-review:")).map(row => row.status)).toEqual(["unread", "unread"]);
   });
 
   it("notifies a newly assigned dispatcher of a case, but not someone who took it", async () => {

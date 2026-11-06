@@ -7,13 +7,14 @@ import { createDraftStorage } from "../drafts/storage";
 import { formLayout } from "../design/form";
 import { Button, ErrorNotice, Loading, styles } from "../ui";
 import { createEmployeeTasksApi } from "../tasks/api";
+import { createUploadFiles } from "../field-work/upload-files";
 import { EmployeeTasksStore } from "../tasks/store";
 import { EmployeeTasks } from "../tasks/ui";
 
 type Props = {
   config: MobileConfig; userId: string; memberId: string; organizationId: string;
   getToken: () => Promise<string | null>; current: () => boolean;
-  active: boolean; onLeave: () => void;
+  active: boolean; onLeave: () => void; openTaskRequest?: { taskId: string | null; nonce: number };
 };
 type Resource = { vault: DraftVault; store: EmployeeTasksStore | null };
 
@@ -45,7 +46,8 @@ export function FieldEmployeeTaskWorkspace(props: Props) {
           current: isCurrent, revalidate: async () => { await api.directory(); if (!isCurrent()) throw new Error("Prihlásenie sa zmenilo."); } });
         if (!isCurrent()) { vault.close(); return; }
         if (vault.snapshot().ready) store = new EmployeeTasksStore(api, userId, { id: randomUUID,
-          createPort: vault.bind("employee-task-create", userId), commandPort: id => vault!.bind("employee-task-command", id) });
+          createPort: vault.bind("employee-task-create", userId), commandPort: id => vault!.bind("employee-task-command", id), photoPort: id => vault!.bind("employee-task-photo", id),
+          photoFiles: createUploadFiles(["task", config.environment, new URL(config.supabaseUrl).hostname.split(".")[0], userId, organizationId].join(".")) });
         setResource({ vault, store }); setError(null);
       } catch (failure) {
         store?.dispose(); vault?.close();
@@ -54,7 +56,7 @@ export function FieldEmployeeTaskWorkspace(props: Props) {
     }
     void open();
     return () => { alive = false; controller.abort(); unsubscribe(); store?.dispose(); vault?.close(); };
-  }, [api, current, scope, userId, attempt]);
+  }, [api, config.environment, config.supabaseUrl, organizationId, current, scope, userId, attempt]);
   const retry = () => { setResource(null); setError(null); setAttempt(value => value + 1); };
   if (!resource) return <ScrollView contentContainerStyle={formLayout.content}><View style={formLayout.notices}>
     {error ? <ErrorNotice message={error} onRetry={retry} /> : <Loading label="Overujem prístup a obnovujem koncepty úloh…" />}
@@ -78,6 +80,6 @@ function FieldTasksReady({ resource, retry, ...props }: Props & { resource: Reso
       }} /><Button label="Zahodiť miestne koncepty úloh" secondary disabled={state.busy || state.saving} onPress={discard} /></>}
     </View>}
     {resource.store && state.ready ? <EmployeeTasks config={props.config} getToken={props.getToken} userId={props.userId}
-      organizationId={props.organizationId} store={resource.store} active={props.active} onLeave={props.onLeave} /> : null}
+      organizationId={props.organizationId} store={resource.store} active={props.active} onLeave={props.onLeave} openTaskRequest={props.openTaskRequest} /> : null}
   </View>;
 }

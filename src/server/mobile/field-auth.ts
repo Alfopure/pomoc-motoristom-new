@@ -75,10 +75,9 @@ export async function requireMobilePerson(request: Request): Promise<MobilePerso
   let dispatcher: MotoristActor | null = null;
   try { dispatcher = await requireMobileActor(request); }
   catch (error) { if (!(error instanceof MutationError) || error.code !== "mobile_no_dispatch_profile") throw error; }
-  if (!dispatcher) return { dispatcher: null, field: await requireMobileMember(request) };
-  // Without deliveries (switched off, no delivery role, a passing failure) a
-  // dispatcher stays a dispatcher.
-  if (!mobileDeliveryEnabled()) return { dispatcher, field: null };
-  try { return { dispatcher, field: await requireMobileMember(request) }; }
+  // Push registration represents the employee, independently of whether delivery
+  // operations are enabled. Task-only field staff still need their own phone.
+  if (!dispatcher) return { dispatcher: null, field: await requireMobileMemberIdentity(request) };
+  try { return { dispatcher, field: await requireMobileMemberIdentity(request) }; }
   catch { return { dispatcher, field: null }; }
 }

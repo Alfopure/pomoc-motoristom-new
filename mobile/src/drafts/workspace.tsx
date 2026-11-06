@@ -12,6 +12,7 @@ import { createCasesApi, type CasesApi } from "../cases/api";
 import { Cases, type CaseOpenRequest } from "../cases/ui";
 import { EmployeeTasks } from "../tasks/ui";
 import { createEmployeeTasksApi } from "../tasks/api";
+import { createUploadFiles } from "../field-work/upload-files";
 import { EmployeeTasksStore } from "../tasks/store";
 import { WorkStore } from "../work/store";
 import { createToolsApi } from "../tools/api";
@@ -190,11 +191,11 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
   useEffect(() => {
     // Field notices (Pristavenia, Moja práca, Pobočka) open under the member's own id.
     if (!tap || isFieldTap(tap.target) || !current()) return;
-    const target = pushTaps.take(verified.profileId);
-    if (target?.kind === "task") { setTaskRequest({ taskId: target.id, nonce: ++request.current }); onView("tasks"); }
+    const target = pushTaps.take(verified.profileId, props.userId);
+    if (target?.kind === "task" || target?.kind === "employee-task") { setTaskRequest({ taskId: target.id, nonce: ++request.current }); onView("tasks"); }
     else if (target?.kind === "case") { setCaseRequest({ kind: "detail", id: target.id, nonce: ++request.current }); onView("cases"); }
     else if (target?.kind === "callbacks") onView("callbacks");
-  }, [tap, current, verified.profileId, onView]);
+  }, [tap, current, verified.profileId, props.userId, onView]);
   useEffect(() => {
     if (!callCase || consumedCallCase.current === callCase.nonce || !current()) return;
     consumedCallCase.current = callCase.nonce;
@@ -207,6 +208,9 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
   function resume(record: StoredDraft) {
     if (record.kind === "employee-task-create") {
       setTaskRequest({ taskId: null, nonce: ++request.current }); props.onView("tasks");
+    } else if (record.kind === "employee-task-photo") {
+      const photo = (record.payload as { photo?: { taskId?: unknown } }).photo;
+      setTaskRequest({ taskId: draftId(photo?.taskId) ? photo.taskId : null, nonce: ++request.current }); props.onView("tasks");
     } else if (record.kind === "task-state" || record.kind === "employee-task-command") {
       if (record.resourceId) { setTaskRequest({ taskId: record.resourceId, nonce: ++request.current }); props.onView("tasks"); }
     } else { setCaseRequest({ kind: record.kind, id: record.resourceId, nonce: ++request.current }); props.onView("cases"); }
@@ -280,7 +284,8 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
   const employeeApi = useMemo(() => createEmployeeTasksApi(props.config, props.getToken, props.userId, props.verified.organizationId),
     [props.config, props.getToken, props.userId, props.verified.organizationId]);
   const employeeStore = useMemo(() => new EmployeeTasksStore(employeeApi, props.userId, { id: randomUUID,
-    createPort: vault.bind("employee-task-create", props.userId), commandPort: id => vault.bind("employee-task-command", id) }), [employeeApi, props.userId, vault]);
+    createPort: vault.bind("employee-task-create", props.userId), commandPort: id => vault.bind("employee-task-command", id), photoPort: id => vault.bind("employee-task-photo", id),
+    photoFiles: createUploadFiles(["task", props.config.environment, new URL(props.config.supabaseUrl).hostname.split(".")[0], props.userId, props.verified.organizationId].join(".")) }), [employeeApi, props.config.environment, props.config.supabaseUrl, props.userId, props.verified.organizationId, vault]);
   useEffect(() => () => employeeStore.dispose(), [employeeStore]);
   const caseKey = useMemo(() => [...queryKey, "cases", identity.profileId], [queryKey, identity.profileId]);
   const visible = operationViews.includes(view);
@@ -352,7 +357,7 @@ function Account(props: Props) {
     </Group>
   </View>;
 }
-const labels: Record<DraftKind, string> = { "case-create": "Nový prípad", "case-edit": "Úprava prípadu", "case-note": "Poznámka prípadu", "case.owner": "Priradenie dispečera", "task-create": "Nová úloha prípadu", "task-state": "Správa alebo stav úlohy", "employee-task-create": "Nová úloha", "employee-task-command": "Rozpracovaná zmena úlohy", handoff: "Odovzdanie prípadu", attachment: "Príloha prípadu" };
+const labels: Record<DraftKind, string> = { "case-create": "Nový prípad", "case-edit": "Úprava prípadu", "case-note": "Poznámka prípadu", "case.owner": "Priradenie dispečera", "task-create": "Nová úloha prípadu", "task-state": "Správa alebo stav úlohy", "employee-task-create": "Nová úloha", "employee-task-command": "Rozpracovaná zmena úlohy", "employee-task-photo": "Fotografia úlohy", handoff: "Odovzdanie prípadu", attachment: "Príloha prípadu" };
 function LocalDrafts({ vault, onResume, onDiscarded, needsReset, deferReset }: { vault: DraftVault; onResume: (record: StoredDraft) => void; onDiscarded: () => void; needsReset: boolean; deferReset: () => void }) {
   const state = useSyncExternalStore(vault.subscribe, vault.snapshot, vault.snapshot), [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   function discard(record?: StoredDraft) {
@@ -376,7 +381,7 @@ function LocalDrafts({ vault, onResume, onDiscarded, needsReset, deferReset }: {
         <DraftAction label="Zahodiť" danger accessibilityLabel={"Zahodiť: " + labels[record.kind]} disabled={busy || state.saving || state.busy} onPress={() => discard(record)} />
       </View>
     </View>)}</Group>}
-    <Text style={account.note}>{!state.records.length && state.ready ? "Zatiaľ bez miestnych konceptov. " : ""}{state.durable ? "Rozpísané údaje ostanú v chránenom úložisku aj po odhlásení. Otvoríte ich po prihlásení do rovnakého účtu. Fotografie a dokumenty sa miestne neuchovávajú." : "Tento náhľad obnoví údaje iba počas otvorenia aplikácie. Fotografie a dokumenty sa miestne neuchovávajú."}</Text>
+    <Text style={account.note}>{!state.records.length && state.ready ? "Zatiaľ bez miestnych konceptov. " : ""}{state.durable ? "Rozpísané údaje ostanú v chránenom úložisku aj po odhlásení. Otvoríte ich po prihlásení do rovnakého účtu. Fotografie úloh čakajúce na nahratie sú dočasne v cache telefónu; systém ich môže odstrániť. Ostatné prílohy sa miestne neuchovávajú." : "Tento náhľad obnoví údaje iba počas otvorenia aplikácie. Fotografie úloh čakajúce na nahratie sú dočasne v cache telefónu; systém ich môže odstrániť. Ostatné prílohy sa miestne neuchovávajú."}</Text>
     <View style={formLayout.notices}>
       {error && <ErrorNotice message={error} />}
       {needsReset && <Button label="Obnoviť formuláre po odstránení" secondary disabled={busy || state.saving || state.busy || !!state.error} onPress={onDiscarded} />}

@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { FlatList, Keyboard, KeyboardAvoidingView, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
 import { ArrowRight, CheckCircle2, Circle, Clock3, Search } from "lucide-react-native";
-import type { EmployeeTask, TaskWorkspaceTarget, TaskWorkspaceView } from "../../../src/lib/mobile-task-workspace";
+import type { EmployeeTask, TaskRecurrenceSchedule, TaskWorkspaceTarget, TaskWorkspaceView } from "../../../src/lib/mobile-task-workspace";
 import type { MobileConfig } from "../lib/config";
 import { useAndroidBack } from "../lib/use-android-back";
 import { useShellBack } from "../shell/back";
@@ -15,7 +15,9 @@ import { palette, radius, space, type } from "../design/tokens";
 import { NAVIGATION_CONTENT_BOTTOM } from "../ui/theme";
 import { createEmployeeTasksApi } from "./api";
 import { EmployeeTasksStore, type EmployeeTaskCommandDraft } from "./store";
-import { customDueDate, duePreset, taskDueLabel, taskOverdue, taskPriorityLabels, taskRecipientLabel, taskStateLabels } from "./presentation";
+import { ChecklistEditor, RecurrenceEditor } from "./editors";
+import { PhotoSelection, TaskPhotoList } from "./photo-ui";
+import { customDueDate, duePreset, taskRecurrenceIssue, taskWeekdays, dueDateInput, taskDayKey, taskDueLabel, taskOverdue, taskPriorityLabels, taskRecipientLabel, taskStateLabels } from "./presentation";
 
 export type EmployeeTasksProps = {
   config: MobileConfig; getToken: () => Promise<string | null>; userId: string; organizationId?: string;
@@ -38,6 +40,8 @@ function EmployeeTasksWorkspace({ store: supplied, ...props }: EmployeeTasksProp
   const state = useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
   const cache = useQueryClient();
   const prefix = useMemo(() => ["employee-tasks", props.config.environment, props.userId, props.organizationId ?? ""], [props.config.environment, props.userId, props.organizationId]);
+  const directory = useQuery({ queryKey: [...prefix, "directory", ""], queryFn: ({ signal }) => store.api.directory("", signal), enabled: props.active, staleTime: 60_000 });
+  const timeZone = directory.data?.timeZone;
   const [page, setPage] = useState<Page>({ kind: "list" });
   const [handled, setHandled] = useState<string | null>(null);
   const requested = props.openTaskRequest;
@@ -50,7 +54,7 @@ function EmployeeTasksWorkspace({ store: supplied, ...props }: EmployeeTasksProp
   useEffect(() => () => { if (!supplied) store.dispose(); }, [supplied, store]);
   const refresh = () => { void cache.invalidateQueries({ queryKey: prefix }); };
   const saved = (id: string) => { refresh(); setPage({ kind: "detail", id }); };
-  const startCreate = () => { store.beginCreate(); setPage({ kind: "create" }); };
+  const startCreate = () => { void store.beginCreate().then(ready => { if (ready) setPage({ kind: "create" }); }); };
   const back = () => setPage(page.kind === "target" && page.returnTo === "detail" && page.task ? { kind: "detail", id: page.task.id } : page.kind === "target" || page.kind === "due" ? { kind: "create" } : { kind: "list" });
   useAndroidBack(props.active && page.kind === "list" && Boolean(props.onLeave), () => props.onLeave?.());
   if (state.revoked) return <ScrollView contentContainerStyle={s.content}><ErrorNotice message="Prístup k úlohám sa zmenil. Obnovte prihlásenie, aby sa overili aktuálne oprávnenia." /></ScrollView>;
@@ -68,12 +72,12 @@ function EmployeeTasksWorkspace({ store: supplied, ...props }: EmployeeTasksProp
         }
       }} />;
   }
-  if (page.kind === "due") return <DuePicker active={props.active} current={state.create.input.dueAt ?? null} onBack={back} onSelect={dueAt => { store.editCreate({ dueAt }); setPage({ kind: "create" }); }} />;
-  if (page.kind === "create") return <CreateTask store={store} active={props.active} onBack={back} onSaved={saved}
+  if (page.kind === "due") return <DuePicker key={directory.isPending ? "pending" : timeZone ?? "local"} timeZone={timeZone} loading={directory.isPending} loadError={directory.isError && !directory.data} onReload={() => { void directory.refetch(); }} active={props.active} current={state.create.input.dueAt ?? null} onBack={back} onSelect={dueAt => { store.editCreate({ dueAt }); setPage({ kind: "create" }); }} />;
+  if (page.kind === "create") return <CreateTask store={store} timeZone={timeZone} active={props.active} onBack={back} onSaved={saved}
     onTarget={() => setPage({ kind: "target", returnTo: "create" })} onDue={() => setPage({ kind: "due" })} />;
-  if (page.kind === "detail") return <TaskDetail key={page.id} id={page.id} store={store} queryKey={prefix} active={props.active} onBack={back} onChanged={refresh}
+  if (page.kind === "detail") return <TaskDetail key={page.id} id={page.id} timeZone={timeZone} store={store} queryKey={prefix} active={props.active} onBack={back} onChanged={refresh}
     onAssign={task => setPage({ kind: "target", returnTo: "detail", task })} onOpenCase={props.onOpenCase} />;
-  return <TaskList store={store} queryKey={prefix} active={props.active} onCreate={startCreate} onOpen={id => setPage({ kind: "detail", id })} />;
+  return <TaskList store={store} timeZone={timeZone} queryKey={prefix} active={props.active} onCreate={startCreate} onOpen={id => setPage({ kind: "detail", id })} />;
 }
 
 function TaskChoice({ label, selected, onPress, disabled }: { label: string; selected: boolean; onPress: () => void; disabled?: boolean }) {
@@ -83,15 +87,26 @@ function TaskChoice({ label, selected, onPress, disabled }: { label: string; sel
   </Pressable>;
 }
 
-function TaskList({ store, queryKey, active, onCreate, onOpen }: { store: EmployeeTasksStore; queryKey: string[]; active: boolean; onCreate: () => void; onOpen: (id: string) => void }) {
+function TaskList({ store, queryKey, active, onCreate, onOpen, timeZone }: { timeZone?: string; store: EmployeeTasksStore; queryKey: string[]; active: boolean; onCreate: () => void; onOpen: (id: string) => void }) {
   const state = useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
   const [view, setView] = useState<TaskWorkspaceView>("mine");
-  const [done, setDone] = useState(false), [search, setSearch] = useState(""), [q, setQuery] = useState("");
+  const [done, setDone] = useState(false), [dueFilter, setDueFilter] = useState<"all" | "today" | "overdue">("all"), [search, setSearch] = useState(""), [q, setQuery] = useState("");
   useEffect(() => { const id = setTimeout(() => setQuery(search.trim()), 250); return () => clearTimeout(id); }, [search]);
+  const [now, setNow] = useState(() => new Date());
+  useLayoutEffect(() => {
+    if (!active) return;
+    // Reset the organization-day cursor before painting cached Today results
+    // when returning from suspension across midnight.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setNow(new Date());
+    const timer = setInterval(() => setNow(new Date()), 60_000);
+    return () => clearInterval(timer);
+  }, [active]);
+  const day = taskDayKey(now, timeZone);
   const pendingSearch = q !== search.trim();
-  const query = useInfiniteQuery({ queryKey: [...queryKey, "list", view, done, q], enabled: active && !pendingSearch,
+  const query = useInfiniteQuery({ queryKey: [...queryKey, "list", view, done, dueFilter, q, dueFilter === "all" ? null : day], enabled: active && !pendingSearch,
     initialPageParam: null as string | null,
-    queryFn: ({ pageParam, signal }) => store.api.list({ view, category: done ? "done" : "open", q, cursor: pageParam }, signal),
+    queryFn: ({ pageParam, signal }) => store.api.list({ view, category: done ? "done" : "open", dueFilter: done ? "all" : dueFilter, q, cursor: pageParam }, signal),
     getNextPageParam: page => page.nextCursor ?? undefined,
     refetchInterval: active ? 60_000 : false,
   });
@@ -102,16 +117,19 @@ function TaskList({ store, queryKey, active, onCreate, onOpen }: { store: Employ
   const blocked = pendingSearch || query.isPending || query.isError && !query.isFetchNextPageError;
   return <FlatList data={blocked ? [] : tasks} keyExtractor={task => task.id} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={s.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { if (!pendingSearch) void query.refetch(); }} />}
-    renderItem={({ item }) => <View style={s.taskGroup}><TaskRow task={item} first onPress={() => onOpen(item.id)} /></View>}
+    renderItem={({ item }) => <View style={s.taskGroup}><TaskRow task={item} timeZone={timeZone} first onPress={() => onOpen(item.id)} /></View>}
     ListHeaderComponent={<View style={s.listHeader}>
     <View style={s.headingRow}><Text accessibilityRole="header" style={s.heading}>Úlohy</Text><Button primary label="+ Nová úloha" onPress={onCreate} /></View>
     <Text style={s.muted}>Jednoducho zadať. Jasne vidieť, kto rieši.</Text>
+    {draft.status === "saved" && draft.error ? <ErrorNotice message={draft.error} /> : null}
     {resume ? <Card><Text style={s.rowTitle}>{draft.status === "uncertain" ? "Vytvorenie čaká na overenie" : "Máte rozpracovanú úlohu"}</Text>
       {draft.input.title ? <Text style={s.body}>{draft.input.title}</Text> : null}<Button label={draft.status === "uncertain" ? "Overiť pôvodné vytvorenie" : "Pokračovať v úlohe"} secondary onPress={onCreate} /></Card> : null}
     <View style={s.choices}>{([["mine", "Moje"], ["branch", "Pobočka"], ["created", "Zadané mnou"]] as const).map(([value, label]) => <TaskChoice key={value} label={label} selected={view === value} onPress={() => setView(value)} />)}</View>
     <View style={s.search}><Search size={18} color={palette.secondaryLabel} accessible={false} /><TextInput accessibilityLabel="Hľadať úlohu" placeholder="Hľadať úlohu" placeholderTextColor={palette.tertiaryLabel}
       value={search} onChangeText={setSearch} maxLength={200} returnKeyType="search" autoCorrect={false} style={s.searchInput} /></View>
     <View style={s.filterRow}><View style={s.choices}><TaskChoice label="Na kontrolu" selected={view === "review"} onPress={() => setView(view === "review" ? "mine" : "review")} />
+      <TaskChoice label="Dnes" selected={!done && dueFilter === "today"} onPress={() => { setDone(false); setDueFilter(dueFilter === "today" ? "all" : "today"); }} />
+      <TaskChoice label="Po termíne" selected={!done && dueFilter === "overdue"} onPress={() => { setDone(false); setDueFilter(dueFilter === "overdue" ? "all" : "overdue"); }} />
       <TaskChoice label="Hotové" selected={done} onPress={() => setDone(!done)} /></View><Text style={s.caption}>{hints[view]}</Text></View>
     </View>}
     ListEmptyComponent={pendingSearch || query.isPending ? <Loading label="Načítavam úlohy…" /> : query.isError && !query.isFetchNextPageError ? <ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} /> :
@@ -123,38 +141,47 @@ function TaskList({ store, queryKey, active, onCreate, onOpen }: { store: Employ
     </View> : null} />;
 }
 
-export function TaskRow({ task, first, onPress }: { task: EmployeeTask; first?: boolean; onPress: () => void }) {
+export function TaskRow({ task, first, onPress, timeZone }: { timeZone?: string; task: EmployeeTask; first?: boolean; onPress: () => void }) {
   const overdue = taskOverdue(task), Icon = task.state === "done" ? CheckCircle2 : task.state === "in_review" ? Clock3 : Circle;
   const recipient = taskRecipientLabel(task);
-  return <Pressable accessibilityRole="button" accessibilityLabel={[task.title, taskStateLabels[task.state], recipient, overdue ? "Po termíne" : null, taskDueLabel(task.dueAt)].filter(Boolean).join(". ")}
+  return <Pressable accessibilityRole="button" accessibilityLabel={[task.title, taskStateLabels[task.state], recipient, overdue ? "Po termíne" : null, taskDueLabel(task.dueAt, undefined, timeZone)].filter(Boolean).join(". ")}
     onPress={onPress} style={({ pressed }) => [s.taskRow, pressed && { backgroundColor: palette.fill }]}>
     {!first ? <View style={s.separator} /> : null}
     <Icon size={22} strokeWidth={1.8} color={task.state === "done" ? palette.greenText : palette.secondaryLabel} accessible={false} />
     <View style={s.grow}><Text style={s.rowTitle}>{task.title}</Text><Text style={s.caption}>{recipient}</Text>
-      <View style={s.taskMeta}><Tag text={taskStateLabels[task.state]} tone={tones[task.state]} />{task.dueAt ? <Text style={[s.caption, overdue && s.overdue]}>{overdue ? "Po termíne · " : ""}{taskDueLabel(task.dueAt)}</Text> : null}</View>
+      <View style={s.taskMeta}>{task.checklist?.length ? <Text style={s.caption}>{task.checklist.filter(item => item.done).length}/{task.checklist.length} bodov</Text> : null}{task.recurrence ? <Text style={s.caption}>Opakuje sa</Text> : null}<Tag text={taskStateLabels[task.state]} tone={tones[task.state]} />{task.dueAt ? <Text style={[s.caption, overdue && s.overdue]}>{overdue ? "Po termíne · " : ""}{taskDueLabel(task.dueAt, undefined, timeZone)}</Text> : null}</View>
     </View><ArrowRight size={17} color={palette.tertiaryLabel} accessible={false} />
   </Pressable>;
 }
 
-function CreateTask({ store, active, onBack, onSaved, onTarget, onDue }: { store: EmployeeTasksStore; active: boolean; onBack: () => void; onSaved: (id: string) => void; onTarget: () => void; onDue: () => void }) {
+function CreateTask({ store, active, onBack, onSaved, onTarget, onDue, timeZone }: { timeZone?: string; store: EmployeeTasksStore; active: boolean; onBack: () => void; onSaved: (id: string) => void; onTarget: () => void; onDue: () => void }) {
   const { create: state } = useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
-  const [more, setMore] = useState(Boolean(state.input.description || state.input.priority !== "normal"));
-  const saving = state.status === "saving", editable = state.status === "editing";
+  useSyncExternalStore(store.photos.subscribe, store.photos.snapshot, store.photos.snapshot);
+  const selectedPhotoKey = state.receipt ? store.photos.forTask(state.receipt.task.id) : store.userId;
+  const selectedPhoto = store.photos.get(selectedPhotoKey);
+  const [more, setMore] = useState(Boolean(state.input.description || state.input.priority !== "normal" || state.input.checklist?.length || state.input.recurrence));
+  const saving = state.status === "saving" || selectedPhoto.status === "saving", editable = state.status === "editing" && !saving;
   useShellBack(active, "Úlohy", onBack, saving);
   useAndroidBack(active && !saving, onBack);
-  const submit = async (retry = false) => { Keyboard.dismiss(); const receipt = await (retry ? store.retryCreate() : store.create()); if (receipt) onSaved(receipt.task.id); };
+  const submit = async (retry = false) => {
+    Keyboard.dismiss(); const receipt = await (retry ? store.retryCreate() : store.create());
+    if (receipt) { if (store.photos.get(store.userId).photo) await store.photos.upload(store.userId, receipt.task); onSaved(receipt.task.id); }
+  };
   return <KeyboardAvoidingView style={s.fill} behavior={Platform.OS === "ios" ? "padding" : undefined}><ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={formLayout.content}>
     <View style={formLayout.head}><Text accessibilityRole="header" style={s.heading}>Nová úloha</Text><Text style={s.muted}>Čo treba urobiť a komu to patrí.</Text></View>
     <FormSection><Field label="Čo treba urobiť?" placeholder="Napr. pripraviť auto na zajtra" value={state.input.title} onChangeText={title => store.editCreate({ title })} maxLength={500} multiline editable={editable} autoFocus />
       <PickerRow label="Komu" value={state.input.targetLabel} onPress={onTarget} disabled={!editable} />
-      <PickerRow label="Termín" value={taskDueLabel(state.input.dueAt ?? null)} onPress={onDue} disabled={!editable} /></FormSection>
+      <PickerRow label="Termín" value={taskDueLabel(state.input.dueAt ?? null, undefined, timeZone)} onPress={onDue} disabled={!editable} /></FormSection>
     <View style={s.inset}><TaskChoice label={more ? "Skryť ďalšie možnosti" : "Ďalšie možnosti"} selected={more} onPress={() => setMore(!more)} disabled={!editable} /></View>
-    {more ? <FormSection title="Podrobnosti"><Field label="Popis (voliteľný)" placeholder="Čo má kolega vedieť?" multiline value={state.input.description ?? ""} onChangeText={description => store.editCreate({ description })} maxLength={10_000} editable={editable} />
-      <ChoiceField label="Priorita">{(["normal", "high", "urgent", "low"] as const).map(priority => <TaskChoice key={priority} label={taskPriorityLabels[priority]} selected={state.input.priority === priority} onPress={() => store.editCreate({ priority })} disabled={!editable} />)}</ChoiceField></FormSection> : null}
+    {more ? <><FormSection title="Podrobnosti"><Field label="Popis (voliteľný)" placeholder="Čo má kolega vedieť?" multiline value={state.input.description ?? ""} onChangeText={description => store.editCreate({ description })} maxLength={10_000} editable={editable} />
+      <ChoiceField label="Priorita">{(["normal", "high", "urgent", "low"] as const).map(priority => <TaskChoice key={priority} label={taskPriorityLabels[priority]} selected={state.input.priority === priority} onPress={() => store.editCreate({ priority })} disabled={!editable} />)}</ChoiceField></FormSection>
+      <ChecklistEditor items={state.input.checklist ?? []} onChange={checklist => store.editCreate({ checklist })} disabled={!editable} />
+      <RecurrenceEditor timeZone={timeZone} value={state.input.recurrence} onChange={recurrence => store.editCreate({ recurrence })} disabled={!editable} /></> : null}
+    {editable || selectedPhoto.photo ? <PhotoSelection photos={store.photos} photoKey={selectedPhotoKey} active={active} disabled={saving} /> : null}
     <View style={formLayout.actions}>{state.error ? <ErrorNotice message={state.error} /> : null}
       {state.status === "uncertain" ? <Button primary label="Overiť pôvodné vytvorenie" onPress={() => { void submit(true); }} /> : state.status === "saved" && state.receipt ? <Button primary label="Otvoriť vytvorenú úlohu" onPress={() => onSaved(state.receipt!.task.id)} /> :
         <Button primary label={saving ? "Vytváram…" : "Vytvoriť úlohu"} disabled={!editable || !state.input.title.trim()} onPress={() => { void submit(); }} />}
-      {editable && state.input.title ? <Button secondary label="Zahodiť koncept" onPress={() => { store.discardCreate(); onBack(); }} /> : null}
+      {editable && state.input.title ? <Button secondary label="Zahodiť koncept" onPress={() => { void store.photos.discard(store.userId).then(() => { if (!store.photos.get(store.userId).photo) { store.discardCreate(); onBack(); } }); }} /> : null}
       <Text style={s.caption}>Úloha zostane uložená aj bez pripojenia ku konkrétnemu prípadu.</Text>
     </View>
   </ScrollView></KeyboardAvoidingView>;
@@ -188,28 +215,39 @@ function TargetPicker({ store, queryKey, active, selected, onBack, onSelect, bus
   </ScrollView>;
 }
 
-function DuePicker({ active, current, onBack, onSelect }: { active: boolean; current: string | null; onBack: () => void; onSelect: (date: string | null) => void }) {
-  const existing = current ? new Date(current) : new Date();
-  const [date, setDate] = useState(`${existing.getDate()}. ${existing.getMonth() + 1}. ${existing.getFullYear()}`);
-  const [time, setTime] = useState(current ? `${String(existing.getHours()).padStart(2, "0")}:${String(existing.getMinutes()).padStart(2, "0")}` : "17:00");
+function DuePicker({ active, current, onBack, onSelect, timeZone, loading, loadError, onReload }: {
+  active: boolean; current: string | null; onBack: () => void; onSelect: (date: string | null) => void;
+  timeZone?: string; loading: boolean; loadError: boolean; onReload: () => void;
+}) {
+  const [openedAt] = useState(() => new Date());
+  const [initial] = useState(() => dueDateInput(current ? new Date(current) : openedAt, timeZone));
+  const [date, setDate] = useState(initial.date);
+  const [time, setTime] = useState(current ? initial.time : "17:00");
   const [error, setError] = useState<string | null>(null);
   useShellBack(active, "Nová úloha", onBack);
   useAndroidBack(active, onBack);
+  if (loading || loadError) return <ScrollView contentContainerStyle={s.content}>{loading ? <Loading label="Načítavam časové pásmo organizácie…" /> : <ErrorNotice message="Časové pásmo organizácie sa nepodarilo načítať. Skúste znova." onRetry={onReload} />}</ScrollView>;
   return <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={formLayout.content}>
-    <View style={formLayout.head}><Text accessibilityRole="header" style={s.heading}>Dokedy?</Text><Text style={s.muted}>Termín je voliteľný.</Text></View>
-    <FormSection>{([[null, "Bez termínu"], [duePreset(0), "Dnes do konca dňa"], [duePreset(1), "Zajtra do konca dňa"], [duePreset(7), "O týždeň"]] as const).map(([value, label]) => <SelectRow key={label} label={label} selected={current === value} onPress={() => onSelect(value)} />)}</FormSection>
+    <View style={formLayout.head}><Text accessibilityRole="header" style={s.heading}>Dokedy?</Text><Text style={s.muted}>{timeZone ? `Termín je voliteľný. Časové pásmo: ${timeZone}.` : "Termín je voliteľný."}</Text></View>
+    <FormSection>{([[null, "Bez termínu"], [0, "Dnes do konca dňa"], [1, "Zajtra do konca dňa"], [7, "O týždeň"]] as const).map(([days, label]) => <SelectRow key={label} label={label}
+      selected={current === (days === null ? null : duePreset(days, openedAt, timeZone))} onPress={() => onSelect(days === null ? null : duePreset(days, new Date(), timeZone))} />)}</FormSection>
     <FormSection title="Iný termín"><Field label="Dátum" placeholder="18. 11. 2026" value={date} onChangeText={setDate} maxLength={20} keyboardType="numbers-and-punctuation" />
       <Field label="Čas" placeholder="17:00" value={time} onChangeText={setTime} maxLength={5} keyboardType="numbers-and-punctuation" /></FormSection>
-    <View style={formLayout.actions}>{error ? <ErrorNotice message={error} /> : null}<Button primary label="Použiť tento termín" onPress={() => { try { onSelect(customDueDate(date, time)); } catch (caught) { setError(errorMessage(caught)); } }} /></View>
+    <View style={formLayout.actions}>{error ? <ErrorNotice message={error} /> : null}<Button primary label="Použiť tento termín" onPress={() => { try { onSelect(current && date === initial.date && time === initial.time ? current : customDueDate(date, time, timeZone)); } catch (caught) { setError(errorMessage(caught)); } }} /></View>
   </ScrollView>;
 }
 
-function TaskDetail({ id, store, queryKey, active, onBack, onAssign, onChanged, onOpenCase }: {
-  id: string; store: EmployeeTasksStore; queryKey: string[]; active: boolean; onBack: () => void;
+function TaskDetail({ id, store, queryKey, active, onBack, onAssign, onChanged, onOpenCase, timeZone }: {
+  timeZone?: string; id: string; store: EmployeeTasksStore; queryKey: string[]; active: boolean; onBack: () => void;
   onAssign: (task: EmployeeTask) => void; onChanged: () => void; onOpenCase?: (id: string) => void;
 }) {
   useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
   const write = store.commandState(id);
+  useSyncExternalStore(store.photos.subscribe, store.photos.snapshot, store.photos.snapshot);
+  const photoKey = store.photos.forTask(id), pendingPhoto = store.photos.get(photoKey);
+  const [completionAction, setCompletionAction] = useState<"complete" | "approve" | null>(null);
+  const [completionResult, setCompletionResult] = useState(false);
+  const [detailsMore, setDetailsMore] = useState(Boolean(write.checklistDraft || write.recurrenceDraft));
   const [reviewAction, setReviewAction] = useState<"submit_review" | "return" | null>(null);
   const query = useInfiniteQuery({ queryKey: [...queryKey, "detail", id], enabled: active, initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) => store.api.detail(id, pageParam, signal), getNextPageParam: page => page.nextActivityCursor ?? undefined });
@@ -219,13 +257,27 @@ function TaskDetail({ id, store, queryKey, active, onBack, onAssign, onChanged, 
   const task = query.data?.pages[0]?.task;
   const run = async (input: EmployeeTaskCommandDraft) => {
     Keyboard.dismiss(); const result = await store.command(id, input);
-    if (result) { setReviewAction(null); onChanged(); void query.refetch(); }
+    if (result) { setReviewAction(null); setCompletionAction(null); setCompletionResult(false); onChanged(); void query.refetch(); }
     else if (store.commandState(id).status !== "uncertain") void query.refetch();
   };
   const retry = async () => { const receipt = await store.retryCommand(id); if (receipt) { setReviewAction(null); onChanged(); void query.refetch(); } };
   if (query.isPending) return <ScrollView contentContainerStyle={s.content}><Loading label="Načítavam úlohu…" /></ScrollView>;
   if (query.isError && !query.isFetchNextPageError || !task) return <ScrollView contentContainerStyle={s.content}><ErrorNotice message={errorMessage(query.error)} onRetry={() => { void query.refetch(); }} /></ScrollView>;
-  const permissions = task.permissions, disabled = saving || uncertain || query.isRefetching;
+  const permissions = task.permissions, disabled = saving || uncertain || query.isRefetching || pendingPhoto.status === "saving";
+  const incomplete = task.checklist?.some(item => !item.done) ?? false;
+  const finish = async (withoutPhoto = false) => {
+    if (!completionAction) return;
+    let revision = task.revision;
+    if (pendingPhoto.photo) {
+      if (withoutPhoto) { await store.photos.discard(photoKey); if (store.photos.get(photoKey).photo) return; }
+      else { const receipt = await store.photos.upload(photoKey, task); if (!receipt) return; revision = receipt.task.revision; onChanged(); }
+    }
+    if (completionResult && write.draftText.trim()) {
+      const receipt = await store.command(id, { action: "comment", body: write.draftText.trim(), expectedRevision: revision });
+      if (!receipt) return; revision = receipt.task.revision;
+    }
+    await run({ action: completionAction, expectedRevision: revision, ...(incomplete ? { allowIncompleteChecklist: true } : {}) });
+  };
   const activities = [...new Map(query.data?.pages.flatMap(page => page.activity).map(item => [item.id, item]) ?? []).values()]
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   let primary: { label: string; action: "claim" | "start" | "complete" | "reopen" | "approve" } | null = null;
@@ -242,15 +294,65 @@ function TaskDetail({ id, store, queryKey, active, onBack, onAssign, onChanged, 
       meta={task.createdBy ? "Zadal/a " + task.createdBy.displayName : null} />
     <View style={s.inset}>{write.error ? <ErrorNotice message={write.error} /> : null}
       {uncertain ? <Button primary label="Overiť pôvodnú požiadavku" onPress={() => { void retry(); }} /> : <>
-        {primary ? <Button primary label={saving ? "Ukladám…" : primary.label} disabled={disabled} onPress={() => { if (primary) void run({ action: primary.action, expectedRevision: task.revision }); }} /> : null}
+        {primary && !completionAction ? <Button primary label={saving ? "Ukladám…" : primary.label} disabled={disabled} onPress={() => {
+          if (!primary) return;
+          if ((primary.action === "complete" || primary.action === "approve") && (incomplete || pendingPhoto.photo)) setCompletionAction(primary.action);
+          else void run({ action: primary.action, expectedRevision: task.revision });
+        }} /> : null}
+        {permissions.complete && permissions.attach && !completionAction ? <Button secondary label="Dokončiť s výsledkom alebo fotkou" disabled={disabled} onPress={() => { setCompletionAction("complete"); setCompletionResult(true); }} /> : null}
         {permissions.submitReview && task.reviewer ? <Button primary={!primary} secondary={Boolean(primary)} label="Odovzdať na kontrolu" disabled={disabled} onPress={() => setReviewAction("submit_review")} /> : null}
         {permissions.assign ? <Button secondary label={task.group && !task.assignee ? "Prideliť kolegovi" : "Zmeniť riešiteľa"} disabled={disabled} onPress={() => onAssign(task)} /> : null}
         {permissions.return ? <Button secondary label="Vrátiť na dopracovanie" disabled={disabled} onPress={() => setReviewAction("return")} /> : null}
       </>}
     </View>
+    {completionAction ? <View style={s.inset}><Card><Text style={s.rowTitle}>{completionAction === "approve" ? "Schváliť úlohu?" : "Dokončiť úlohu?"}</Text>
+      {incomplete ? <Text style={s.muted}>Niektoré body checklistu ešte nie sú hotové. Dokončenie ich samo neodškrtne.</Text> : null}
+      {completionResult ? <Field label="Výsledok (voliteľný)" value={write.draftText} onChangeText={value => store.editComment(id, value)} multiline maxLength={10_000} editable={!disabled} /> : null}
+      {completionResult && permissions.attach ? <PhotoSelection photos={store.photos} photoKey={photoKey} task={task} active={active} disabled={disabled} onChanged={() => { onChanged(); void query.refetch(); }} /> : null}
+      <Button primary label={pendingPhoto.photo ? (completionAction === "approve" ? "Nahrať fotku a schváliť" : "Nahrať fotku a dokončiť") : incomplete ? (completionAction === "approve" ? "Schváliť aj s nehotovými bodmi" : "Dokončiť aj s nehotovými bodmi") : "Potvrdiť dokončenie"}
+        disabled={disabled} onPress={() => { void finish(); }} />
+      {pendingPhoto.photo ? <Button secondary label={completionAction === "approve" ? "Schváliť bez fotografie" : "Dokončiť bez fotografie"} disabled={disabled} onPress={() => { void finish(true); }} /> : null}
+      <Button secondary label="Pokračovať v riešení" disabled={disabled} onPress={() => { setCompletionAction(null); setCompletionResult(false); }} />
+    </Card></View> : null}
     <SectionHeader title="Podrobnosti" /><Group><InfoRow first label="Riešiteľ" value={task.assignee?.displayName ?? null} empty={task.group ? "Čaká na pridelenie pobočkou" : "Bez riešiteľa"} />
-      {task.group ? <InfoRow label="Pobočka" value={task.group.name} /> : null}<InfoRow label="Termín" value={taskDueLabel(task.dueAt)} detail={due ? "Termín už uplynul" : null} />
+      {task.group ? <InfoRow label="Pobočka" value={task.group.name} /> : null}<InfoRow label="Termín" value={taskDueLabel(task.dueAt, undefined, timeZone)} detail={due ? "Termín už uplynul" : null} />
       {task.priority !== "normal" ? <InfoRow label="Priorita" value={taskPriorityLabels[task.priority]} /> : null}{task.reviewer ? <InfoRow label="Kontrolór" value={task.reviewer.displayName} /> : null}</Group>
+    {permissions.editChecklist || permissions.manageRecurrence ? <View style={s.inset}><Button secondary label={detailsMore ? "Skryť ďalšie možnosti úlohy" : "Ďalšie možnosti úlohy"} disabled={disabled}
+      onPress={() => setDetailsMore(!detailsMore)} /></View> : null}
+    {(task.checklist?.length || detailsMore && permissions.editChecklist || write.checklistDraft) ? <>
+      {write.checklistDraft ? <><ChecklistEditor items={write.checklistDraft.items} disabled={disabled} onChange={items => store.editChecklist(id, items, write.checklistDraft!.expectedRevision)} />
+        <View style={s.inset}>{write.checklistDraft.expectedRevision !== task.revision ? <><Text style={s.caption}>Úloha sa medzičasom zmenila. Pred uložením skontrolujte aktuálny stav.</Text>
+          <Button secondary label="Použiť checklist na aktuálnu verziu" disabled={disabled} onPress={() => store.editChecklist(id, write.checklistDraft!.items, task.revision)} /></> : null}
+          <Button secondary label="Uložiť checklist" disabled={disabled || write.checklistDraft.expectedRevision !== task.revision} onPress={() => { if (write.checklistDraft) void run({ action: "checklist", items: write.checklistDraft.items, expectedRevision: write.checklistDraft.expectedRevision }); }} />
+          <Button secondary label="Zahodiť úpravu checklistu" disabled={disabled} onPress={() => store.editChecklist(id, null, task.revision)} /></View></> : <>
+        <SectionHeader title="Checklist" detail={task.checklist?.length ? `${task.checklist.filter(item => item.done).length} z ${task.checklist.length} hotové` : null} />
+        {task.checklist?.length ? <Group>{task.checklist.map(item => <SelectRow key={item.id} label={item.title} selected={item.done} disabled={disabled || !permissions.editChecklist}
+          onPress={() => { void run({ action: "checklist", expectedRevision: task.revision, items: task.checklist!.map(row => row.id === item.id ? { ...row, done: !row.done } : row) }); }} />)}</Group> : null}
+        {detailsMore && permissions.editChecklist ? <View style={s.inset}><Button secondary label={task.checklist?.length ? "Upraviť checklist" : "Pridať checklist"} disabled={disabled} onPress={() => store.editChecklist(id, task.checklist ?? [], task.revision)} /></View> : null}
+      </>}
+    </> : null}
+    {task.recurrence || detailsMore && permissions.manageRecurrence || write.recurrenceDraft ? <>
+      <SectionHeader title="Opakovanie" />
+      {task.recurrence?.state === "needs_attention" ? <View style={s.inset}><Card><Text style={s.muted}>{taskRecurrenceIssue(task.recurrence)}</Text></Card></View> : null}
+      {task.recurrence ? <Group><InfoRow first label={task.recurrence.frequency === "daily" ? "Denne" : `Týždenne · ${taskWeekdays[(task.recurrence.weekday ?? 1) - 1]}`} value={task.recurrence.time}
+        detail={`${task.recurrence.state === "active" ? "Aktívne" : task.recurrence.state === "paused" ? "Pozastavené" : "Vyžaduje úpravu príjemcu"} · ${task.recurrence.timeZone}`} />
+        {task.recurrence.nextAt ? <InfoRow label="Ďalšia úloha" value={taskDueLabel(task.recurrence.nextAt)} /> : null}</Group> : null}
+      {write.recurrenceDraft ? <><RecurrenceEditor value={write.recurrenceDraft.schedule} canDisable={false} timeZone={task.recurrence?.timeZone} disabled={disabled}
+        onChange={schedule => { if (schedule) store.editRecurrence(id, schedule as TaskRecurrenceSchedule & { weekday?: number }, write.recurrenceDraft!.expectedRevision, write.recurrenceDraft!.expectedSeriesRevision); }} />
+        <View style={s.inset}><Text style={s.caption}>{task.recurrence ? "Zmena upraví čas a interval opakovania. Názov, príjemca a checklist série zostanú pôvodné." : "Budúce úlohy prevezmú názov, popis, riešiteľa a checklist z tejto úlohy."}</Text>
+          {write.recurrenceDraft.expectedRevision !== task.revision || write.recurrenceDraft.expectedSeriesRevision !== task.recurrence?.revision ? <><Text style={s.caption}>Úloha alebo séria sa medzičasom zmenila. Skontrolujte aktuálne budúce zadania.</Text>
+            <Button secondary label="Použiť návrh na aktuálnu sériu" disabled={disabled} onPress={() => store.editRecurrence(id, write.recurrenceDraft!.schedule, task.revision, task.recurrence?.revision)} /></> : null}
+          <Button secondary label="Uložiť opakovanie" disabled={disabled || task.recurrence?.state === "needs_attention" || write.recurrenceDraft.expectedRevision !== task.revision || write.recurrenceDraft.expectedSeriesRevision !== task.recurrence?.revision} onPress={() => { if (write.recurrenceDraft) void run({ action: "recurrence", schedule: write.recurrenceDraft.schedule, expectedRevision: write.recurrenceDraft.expectedRevision, ...(write.recurrenceDraft.expectedSeriesRevision === undefined ? {} : { expectedSeriesRevision: write.recurrenceDraft.expectedSeriesRevision }) }); }} />
+          <Button secondary label="Zahodiť úpravu opakovania" disabled={disabled} onPress={() => store.editRecurrence(id, null, task.revision)} /></View></> : detailsMore && permissions.manageRecurrence && task.recurrence?.state !== "needs_attention" ? <View style={s.inset}>
+        <Button secondary label={task.recurrence ? "Upraviť budúce úlohy" : "Nastaviť opakovanie"} disabled={disabled} onPress={() => store.editRecurrence(id, task.recurrence ? {
+          frequency: task.recurrence.frequency, time: task.recurrence.time, ...(task.recurrence.frequency === "weekly" ? { weekday: task.recurrence.weekday! } : {}),
+        } : { frequency: "daily", time: "09:00" }, task.revision, task.recurrence?.revision)} />
+        {task.recurrence ? <Button secondary label={task.recurrence.state === "active" ? "Pozastaviť opakovanie" : "Obnoviť opakovanie"} disabled={disabled} onPress={() => { void run({ action: "recurrence", expectedRevision: task.revision, expectedSeriesRevision: task.recurrence!.revision,
+          schedule: task.recurrence!.state === "active" ? null : { frequency: task.recurrence!.frequency, time: task.recurrence!.time, ...(task.recurrence!.frequency === "weekly" ? { weekday: task.recurrence!.weekday! } : {}) } }); }} /> : null}
+      </View> : null}
+    </> : null}
+    <TaskPhotoList task={task} api={store.api} active={active} disabled={disabled} onChanged={() => { onChanged(); void query.refetch(); }} />
+    {!completionResult && (permissions.attach || pendingPhoto.photo) ? <PhotoSelection photos={store.photos} photoKey={photoKey} task={task} active={active} disabled={disabled} onChanged={() => { onChanged(); void query.refetch(); }} /> : null}
     {task.description ? <><SectionHeader title="Čo treba urobiť" /><View style={s.inset}><Card><Text selectable style={s.body}>{task.description}</Text></Card></View></> : null}
     {task.reviewSubmission ? <><SectionHeader title="Odovzdané na kontrolu" /><View style={s.inset}><Card><Text selectable style={s.body}>{task.reviewSubmission}</Text></Card></View></> : null}
     {task.reviewReturnReason ? <><SectionHeader title="Čo treba doplniť" /><View style={s.inset}><Card><Text selectable style={s.body}>{task.reviewReturnReason}</Text></Card></View></> : null}

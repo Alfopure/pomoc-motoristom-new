@@ -1,9 +1,9 @@
-export type PushTarget = { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" } | { kind: "delivery"; id: string }
+export type PushTarget = { kind: "employee-task"; id: string } | { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" } | { kind: "delivery"; id: string }
   | { kind: "operation"; id: string } | { kind: "towing"; id: string } | { kind: "branch-request"; id: string };
 /** Notices addressed to the field member (its member id), opened by the field modules. */
 export const FIELD_TAP_KINDS: readonly PushTarget["kind"][] = ["delivery", "operation", "towing", "branch-request"];
 export const isFieldTap = (target: PushTarget | undefined | null) => Boolean(target && FIELD_TAP_KINDS.includes(target.kind));
-type PushTap = { key: string; profileId: string; target: PushTarget };
+type PushTap = { key: string; profileId: string; target: PushTarget } | { key: string; userId: string; target: { kind: "employee-task"; id: string } };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -12,6 +12,10 @@ export function readPushTap(response: unknown): PushTap | null {
   const request = (response as { notification?: { request?: { identifier?: unknown; content?: { data?: unknown } } } } | null)?.notification?.request;
   const data = request?.content?.data as Record<string, unknown> | null | undefined;
   if (!request || typeof request.identifier !== "string" || !data || typeof data !== "object") return null;
+  if (data.kind === "employee-task") {
+    if (typeof data.userId !== "string" || !UUID.test(data.userId) || typeof data.id !== "string" || !UUID.test(data.id)) return null;
+    return { key: request.identifier, userId: data.userId.toLowerCase(), target: { kind: "employee-task", id: data.id.toLowerCase() } };
+  }
   if (typeof data.profileId !== "string" || !UUID.test(data.profileId)) return null;
   const profileId = data.profileId.toLowerCase();
   if (data.kind === "callbacks") return { key: request.identifier, profileId, target: { kind: "callbacks" } };
@@ -36,13 +40,13 @@ export class PushTapInbox {
     for (const notify of this.listeners) notify();
   }
   /** The target for this operator; a notice sent to another account only opens the app. */
-  take(profileId: string): PushTarget | null {
+  take(profileId: string, userId?: string): PushTarget | null {
     const tap = this.pending;
     if (!tap) return null;
     this.pending = null;
     this.handled.add(tap.key);
     for (const notify of this.listeners) notify();
-    return tap.profileId === profileId.toLowerCase() ? tap.target : null;
+    return "userId" in tap ? tap.userId === userId?.toLowerCase() ? tap.target : null : tap.profileId === profileId.toLowerCase() ? tap.target : null;
   }
 }
 

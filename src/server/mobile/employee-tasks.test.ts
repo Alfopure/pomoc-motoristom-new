@@ -225,3 +225,77 @@ describe("employee task commands and unconfirmed responses", () => {
     expect(JSON.stringify(await response.json())).not.toContain("PRIVATE_SERVICE_KEY_DATABASE_DETAILS");
   });
 });
+
+describe("employee task extensions", () => {
+  const item = { id: groupId, title: "Skontrolovať pneumatiky", done: false };
+  it("explains an inactive recurrence owner without exposing the internal database error", async () => {
+    mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "22023", message: "Task recurrence owner inactive" } });
+    const response = await command(request("POST", "", { ...commandInput(), action: "recurrence", schedule: { frequency: "daily", time: "08:30" } }), context);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "task_recurrence_owner_inactive", error: "Autor série už nemá prístup. Vytvorte novú opakovanú úlohu." });
+  });
+  it("explains an unavailable recurrence recipient with an actionable localized error", async () => {
+    mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "22023", message: "Task recurrence recipient inactive" } });
+    const response = await command(request("POST", "", { ...commandInput(), action: "recurrence", expectedSeriesRevision: 2, schedule: { frequency: "daily", time: "08:30" } }), context);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "task_recurrence_recipient_inactive", error: "Príjemca série už nie je dostupný. Vytvorte novú opakovanú úlohu s platným príjemcom." });
+  });
+  it("forwards server due filters and verifies the response echo/time zone", async () => {
+    result({ ...rpcData("list"), dueFilter: "today", timeZone: "Europe/Bratislava" });
+    const response = await list(request("GET", "dueFilter=today"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ dueFilter: "today", timeZone: "Europe/Bratislava" });
+    expect(mocks.rpc).toHaveBeenLastCalledWith("motorist_employee_tasks", expect.objectContaining({ p_input: expect.objectContaining({ dueFilter: "today" }) }));
+    result({ ...rpcData("list"), dueFilter: "all", timeZone: "Europe/Bratislava" });
+    expect((await list(request("GET", "dueFilter=overdue"))).status).toBe(503);
+  });
+  it.each(["dueFilter=tomorrow", "dueFilter=today&dueFilter=overdue"])("rejects invalid due filter %s", async query => {
+    expect((await list(request("GET", query))).status).toBe(400);
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+  it("creates a bounded checklist and daily/weekly series without accepting client time zones", () => {
+    expect(parseEmployeeTaskCreate({ ...createInput(), checklist: [item], recurrence: { frequency: "weekly", time: "08:30", weekday: 7 } })).toMatchObject({ checklist: [item], recurrence: { frequency: "weekly", time: "08:30", weekday: 7 } });
+    expect(() => parseEmployeeTaskCreate({ ...createInput(), checklist: [item, item] })).toThrow();
+    expect(() => parseEmployeeTaskCreate({ ...createInput(), recurrence: { frequency: "weekly", time: "08:30", weekday: 0 } })).toThrow();
+    expect(() => parseEmployeeTaskCreate({ ...createInput(), recurrence: { frequency: "daily", time: "24:00" } })).toThrow();
+    expect(() => parseEmployeeTaskCreate({ ...createInput(), recurrence: { frequency: "daily", time: "08:30", timeZone: "UTC" } })).toThrow();
+    expect(() => parseEmployeeTaskCreate({ ...createInput(), checklist: Array.from({ length: 51 }, (_, index) => ({ ...item, id: `50000000-0000-4000-8000-${String(index).padStart(12, "0")}` })) })).toThrow();
+  });
+  it("preserves checklist commands, pause and explicit completion confirmation", () => {
+    expect(parseEmployeeTaskCommand({ ...commandInput(), action: "checklist", items: [item] })).toMatchObject({ action: "checklist", items: [item] });
+    expect(parseEmployeeTaskCommand({ ...commandInput(), action: "recurrence", schedule: null })).toMatchObject({ action: "recurrence", schedule: null });
+    expect(parseEmployeeTaskCommand({ ...commandInput(), action: "recurrence", schedule: null, expectedSeriesRevision: 4 })).toMatchObject({ action: "recurrence", schedule: null, expectedSeriesRevision: 4 });
+    for (const expectedSeriesRevision of [0, -1, 1.5, "1", null, 2_147_483_648]) {
+      expect(() => parseEmployeeTaskCommand({ ...commandInput(), action: "recurrence", schedule: null, expectedSeriesRevision })).toThrow();
+    }
+    for (const action of ["complete", "approve"]) {
+      expect(parseEmployeeTaskCommand({ ...commandInput(), action, allowIncompleteChecklist: true })).toMatchObject({ action, allowIncompleteChecklist: true });
+      expect(() => parseEmployeeTaskCommand({ ...commandInput(), action, allowIncompleteChecklist: "true" })).toThrow();
+    }
+  });
+  it("does not expose attachment confirmation through arbitrary task command JSON", () => {
+    expect(() => parseEmployeeTaskCommand({ ...commandInput(), action: "attachment_finish", attachmentId: groupId })).toThrow();
+  });
+  it("returns typed extensions and rejects malformed private storage metadata", async () => {
+    const extended = { ...task(), checklist: [item], recurrence: { id: groupId, revision: 1, frequency: "daily", time: "08:30", weekday: null, timeZone: "Europe/Bratislava", state: "active", nextAt: at },
+      attachments: [{ id: groupId, fileName: "foto.jpg", mimeType: "image/jpeg", sizeBytes: 100, createdAt: at, canRemove: true }], permissions: { ...task().permissions, attach: true, editChecklist: true, manageRecurrence: false } };
+    result({ ...rpcData("get"), task: extended });
+    const response = await detail(request(), context);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ task: extended });
+    result({ ...rpcData("get"), task: { ...extended, recurrence: { ...extended.recurrence, timeZone: "not/a/zone" } } });
+    expect((await detail(request(), context)).status).toBe(503);
+    result({ ...rpcData("get"), task: { ...extended, recurrence: { ...extended.recurrence, revision: undefined } } });
+    expect((await detail(request(), context)).status).toBe(503);
+    for (const issue of ["creator_inactive", "recipient_unavailable"]) {
+      result({ ...rpcData("get"), task: { ...extended, recurrence: { ...extended.recurrence, state: "needs_attention", issue } } });
+      const withIssue = await detail(request(), context);
+      expect(withIssue.status).toBe(200);
+      expect(await withIssue.json()).toMatchObject({ task: { recurrence: { issue } } });
+    }
+    result({ ...rpcData("get"), task: { ...extended, recurrence: { ...extended.recurrence, issue: "private_database_error" } } });
+    expect((await detail(request(), context)).status).toBe(503);
+    result({ ...rpcData("get"), task: { ...extended, attachments: [...extended.attachments, ...extended.attachments] } });
+    expect((await detail(request(), context)).status).toBe(503);
+  });
+});

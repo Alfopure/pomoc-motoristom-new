@@ -5,6 +5,7 @@ import type { MotoristActor } from "./api-auth";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { MutationError } from "./mutation-error";
 import { TASK_LINK_LIMIT, TASK_MESSAGE_LIMIT, type TaskMessage, type TaskMessageCursor, type TaskMessagePage, type WorkspaceTask } from "@/domain/task-workspace";
+import { queueWorkPush } from "./mobile/push-outbox";
 export type TaskWorkspaceActor = Pick<MotoristActor, "organizationId" | "profileId">;
 export const TASK_WORKSPACE_ROLES = ["dispatcher", "senior_dispatcher", "manager", "admin"] as const;
 const headers = { "Cache-Control": "private, no-store", Vary: "Cookie" };
@@ -50,6 +51,7 @@ async function workspaceRpc<T>(actor: TaskWorkspaceActor, action: string, id?: s
     const message = error.code === "55000" ? "Nové úlohy ešte nie sú aktivované. Vyžaduje sa kompatibilná databáza a overenie všetkých zapisujúcich verzií aplikácie." : status === 409 ? "Úloha sa medzičasom zmenila. Načítajte aktuálnu verziu." : status === 403 || status === 404 ? "Úloha nie je dostupná alebo nemáte oprávnenie." : status === 400 ? "Skontrolujte údaje úlohy a jej väzby." : "Úlohu sa nepodarilo spracovať. Skúste to znova.";
     throw new MutationError(message, status);
   }
+  if (data && ["create", "update", "send_message"].includes(action)) queueWorkPush(actor.organizationId);
   if ((action === "create" || action === "update") && data && typeof data === "object" && "id" in data && typeof data.id === "string") {
     try {
       const [{ createSupabaseAdminClient }, { deliverTaskAssignmentNotifications }] = await Promise.all([

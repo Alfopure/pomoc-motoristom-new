@@ -172,7 +172,21 @@ async function runMobilePushMaterialisation(organizationId: string, cronStartedA
   // so old positions are deleted even while push fails, and the job still reports it.
   let upkeep: Awaited<ReturnType<typeof runMobilePushUpkeep>> = null, upkeepError: unknown = null;
   try { upkeep = await runMobilePushUpkeep(admin, organizationId, new Date()); } catch (error) { upkeepError = error; }
-  const result = mobilePushEnabled() ? await runMobileCallbackPush(admin, organizationId, new Date()) : { status: "disabled" as const, detail: { reason: "push_disabled" } };
+  let result: { status: TelephonyCronJobResult["status"]; detail: Record<string, unknown> } = { status: "disabled", detail: { reason: "push_disabled" } };
+  let callbackError: unknown = null;
+  if (mobilePushEnabled()) {
+    try { result = await runMobileCallbackPush(admin, organizationId, new Date()); }
+    catch (error) { callbackError = error; }
+  }
+  // Task recurrence and orphan cleanup share this existing cron, even when push
+  // is disabled. A separate bounded client leaves the telephony budget intact.
+  let employeeTasks: Record<string, unknown> | null = null;
+  if (Date.now() - cronStartedAt <= 60_000) {
+    try {
+      const { maintainEmployeeTasks } = await import("@/server/mobile/task-maintenance");
+      employeeTasks = await maintainEmployeeTasks(organizationId, Math.min(cronStartedAt + 65_000, Date.now() + 4_000));
+    } catch { employeeTasks = { status: "failed" }; }
+  }
   // Work notices: escalate waiting branch work, then drain the outbox, within its own budget.
   let work: Record<string, unknown> | null = null;
   if (mobilePushEnabled() && Date.now() - cronStartedAt <= MOBILE_WORK_PUSH_LATEST_START_MS) {
@@ -186,5 +200,6 @@ async function runMobilePushMaterialisation(organizationId: string, cronStartedA
     } catch (error) { work = { error: error instanceof Error ? error.message.slice(0, 200) : "failed" }; }
   }
   if (upkeepError) throw upkeepError;
-  return { job, status: result.status, detail: { ...result.detail, ...(upkeep ? { upkeep } : {}), ...(work ? { work } : {}) } };
+  if (callbackError) throw callbackError;
+  return { job, status: result.status, detail: { ...result.detail, ...(upkeep ? { upkeep } : {}), ...(work ? { work } : {}), ...(employeeTasks ? { employeeTasks } : {}) } };
 }

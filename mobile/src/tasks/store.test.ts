@@ -106,3 +106,50 @@ describe("employee task writes", () => {
     expect(store.snapshot().revoked).toBe(true); expect(durable.port.reject).toHaveBeenCalledOnce();
   });
 });
+
+
+describe("employee task extension drafts", () => {
+  it("keeps unfinished checklist text and time without corrupting the whole account draft", () => {
+    const durable = memory();
+    const first = new EmployeeTasksStore(stubApi(), userId, { id: () => commandId, createPort: durable.port });
+    first.editCreate({ title: "Kontrola", checklist: [{ id: otherId, title: "", done: false }], recurrence: { frequency: "daily", time: "1" } });
+    first.dispose();
+    const restored = new EmployeeTasksStore(stubApi(), userId, { id: () => commandId, createPort: durable.port });
+    expect(restored.snapshot()).toMatchObject({ revoked: false, create: { input: { checklist: [{ title: "" }], recurrence: { time: "1" } } } });
+  });
+  it("binds a durable command port once for a task, preserving its vault generation", async () => {
+    const durable = memory(), bind = vi.fn(() => durable.port);
+    const store = new EmployeeTasksStore(stubApi(), userId, { id: () => commandId, commandPort: bind });
+    store.commandState(taskId); store.editComment(taskId, "Hotovo");
+    await store.command(taskId, { action: "comment", body: "Hotovo", expectedRevision: 1 });
+    await store.command(taskId, { action: "complete", expectedRevision: 1 });
+    expect(bind).toHaveBeenCalledOnce();
+  });
+  it("restores unsent checklist and recurrence edits across a restart", () => {
+    const durable = memory(), first = new EmployeeTasksStore(stubApi(), userId, { id: () => commandId, commandPort: () => durable.port });
+    first.editChecklist(taskId, [{ id: otherId, title: "Doklady", done: false }], 4);
+    first.editRecurrence(taskId, { frequency: "weekly", time: "0", weekday: 2 }, 4, 3);
+    first.dispose();
+    const restored = new EmployeeTasksStore(stubApi(), userId, { id: () => commandId, commandPort: () => durable.port });
+    expect(restored.commandState(taskId)).toMatchObject({ checklistDraft: { items: [{ title: "Doklady" }], expectedRevision: 4 }, recurrenceDraft: { schedule: { time: "0" }, expectedRevision: 4, expectedSeriesRevision: 3 } });
+  });
+  it("does not persist attachment projections in command receipts", async () => {
+    const durable = memory();
+    const command = vi.fn(async () => ({ ...receipt(), task: { ...receipt().task, attachments: [] } }));
+    const store = new EmployeeTasksStore(stubApi({ command }), userId, { id: () => commandId, commandPort: () => durable.port });
+    await store.command(taskId, { action: "complete", expectedRevision: 1 });
+    expect(JSON.stringify(durable.read())).not.toContain('"attachments"');
+  });
+});
+
+
+it("freezes the semantic series revision while reconciling a lost pause result", async () => {
+  const durable = memory(), command = vi.fn().mockRejectedValueOnce(new MobileApiError("lost", 503)).mockImplementationOnce(async (_task, input) => receipt(input.commandId));
+  const first = new EmployeeTasksStore(stubApi({ command }), userId, { id: () => commandId, commandPort: () => durable.port });
+  await first.command(taskId, { action: "recurrence", schedule: null, expectedRevision: 4, expectedSeriesRevision: 7 });
+  first.dispose();
+  const restored = new EmployeeTasksStore(stubApi({ command }), userId, { id: () => otherId, commandPort: () => durable.port });
+  await restored.retryCommand(taskId);
+  expect(command.mock.calls[1]).toEqual(command.mock.calls[0]);
+  expect(command.mock.calls[1][1]).toMatchObject({ expectedSeriesRevision: 7 });
+});
