@@ -449,7 +449,12 @@ export type MobileHandoffDelivered = MobileScope & {
 /** The pristavovač's side: a field member without a dispatch profile. */
 export type MobileFieldScope = { ok: true; apiVersion: 1; environment: MobileEnvironment; memberId: string; checkedAt: string };
 /** `capabilities` (deliver, drive, …) and `branches` (lead seats) decide which field modules the app shows; the server still authorizes every request. Older servers omit both. */
-export type MobileFieldMe = MobileFieldScope & { member: { id: string; displayName: string; email: string | null }; capabilities?: string[]; branches?: { id: string; name: string }[] };
+export type MobileFieldMe = MobileFieldScope & {
+  member: { id: string; displayName: string; email: string | null };
+  capabilities?: string[]; branches?: { id: string; name: string }[];
+  /** Employee tasks remain available without the delivery/telephony feature. */
+  tasks?: boolean; organizationId?: string;
+};
 export type MobileDelivery = {
   id: string; status: HandoffState; revision: number; publishedVersion: number; caseNumber: string;
   expiresAt: string; createdAt: string; openedAt: string | null; eta: string | null; createdBy: string | null;

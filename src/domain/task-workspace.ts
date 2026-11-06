@@ -2,6 +2,12 @@ import type { CaseTask, TaskReminderChannel } from "./types";
 export type TaskCaseLink = { caseId: string; caseNumber: string; status: string };
 export type TaskOrigin = { sourceType: "callback" | "sms" | "location"; sourceId: string; originCaseId: string; cancelledAt: string | null };
 export type WorkspaceTask = CaseTask & {
+  assignedUserId?: string | null;
+  assignedUserName?: string | null;
+  assignedGroupId?: string | null;
+  assignedGroupName?: string | null;
+  createdByUserId?: string | null;
+  completedByUserId?: string | null;
   workflowVersion?: 1;
   workflowState?: import("./task-workflow").TaskWorkflowState;
   reviewerProfileId?: string | null;
@@ -29,3 +35,9 @@ export type TaskMessagePage = { messages: TaskMessage[]; nextCursor: TaskMessage
 export const TASK_MESSAGE_LIMIT = 10_000;
 export const TASK_MESSAGE_PAGE_SIZE = 50;
 export const TASK_LINK_LIMIT = 100;
+
+export function workspaceTaskAssigneeLabel(task: WorkspaceTask, operators: readonly { id: string; name: string }[]): string {
+  const person = task.assignedUserName || operators.find(operator => operator.id === task.assignedTo)?.name;
+  const group = task.assignedGroupName;
+  return [person, group].filter(Boolean).join(" · ") || (task.assignedUserId ? "Zamestnanec" : task.assignedGroupId ? "Pracovná skupina" : "Nepriradené");
+}

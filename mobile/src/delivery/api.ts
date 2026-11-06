@@ -87,6 +87,9 @@ export function createDeliveryApi(config: MobileConfig, getToken: () => Promise<
       if (body.capabilities !== undefined && (!Array.isArray(body.capabilities) || body.capabilities.length > 20 || body.capabilities.some(item => !text(item, 40)))) throw invalid();
       if (body.branches !== undefined && (!Array.isArray(body.branches) || body.branches.length > 50
         || body.branches.some(item => { const branch = object(item); return !id(branch.id) || !text(branch.name, 200); }))) throw invalid();
+      if (body.tasks !== undefined && typeof body.tasks !== "boolean"
+        || body.organizationId !== undefined && !id(body.organizationId)
+        || body.tasks === true && !id(body.organizationId)) throw invalid();
       memberId = body.memberId as string;
       access?.verified(tickets.get(body) ?? -1);
       return body as MobileFieldMe;

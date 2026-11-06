@@ -16,6 +16,24 @@ function fixture() {
 }
 
 describe("account draft vault protocol", () => {
+  it("keeps employee task drafts scoped to the authenticated user and organization without granting a dispatch profile", async () => {
+    const f = fixture(), vault = await f.open(), port = vault.bind("employee-task-create", f.scope.userId);
+    const receipt = { ok: true, apiVersion: 1, environment: f.scope.environment, userId: f.scope.userId,
+      organizationId: f.scope.organizationId, checkedAt: "2026-11-06T12:00:00Z" };
+    expect(port.acceptsScope(receipt)).toBe(true);
+    expect(port.acceptsScope({ ...receipt, userId: id(998) })).toBe(false);
+    expect(port.acceptsScope({ ...receipt, organizationId: id(997) })).toBe(false);
+    expect(port.acceptsScope({ ...receipt, environment: "production" })).toBe(false);
+    expect(vault.bind("task-create", resource).acceptsScope(receipt)).toBe(false);
+    port.changed({ version: 1, userId: f.scope.userId, input: { title: "Doplniť doklady" }, pending: null, status: "editing" });
+    const command = vault.bind("employee-task-command", resource);
+    command.changed({ version: 1, userId: f.scope.userId, taskId: resource, status: "uncertain", pending: { commandId: id(99) } });
+    await vault.flush(); vault.close();
+    const restored = await f.open();
+    expect(restored.bind("employee-task-create", f.scope.userId).load()).toMatchObject({ input: { title: "Doplniť doklady" } });
+    expect(restored.bind("employee-task-command", resource).load()).toMatchObject({ pending: { commandId: id(99) } });
+    restored.close();
+  });
   it("awaits the storage acknowledgement and fresh authority before releasing a transport ticket", async () => {
     const f = fixture(), vault = await f.open(), port = vault.bind("case-note", resource), gate = deferred<void>();
     vi.mocked(f.driver.setItem).mockImplementationOnce(async (key, value) => { await gate.promise; f.files.set(key, value); });

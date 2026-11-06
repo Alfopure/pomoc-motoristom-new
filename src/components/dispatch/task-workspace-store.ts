@@ -6,7 +6,7 @@ export type TaskDraft = { title: string; assignedTo: string; dueAt: string; remi
 export type TaskBoardMutation = { status: "open" | "done"; dueAt?: string | null };
 export type TaskWorkspaceSnapshot = {
   tasks: WorkspaceTask[]; selectedId: string | null; creating: boolean; createDraft: TaskDraft;
-  drafts: Record<string, { value: TaskDraft; revision: number }>;
+  drafts: Record<string, { value: TaskDraft; revision: number; baselineAssignedTo: string }>;
   chats: Record<string, { messages: TaskMessage[]; nextCursor: TaskMessageCursor | null; loaded: boolean; latestFetched?: TaskMessageCursor }>;
   chatDrafts: Record<string, string>; pendingMessages: Record<string, { clientMessageId: string; body: string }>;
   workflowEnabled: boolean; pendingWorkflow: Record<string, TaskWorkflowCommand>;
@@ -14,7 +14,8 @@ export type TaskWorkspaceSnapshot = {
 };
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 export function emptyTaskDraft(viewer?: string): TaskDraft { return { title: "", assignedTo: viewer ?? "unassigned", dueAt: "", reminderAt: "", priority: "normal", status: "open", caseIds: [], reminderChannels: ["in_app"] }; }
-export function taskDraft(task: WorkspaceTask): TaskDraft { return { title: task.title, assignedTo: task.assignedTo || "unassigned", dueAt: task.dueAt || "", reminderAt: (task as WorkspaceTask & { reminderAt?: string | null }).reminderAt || "", priority: task.priority, status: task.status === "done" ? "done" : "open", caseIds: task.caseIds, reminderChannels: ["in_app"] }; }
+export const RETAIN_TASK_ASSIGNEE = "retain-task-assignee";
+export function taskDraft(task: WorkspaceTask): TaskDraft { return { title: task.title, assignedTo: (!task.assignedTo || task.assignedTo === "unassigned") && (task.assignedUserId || task.assignedGroupId) ? RETAIN_TASK_ASSIGNEE : task.assignedTo || "unassigned", dueAt: task.dueAt || "", reminderAt: (task as WorkspaceTask & { reminderAt?: string | null }).reminderAt || "", priority: task.priority, status: task.status === "done" ? "done" : "open", caseIds: task.caseIds, reminderChannels: ["in_app"] }; }
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 const compareMessagePositions = (a: TaskMessageCursor, b: TaskMessageCursor) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
 export class TaskWorkspaceStore {
@@ -83,7 +84,7 @@ export class TaskWorkspaceStore {
   edit = (id: string, patch: Partial<TaskDraft>) => {
     if (!this.enabled || this.state.hidden) return;
     const task = this.state.tasks.find(item => item.id === id); if (!task) return;
-    const current = this.state.drafts[id] ?? { value: taskDraft(task), revision: task.revision };
+    const current = this.state.drafts[id] ?? { value: taskDraft(task), revision: task.revision, baselineAssignedTo: taskDraft(task).assignedTo };
     const next = { ...current, value: { ...current.value, ...patch } };
     const drafts = { ...this.state.drafts, [id]: next };
     if (same(next.value, taskDraft(task))) delete drafts[id];
@@ -157,12 +158,12 @@ export class TaskWorkspaceStore {
     finally { if (sequence === this.readSequence) this.update({ loading: false }); }
   }
   private body(value: unknown): RequestInit { return { headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) }; }
-  private payload(draft: TaskDraft, includeChannels = true) {
+  private payload(draft: TaskDraft, includeChannels = true, includeAssignee = true) {
     if (!draft.title.trim() || draft.title.trim().length > 500) throw new Error("Úloha potrebuje názov s najviac 500 znakmi.");
     if (draft.dueAt && !Number.isFinite(Date.parse(draft.dueAt))) throw new Error("Skontrolujte termín úlohy.");
     if (draft.reminderAt && !Number.isFinite(Date.parse(draft.reminderAt))) throw new Error("Skontrolujte čas pripomienky.");
-    const { reminderChannels, ...fields } = draft;
-    return { ...fields, ...(includeChannels ? { reminderChannels } : {}), reminderAt: draft.reminderAt ? new Date(draft.reminderAt).toISOString() : null, title: draft.title.trim(), assignedTo: draft.assignedTo === "unassigned" ? null : draft.assignedTo, dueAt: draft.dueAt ? new Date(draft.dueAt).toISOString() : null };
+    const { reminderChannels, assignedTo, ...fields } = draft;
+    return { ...fields, ...(includeChannels ? { reminderChannels } : {}), reminderAt: draft.reminderAt ? new Date(draft.reminderAt).toISOString() : null, title: draft.title.trim(), ...(includeAssignee ? { assignedTo: assignedTo === "unassigned" ? null : assignedTo } : {}), dueAt: draft.dueAt ? new Date(draft.dueAt).toISOString() : null };
   }
   private async operation(action: () => Promise<void>): Promise<boolean> {
     if (!this.enabled || this.state.saving || this.state.hidden) return false;
@@ -184,12 +185,12 @@ export class TaskWorkspaceStore {
     const draft = this.state.drafts[id]; if (!draft) return;
     const generation = this.generation;
     try {
-      const { task } = await this.request(`/api/tasks/${id}`, { method: "PATCH", ...this.body({ ...this.payload(draft.value, false), expectedRevision: draft.revision }) }) as { task: WorkspaceTask };
+      const { task } = await this.request(`/api/tasks/${id}`, { method: "PATCH", ...this.body({ ...this.payload(draft.value, false, draft.value.assignedTo !== draft.baselineAssignedTo && draft.value.assignedTo !== RETAIN_TASK_ASSIGNEE), expectedRevision: draft.revision }) }) as { task: WorkspaceTask };
       if (generation !== this.generation || !this.state.tasks.some(item => item.id === id)) return;
       this.accept(task);
       const drafts = { ...this.state.drafts };
       if (same(drafts[id], draft)) delete drafts[id];
-      else if (drafts[id]) drafts[id] = { ...drafts[id], revision: task.revision };
+      else if (drafts[id]) drafts[id] = { ...drafts[id], revision: task.revision, baselineAssignedTo: taskDraft(task).assignedTo };
       this.update({ drafts, conflicts: this.state.conflicts.filter(value => value !== id) });
     } catch (error) { if (generation === this.generation && (error as { status?: number }).status === 409) this.update({ conflicts: [...new Set([...this.state.conflicts, id])] }); throw error; }
   });

@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { DndContext, DragOverlay, KeyboardSensor, MeasuringStrategy, PointerSensor, pointerWithin, rectIntersection, useDraggable, useDroppable, useSensor, useSensors, type CollisionDetection, type KeyboardCoordinateGetter } from "@dnd-kit/core";
 import { CalendarDays, CheckCircle2, Clock3, GripVertical, RotateCcw, UserRoundCheck } from "lucide-react";
 import type { Operator } from "@/domain/types";
-import type { WorkspaceTask } from "@/domain/task-workspace";
+import { workspaceTaskAssigneeLabel, type WorkspaceTask } from "@/domain/task-workspace";
 import { MOTORIST_TIME_ZONE } from "@/domain/time";
 import { isTaskOverdue, taskPriorityLabels } from "@/domain/tasks";
 import { taskWorkflowLabels, taskWorkflowState, type TaskWorkflowAction } from "@/domain/task-workflow";
@@ -31,7 +31,7 @@ export type TaskWorkspaceCardProps = {
 
 export function TaskWorkspaceCard({ task, operators, selected, dirty, disabled, saving, draggable = false, now, onSelect, onStatusChange, workflowEnabled, viewerProfileId, onWorkflowAction }: TaskWorkspaceCardProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } = useDraggable({ id: task.id, disabled: !draggable || disabled });
-  const operator = operators.find(item => item.id === task.assignedTo);
+  const assigneeLabel = workspaceTaskAssigneeLabel(task, operators);
   const action = task.status === "done" ? "Otvoriť znova" : "Vybaviť";
   const stage = taskWorkflowState(task);
   const reviewer = operators.find(item => item.id === task.reviewerProfileId);
@@ -56,7 +56,7 @@ export function TaskWorkspaceCard({ task, operators, selected, dirty, disabled, 
     <button type="button" data-task-title className={styles.title} aria-current={selected ? "true" : undefined} onClick={() => onSelect(task.id)}>{task.title}</button>
     <div className={styles.caseTags}>{task.caseLinks.length ? task.caseLinks.map(link => <span key={link.caseId}>{link.caseNumber}</span>) : <span>Samostatná úloha</span>}</div>
     <div className={styles.cardFooter}>
-      <span className={styles.assignee}><span className={styles.avatar} aria-hidden="true">{operator ? operator.name.split(" ").filter(Boolean).slice(0, 2).map(part => part[0]).join("") : "—"}</span>{operator?.name ?? "Nepriradené"}</span>
+      <span className={styles.assignee}><span className={styles.avatar} aria-hidden="true">{assigneeLabel !== "Nepriradené" ? assigneeLabel.split(" ").filter(Boolean).slice(0, 2).map(part => part[0]).join("") : "—"}</span>{assigneeLabel}</span>
       <span className={isTaskOverdue(task, now) ? styles.overdueDate : styles.date}><Clock3 size={12} aria-hidden="true" />{task.dueAt && Number.isFinite(new Date(task.dueAt).getTime()) ? new Date(task.dueAt).toLocaleString("sk-SK", { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit", timeZone: MOTORIST_TIME_ZONE }) : "Bez termínu"}</span>
     </div>
     {workflowEnabled && task.reviewerProfileId && <p className={styles.reviewerLine}><UserRoundCheck size={13} aria-hidden="true" /><span>{stage === "in_review" ? "Kontroluje" : "Kontrolór"}: <strong>{reviewer?.name ?? "Určený kolega"}</strong></span></p>}

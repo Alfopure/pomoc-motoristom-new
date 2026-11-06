@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { memoryStorage } from "../lib/session-storage";
-import { MODULES, PIN_LIMIT, accessLabel, fieldModules, fieldRoleLabel, isModuleId, moduleAccess, moduleById, rolePins, type ModuleId } from "./modules";
+import { MODULES, PIN_LIMIT, accessLabel, fieldModules, fieldRoleLabel, hasField, isModuleId, moduleAccess, moduleById, rolePins, type ModuleId } from "./modules";
 import { pushKinds, pushOffer } from "../notifications/kinds";
 import { movingPin, normalizePins, pinsFull, replacingPin, samePins, withPin, withoutPin } from "./pins";
 import { barItems, barTabs, dispatchView, initialShell, openModule, reconcileShell, selectTab, shellBack, shellLocation, type ShellState } from "./navigation";
@@ -10,6 +10,14 @@ import { ShellBackStore } from "./back-store";
 const all: ModuleId[] = ["hovory", "pripady", "ulohy", "nastroje"];
 
 describe("module registry", () => {
+  it("offers tasks to a verified employee without adding dispatch or delivery modules", () => {
+    const employee = fieldModules({ capabilities: [], branches: [], tasks: true });
+    expect(hasField(employee)).toBe(true);
+    expect(moduleAccess(null, employee)).toEqual(["ulohy"]);
+    expect(rolePins(null, employee)).toEqual(["ulohy"]);
+    expect(moduleAccess("dispatcher", employee)).toEqual(all);
+    expect(hasField(fieldModules(null))).toBe(false);
+  });
   it("has unique ids and readable names", () => {
     expect(new Set(MODULES.map(item => item.id)).size).toBe(MODULES.length);
     // Short visible labels accompany the full accessible module name in the six-item bar.

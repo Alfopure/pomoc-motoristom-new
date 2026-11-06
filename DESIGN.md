@@ -2,6 +2,14 @@
 
 ## Source of truth
 
+**Mobilné úlohy: Draft · 6. 11. 2026.** Aktuálny rozsah a pravidlá určuje
+[kontrakt jednoduchých úloh](docs/mobile/simple-tasks-2026-11-06.md): rýchle
+samostatné vytvorenie, kolega alebo pobočka, jasné prevzatie/pridelenie a práca
+pre každého aktívneho zamestnanca vrátane terénu. Pre tento modul rozširuje skoršiu
+hranicu „nemeniť funkčný rozsah rolí“; nepridáva dispečerský prístup terénnym účtom.
+Vzhľad, komponenty, prístupnosť a navigácia naďalej vychádzajú z mobilného
+štandardu a častí Visual language, Components a Accessibility nižšie.
+
 **Mobilný dizajn: Active · 4. 11. 2026.** Platí [mobilný štandard](docs/mobile/design-standard.md), [audit a realizačný plán](docs/mobile/redesign-plan-2026-11-04.md) a [33 preštudovaných primárnych zdrojov](docs/mobile/ux-ui-sources-2026-11-04.md). Mobilná časť pokrýva spoločný dizajnový systém, navigáciu a existujúce moduly Expo aplikácie. Overenia a stav vydania sú v pláne; tento status sám nepotvrdzuje natívnu akceptáciu.
 
 Status: **Draft**, 2026-11-05. Tento doplnok pokrýva klientské odovzdávanie práce, pobočkový tok, logistické a odťahové mobilné karty, knihu zásahov `/zakazky` a použiteľnosť súvisiacich obrazoviek. Funkčný rozsah vrátane kratšieho pristavenia, blokovania, oznámení, polohy a PZP určuje [spoločný realizačný plán](docs/plans/eros-kniha-zasahov-2026-11-05.md). Braňovo napojenie je odložené. Nejde o redizajn celej aplikácie.

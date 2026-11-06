@@ -6,7 +6,7 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { isUuid } from "@/lib/telephony/uuid";
 import { MutationError } from "@/server/mutation-error";
 import type { MotoristActor } from "@/server/api-auth";
-import { mobileEnvironment, requireMobileActor, verifyMobileUser } from "./auth";
+import { mobileEnvironment, requireMobileActor, verifyMobileUser, type MobileUser } from "./auth";
 
 /** A field member (no dispatch profile): pristavovač, vodič or miestny dispečer pobočky.
  * Capabilities decide which field routes it may use; each route checks its own. */
@@ -34,6 +34,16 @@ export async function requireMobileFieldActor(request: Request): Promise<MobileF
 export async function requireMobileMember(request: Request): Promise<MobileFieldActor> {
   const user = await verifyMobileUser(request);
   if (!mobileDeliveryEnabled()) throw deliveryUnavailable();
+  return resolveMobileMember(user);
+}
+
+/** Employee identity is independent of telephony and delivery availability.
+ * Operation routes keep using requireMobileMember and its feature gate. */
+export async function requireMobileMemberIdentity(request: Request): Promise<MobileFieldActor> {
+  return resolveMobileMember(await verifyMobileUser(request));
+}
+
+async function resolveMobileMember(user: MobileUser): Promise<MobileFieldActor> {
   const { data, error } = await fieldAdmin().rpc("motorist_towing_actor", { p_user_id: user.userId });
   if (error) {
     if (missingSchema(error.code)) throw deliveryUnavailable();

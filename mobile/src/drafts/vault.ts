@@ -1,12 +1,12 @@
 import type { StorageDriver } from "../lib/session-storage";
 import { DraftNotSentError, draftDate, draftId, draftKeys, draftObject, type DraftPort } from "./port";
 
-export type DraftKind = "case-create" | "case-edit" | "case-note" | "case.owner" | "task-create" | "task-state" | "handoff" | "attachment";
+export type DraftKind = "case-create" | "case-edit" | "case-note" | "case.owner" | "task-create" | "task-state" | "employee-task-create" | "employee-task-command" | "handoff" | "attachment";
 export type DraftScope = { environment: "test" | "production"; projectUrl: string; userId: string; profileId: string; organizationId: string };
 export type StoredDraft = { key: string; kind: DraftKind; resourceId: string | null; generation: string; updatedAt: string; payload: object };
 export type VaultState = { ready: boolean; saving: boolean; busy: boolean; error: string | null; records: StoredDraft[]; durable: boolean };
 type Options = { durable: boolean; uuid: () => string; current: () => boolean; revalidate: () => Promise<void> };
-const kinds: DraftKind[] = ["case-create", "case-edit", "case-note", "case.owner", "task-create", "task-state", "handoff", "attachment"];
+const kinds: DraftKind[] = ["case-create", "case-edit", "case-note", "case.owner", "task-create", "task-state", "employee-task-create", "employee-task-command", "handoff", "attachment"];
 const ACCOUNT_LIMIT = 90_000;
 const RECORD_LIMIT = 64_000;
 const RECORD_COUNT = 32;
@@ -243,7 +243,9 @@ export class DraftVault {
       reject: () => { this.ledger.rejected.add(key); this.ledger.recordErrors.set(key, "Tento uložený koncept sa nepodarilo overiť. Najprv ho skontrolujte alebo vedome zahoďte."); this.ledger.notify(); },
       acceptsScope: value => {
         try { const v = draftObject(value); return v.ok === true && v.apiVersion === 1 && v.environment === this.scope.environment
-          && v.profileId === this.scope.profileId && draftDate(v.checkedAt); } catch { return false; }
+          && (kind === "employee-task-create" || kind === "employee-task-command"
+            ? v.userId === this.scope.userId && v.organizationId === this.scope.organizationId
+            : v.profileId === this.scope.profileId) && draftDate(v.checkedAt); } catch { return false; }
       },
       prepare: async payload => {
         if (!current()) throw new DraftNotSentError();

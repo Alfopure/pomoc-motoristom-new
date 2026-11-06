@@ -315,7 +315,8 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     ]);
   }
   if (me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do aplikácie…" /></>;
-  // A membership with only office roles (billing, reports…) has nothing in the app yet.
+  // Compatibility with a server predating employee tasks: an office-only
+  // membership may have no module until its access snapshot is refreshed.
   if (fieldOnly && delivery.memberId && !hasField(delivery.modules)) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
     <Text accessibilityRole="header" style={styles.subheading}>V aplikácii pre vás zatiaľ nie je modul</Text>
     <Text style={styles.muted}>Váš účet nemá pristavenia, jazdy, odťahy ani pobočku. Prácu kancelárie nájdete na webe dispečingu.</Text>
@@ -325,7 +326,7 @@ function Workspace({ config, client, api, active, userId, liveUser, logoutState,
     {logoutError && <ErrorNotice message={logoutError} />}
     <Button label="Odhlásiť sa" onPress={() => { void logout(); }} disabled={logoutBusy || logoutState.busy} secondary />
   </View></>;
-  if (fieldOnly && delivery.memberId) return <FieldShell key={delivery.memberId} config={config} active={active} userId={userId} session={delivery} work={work} push={push}
+  if (fieldOnly && delivery.memberId) return <FieldShell key={delivery.memberId} config={config} active={active} userId={userId} client={client} liveUser={liveUser} session={delivery} work={work} push={push}
     logoutState={logoutState} logoutError={logoutError} logoutBusy={logoutBusy} onLogout={() => { void logout(); }} accessRefresh={accessRefresh} />;
   if (fieldOnly && delivery.me.isPending) return <><BrandRow test={config.environment === "test"} /><Loading label="Overujem prístup do aplikácie…" /></>;
   if (fieldOnly) return <><BrandRow test={config.environment === "test"} /><View style={styles.content}>
