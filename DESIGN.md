@@ -343,6 +343,16 @@ Snímky: 1440/1280/1024/768 a 390/320 px; navyše husté dáta, dlhé názvy, ot
 
 ## Open questions
 
+### Doplnenie 6. 11. 2026 — vlastný odťah a odťahová kancelária
+
+Logistický modul sa volá **Pristavenia a návraty**. Odťahový vodič má **Moje odťahy** a akciu **Nový odťah**; zmiešaný terénny modul ostáva **Moja práca**. **Kniha odťahov** je samostatný modul odťahovej kancelárie aj pre účet bez hlavného dispečingu. Používa rovnaký mobilný shell, manifest, formulárové komponenty a tokeny.
+
+Vlastný odťah má pevne určeného prihláseného odťahovkára; pristavovač bez odťahovej roly ho nevytvára. Pobočka, technika a objednávateľ sa vyberajú z existujúcich katalógov, s vyhľadávaním a čitateľným názvom. Čas navrhnutý pri vytvorení je plán; skutočný čas výkonu sa potvrdzuje osobitne. Spätná evidencia má ručný dátum/čas a nevytvára dnešný GPS priebeh.
+
+Majiteľ potvrdil, že **B peniaze** a **Iná hotovosť** označujú tú istú kategóriu: príjem bez externej faktúry, ktorý drží vodič do fyzického prevzatia majiteľom alebo oprávnenou kanceláriou. V rozhraní používať **Iná hotovosť (bez faktúry)**. Zobraziť ju v rozpise jednej pokladne spolu s celkovou hotovosťou, rezerváciami a odovzdaniami. Príjem a následný presun držby sú odlišné udalosti. Potvrdenka, držiteľ, opravy a prevzatie zostávajú dohľadateľné; historicky nerozlíšené peniaze sa neodhadujú podľa dnešnej dohody na zákazke.
+
+Rozpracovaný formulár sa zachová pre konkrétny účet. Neisté vytvorenie alebo finančná operácia sa obnovuje rovnakým identifikátorom; používateľ musí vidieť, ktorý výsledok ešte nie je potvrdený. Podľa zadania je funkčné a zariadeniové skúšanie tejto dodávky odložené.
+
 **Mobil:** smerovanie a vizuálny rozsah vyplývajú z požiadavky majiteľa. Fyzická skúška iPhone/Android, VoiceOver a živé audio zostávajú samostatným dôkazom; nezamieňať výskumné odporúčanie s certifikáciou Apple.
 
 Nejasnosti neblokujú tento produktový návrh; pred implementáciou sa uzavrú len tie, ktoré menia daný rozsah.

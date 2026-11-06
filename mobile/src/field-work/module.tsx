@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Alert, Linking, Pressable, ScrollView, Text, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
-import { Camera, Car, ClipboardCheck, Clock, MapPin, Navigation, Phone, Truck } from "lucide-react-native";
+import { Camera, Car, ClipboardCheck, MapPin, Navigation, Phone, Truck } from "lucide-react-native";
 import type { MobileFieldCash, MobileOperation, MobileOperationEvidenceInput, MobileTowingAttachment, MobileTowingCommand, MobileTowingDriverFields, MobileTowingOrder } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
 import { dialable, formatNumber } from "../lib/display";
@@ -28,6 +28,9 @@ import {
 } from "./model";
 import { requestWorkNavigation } from "./work-navigation";
 import { CashPanel, TowWorkFields } from "./CashPanel";
+import { TowingCreate } from "./towing-create";
+import { TowingTimeField } from "./towing-form";
+import { TowingOperationalEditor } from "./towing-operational-editor";
 import { Chip, StepRecovery, StorageNotice, fieldStyles as s } from "./parts";
 import type { FieldWorkSession } from "./session";
 
@@ -49,15 +52,19 @@ function askWorkDiscard(discard: () => void, keep: () => void) {
  * steps, doklady and photos. The shell's top bar leads back from a detail. */
 export function WorkModule({ session, active, visible, openRequest }: { session: FieldWorkSession | null; active: boolean; visible: boolean; openRequest: WorkOpenRequest | null }) {
   const [selected, setSelected] = useState<WorkTarget | null>(null);
+  const [creating, setCreating] = useState(false);
   const [handled, setHandled] = useState<number | null>(null);
   const [dirty, setDirty] = useState(false);
   const [incoming, setIncoming] = useState<WorkTarget | null>(null);
   const open = (target: WorkTarget | null) => {
+    if (target?.kind === "towing-create") { setCreating(true); return; }
+    setCreating(false);
     if (selected?.kind === target?.kind && selected?.id === target?.id) return;
     requestWorkNavigation(dirty, () => { setDirty(false); setSelected(target); }, askWorkDiscard);
   };
   if (openRequest && openRequest.nonce !== handled) {
     setHandled(openRequest.nonce);
+    setCreating(false);
     if (selected?.kind !== openRequest.kind || selected.id !== openRequest.id) {
       const target: WorkTarget = { kind: openRequest.kind, id: openRequest.id };
       if (dirty) setIncoming(target); else setSelected(target);
@@ -71,23 +78,24 @@ export function WorkModule({ session, active, visible, openRequest }: { session:
   useShellBack(visible && selected !== null, "Moja práca", back);
   useAndroidBack(active && visible && selected !== null, back);
   if (!session) return <View style={styles.content}><Loading label="Overujem prístup k práci…" /></View>;
+  if (creating && session.capabilities.includes("drive")) return <TowingCreate session={session} active={active} visible={visible} onBack={() => setCreating(false)} onCreated={id => { setCreating(false); setSelected({ kind: "towing", id }); }} />;
   if (selected?.kind === "cash") return <CashDetail session={session} active={active && visible} onDirtyChange={setDirty} />;
   if (selected?.kind === "operation") return <OperationDetail key={selected.id} session={session} id={selected.id} active={active && visible} onOpenBlocker={open} />;
   if (selected?.kind === "towing") return <TowingDetail key={selected.id} session={session} id={selected.id} active={active && visible} onOpenBlocker={open} onDirtyChange={setDirty} />;
-  return <WorkList session={session} active={active && visible} onOpen={open} />;
+  return <WorkList session={session} active={active && visible} onOpen={open} onCreate={() => setCreating(true)} />;
 }
 
-function WorkList({ session, active, onOpen }: { session: FieldWorkSession; active: boolean; onOpen: (target: WorkTarget) => void }) {
+function WorkList({ session, active, onOpen, onCreate }: { session: FieldWorkSession; active: boolean; onOpen: (target: WorkTarget) => void; onCreate: () => void }) {
   const now = useDeliveryTime(active);
   const commands = useSyncExternalStore(session.commands.subscribe, session.commands.snapshot, session.commands.snapshot);
   const query = session.list, usable = canUseDeliveryCache(query.error);
   const items = usable ? workItems(query.data) : [];
-  const pending = commands.pending.filter(item => item.target.kind !== "branch");
+  const pending = commands.pending.filter(item => item.target.kind !== "branch" && item.target.kind !== "towing-office" && (item.target.kind !== "towing-create" || (item.command as { mode?: string }).mode === "self"));
   const uploads = useUploads(session.uploads).uploads;
   return <ScrollView contentContainerStyle={formLayout.content}>
     <View style={formLayout.head}><Text accessibilityRole="header" style={styles.heading}>Moja práca</Text></View>
     <StorageNotice commands={session.commands} state={commands} />
-    {session.capabilities.includes("drive") && <View style={formLayout.actions}><Button secondary label="Moja pokladňa" onPress={() => onOpen({ kind: "cash", id: session.memberId })} /></View>}
+    {session.capabilities.includes("drive") && <View style={formLayout.actions}><Button primary label="Nový odťah" onPress={onCreate} /><Button secondary label="Moja pokladňa" onPress={() => onOpen({ kind: "cash", id: session.memberId })} /></View>}
     {pending.length > 0 && <>
       <SectionHeader title="Nepotvrdené kroky" detail={String(pending.length)} />
       <View style={formLayout.actions}>{pending.map(record => <Button key={targetKey(record.target)} secondary label={"Overiť krok: " + record.label} onPress={() => onOpen(record.target)} />)}</View>
@@ -129,10 +137,10 @@ function CashDetail({ session, active, onDirtyChange }: { session: FieldWorkSess
     <StorageNotice commands={session.commands} state={commands} />
     {pending && <StepRecovery commands={session.commands} record={pending} busy={commands.busy || !commands.enabled} onResult={applied} onReload={() => query.refetch()} />}
     {query.isError && <ErrorNotice message="Pokladňu sa nepodarilo overiť." onRetry={() => { void query.refetch(); }} />}
-    {query.isPending ? <Loading label="Načítavam vašu pokladňu…" /> : <CashPanel cash={cash} busy={busy} onDirtyChange={onDirtyChange} onReceive={async () => false} onPropose={async amountCents => {
+    {query.isPending ? <Loading label="Načítavam vašu pokladňu…" /> : <CashPanel cash={cash} busy={busy} onDirtyChange={onDirtyChange} onReceive={async () => false} onPropose={async (amountCents, cashBreakdown) => {
       if (busy || !cash?.account) return false;
       const result = await session.commands.start<MobileFieldCash>(target, { commandId: randomUUID(), handoverId: randomUUID(), type: "propose_handover", expectedRevision: 0,
-        payload: { amountCents, accountRevision: cash.account.revision } }, "Odovzdať hotovosť");
+        payload: { amountCents, accountRevision: cash.account.revision, ...(cashBreakdown ? { cashBreakdown } : {}) } }, "Odovzdať hotovosť");
       if (result) applied(result); else void query.refetch();
       return Boolean(result);
     }} />}
@@ -366,7 +374,10 @@ function TowingDetail({ session, id, active, onOpenBlocker, onDirtyChange }: { s
   const [edits, setEdits] = useState<MobileTowingDriverFields>({});
   const [structuredDirty, setStructuredDirty] = useState(false);
   const [paymentDirty, setPaymentDirty] = useState(false);
-  const edited = structuredDirty || paymentDirty || Object.entries(edits).some(([key, value]) => value !== query.data?.fields[key as DriverField]);
+  const [operationalDirty, setOperationalDirty] = useState(false);
+  const [startValid, setStartValid] = useState(true), [endValid, setEndValid] = useState(true);
+  const workTimesValid = startValid && endValid;
+  const edited = structuredDirty || paymentDirty || operationalDirty || Object.entries(edits).some(([key, value]) => value !== query.data?.fields[key as DriverField]);
   useEffect(() => { onDirtyChange(edited); }, [edited, onDirtyChange]);
   const [error, setError] = useState<string | null>(null);
   const [left, setLeft] = useState<"submitted" | "gone" | null>(null);
@@ -468,16 +479,17 @@ function TowingDetail({ session, id, active, onOpenBlocker, onDirtyChange }: { s
     {f.dispatchInstructions ? <Group><InfoRow first label="Pokyny" value={f.dispatchInstructions} /></Group> : null}
     {!pending && <View style={formLayout.actions}>
       {missing.length > 0 && <Text style={styles.muted}>{"Pred odovzdaním doplňte: " + missing.join(", ") + "."}</Text>}
-      <Button primary label={step.label} disabled={blocked || missing.length > 0 || changed.length > 0 || structuredDirty} onPress={confirmStep} />
-      {(changed.length > 0 || structuredDirty) && <Text style={styles.muted}>Najprv uložte zmenené údaje.</Text>}
+      <Button primary label={step.label} disabled={blocked || missing.length > 0 || changed.length > 0 || structuredDirty || operationalDirty || !workTimesValid} onPress={confirmStep} />
+      {(changed.length > 0 || structuredDirty || operationalDirty) && <Text style={styles.muted}>Najprv uložte zmenené údaje.</Text>}
     </View>}
     <TowWorkFields key={order.id + ":" + order.assignmentGeneration} fields={f} onDirtyChange={setStructuredDirty} parking={canUseDeliveryCache(options.error) ? options.data?.parking : undefined} busy={blocked} onSave={fields => run("update_order", "Uložiť vykonané úkony", { fields })} />
     {cashQuery.isError && <ErrorNotice message="Pokladňu sa nepodarilo overiť. Pred príjmom platby ju obnovte." onRetry={() => { void cashQuery.refetch(); }} />}
     <CashPanel key={order.id + ":payment"} onDirtyChange={setPaymentDirty} order={order} cash={cashQuery.data ?? null}
       busy={blocked || cashQuery.isPending || cashQuery.isError || commands.pending.some(item => item.target.kind === "cash")}
-      onPropose={async () => false} onReceive={async ({ amountCents, method }) => run("receive_payment", "Potvrdiť prijatú platbu", {
-        receiptId: randomUUID(), amountCents, method, ...(method === "cash" ? { accountRevision: cashQuery.data?.account?.revision ?? 1 } : {}),
+      onPropose={async () => false} onReceive={async ({ amountCents, method, cashCategory }) => run("receive_payment", "Potvrdiť prijatú platbu", {
+        receiptId: randomUUID(), amountCents, method, ...(cashCategory ? { cashCategory } : {}), ...(method === "cash" ? { accountRevision: cashQuery.data?.account?.revision ?? 1 } : {}),
       })} />
+    <TowingOperationalEditor session={session} order={order} disabled={blocked} onDirtyChange={setOperationalDirty} onSave={fields => run("update_order", "Uložiť údaje zadania", { fields })} />
     <SectionHeader title="Zákazka" />
     <Group>
       <InfoRow first label="Nakládka" value={f.pickup || null} />
@@ -489,14 +501,12 @@ function TowingDetail({ session, id, active, onOpenBlocker, onDirtyChange }: { s
     </Group>
     {order.workStatus !== "assigned" && <>
       <FormSection title="Priebeh práce" footer="Ceny a fakturáciu vedie kancelária na webe.">
-        <Field label="Začiatok práce" value={value("startedAt") ? termLabel(value("startedAt")) : ""} placeholder="Nezaznamenaný" editable={false}
-          action={<FieldAction icon={Clock} label="Teraz" accessibilityLabel="Začiatok práce teraz" disabled={blocked} onPress={() => setEdits(e => ({ ...e, startedAt: new Date().toISOString() }))} />} />
-        <Field label="Koniec práce" value={value("finishedAt") ? termLabel(value("finishedAt")) : ""} placeholder="Nezaznamenaný" editable={false}
-          action={<FieldAction icon={Clock} label="Teraz" accessibilityLabel="Koniec práce teraz" disabled={blocked} onPress={() => setEdits(e => ({ ...e, finishedAt: new Date().toISOString() }))} />} />
+        <TowingTimeField label="Začiatok práce" value={value("startedAt") ?? undefined} disabled={blocked} onValidityChange={setStartValid} onChange={next => setEdits(e => ({ ...e, startedAt: next ?? null }))} />
+        <TowingTimeField label="Koniec práce" value={value("finishedAt") ?? undefined} disabled={blocked} onValidityChange={setEndValid} onChange={next => setEdits(e => ({ ...e, finishedAt: next ?? null }))} />
         {TEXT_FIELDS.map(item => <Field key={item.key} label={item.label} value={value(item.key)} multiline={item.multiline} maxLength={2000} editable={!blocked}
           onChangeText={text => setEdits(e => ({ ...e, [item.key]: text.trim() ? text : null }))} />)}
       </FormSection>
-      <View style={formLayout.actions}><Button label="Uložiť údaje" disabled={blocked || changed.length === 0}
+      <View style={formLayout.actions}><Button label="Uložiť údaje" disabled={blocked || changed.length === 0 || !workTimesValid}
         onPress={() => { void run("update_order", "Uložiť údaje zákazky", { fields: Object.fromEntries(changed.map(key => [key, edits[key] ?? null])) }); }} /></View>
     </>}
     <SectionHeader title="Fotky a sken" detail={String(order.attachments.length)} />

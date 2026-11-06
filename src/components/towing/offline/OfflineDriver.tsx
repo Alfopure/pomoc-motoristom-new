@@ -121,7 +121,7 @@ export function OfflineDriver() {
     finally { setBusy(false); }
   }
   return <main className="min-h-dvh bg-zinc-100 px-4 py-6 text-zinc-950"><div className="mx-auto max-w-3xl space-y-4">
-    <header className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-widest text-zinc-500">Pomoc motoristom</p><h1 className="text-2xl font-bold">Práca v zariadení</h1></div><a className="min-h-11 rounded-lg border border-zinc-300 px-4 py-3 text-sm font-semibold" href="/vodic">Moje zákazky</a></header>
+    <header className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-widest text-zinc-500">Pomoc motoristom</p><h1 className="text-2xl font-bold">Práca v zariadení</h1></div><a className="min-h-11 rounded-lg border border-zinc-300 px-4 py-3 text-sm font-semibold" href="/vodic">Moje odťahy</a></header>
     <section className={card} aria-live="polite"><p className="font-semibold">{online ? 'Pripojenie dostupné' : 'Bez pripojenia'}</p><p className="mt-2 text-sm leading-6">{message}</p>
       <p className="mt-2 text-sm">Čaká {summary.changes} záznamov · {summary.photos} fotografií · {summary.receipts} príjmov hotovosti</p>
       {expiresAt && <p className={`mt-2 text-sm ${expiresAt - checkedAt < 3_600_000 ? 'font-semibold text-amber-800' : 'text-zinc-600'}`}>Offline prístup najneskôr do {new Date(expiresAt).toLocaleString('sk-SK')} a počas platného prihlásenia. Potom treba online overenie; neodoslaná práca sa nezmaže.</p>}

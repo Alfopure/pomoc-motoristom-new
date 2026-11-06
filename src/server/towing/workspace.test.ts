@@ -50,15 +50,15 @@ describe('persisted office pricing date', () => {
 
 
 describe('driver operational contacts', () => {
-  it('retains minimal customer and requester contacts and assistance reference without billing identity', () => {
+  it('retains operational requester contacts but keeps customer billing identity and office notes private', () => {
     const order = workspace('driver').orders[0];
-    order.fields.requester = { name: 'Synthetic requester', phone: '+421900000000', email: 'private@example.invalid', companyId: 'private' };
+    order.fields.requester = { name: 'Synthetic requester', phone: '+421900000000', email: 'contact@example.invalid', companyId: '12345678', taxId: 'private' };
     order.fields.customer = { name: 'Synthetic customer', phone: '+421900000001', address: 'private address', taxId: 'private' };
     order.fields.assistanceReference = 'SYNTHETIC-REF';
     order.fields.assistancePartnerName = 'Synthetic assistance';
     order.officeNotes = 'Internal only';
     const result = projectTowingDriverOrder(order, actor);
-    expect(result.fields.requester).toEqual({ name: 'Synthetic requester', phone: '+421900000000' });
+    expect(result.fields.requester).toEqual({ name: 'Synthetic requester', phone: '+421900000000', email: 'contact@example.invalid', companyId: '12345678' });
     expect(result.fields.customer).toEqual({ name: 'Synthetic customer', phone: '+421900000001' });
     expect(result.fields.assistanceReference).toBe('SYNTHETIC-REF');
     expect(result.fields.assistancePartnerName).toBe('Synthetic assistance');

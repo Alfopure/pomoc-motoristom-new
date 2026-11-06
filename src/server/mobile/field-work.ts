@@ -1,4 +1,5 @@
 import "server-only";
+import { CASH_CATEGORIES, isCashCategory, isCashBreakdown, cashBreakdownTotal, isCashCategories } from "@/domain/towing/cash-categories";
 import { randomBytes } from "node:crypto";
 import type { TowingCapability, TowingMember, TowingRole } from "@/domain/towing/types";
 import type { Json } from "@/lib/supabase/database.types";
@@ -313,7 +314,7 @@ const SERVICE_TYPES = ["tow", "repair", "transport", "storage", "relocation"];
 const SUBJECT_TYPES = ["vehicle", "machine", "material"];
 const TOWING_STATUSES = ["assigned", "in_progress", "needs_changes"];
 const ATTACHMENT_KINDS = ["work", "handover", "scan"];
-const DRIVER_FIELDS = ["startedAt", "finishedAt", "driverNotes", "performedQuantity", "photoException", "destination", "subjectDescription", "plate", "vin", "odometer", "handoverRecipientName", "handedOverAt", "handoverException"] as const;
+const DRIVER_FIELDS = ["startedAt", "finishedAt", "driverNotes", "performedQuantity", "photoException", "destination", "subjectDescription", "plate", "vin", "odometer", "handoverRecipientName", "handedOverAt", "handoverException", "pickup", "contact", "noContactReason", "branchId", "fleetAssetId", "plannedAt", "assistanceReference", "assistancePartnerId", "requesterId", "parkingId"] as const;
 const PAYMENT_INTENTS = ["partner_invoice", "deferred_invoice", "card_terminal", "cash_terminal", "cash_other"] as const;
 // The towing RPC writes `now()::text` ("2026-10-28 08:00:00.123456+00"); the web writes ISO.
 const TOWING_TIME = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(:\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}(?::?\d{2})?)$/;
@@ -374,10 +375,10 @@ function nullableCents(value: unknown): number | null {
 }
 function readOwner(value: unknown): MobileTowingOwner {
   const owner = input(value, "Neplatný vlastník vozidla.");
-  onlyKeys(owner, ["name", "phone", "address", "companyId"], "Upravte iba meno, telefón, adresu a IČO vlastníka.");
+  onlyKeys(owner, ["name", "phone", "email", "address", "companyId"], "Upravte iba prevádzkové kontaktné údaje.");
   if (!text(owner.name, 2000)) invalid("Vyplňte meno vlastníka.");
   const result: MobileTowingOwner = { name: "" };
-  for (const key of ["name", "phone", "address", "companyId"] as const) {
+  for (const key of ["name", "phone", "email", "address", "companyId"] as const) {
     if (owner[key] === undefined || owner[key] === null) continue;
     if (!text(owner[key], 2000)) invalid("Skontrolujte údaje vlastníka.");
     result[key] = (owner[key] as string).trim();
@@ -403,7 +404,7 @@ function readRealizedItems(value: unknown): MobileTowingRealizedItem[] {
     return out;
   });
 }
-/** Allowlisted driver projection: work fields and attachments; no cents, payments, office notes or other parties. */
+/** Own-assignment operational projection; office notes, prices and invoice data stay private. */
 export function projectTowingOrder(value: unknown, memberId: string): MobileTowingOrder {
   const order = record(value), fields = record(order.fields);
   if (typeof order.id !== "string" || !isUuid(order.id) || !text(order.number, 64) || !positive(order.revision) || !positive(order.assignmentGeneration)
@@ -419,6 +420,11 @@ export function projectTowingOrder(value: unknown, memberId: string): MobileTowi
     realizedItems: fields.realizedItems === undefined ? [] : readRealizedItems(fields.realizedItems), owner,
     handoverRecipientName: optionalText(fields.handoverRecipientName, 300), handedOverAt: towingTime(fields.handedOverAt), handoverException: optionalText(fields.handoverException, 4000),
     requesterName: optionalText(requester?.name, 300), dispatchInstructions: optionalText(fields.dispatchInstructions, 4000),
+    requester: requester ? readOwner(requester) : null, recipient: fields.recipient ? readOwner(fields.recipient) : null,
+    requesterType: fields.requesterType == null ? null : ["assistance", "selfpayer"].includes(fields.requesterType as string)
+      ? fields.requesterType as "assistance" | "selfpayer" : unconfirmed(),
+    branchId: optionalText(fields.branchId, 36), fleetAssetId: optionalText(fields.fleetAssetId, 36),
+    assistancePartnerId: optionalText(fields.assistancePartnerId, 36), requesterId: optionalText(fields.requesterId, 36), parkingId: optionalText(fields.parkingId, 36),
     serviceType: fields.serviceType as MobileTowingFields["serviceType"], subjectType: fields.subjectType as MobileTowingFields["subjectType"],
     subjectDescription: (fields.subjectDescription as string | undefined) ?? "", pickup: (fields.pickup as string | undefined) ?? "",
     plate: optionalText(fields.plate, 100), vin: optionalText(fields.vin, 100), destination: optionalText(fields.destination, 10_000),
@@ -436,7 +442,7 @@ export function projectTowingOrder(value: unknown, memberId: string): MobileTowi
     payments: Array.isArray(order.payments) ? order.payments.filter(value => record(value).driverId === memberId).sort((a, b) => Date.parse(String(record(b).createdAt)) - Date.parse(String(record(a).createdAt))).slice(0, 100).map(value => {
       const p = record(value);
       if (typeof p.id !== "string" || !isUuid(p.id) || typeof p.receiptId !== "string" || !isUuid(p.receiptId) || !Number.isSafeInteger(p.amountCents) || !["cash", "card", "bank", "other"].includes(p.method as string) || !isHistoryTimestamp(p.createdAt)) unconfirmed();
-      return { id: p.id, receiptId: p.receiptId, amountCents: p.amountCents as number, method: p.method as "cash" | "card" | "bank" | "other", createdAt: p.createdAt as string };
+      return { id: p.id, receiptId: p.receiptId, amountCents: p.amountCents as number, method: p.method as "cash" | "card" | "bank" | "other", ...(p.cashCategory !== undefined ? { cashCategory: p.cashCategory === null ? null : isCashCategory(p.cashCategory) ? p.cashCategory : unconfirmed() } : {}), createdAt: p.createdAt as string };
     }) : [],
     attachments: order.attachments.map(projectAttachment).filter(item => item.status !== "abandoned") };
 }
@@ -469,10 +475,11 @@ export function readTowingCommand(value: unknown): MobileTowingCommand {
   const payload = input(body.payload, "Neplatný krok zákazky.");
   const base = { commandId: body.commandId.toLowerCase(), type: body.type as MobileTowingCommand["type"], expectedRevision: body.expectedRevision, assignmentGeneration: body.assignmentGeneration };
   if (body.type === "receive_payment") {
-    onlyKeys(payload, ["receiptId", "amountCents", "method", "accountRevision"], "Neplatný príjmový doklad.");
+    onlyKeys(payload, ["receiptId", "amountCents", "method", "accountRevision", "cashCategory"], "Neplatný príjmový doklad.");
     if (typeof payload.receiptId !== "string" || !isUuid(payload.receiptId) || !positive(payload.amountCents) || !["cash", "card"].includes(payload.method as string)
       || payload.method === "cash" && !positive(payload.accountRevision) || payload.accountRevision !== undefined && !positive(payload.accountRevision)) invalid("Zadajte presnú prijatú sumu a spôsob úhrady. Obnovte stav pokladne.");
-    return { ...base, payload: { receiptId: payload.receiptId.toLowerCase(), amountCents: payload.amountCents as number, method: payload.method as "cash" | "card", ...(payload.accountRevision !== undefined ? { accountRevision: payload.accountRevision as number } : {}) } };
+    if (payload.cashCategory !== undefined && (payload.method !== "cash" || !isCashCategory(payload.cashCategory))) invalid("Vyberte kategóriu prijatej hotovosti.");
+    return { ...base, payload: { ...(payload.cashCategory !== undefined ? { cashCategory: payload.cashCategory as "regular" | "other" | "unclassified" } : {}), receiptId: payload.receiptId.toLowerCase(), amountCents: payload.amountCents as number, method: payload.method as "cash" | "card", ...(payload.accountRevision !== undefined ? { accountRevision: payload.accountRevision as number } : {}) } };
   }
   if (body.type === "abandon_attachment") {
     // Only an own unfinished upload of the current assignment; the RPC re-checks both.
@@ -486,10 +493,24 @@ export function readTowingCommand(value: unknown): MobileTowingCommand {
   }
   onlyKeys(payload, ["fields"], "Neplatné údaje zákazky.");
   const fields = input(payload.fields, "Neplatné údaje zákazky.");
-  onlyKeys(fields, [...DRIVER_FIELDS, "paymentIntent", "owner", "realizedItems"], "Tieto údaje zákazky doplní kancelária.");
+  onlyKeys(fields, [...DRIVER_FIELDS, "paymentIntent", "owner", "requester", "recipient", "requesterType", "serviceType", "subjectType", "realizedItems"], "Tieto údaje zákazky doplní kancelária.");
   if (!Object.keys(fields).length) invalid("Nie je čo uložiť.");
   const out: MobileTowingDriverFields = {};
   if ("owner" in fields) out.owner = readOwner(fields.owner);
+  if ("requester" in fields) out.requester = readOwner(fields.requester);
+  if ("recipient" in fields) out.recipient = readOwner(fields.recipient);
+  if ("requesterType" in fields) {
+    if (fields.requesterType !== null && !["assistance", "selfpayer"].includes(fields.requesterType as string)) invalid("Vyberte typ objednávateľa.");
+    out.requesterType = fields.requesterType as "assistance" | "selfpayer" | null;
+  }
+  if ("serviceType" in fields) {
+    if (!SERVICE_TYPES.includes(fields.serviceType as string)) invalid("Vyberte druh výkonu.");
+    out.serviceType = fields.serviceType as MobileTowingFields["serviceType"];
+  }
+  if ("subjectType" in fields) {
+    if (!SUBJECT_TYPES.includes(fields.subjectType as string)) invalid("Vyberte druh predmetu zákazky.");
+    out.subjectType = fields.subjectType as MobileTowingFields["subjectType"];
+  }
   if ("realizedItems" in fields) out.realizedItems = readRealizedItems(fields.realizedItems);
   if ("paymentIntent" in fields) {
     if (fields.paymentIntent !== null && !PAYMENT_INTENTS.includes(fields.paymentIntent as typeof PAYMENT_INTENTS[number])) invalid("Vyberte spôsob plánovanej úhrady.");
@@ -500,6 +521,8 @@ export function readTowingCommand(value: unknown): MobileTowingCommand {
     const raw = fields[key];
     if (raw !== null && (typeof raw !== "string" || raw.length > 4000)) invalid("Skontrolujte dĺžku údajov zákazky.");
     const valueText = typeof raw === "string" ? raw.trim() || null : null;
+    if (["branchId", "fleetAssetId", "assistancePartnerId", "requesterId", "parkingId"].includes(key) && valueText !== null && !isUuid(valueText)) invalid("Vyberte platnú položku zo zoznamu.");
+    if (key === "plannedAt" && valueText !== null && !isHistoryTimestamp(valueText)) invalid("Plánovaný čas nie je platný.");
     if ((key === "startedAt" || key === "finishedAt" || key === "handedOverAt") && valueText !== null && (!isHistoryTimestamp(valueText) || Date.parse(valueText) > Date.now() + 5 * 60_000)) invalid("Čas práce nie je platný.");
     out[key] = valueText;
   }
@@ -552,22 +575,28 @@ export async function loadFieldCash(actor: MobileFieldActor): Promise<MobileFiel
   if (accounts.length > 1) unconfirmed();
   const source = accounts[0];
   if (source && (!isUuid(source.id) || !Number.isSafeInteger(source.balanceCents) || !Number.isSafeInteger(source.reservedCents) || source.reservedCents < 0 || !positive(source.revision))) unconfirmed();
-  const account = source ? { id: source.id, balanceCents: source.balanceCents, reservedCents: source.reservedCents, revision: source.revision } : null;
+  if (source?.categories !== undefined && (!isCashCategories(source.categories) || CASH_CATEGORIES.reduce((sum, key) => sum + source.categories![key].balanceCents, 0) !== source.balanceCents || CASH_CATEGORIES.reduce((sum, key) => sum + source.categories![key].reservedCents, 0) !== source.reservedCents)) unconfirmed();
+  const account = source ? { id: source.id, balanceCents: source.balanceCents, reservedCents: source.reservedCents, revision: source.revision, ...(source.categories ? { categories: source.categories } : {}) } : null;
   const handovers = (workspace.handovers ?? []).filter(row => row.driverId === actor.memberId).slice(0, 100).map(row => {
     if (!isUuid(row.id) || !positive(row.amountCents) || !positive(row.revision) || !["pending", "accepted", "rejected", "cancelled"].includes(row.status) || !isHistoryTimestamp(row.createdAt)) unconfirmed();
-    return { id: row.id, amountCents: row.amountCents, status: row.status, revision: row.revision, createdAt: row.createdAt };
+    if (row.cashBreakdown !== undefined && (!isCashBreakdown(row.cashBreakdown) || cashBreakdownTotal(row.cashBreakdown) !== row.amountCents)) unconfirmed();
+    return { id: row.id, amountCents: row.amountCents, status: row.status, revision: row.revision, createdAt: row.createdAt, ...(row.cashBreakdown ? { cashBreakdown: row.cashBreakdown } : {}) };
   });
   return { account, handovers };
+}
+function validatedCashBreakdown(value: unknown, total: number) {
+  if (!isCashBreakdown(value) || cashBreakdownTotal(value) !== total) invalid("Rozpis hotovosti sa musí rovnať odovzdávanej sume.");
+  return value;
 }
 export function readCashCommand(value: unknown): MobileFieldCashCommand {
   const body = input(value, "Neplatné odovzdanie hotovosti.");
   onlyKeys(body, ["commandId", "handoverId", "type", "expectedRevision", "payload"], "Neplatné odovzdanie hotovosti.");
   const payload = input(body.payload, "Neplatné odovzdanie hotovosti.");
-  onlyKeys(payload, ["amountCents", "accountRevision"], "Neplatné odovzdanie hotovosti.");
+  onlyKeys(payload, ["amountCents", "accountRevision", "cashBreakdown"], "Neplatné odovzdanie hotovosti.");
   if (typeof body.commandId !== "string" || !isUuid(body.commandId) || typeof body.handoverId !== "string" || !isUuid(body.handoverId)
     || body.type !== "propose_handover" || body.expectedRevision !== 0 || !positive(payload.amountCents) || !positive(payload.accountRevision)) invalid("Zadajte presnú sumu a obnovte stav svojej pokladne.");
   return { commandId: body.commandId.toLowerCase(), handoverId: body.handoverId.toLowerCase(), type: "propose_handover", expectedRevision: 0,
-    payload: { amountCents: payload.amountCents as number, accountRevision: payload.accountRevision as number } };
+    payload: { amountCents: payload.amountCents as number, accountRevision: payload.accountRevision as number, ...(payload.cashBreakdown !== undefined ? { cashBreakdown: validatedCashBreakdown(payload.cashBreakdown, payload.amountCents as number) } : {}) } };
 }
 export async function commandFieldCash(actor: MobileFieldActor, value: unknown): Promise<{ commandId: string; revision: number; cash: MobileFieldCash }> {
   requireDrive(actor);
@@ -579,10 +608,34 @@ export async function commandFieldCash(actor: MobileFieldActor, value: unknown):
 }
 
 export async function loadFieldTowingOptions(actor: MobileFieldActor): Promise<MobileFieldTowingOptions> {
-  requireDrive(actor);
-  const workspace = await loadTowingWorkspace(towingMember(actor), "driver", { limit: 1, offset: 0 });
+  const office = actor.capabilities.includes("operate");
+  if (!office) requireDrive(actor);
+  if (!towingEnabled()) throw new MutationError("Odťahy ešte nie sú v tomto prostredí zapnuté.", 503, "towing_unavailable");
+  const [workspace, fleet, branches, partners] = await Promise.all([
+    loadTowingWorkspace(towingMember(actor), office ? "office" : "driver", { limit: 1, offset: 0 }),
+    fieldAdmin().from("motorist_fleet_assets").select("id,label,license_plate,status,branch_id")
+      .eq("organization_id", actor.organizationId).eq("kind", "tow_truck").order("label").limit(2000),
+    fieldAdmin().from("motorist_branches").select("id,name").eq("organization_id", actor.organizationId)
+      .eq("active", true).order("name").limit(200),
+    fieldAdmin().from("motorist_contacts").select("id,name").eq("organization_id", actor.organizationId)
+      .in("role", ["assistance", "partner"]).order("name").limit(2000),
+  ]);
+  if (fleet.error || !Array.isArray(fleet.data) || branches.error || !Array.isArray(branches.data)
+    || partners.error || !Array.isArray(partners.data)) unconfirmed();
+  const reference = (row: { id: string; name: string }) => {
+    if (!isUuid(row.id) || !text(row.name, 2000)) unconfirmed();
+    return { id: row.id, name: row.name };
+  };
   return { parking: (workspace.parking ?? []).filter(row => row.active).slice(0, 200).map(row => {
     if (!isUuid(row.id) || !text(row.name, 2000) || !text(row.address, 4000)) unconfirmed();
     return { id: row.id, name: row.name, address: row.address };
-  }) };
+  }), branches: branches.data.map(reference), partners: partners.data.map(reference),
+    fleet: fleet.data.map(row => {
+      if (!isUuid(row.id) || !text(row.label, 2000)) unconfirmed();
+      return { id: row.id, name: row.label,
+        ...(row.license_plate ? { plate: String(row.license_plate) } : {}),
+        ...(row.branch_id && isUuid(row.branch_id) ? { branchId: row.branch_id } : {}),
+        ...(typeof row.status === "string" ? { status: row.status } : {}) };
+    }), ...(office ? { members: workspace.members.filter(row => row.active && row.capabilities.includes("drive")).slice(0, 200)
+      .map(row => reference({ id: row.id, name: row.displayName })) } : {}) };
 }

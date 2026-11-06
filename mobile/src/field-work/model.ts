@@ -7,7 +7,7 @@ import type { FieldWorkList } from "./api";
 
 /** Moja práca without any screen: labels, order of the list, the next step and what
  * a doklad or a submitted odťah still needs. The server re-checks all of it. */
-export const operationKindLabels: Record<MobileOperationKind, string> = { delivery: "Pristavenie", collection: "Odvoz vozidla", transfer: "Presun vozidla" };
+export const operationKindLabels: Record<MobileOperationKind, string> = { delivery: "Pristavenie náhradného vozidla", collection: "Vyzdvihnutie náhradného vozidla", transfer: "Presun vozidla" };
 export const operationStatusLabels: Record<MobileOperationStatus, string> = {
   assigned: "Pridelené", accepted: "Prijaté", en_route: "Na ceste", arrived: "Na mieste", collected: "Vozidlo prevzaté", completed: "Dokončené", cancelled: "Zrušené",
 };

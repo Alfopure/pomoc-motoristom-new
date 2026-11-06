@@ -300,21 +300,25 @@ describe("Moja práca: towing", () => {
     expect(work.projectTowingOrder(towingOrder({}, { dispatchInstructions: "Kľúče na recepcii" }), MEMBER).fields).toMatchObject({ dispatchInstructions: "Kľúče na recepcii" });
     expect(() => work.readTowingCommand({ commandId: CMD, type: "update_order", expectedRevision: 7, assignmentGeneration: 2, payload: { fields: { dispatchInstructions: "Zmena" } } })).toThrow();
   });
-  it("projects the driver's own order without finance or other parties", () => {
+  it("projects own operational contacts without office finance or another driver's order", () => {
     const order = work.projectTowingOrder(towingOrder(), MEMBER);
     expect(order).toMatchObject({ id: ORDER, number: "OT-2026-0005", revision: 7, assignmentGeneration: 2, workStatus: "in_progress",
-      fields: { requesterName: "Asistencia s.r.o.", pickup: "D1 km 120", destination: "Servis Žilina", customer: { name: "Mária", phone: "+421900333444" }, startSource: "manual" } });
+      fields: { requesterName: "Asistencia s.r.o.", requester: { name: "Asistencia s.r.o.", phone: "+421" }, pickup: "D1 km 120", destination: "Servis Žilina", customer: { name: "Mária", phone: "+421900333444" }, startSource: "manual" } });
     expect(order.attachments.map(item => item.id)).toEqual([id(40)]);
     const json = JSON.stringify(order);
-    for (const secret of ["receivedCents", "reconciliationRequired", "requester\":", "billing", "officeNotes"]) expect(json).not.toContain(secret);
+    for (const secret of ["receivedCents", "reconciliationRequired", "billing", "officeNotes", "taxId"]) expect(json).not.toContain(secret);
     expect(() => work.projectTowingOrder(towingOrder({ driverId: OTHER }), MEMBER)).toThrow();
     expect(() => work.projectTowingOrder(towingOrder({ workStatus: "submitted" }), MEMBER)).toThrow();
   });
-  it("lets a driver write only their own fields", () => {
+  it("accepts complete operational fields but denies office fields and missing own assignment", () => {
     const base = { commandId: CMD, type: "update_order", expectedRevision: 7, assignmentGeneration: 2 };
     expect(work.readTowingCommand({ ...base, payload: { fields: { finishedAt: "2026-10-28T09:00:00Z", driverNotes: " hotovo ", photoException: "" } } }).payload)
       .toEqual({ fields: { finishedAt: "2026-10-28T09:00:00Z", driverNotes: "hotovo", photoException: null } });
-    expect(() => work.readTowingCommand({ ...base, payload: { fields: { pickup: "iné" } } })).toThrow();
+    expect(work.readTowingCommand({ ...base, payload: { fields: { pickup: " iné ", contact: "+421900111222", branchId: id(90), requester: { name: "Partner", email: "contact@example.invalid" } } } }).payload)
+      .toEqual({ fields: { pickup: "iné", contact: "+421900111222", branchId: id(90), requester: { name: "Partner", email: "contact@example.invalid" } } });
+    for (const fields of [{ officeNotes: "Private" }, { authorizedCollectionCents: 1000 }, { customer: { name: "Billing identity" } }, { requester: { name: "Partner", taxId: "Private" } }, { branchId: OTHER + "/other" }]) {
+      expect(() => work.readTowingCommand({ ...base, payload: { fields } })).toThrow();
+    }
     expect(() => work.readTowingCommand({ ...base, payload: { fields: { startedAt: "2026-10-28T10:00:00Z", finishedAt: "2026-10-28T09:00:00Z" } } })).toThrow();
     expect(() => work.readTowingCommand({ ...base, type: "receive_payment", payload: {} })).toThrow();
     expect(() => work.readTowingCommand({ ...base, type: "submit", assignmentGeneration: undefined, payload: {} })).toThrow();

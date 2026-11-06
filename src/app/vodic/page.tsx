@@ -8,7 +8,7 @@ import { MotoristLogin } from "@/components/auth/MotoristLogin";
 import { getDefaultMotoristAuthState } from "@/server/api-auth";
 import { getAppRelease } from "@/server/app-release";
 
-export const metadata: Metadata = { title: "Moje zákazky", manifest: "/vodic.webmanifest" };
+export const metadata: Metadata = { title: "Moje odťahy", manifest: "/vodic.webmanifest" };
 export const dynamic = "force-dynamic";
 
 export default async function DriverPage({ searchParams }: { searchParams: Promise<{ orderId?: string }> }) {

@@ -342,7 +342,7 @@ test("handoff action delegates without writing and management mounts only when e
     .getByText("Podrobná správa jázd a zákaziek", { exact: true })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Výjazdy a odvozy", exact: true }),
+    page.getByRole("heading", { name: "Pristavenia a návraty", exact: true }),
   ).toBeVisible();
   const search = page.getByLabel("Hľadať jazdu", { exact: true });
   await search.fill("Rozpracovaný filter");
@@ -364,7 +364,7 @@ test("closing detailed management refreshes the compact status", async ({
     .getByText("Podrobná správa jázd a zákaziek", { exact: true })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Výjazdy a odvozy", exact: true }),
+    page.getByRole("heading", { name: "Pristavenia a návraty", exact: true }),
   ).toBeVisible();
   trace.data.operations.operations[1].status = "completed";
   await page

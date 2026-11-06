@@ -956,7 +956,7 @@ function DispatchConsoleContent({
     { group: "operations", icon: CalendarDays, label: "Dochádzka", shortLabel: "Doch.", view: "attendance" },
     { group: "operations", icon: Truck, label: "Flotila", shortLabel: "Flotila", view: "fleet" },
     { group: "operations", icon: Building2, label: "Pobočky", shortLabel: "Pobočky", view: "branches" },
-    { group: "operations", icon: MapPinned, label: "Výjazdy a odvozy", shortLabel: "Výjazdy", view: "operations" },
+    { group: "operations", icon: MapPinned, label: "Pristavenia a návraty", shortLabel: "Pristavenia", view: "operations" },
     ...(canUseTowing ? [{ group: "operations" as const, icon: Truck, label: towingAccess?.office ? "Kniha odťahov" : "Moje odťahy", shortLabel: "Odťahy", view: "towing" as const }] : []),
     { group: "operations", icon: ClipboardCheck, label: "Partneri", shortLabel: "Partneri", view: "partners" },
     { group: "management", icon: BarChart3, label: "Reporty", shortLabel: "Reporty", view: "reports" },
