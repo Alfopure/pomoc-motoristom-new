@@ -220,12 +220,12 @@ a už dané súhlasy zostávajú platné pre svoj konkrétny rozsah.
 
 | Etapa | Stav |
 | --- | --- |
-| 1. TestFlight | Mac znovu dostupný, uchované predchádzajúce artefakty; nový základný TEST build sa pripravuje. |
-| 2. Upozornenia | Implementácia databázovej a serverovej podpory, registrácie a mobilného otvorenia. |
-| 3. Dnes / Po termíne | Implementácia serverového filtra a mobilného výberu. |
-| 4. Fotky | Implementácia súkromných príloh a bezpečného opakovania prenosu. |
-| 5. Checklist | Implementácia bodov a výslovného potvrdenia nedokončených bodov. |
-| 6. Opakovanie | Implementácia dennej/týždennej série s ohraničeným spracovaním. |
+| 1. TestFlight | Základný build 38 podpísaný/overený; natívny štart zablokoval systémový simulátor a spojenie s Macom. Rozšírený build zatiaľ nie je zostavený. |
+| 2. Upozornenia | Implementované a overené databázovo/API; fyzické doručenie a otvorenie pushu ešte čaká na iPhone. |
+| 3. Dnes / Po termíne | Overené na TESTe a v Expo UI vrátane časového pásma, stránkovania a DST testov. |
+| 4. Fotky | Živý TEST upload/čítanie/odstránenie aj zákazy prístupu prešli; kamera na iPhone zostáva neoverená. |
+| 5. Checklist | Overené API/UI a súbehovými testami; zachované aj overené automatické zdrojové dokončenie. |
+| 6. Opakovanie | Implementované; TEST API a lokálne SQL overenie opakovania, CAS a ohraničeného spracovania prešli. |
 
 Priebežné pracovné dôkazy a checkpointy sú v `.context/task-extensions/`.
-Tabuľka opisuje rozpracovanie; nepotvrdzuje nasadenie ani fyzickú akceptáciu.
+Implementácia a výsledky sú v [odovzdaní](../mobile/task-extensions-2026-11-06.md). Tabuľka nenahrádza chýbajúcu natívnu/fyzickú akceptáciu.
