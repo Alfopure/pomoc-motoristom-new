@@ -1,14 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ rpc: vi.fn(), deliver: vi.fn() }));
+const mocks = vi.hoisted(() => ({ rpc: vi.fn(), deliver: vi.fn(), workPush: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createSupabaseServerClient: async () => ({ rpc: mocks.rpc }) }));
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => ({ kind: "admin" }) }));
 vi.mock("./task-notifications", () => ({ deliverTaskAssignmentNotifications: mocks.deliver }));
+vi.mock("./mobile/push-outbox", () => ({ queueWorkPush: mocks.workPush }));
 import { createWorkspaceTask, deleteWorkspaceTask, loadTaskMessages, loadWorkspaceTask, sendTaskMessage, updateWorkspaceTask, validateTaskInput } from "./tasks";
 import type { MotoristActor } from "./api-auth";
 const actor: MotoristActor = { organizationId: "org", profileId: "a", userId: "u", role: "dispatcher", displayName: "A" };
 const id = "00000000-0000-4000-8000-000000000001";
-beforeEach(() => mocks.rpc.mockReset().mockResolvedValue({ data: {}, error: null }));
+beforeEach(() => { mocks.workPush.mockReset(); mocks.rpc.mockReset().mockResolvedValue({ data: {}, error: null }); });
 describe("task workspace service boundary", () => {
+  it("drains canonical assignment/comment notices only after the authenticated transaction succeeds", async () => {
+    await createWorkspaceTask(actor, { title: "New" });
+    await updateWorkspaceTask(actor, id, { expectedRevision: 1, title: "Changed" });
+    await sendTaskMessage(actor, id, { body: "Hello", clientMessageId: id });
+    expect(mocks.workPush.mock.calls).toEqual([[actor.organizationId], [actor.organizationId], [actor.organizationId]]);
+    mocks.workPush.mockClear();
+    mocks.rpc.mockResolvedValue({ error: { code: "42501" } });
+    await expect(updateWorkspaceTask(actor, id, { expectedRevision: 1, title: "Denied" })).rejects.toMatchObject({ status: 403 });
+    expect(mocks.workPush).not.toHaveBeenCalled();
+  });
   it("explains blocked legacy completion when a task needs its designated review", async () => {
     mocks.rpc.mockResolvedValue({ error: { code: "22023", message: "Task review required" } });
     await expect(updateWorkspaceTask(actor, id, { expectedRevision: 4, status: "done" })).rejects.toMatchObject({ status: 400, message: expect.stringContaining("vyžaduje kontrolu") });

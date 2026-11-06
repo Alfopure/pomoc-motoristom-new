@@ -310,4 +310,15 @@ describe("notification taps", () => {
     expect(inbox.take("00000000-0000-4000-8000-000000000002")).toBeNull();
     expect(inbox.snapshot()).toBeNull();
   });
+  it("routes employee tasks by canonical user without treating a field member as a dispatcher", () => {
+    const inbox = new PushTapInbox();
+    const user = "00000000-0000-4000-8000-000000000009";
+    expect(readPushTap(response({ kind: "employee-task", id: TASK, userId: user }))).toEqual({ key: "n1", userId: user, target: { kind: "employee-task", id: TASK } });
+    expect(readPushTap(response({ kind: "employee-task", id: TASK, profileId: ME }))).toBeNull();
+    inbox.receive(response({ kind: "employee-task", id: TASK, userId: user }));
+    expect(inbox.take(ME, user)).toEqual({ kind: "employee-task", id: TASK });
+    inbox.receive(response({ kind: "employee-task", id: TASK, userId: user }, "n2"));
+    expect(inbox.take(user, ME)).toBeNull();
+  });
+
 });

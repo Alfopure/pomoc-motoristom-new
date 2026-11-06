@@ -9,8 +9,8 @@ import { DISPATCH_PUSH, pushOffer } from "./kinds";
 import type { PushSettings } from "./settings";
 
 const SWITCHES: readonly { type: MobilePushType; title: string; subtitle: string }[] = [
-  { type: "tasks", title: "Úlohy", subtitle: "Nová úloha, kontrola a vrátenie na dopracovanie" },
-  { type: "task_due", title: "Termíny úloh", subtitle: "Pripomienka a úloha po termíne" },
+  { type: "tasks", title: "Úlohy", subtitle: "Pridelenie, správa pri úlohe, kontrola a vrátenie" },
+  { type: "task_due", title: "Termíny úloh", subtitle: "Upozornenie pred termínom alebo pri termíne" },
   { type: "cases", title: "Prípady", subtitle: "Kolega vám pridelil prípad" },
   { type: "callbacks_mine", title: "Moje spätné volania", subtitle: "Prevzaté spätné volanie po termíne" },
   { type: "callbacks_unclaimed", title: "Spätné volania bez dispečera", subtitle: "Požiadavka po termíne, ktorú nikto neprevzal" },

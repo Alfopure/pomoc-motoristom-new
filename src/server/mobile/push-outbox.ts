@@ -3,13 +3,14 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { MobilePushData, MobilePushType } from "@/lib/mobile-api";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { mobileEnvironment } from "./auth";
+import { isUuid } from "@/lib/telephony/uuid";
 import { deliverPushNotices, mobilePushEnabled, queueMobilePush, STALE_DEVICE_DAYS, storedPreferences, type PushDevice, type PushNotice, type PushTransport } from "./push";
 
 /** Work notices (branch queue, own assignments, damage reports) come from the
  * database outbox written in the same transaction as the change. A claim lease
  * keeps the immediate send and the cron drain from sending a row twice; the
  * server re-checks each recipient's access before it hands out a row. */
-export type OutboxRow = { id: string; leaseId: string; memberId: string | null; profileId: string | null; type: Extract<MobilePushType, "work" | "branch">; event: string; title: string; body: string; target: MobilePushData };
+export type OutboxRow = { id: string; leaseId: string; memberId: string | null; profileId: string | null; userId?: string | null; type: Extract<MobilePushType, "work" | "branch" | "tasks" | "task_due">; event: string; title: string; body: string; target: MobilePushData };
 export type OutboxOutcome = { id: string; lease_id: string; outcome: "sent" | "no_device" | "failed" };
 export type OutboxDrain = { claimed: number; sent: number; noDevice: number; failed: number };
 type Admin = SupabaseClient;
@@ -76,11 +77,11 @@ export async function drainPushOutbox(admin: Admin, organizationId: string, opti
     // the newest row wins (a later new term replaces an earlier one).
     const seen = new Set<string>();
     const notices: (PushNotice & { rowId: string })[] = [...rows].reverse().flatMap(row => (owners.get((row.memberId ?? row.profileId)!) ?? [])
-      .filter(device => device.preferences[row.type]).flatMap(device => {
+      .filter(device => device.preferences[row.type] && (row.target.kind !== "employee-task" || typeof row.userId === "string" && isUuid(row.userId) && isUuid(row.target.id))).flatMap(device => {
         const key = `${device.token}:${row.event}:${"id" in row.target ? row.target.id : ""}`;
         if (seen.has(key)) return [];
         seen.add(key);
-        return [{ rowId: row.id, device, title: row.title, body: row.body, data: row.target }];
+        return [{ rowId: row.id, device, title: row.title, body: row.body, data: row.target.kind === "employee-task" ? { ...row.target, userId: row.userId! } : row.target }];
       }));
     sending = notices.length > 0;
     const delivered = notices.length ? await deliverPushNotices(admin as never, notices, options.transport) : [];

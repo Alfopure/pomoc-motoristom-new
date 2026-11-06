@@ -63,9 +63,11 @@ export type MobilePushType = "tasks" | "task_due" | "callbacks_mine" | "callback
 export type MobilePushPreferences = Record<MobilePushType, boolean>;
 export type MobilePushRegistration = MobileScope & { preferences: MobilePushPreferences };
 export type MobilePushData = { kind: "task"; id: string } | { kind: "case"; id: string } | { kind: "callbacks" } | { kind: "delivery"; id: string }
-  | { kind: "operation"; id: string } | { kind: "towing"; id: string } | { kind: "branch-request"; id: string };
+  | { kind: "operation"; id: string } | { kind: "towing"; id: string } | { kind: "branch-request"; id: string }
+  | { kind: "employee-task"; id: string; userId?: string };
 /** What a delivered notification carries: where a tap leads and whose phone it was sent to. */
-export type MobilePushPayload = MobilePushData & { profileId: string };
+export type MobilePushPayload = Exclude<MobilePushData, { kind: "employee-task" }> & { profileId: string }
+  | { kind: "employee-task"; id: string; userId: string };
 export type MobileVoiceAttemptEnded = MobileScope & {
   resolved: boolean; sessionId: string | null; terminationPending: boolean;
 };

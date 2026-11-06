@@ -255,3 +255,11 @@ describe("shell back store", () => {
     expect(notified).toBe(4);
   });
 });
+
+
+it("offers task notifications to a tasks-only employee without promising case access", () => {
+  const kinds = pushKinds(false, { delivery: false, work: false, branch: false, tasks: true });
+  expect(kinds).toEqual(["tasks", "task_due"]);
+  expect(pushOffer(kinds)).toBe("Úlohy aj pri zamknutom telefóne");
+  expect(pushOffer(pushKinds(true, { delivery: false, work: false, branch: false, tasks: true }))).toBe("Úlohy, prípady a spätné volania aj pri zamknutom telefóne");
+});

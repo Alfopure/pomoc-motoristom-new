@@ -8,7 +8,7 @@ import {resolve} from 'node:path';
 const origin=process.env.MOBILE_QA_ORIGIN||'http://localhost:8081';
 const url=new URL(origin);
 assert(['localhost','127.0.0.1'].includes(url.hostname)&&url.protocol==='http:','Use only isolated local Expo web');
-const out=resolve('.context/simple-tasks-qa');mkdirSync(out,{recursive:true});
+const out=resolve(process.env.MOBILE_QA_OUTPUT||'.context/simple-tasks-qa');mkdirSync(out,{recursive:true});
 const init=resolve(out,'composed-fixture.js');
 writeFileSync(init,readFileSync('tests/mobile/ui-redesign-fixture.js','utf8')+'\n'+readFileSync('tests/mobile/simple-tasks-fixture.js','utf8'));
 const report={source:spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).stdout.trim(),startedAt:new Date().toISOString(),synthetic:true,checks:[],sessions:[],screenshots:[]};

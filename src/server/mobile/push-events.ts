@@ -59,6 +59,14 @@ export function pushTaskReview(admin: Admin, change: { organizationId: string; t
   if (change.action !== "submit_review" && change.action !== "return") return;
   if (!isUuid(change.taskId)) return;
   queueMobilePush(async () => {
+    // Employee tasks already queued a canonical, recipient-revalidated review
+    // event in the workflow transaction. Keep the private bell, send one push.
+    const task = await (admin as unknown as SupabaseClient).from("motorist_case_tasks").select("employee_extensions,assigned_user_id,assigned_to")
+      .eq("organization_id", change.organizationId).eq("id", change.taskId).abortSignal(AbortSignal.timeout(READ_MS)).maybeSingle();
+    if (task.error || !task.data || task.data.employee_extensions === true) return;
+    // Old review bells could fall back to an office creator when the actual
+    // assignee is field-only. Its canonical return is owned by the DB outbox.
+    if (change.action === "return" && task.data.assigned_user_id && task.data.assigned_to === null) return;
     // The workflow transaction wrote the in-app notice and chose its recipient.
     const notice = await admin.from("motorist_notifications").select("id,recipient_profile_id,case_id").eq("organization_id", change.organizationId)
       .eq("task_id", change.taskId).eq("status", "unread").like("dedupe_key", "task-review:" + change.taskId + ":generation:%:" + change.action + ":recipient:%")
