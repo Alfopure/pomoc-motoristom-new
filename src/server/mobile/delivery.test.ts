@@ -9,7 +9,8 @@ vi.mock("./auth", () => ({ mobileEnvironment: () => "test", verifyMobileUser: mo
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: () => ({ rpc: mocks.rpc }) }));
 vi.mock("./push", () => ({ queueMobilePush: mocks.queue, sendMemberPush: mocks.memberPush }));
 
-const { requireMobileFieldActor, requireMobilePerson, mobileDeliveryEnabled } = await import("./field-auth");
+const { requireMobileFieldActor, requireMobilePerson, requireMobileMemberIdentity, mobileDeliveryEnabled } = await import("./field-auth");
+const { GET: fieldMeRoute } = await import("@/app/api/mobile/v1/field/me/route");
 const { commandDelivery, issueDeliveryTracker, loadDeliveries, parseDelivery, readDelivery, readTrackerToken, recordDeliveryPosition, revokeDeliveryTracker, trackDeliveryPositions, trackerHash } = await import("./delivery");
 const { POST: trackRoute } = await import("@/app/api/mobile/v1/field/track/route");
 const { commandMobileCaseHandoff, getMobileCaseHandoffs, parseMobileHandoffInput } = await import("./case-handoff");
@@ -42,6 +43,22 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("pristavovač identity", () => {
+  it("keeps employee identity and tasks available while delivery operations are disabled", async () => {
+    vi.stubEnv("MOBILE_DELIVERY_ENABLED", "false");
+    await expect(requireMobileMemberIdentity(new Request("https://x"))).resolves.toMatchObject({ userId: USER, memberId: MEMBER, organizationId: ORG });
+    await expect(requireMobileFieldActor(new Request("https://x"))).rejects.toMatchObject({ status: 503 });
+    const response = await fieldMeRoute(new Request("https://x/api/mobile/v1/field/me"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ memberId: MEMBER, organizationId: ORG, tasks: true, capabilities: [], branches: [] });
+  });
+
+  it("still verifies the login before rejecting disabled delivery operations", async () => {
+    vi.stubEnv("MOBILE_DELIVERY_ENABLED", "false");
+    mocks.user.mockRejectedValue(new MutationError("Prihláste sa.", 401));
+    await expect(requireMobileFieldActor(new Request("https://x"))).rejects.toMatchObject({ status: 401 });
+    await expect(requireMobileMemberIdentity(new Request("https://x"))).rejects.toMatchObject({ status: 401 });
+    expect(mocks.rpc).not.toHaveBeenCalled();
+  });
   it("is off unless switched on, and never on a working-branch Preview", () => {
     expect(mobileDeliveryEnabled({})).toBe(false);
     expect(mobileDeliveryEnabled(stableTest)).toBe(true);

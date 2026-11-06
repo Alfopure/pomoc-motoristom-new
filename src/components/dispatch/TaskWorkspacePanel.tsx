@@ -2,11 +2,11 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, ClipboardCheck, Filter, ListTodo, Plus, RefreshCw, Search, UserRoundCheck } from "lucide-react";
 import type { DispatchCase, Operator } from "@/domain/types";
-import type { WorkspaceTask } from "@/domain/task-workspace";
+import { workspaceTaskAssigneeLabel, type WorkspaceTask } from "@/domain/task-workspace";
 import { isTaskDueToday, isTaskHandoverRelevant, isTaskOverdue, taskPriorityLabels } from "@/domain/tasks";
 import { canReviewTask, taskWorkflowLabels, taskWorkflowState, type TaskWorkflowAction } from "@/domain/task-workflow";
 import { useTaskWorkspace } from "./TaskWorkspaceProvider";
-import { taskDraft, type TaskDraft, type TaskBoardMutation } from "./task-workspace-store";
+import { RETAIN_TASK_ASSIGNEE, taskDraft, type TaskDraft, type TaskBoardMutation } from "./task-workspace-store";
 import { TaskChatPanel } from "./TaskChatPanel";
 import { groupTaskBoard, taskBoardColumn, taskBoardColumns, taskBoardDrop, type TaskBoardColumnId, type TaskBoardDateColumn } from "./task-workspace-board";
 import { TaskWorkspaceBoard, TaskWorkspaceCard } from "./TaskWorkspaceBoard";
@@ -51,7 +51,7 @@ export function TaskWorkspacePanel({ headerStatus, tasks, cases, operators, view
   const reviewsForMe = snapshot.tasks.filter(task => canReviewTask(task, viewerProfileId)).length;
   const query = search.trim().toLocaleLowerCase("sk-SK");
   const visible = snapshot.tasks.filter(task => {
-    if (assignee !== "all" && task.assignedTo !== assignee) return false;
+    if (assignee !== "all" && (task.assignedTo !== assignee || (assignee === "unassigned" && (task.assignedUserId || task.assignedGroupId)))) return false;
     if (query && ![task.title, ...task.caseLinks.map(link => link.caseNumber)].some(value => value.toLocaleLowerCase("sk-SK").includes(query))) return false;
     if (workflowEnabled) {
       const stage = taskWorkflowState(task);
@@ -229,7 +229,7 @@ export function TaskWorkspacePanel({ headerStatus, tasks, cases, operators, view
       <section className={styles.section} aria-label="Editor úlohy">
         <label>Názov úlohy<textarea ref={titleRef} value={draft.title} maxLength={500} onChange={event => change({ title: event.target.value })} rows={2} /></label>
         <div className={styles.grid}>
-          <label>Zodpovedná osoba<select value={draft.assignedTo} onChange={event => change({ assignedTo: event.target.value })}><option value="unassigned">Nepriradené</option>{operators.map(operator => <option key={operator.id} value={operator.id}>{operator.name}</option>)}</select></label>
+          <label>Zodpovedná osoba<select value={draft.assignedTo} onChange={event => change({ assignedTo: event.target.value })}><option value="unassigned">{selected && taskDraft(selected).assignedTo === RETAIN_TASK_ASSIGNEE ? "Odobrať priradenie" : "Nepriradené"}</option>{selected && taskDraft(selected).assignedTo === RETAIN_TASK_ASSIGNEE && <option value={RETAIN_TASK_ASSIGNEE}>{workspaceTaskAssigneeLabel(selected, operators)}</option>}{operators.map(operator => <option key={operator.id} value={operator.id}>{operator.name}</option>)}</select></label>
           <label>Termín úlohy<input type="datetime-local" value={localTime(draft.dueAt)} onChange={event => change({ dueAt: event.target.value })} /></label>
           <label>Pripomenúť o<input type="datetime-local" value={localTime(draft.reminderAt)} onChange={event => change({ reminderAt: event.target.value })} /><span>Bez samostatného času sa použije termín úlohy.</span></label>
           <label>Priorita úlohy<select value={draft.priority} onChange={event => change({ priority: event.target.value as TaskDraft["priority"] })}>{Object.entries(taskPriorityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>

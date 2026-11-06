@@ -13,6 +13,8 @@
  *  - `user-bearer` — verified Supabase user JWT + active organization profile; no cookies or machine secrets.
  *  - `field-bearer` — verified Supabase user JWT + active field membership with the needed capability;
  *    no dispatch profile, cookies or machine secrets (pristavovač in the mobile app).
+ *  - `employee-bearer` — verified user JWT + current human office or field membership;
+ *    task RPC scopes every operation without granting dispatch/case access.
  *  - `delivery-tracker` — a per-delivery or per-operation secret issued to the field member over
  *    `field-bearer` (`Authorization: Tracker …`, only its hash stored); it only adds positions to
  *    that open delivery or the member's own accepted operation.
@@ -23,7 +25,7 @@
  * musí byť importovateľný z testov (route-auth-registry.test.ts, route-auth.test.ts).
  */
 
-export type RouteAuthClass = "public" | "bearer" | "dual" | "session" | "user-bearer" | "field-bearer" | "delivery-tracker";
+export type RouteAuthClass = "public" | "bearer" | "dual" | "session" | "user-bearer" | "field-bearer" | "employee-bearer" | "delivery-tracker";
 
 export type MotoristRole = "dispatcher" | "senior_dispatcher" | "manager" | "admin";
 
@@ -95,6 +97,10 @@ export const ROUTE_AUTH_REGISTRY: Record<string, RouteAuthEntry> = {
   "mobile/v1/diagnostics/voice": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Allowlisted sanitized iPhone voice device-log batch; TEST, production only by MOBILE_VOICE_DIAGNOSTICS_ENABLED; one runtime log line, no database write." },
   "mobile/v1/drafts/scope": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Private verified organization scope for account-bound device drafts and expected-organization fencing." },
   "mobile/v1/tasks": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Bounded current-actor assigned or reviewer task overview; no arbitrary actor selection." },
+  "mobile/v1/tasks/workspace": { class: "employee-bearer", note: "Current employee tasks and idempotent creation, including field-only staff; RPC rechecks actor, targets, revisions and organization." },
+  "mobile/v1/tasks/workspace/directory": { class: "employee-bearer", note: "Bounded active human colleague and staffed work-group choices; no customer or dispatch access." },
+  "mobile/v1/tasks/workspace/[id]": { class: "employee-bearer", note: "Exact scoped task and paginated activity; field participants never gain case read access." },
+  "mobile/v1/tasks/workspace/[id]/commands": { class: "employee-bearer", note: "Current task participant or group-lead rights, expected revision and immutable command receipt." },
   "mobile/v1/cases": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Scoped bounded case list and allowlisted draft creation owned by the authenticated actor." },
   "mobile/v1/cases/overview": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Read-only organization-scoped exact open-case counts; no arbitrary organization or actor selection." },
   "mobile/v1/cases/[id]": { class: "user-bearer", role: ["dispatcher", "senior_dispatcher", "manager", "admin"], note: "Organization-scoped case detail and allowlisted revision-safe atomic edits with actor-bound replay receipts." },

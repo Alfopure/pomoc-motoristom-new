@@ -1,10 +1,42 @@
 import { describe, expect, it, vi } from "vitest";
-import type { WorkspaceTask } from "@/domain/task-workspace";
-import { TaskWorkspaceStore } from "./task-workspace-store";
+import { workspaceTaskAssigneeLabel, type WorkspaceTask } from "@/domain/task-workspace";
+import { RETAIN_TASK_ASSIGNEE, taskDraft, TaskWorkspaceStore } from "./task-workspace-store";
 const task = (overrides: Partial<WorkspaceTask> = {}): WorkspaceTask => ({ id: "task-1", title: "Original", caseId: "", caseIds: [], caseLinks: [], revision: 1, originLocked: false, provenance: "manual", origins: [], updatedAt: "2026-09-10T10:00:00Z", assignedTo: "unassigned", dueAt: "", priority: "normal", status: "open", kind: "other", ...overrides });
 const reply = (body: unknown, status = 200) => Promise.resolve(Response.json(body, { status }));
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(fn => { resolve = fn; }); return { resolve, promise }; }
 describe("shared task workspace", () => {
+  const fieldAssignment = { assignedUserId: "field-user-id", assignedUserName: "Martin Podlan", assignedGroupId: "branch-id", assignedGroupName: "Pobočka Bratislava" };
+  it("displays canonical employee and branch names without treating their IDs as office profiles", () => {
+    const assigned = task(fieldAssignment);
+    expect(workspaceTaskAssigneeLabel(assigned, [])).toBe("Martin Podlan · Pobočka Bratislava");
+    expect(workspaceTaskAssigneeLabel(task({ assignedGroupId: "branch-id", assignedGroupName: "Pobočka Bratislava" }), [])).toBe("Pobočka Bratislava");
+    expect(workspaceTaskAssigneeLabel(task({ assignedTo: "profile-id" }), [{ id: "profile-id", name: "Dispečer" }])).toBe("Dispečer");
+    expect(workspaceTaskAssigneeLabel(task(), [])).toBe("Nepriradené");
+    expect(taskDraft(assigned).assignedTo).toBe(RETAIN_TASK_ASSIGNEE);
+  });
+  it("preserves employee and branch assignments on title-only saves and failed retries", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ error: "offline" }, { status: 500 }))
+      .mockResolvedValueOnce(Response.json({ task: task({ ...fieldAssignment, title: "Updated", revision: 2 }) }));
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [task(fieldAssignment)]);
+    store.edit("task-1", { title: "Updated" });
+    expect(await store.saveTask("task-1")).toBe(false);
+    expect(await store.saveTask("task-1")).toBe(true);
+    for (const [, init] of fetcher.mock.calls) {
+      const payload = JSON.parse(init.body);
+      expect(payload).toMatchObject({ title: "Updated", expectedRevision: 1 });
+      expect(payload).not.toHaveProperty("assignedTo");
+    }
+    expect(store.getSnapshot().tasks[0]).toMatchObject(fieldAssignment);
+    store.clear();
+  });
+  it.each(["unassigned", "office-profile-id"])("explicitly changes a retained recipient to %s", async assignedTo => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ task: task({ revision: 2 }) }));
+    const store = new TaskWorkspaceStore(true, undefined, fetcher, [task(fieldAssignment)]);
+    store.edit("task-1", { assignedTo });
+    expect(await store.saveTask("task-1")).toBe(true);
+    expect(JSON.parse(fetcher.mock.calls[0][1].body).assignedTo).toBe(assignedTo === "unassigned" ? null : assignedTo);
+    store.clear();
+  });
   it("expires the initial server snapshot even when every initial read fails offline", async () => {
     vi.useFakeTimers();
     try {

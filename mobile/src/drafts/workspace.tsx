@@ -10,7 +10,9 @@ import type { LogoutState } from "../lib/logout";
 import { formatTime } from "../lib/display";
 import { createCasesApi, type CasesApi } from "../cases/api";
 import { Cases, type CaseOpenRequest } from "../cases/ui";
-import { MyTasks } from "../work/my-tasks-ui";
+import { EmployeeTasks } from "../tasks/ui";
+import { createEmployeeTasksApi } from "../tasks/api";
+import { EmployeeTasksStore } from "../tasks/store";
 import { WorkStore } from "../work/store";
 import { createToolsApi } from "../tools/api";
 import { ToolsWorkspace } from "../tools/ui";
@@ -203,7 +205,9 @@ function AuthorizedDraftWorkspace(props: Props & { verified: MobileDraftScope; g
     setCaseRequest({ kind: "case-call-create", id: null, number: phone, nonce: ++request.current }); onView("cases");
   }, [callCase, current, onView, onCallCaseHandled]);
   function resume(record: StoredDraft) {
-    if (record.kind === "task-state") {
+    if (record.kind === "employee-task-create") {
+      setTaskRequest({ taskId: null, nonce: ++request.current }); props.onView("tasks");
+    } else if (record.kind === "task-state" || record.kind === "employee-task-command") {
       if (record.resourceId) { setTaskRequest({ taskId: record.resourceId, nonce: ++request.current }); props.onView("tasks"); }
     } else { setCaseRequest({ kind: record.kind, id: record.resourceId, nonce: ++request.current }); props.onView("cases"); }
   }
@@ -264,7 +268,7 @@ function LayerSlot({ render, layer, scope, ...open }: { render: Props["renderLay
   return <>{render(layer, scope, null, open)}</>;
 }
 
-function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; queryKey: string[]; caseRequest?: CaseOpenRequest; taskRequest?: { taskId: string | null; nonce: number };
+function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; queryKey: string[]; verified: MobileDraftScope; getToken: () => Promise<string | null>; caseRequest?: CaseOpenRequest; taskRequest?: { taskId: string | null; nonce: number };
   onOpenCase: (id: string) => void; onResume: (record: StoredDraft) => void; onDiscarded: () => void; onForgetCaseRequest: () => void; onForgetTaskRequest: () => void }) {
   const { api, vault, queryKey, view, active, identity, onDiscarded } = props;
   const client = useQueryClient(), state = useSyncExternalStore(vault.subscribe, vault.snapshot, vault.snapshot);
@@ -273,6 +277,11 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
   useEffect(() => { if (resetReady) onDiscarded(); }, [resetReady, onDiscarded]);
   const store = useMemo(() => new WorkStore(api.work, () => { void client.invalidateQueries({ queryKey }); }, (kind, id) => vault.bind(kind, id)), [api.work, client, queryKey, vault]);
   useEffect(() => () => store.dispose(), [store]);
+  const employeeApi = useMemo(() => createEmployeeTasksApi(props.config, props.getToken, props.userId, props.verified.organizationId),
+    [props.config, props.getToken, props.userId, props.verified.organizationId]);
+  const employeeStore = useMemo(() => new EmployeeTasksStore(employeeApi, props.userId, { id: randomUUID,
+    createPort: vault.bind("employee-task-create", props.userId), commandPort: id => vault.bind("employee-task-command", id) }), [employeeApi, props.userId, vault]);
+  useEffect(() => () => employeeStore.dispose(), [employeeStore]);
   const caseKey = useMemo(() => [...queryKey, "cases", identity.profileId], [queryKey, identity.profileId]);
   const visible = operationViews.includes(view);
   useAndroidBack(active && !state.ready && (view === "cases" || view === "tasks"), props.onLeaveModule);
@@ -287,7 +296,8 @@ function VaultOperations(props: Props & { api: CasesApi; vault: DraftVault; quer
     {state.ready && <>
       <View style={view === "cases" ? { flex: 1 } : { display: "none" }}><ModuleBoundary forget={key => key.includes("cases")} onReset={props.onForgetCaseRequest}><Cases api={api} environment={props.config.environment} userId={props.userId} profileId={identity.profileId}
         active={active && view === "cases"} visible={view === "cases"} workStore={store} vault={vault} queryKey={caseKey} openRequest={props.caseRequest} onLeaveCases={props.onLeaveModule} onSelectNumber={props.onSelectNumber} /></ModuleBoundary></View>
-      <View style={view === "tasks" ? { flex: 1 } : { display: "none" }}><ModuleBoundary forget={key => key.includes("my-tasks")} onReset={props.onForgetTaskRequest}><MyTasks store={store} queryKey={queryKey} profileId={identity.profileId}
+      <View style={view === "tasks" ? { flex: 1 } : { display: "none" }}><ModuleBoundary forget={key => key.includes("employee-tasks")} onReset={props.onForgetTaskRequest}><EmployeeTasks store={employeeStore}
+        config={props.config} getToken={props.getToken} userId={props.userId} organizationId={props.verified.organizationId}
         active={active && view === "tasks"} onLeave={props.onLeaveModule} onOpenCase={props.onOpenCase} openTaskRequest={props.taskRequest} /></ModuleBoundary></View>
     </>}
   </>;
@@ -342,7 +352,7 @@ function Account(props: Props) {
     </Group>
   </View>;
 }
-const labels: Record<DraftKind, string> = { "case-create": "Nový prípad", "case-edit": "Úprava prípadu", "case-note": "Poznámka prípadu", "case.owner": "Priradenie dispečera", "task-create": "Nová úloha", "task-state": "Správa alebo stav úlohy", handoff: "Odovzdanie prípadu", attachment: "Príloha prípadu" };
+const labels: Record<DraftKind, string> = { "case-create": "Nový prípad", "case-edit": "Úprava prípadu", "case-note": "Poznámka prípadu", "case.owner": "Priradenie dispečera", "task-create": "Nová úloha prípadu", "task-state": "Správa alebo stav úlohy", "employee-task-create": "Nová úloha", "employee-task-command": "Rozpracovaná zmena úlohy", handoff: "Odovzdanie prípadu", attachment: "Príloha prípadu" };
 function LocalDrafts({ vault, onResume, onDiscarded, needsReset, deferReset }: { vault: DraftVault; onResume: (record: StoredDraft) => void; onDiscarded: () => void; needsReset: boolean; deferReset: () => void }) {
   const state = useSyncExternalStore(vault.subscribe, vault.snapshot, vault.snapshot), [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   function discard(record?: StoredDraft) {

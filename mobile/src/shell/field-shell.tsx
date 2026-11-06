@@ -3,6 +3,9 @@ import { AccessibilityInfo, Linking, Pressable, RefreshControl, ScrollView, Styl
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MapPin } from "lucide-react-native";
 import type { MobileConfig } from "../lib/config";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { MobileApiError } from "../lib/api";
+import { FieldEmployeeTaskWorkspace } from "./employee-task-workspace";
 import type { LogoutState } from "../lib/logout";
 import { appVersion, versionLabel } from "../lib/app-version";
 import { useAndroidBack } from "../lib/use-android-back";
@@ -40,7 +43,7 @@ import { DockTabBar } from "./tab-bar";
 import { ShellTopBar, initialsOf, type PresenceTone } from "./top-bar";
 
 type Props = {
-  config: MobileConfig; active: boolean; userId: string; session: DeliverySession; work: FieldWorkSession | null; push: PushSettings;
+  config: MobileConfig; active: boolean; userId: string; client: SupabaseClient; liveUser: () => string | null; session: DeliverySession; work: FieldWorkSession | null; push: PushSettings;
   logoutState: LogoutState; logoutError: string | null; logoutBusy: boolean; onLogout: () => void;
   accessRefresh: ModuleAccessRefresh;
 };
@@ -61,7 +64,8 @@ export function locationStatus(state: SharingState, open: number): { label: stri
 }
 /** The same status across Pristavenia and Moja práca; a lead without field work sees the branch. */
 export function fieldStatus(modules: FieldModules, delivery: SharingState, work: SharingState, open: number): { label: string; tone: PresenceTone; target: ModuleId } {
-  if (!modules.delivery && !modules.work) return modules.towingOffice ? { label: "Odťahová kancelária", tone: "gray", target: "odtahy" } : { label: "Pobočka", tone: "gray", target: "pobocka" };
+  if (!modules.delivery && !modules.work) return modules.towingOffice ? { label: "Odťahová kancelária", tone: "gray", target: "odtahy" }
+    : modules.branch ? { label: "Pobočka", tone: "gray", target: "pobocka" } : { label: "Úlohy", tone: "gray", target: "ulohy" };
   const states = [modules.delivery ? delivery : null, modules.work ? work : null].filter((state): state is SharingState => state !== null);
   const shown = states.find(state => state.status === "sharing") ?? states.find(state => state.status === "denied") ?? states.find(state => state.status === "error") ?? OFF;
   const status = locationStatus(shown, open);
@@ -72,12 +76,19 @@ type FieldTap = { kind: "delivery"; id: string; nonce: number } | (WorkOpenReque
 /** The same app for a field member (pristavovač, vodič, miestny dispečer): Prehľad ·
  * their modules · Moduly, the same top bar and account, without any dispatch module. */
 export function FieldShell(props: Props) {
-  const { config, active, userId, session, work } = props;
+  const { config, active, userId, session, work, client: authClient, liveUser } = props;
   const memberId = session.memberId!;
   const insets = useSafeAreaInsets();
   const { fontScale } = useWindowDimensions();
-  const { delivery: hasDelivery, work: hasWork, branch: hasBranch, towingOffice: hasTowingOffice } = session.modules;
-  const modules = useMemo(() => ({ delivery: hasDelivery, work: hasWork, branch: hasBranch, towingOffice: hasTowingOffice }), [hasDelivery, hasWork, hasBranch, hasTowingOffice]);
+  const { delivery: hasDelivery, work: hasWork, branch: hasBranch, towingOffice: hasTowingOffice, tasks: hasTasks } = session.modules;
+  const modules = useMemo(() => ({ delivery: hasDelivery, work: hasWork, branch: hasBranch, towingOffice: hasTowingOffice, tasks: hasTasks }), [hasDelivery, hasWork, hasBranch, hasTowingOffice, hasTasks]);
+  const currentEmployee = useMemo(() => () => liveUser() === userId, [liveUser, userId]);
+  const getTaskToken = useMemo(() => async () => {
+    if (!currentEmployee()) throw new MobileApiError("Prihlásenie sa zmenilo.", 401);
+    const { data, error } = await authClient.auth.getSession();
+    if (error || !currentEmployee() || data.session?.user.id !== userId) throw new MobileApiError("Prihláste sa do aplikácie.", 401);
+    return data.session.access_token;
+  }, [authClient, currentEmployee, userId]);
   const available = useMemo(() => moduleAccess(null, modules), [modules]);
   const prefs = useMemo(() => new ShellPreferences(createShellPreferencesStorage(),
     shellPreferencesKey({ environment: config.environment, userId, profileId: memberId }), available, rolePins(null, modules)), [config.environment, userId, memberId, available, modules]);
@@ -88,6 +99,8 @@ export function FieldShell(props: Props) {
   const [shell, setShell] = useState<ShellState>(initialShell);
   const nav = reconcileShell(shell, pins, available);
   const view = dispatchView(nav);
+  const [tasksVisited, setTasksVisited] = useState(false);
+  if (view === "tasks" && !tasksVisited) setTasksVisited(true);
   const [editing, setEditing] = useState(false);
   const [backStore] = useState(() => new ShellBackStore());
   const moduleBack = useSyncExternalStore(backStore.subscribe, backStore.snapshot, backStore.snapshot);
@@ -160,6 +173,10 @@ export function FieldShell(props: Props) {
     {modules.towingOffice && <View style={view === "towing-office" ? { flex: 1 } : { display: "none" }}>
       <TowingOfficeModule session={work} active={active} visible={view === "towing-office"} />
     </View>}
+    {modules.tasks && session.me.data?.organizationId && (tasksVisited || view === "tasks") && <View style={view === "tasks" ? { flex: 1 } : { display: "none" }}>
+      <FieldEmployeeTaskWorkspace config={config} userId={userId} memberId={memberId} organizationId={session.me.data.organizationId}
+        getToken={getTaskToken} current={currentEmployee} active={active && view === "tasks"} onLeave={back} />
+    </View>}
     {modules.branch && <View style={view === "branch" ? { flex: 1 } : { display: "none" }}>
       <BranchModule session={work} active={active} visible={view === "branch"} openRequest={tap?.kind === "branch-request" ? tap as BranchOpenRequest : null} />
     </View>}
@@ -211,6 +228,9 @@ function FieldHome({ modules, deliveries, work, queue, now, location, status, ti
       </View>
     </Pressable>}
     {(errors.delivery || errors.work || errors.branch) && <View style={formLayout.notices}><ErrorNotice message="Niektoré údaje prehľadu sa nepodarilo overiť. Obnovte ich pred ďalším krokom." onRetry={refresh} /></View>}
+    {modules.tasks && <><SectionHeader title="Úlohy" /><Group><Row first title="Moje úlohy a nové zadanie"
+      subtitle="Vytvoriť úlohu pre seba, kolegu alebo pobočku" tone="link" onPress={() => onModule("ulohy")}
+      trailing={<Text style={s.chevron}>›</Text>} /></Group></>}
     {modules.work && <>
       <SectionHeader title="Moja práca" detail={work.length ? String(work.length) : null} />
       {pending.work ? <Loading label="Načítavam vašu prácu…" /> : work.length ? <Group>{work.slice(0, 4).map((item, index) => <WorkRow key={item.key} item={item} first={index === 0} now={now} onOpen={onOpenWork} />)}</Group>
