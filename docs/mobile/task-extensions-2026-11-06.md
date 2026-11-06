@@ -74,11 +74,18 @@ tabuľky sú súkromné s RLS a bucket nie je verejný. Bezpečnostní advisori 
 nezmenené WARN nálezy; tri nové INFO RLS bez politík patria úmyselne súkromným tabuľkám.
 Produkčná migrácia nebola aplikovaná.
 
+Doplnok `20261106180708_employee_task_source_checklist_completion.sql`, SHA-256
+`b2f56f9bc4fc90396f925cac819c491012dc65c81b8116412083b44066aa563c`,
+bol aplikovaný iba na ten istý TEST. Zachováva automatické dokončenie po overenej
+SMS/polohe alebo spätnom volaní aj pri nehotovom checkliste. Výnimka je ohraničená
+existujúcimi vstupmi iba pre `service_role`; pôvodné overenie zdroja, dôkazu,
+organizácie, claimu aj kontroly úlohy zostalo. Ručné dokončenie sa tým neobchádza.
+
 ## Overenie a stav vydania
 
 Lokálne overenie pred vydaním:
 
-- 77 testov na skutočnom PostgreSQL, vrátane zdedených oprávnení/kontroly úloh,
+- 83 testov na skutočnom PostgreSQL, vrátane zdedených oprávnení/kontroly úloh,
   starého webu, súbehu sérií, doručenia aj po viac než 500 neplatných čakajúcich
   udalostiach, RLS, expirácií a opakovaných príkazov.
 - Celková serverová sada a cielené opravy pushu prešli; mobilná sada má 1 551
@@ -89,8 +96,19 @@ Lokálne overenie pred vydaním:
   súboru, výpadok uploadu a opakovanie/odstránenie. Transport je syntetický;
   tieto kontroly nie sú dôkazom živého Storage ani fyzického pushu.
 
-Dôkazy a snímky sú v `.context/task-extensions/`. Živý TEST API/Storage smoke,
-nasadený `dev` commit a natívny rozšírený build sa doplnia po dokončení vydania.
+Dôkazy a snímky sú v `.context/task-extensions/`. Stabilný TEST commit
+`de65fa928eff90a20526c20687d345415a923d9e` prešiel 30 živými kontrolami API a Storage:
+oddelené kancelárske/terénne identity, pobočka, termíny a stránkovanie, checklist,
+konflikt série, súkromný upload/čítanie/odstránenie, priame Storage operácie,
+cudzí účet a odobratý prístup. Test nevytváral zákazníkov, prípady ani push zariadenia.
+Skúšobné úlohy, skupina, profily a štyri Auth účty boli odstránené a úložisko bolo
+prázdne; technický záznam odstráneného uploadu zostáva do bezpečnej expirácie tokenu.
+Dočasný súbor s prihlasovacími údajmi je odstránený. Doplňujúci SQL-only release má
+samostatný PR/commit uvedený v odovzdaní; nemení mobilný kód.
+
+Natívny build s celým rozšírením ešte nebol zostavený ani nahratý. Mac po novom
+štarte systémového simulátora prestal odpovedať aj na bežné príkazy; čaká sa na
+obnovenie spojenia. Fyzické push doručenie a kamera zostávajú neoverené.
 
 Samostatný základný TEST build **1.0.0 (38)** zo zdroja `1a261b23` prešiel
 kontrolou podpisu a obsahu; SHA-256
