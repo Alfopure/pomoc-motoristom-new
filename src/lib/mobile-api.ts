@@ -484,11 +484,15 @@ export type MobileOperationEvidence = {
   id: string; stage: "pickup" | "handover" | "inspection" | "damage"; observedAt: string; source: "observed" | "reported" | "exception";
   person: string | null; note: string; photo: boolean; odometer: number | null; fuel: string | null; missingReason: string | null; damageStatus: "open" | "resolved" | null;
 };
+export type MobileWorkBlocker = { kind: "operation" | "towing"; id: string; number: string | null };
+export type MobileWorkConflict = { kind: "physical" | "schedule"; blocker: MobileWorkBlocker | null };
 export type MobileOperation = {
   id: string; kind: MobileOperationKind; status: MobileOperationStatus; revision: number; caseNumber: string | null;
   vehicle: string | null; from: string; to: string; scheduledAt: string | null; plannedEndAt: string | null; startedAt: string | null; updatedAt: string;
   /** Only while the operation is open and assigned to this member. */
   customer: { name: string; phone: string } | null;
+  /** Only the assistance identity from this assigned operation’s case; optional for older servers. */
+  assistance?: { name: string | null; reference: string | null } | null;
   /** The branch request's note for the executor, when the work came through a branch. */
   instructions: string | null;
   /** A confirmed vehicle: damage can be reported for it. */
@@ -510,6 +514,26 @@ export type MobileOperationPositionReceipt = MobileFieldScope & { stored: boolea
 /** Moja práca: the driver's own odťahové zákazky (`drive`); pricing and billing stay on the web. */
 export type MobileTowingStatus = "assigned" | "in_progress" | "needs_changes";
 export type MobileTowingAttachment = { id: string; kind: "work" | "handover" | "scan"; name: string; mimeType: string; status: "pending" | "ready" | "abandoned"; createdAt: string };
+export type MobileTowingPaymentIntent = "partner_invoice" | "deferred_invoice" | "card_terminal" | "cash_terminal" | "cash_other";
+export type MobileTowingRealizedItem = { id: string; kind: "tow" | "repair" | "transport" | "storage" | "relocation"; description: string; quantity: string; unit: string;
+  parkingId?: string; parkingName?: string; parkingAddress?: string; destination?: string };
+export type MobileTowingOwner = { name: string; phone?: string; email?: string; address?: string; companyId?: string };
+export type MobileCashCategory = "regular" | "other" | "unclassified";
+export type MobileCashBreakdown = Record<MobileCashCategory, number>;
+export type MobileCashCategories = Record<MobileCashCategory, { balanceCents: number; reservedCents: number }>;
+export type MobileTowingPayment = { id: string; receiptId: string; amountCents: number; method: "cash" | "card" | "bank" | "other"; cashCategory?: MobileCashCategory | null; createdAt: string };
+export type MobileFieldTowingOptions = {
+  parking: { id: string; name: string; address: string }[];
+  fleet?: { id: string; name: string; plate?: string; branchId?: string; status?: string }[];
+  branches?: { id: string; name: string }[];
+  partners?: { id: string; name: string }[];
+  /** Only towing office actors receive the driver picker. */
+  members?: { id: string; name: string }[];
+};
+export type MobileFieldCash = { account: { id: string; balanceCents: number; reservedCents: number; revision: number; categories?: MobileCashCategories } | null;
+  handovers: { id: string; amountCents: number; cashBreakdown?: MobileCashBreakdown; status: "pending" | "accepted" | "rejected" | "cancelled"; revision: number; createdAt: string }[] };
+export type MobileFieldCashCommand = { commandId: string; handoverId: string; type: "propose_handover"; expectedRevision: 0; payload: { amountCents: number; accountRevision: number; cashBreakdown?: MobileCashBreakdown } };
+export type MobileFieldCashReceipt = MobileFieldScope & { commandId: string; revision: number; cash: MobileFieldCash };
 export type MobileTowingFields = {
   serviceType: "tow" | "repair" | "transport" | "storage" | "relocation"; subjectType: "vehicle" | "machine" | "material"; subjectDescription: string;
   plate: string | null; vin: string | null; pickup: string; destination: string | null; contact: string | null; noContactReason: string | null;
@@ -517,21 +541,33 @@ export type MobileTowingFields = {
   driverNotes: string | null; performedQuantity: string | null; photoException: string | null;
   assistanceReference: string | null; assistancePartnerName: string | null; parkingName: string | null; parkingAddress: string | null;
   customer: { name: string; phone: string | null } | null;
+  requesterName?: string | null;
+  requesterType?: "assistance" | "selfpayer" | null;
+  requester?: MobileTowingOwner | null; recipient?: MobileTowingOwner | null;
+  branchId?: string | null; fleetAssetId?: string | null; requesterId?: string | null; assistancePartnerId?: string | null; parkingId?: string | null;
+  odometer?: string | null; paymentIntent?: MobileTowingPaymentIntent | null; realizedItems?: MobileTowingRealizedItem[]; owner?: MobileTowingOwner | null;
+  handoverRecipientName?: string | null; handedOverAt?: string | null; handoverException?: string | null;
+  /** Read-only instruction from dispatch or the branch request. */
+  dispatchInstructions?: string | null;
 };
 export type MobileTowingOrder = {
   id: string; number: string; revision: number; assignmentGeneration: number; workStatus: MobileTowingStatus; updatedAt: string;
   fields: MobileTowingFields; attachments: MobileTowingAttachment[];
+  authorizedCollectionCents?: number | null; dueCents?: number | null; payments?: MobileTowingPayment[];
 };
 /** The fields a driver may write; null clears one. */
-export type MobileTowingDriverFields = Partial<Record<"startedAt" | "finishedAt" | "driverNotes" | "performedQuantity" | "photoException" | "destination", string | null>>;
+export type MobileTowingDriverFields = Partial<Record<"startedAt" | "finishedAt" | "driverNotes" | "performedQuantity" | "photoException" | "destination" | "subjectDescription" | "plate" | "vin" | "odometer" | "handoverRecipientName" | "handedOverAt" | "handoverException" | "pickup" | "contact" | "noContactReason" | "branchId" | "fleetAssetId" | "plannedAt" | "assistanceReference" | "assistancePartnerId" | "requesterId" | "parkingId", string | null>>
+  & { paymentIntent?: MobileTowingPaymentIntent | null; realizedItems?: MobileTowingRealizedItem[]; owner?: MobileTowingOwner;
+    requester?: MobileTowingOwner; recipient?: MobileTowingOwner; requesterType?: "assistance" | "selfpayer" | null;
+    serviceType?: MobileTowingFields["serviceType"]; subjectType?: MobileTowingFields["subjectType"] };
 export type MobileTowingCommand = {
-  commandId: string; type: "start" | "update_order" | "submit" | "abandon_attachment"; expectedRevision: number; assignmentGeneration: number;
+  commandId: string; type: "start" | "update_order" | "submit" | "abandon_attachment" | "receive_payment"; expectedRevision: number; assignmentGeneration: number;
   /** abandon_attachment: an own unfinished upload of the current assignment, with a reason. */
-  payload: Record<string, never> | { fields: MobileTowingDriverFields } | { id: string; reason: string };
+  payload: Record<string, never> | { fields: MobileTowingDriverFields } | { id: string; reason: string } | { receiptId: string; amountCents: number; method: "cash" | "card"; accountRevision?: number; cashCategory?: MobileCashCategory };
 };
 export type MobileTowingDetail = MobileFieldScope & { order: MobileTowingOrder };
 /** `order` is null once it left the driver's list (submitted, reassigned or cancelled). */
-export type MobileTowingReceipt = MobileFieldScope & { commandId: string; revision: number; order: MobileTowingOrder | null };
+export type MobileTowingReceipt = MobileFieldScope & { commandId: string; revision: number; order: MobileTowingOrder | null; cash?: MobileFieldCash };
 export type MobileTowingAttachmentReceipt = MobileFieldScope & { commandId: string; revision: number; attachmentId: string };
 /** null: the member has no such work here (capability or module off). `unavailable` names a source
  * that failed to load just now, so its list is null without meaning "none". */

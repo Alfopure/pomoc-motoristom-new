@@ -8,11 +8,18 @@ export type HovoryView = "console" | "history" | "callbacks";
 export type ShellState = { tab: ShellTab; opened: ModuleId | null; account: boolean; search: boolean; alerts: boolean; hovory: HovoryView };
 export type ShellLocation = "prehlad" | "moduly" | ModuleId;
 /** Screen identifiers understood by the existing module components. */
-export type DispatchView = "home" | "modules" | "console" | "history" | "callbacks" | "cases" | "tasks" | "tools" | "deliveries" | "work" | "branch" | "account" | "search" | "alerts";
+export type DispatchView = "home" | "modules" | "console" | "history" | "callbacks" | "cases" | "tasks" | "tools" | "deliveries" | "work" | "branch" | "towing-office" | "account" | "search" | "alerts";
 
 export const initialShell: ShellState = { tab: "prehlad", opened: null, account: false, search: false, alerts: false, hovory: "console" };
 
 export function barTabs(pins: readonly ModuleId[]): ShellTab[] { return ["prehlad", ...pins, "moduly"]; }
+export type BarItem = ShellTab | "add" | null;
+/** An odd two-row bar leaves an inert space before the final fixed Moduly tab. */
+export function barItems(tabs: readonly ShellTab[], showAdd: boolean, rows: 1 | 2 = 1): BarItem[] {
+  const items: BarItem[] = showAdd ? [...tabs.slice(0, -1), "add", tabs[tabs.length - 1]] : [...tabs];
+  if (rows === 2 && items.length % 2 !== 0) items.splice(items.length - 1, 0, null);
+  return items;
+}
 export function shellLocation(state: ShellState): ShellLocation {
   return state.tab === "moduly" ? state.opened ?? "moduly" : state.tab;
 }
@@ -31,6 +38,7 @@ export function dispatchView(state: ShellState): DispatchView {
     case "pristavenia": return "deliveries";
     case "praca": return "work";
     case "pobocka": return "branch";
+    case "odtahy": return "towing-office";
   }
 }
 /** Re-selecting Moduly returns to the module grid; other tabs keep their screen.

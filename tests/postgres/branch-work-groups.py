@@ -183,6 +183,33 @@ with tempfile.TemporaryDirectory(prefix='pm-branch-pg-') as temp:
         for role in ['anon', 'authenticated']:
             check(f'{role} cannot execute branch RPCs', denied(f"set role {role};select public.motorist_branch_workspace('{CENTRAL}','{ORG}','{{}}')"))
             check(f'{role} cannot read branch tables', denied(f"set role {role};select * from public.motorist_work_requests"))
+        # Independent case work: own instructions, stable item retry, no legacy slot.
+        def work_sql(item, who=CENTRAL, source_case=case_id):
+            return "select public.motorist_case_work_item('%s','%s','%s','%s'::jsonb)" % (who, ORG, source_case, json.dumps(item).replace("'", "''"))
+        work = {'commandId': uid(2001), 'kind': 'delivery', 'target': {'type': 'person', 'id': P}, 'pickup': 'A', 'destination': 'B', 'instructions': 'ONLY JOB ONE', 'scheduledAt': None, 'plannedEndAt': None, 'fleetAssetId': None, 'cycleId': None, 'branchId': None}
+        first_work = j(work_sql(work))
+        before = value("select count(*) from motorist_operations")
+        check('case work delivery assigns directly without legacy handoff', first_work['owner']=='logistics' and first_work['status']=='assigned' and value(f"select count(*) from motorist_case_handoffs where operation_id='{first_work['id']}'")=='0')
+        check('case work identical retry creates no additional execution', j(work_sql(work))==first_work and value("select count(*) from motorist_operations")==before)
+        context = j(f"select public.motorist_field_operations_context('{P}','{ORG}',array['{first_work['id']}'::uuid])")
+        check('direct assigned member receives only its own published job instruction', context[first_work['id']]['instructions']=='ONLY JOB ONE')
+        foreign = j(f"select public.motorist_field_operations_context('{OUT}','{ORG}',array['{first_work['id']}'::uuid])")
+        check('another member cannot read direct job instructions', foreign=={})
+        changed = dict(work, instructions='CHANGED')
+        check('case work retry with changed note conflicts', denied(work_sql(changed),'PT409'))
+        failed = dict(work, commandId=uid(2002), target={'type':'person','id':uid(9999)})
+        check('assignment failure rolls back its create', denied(work_sql(failed),'22023') and value("select count(*) from motorist_operations")==before)
+        check('a failed second item does not undo the successful first item', value(f"select count(*) from motorist_operations where id='{first_work['id']}'")=='1')
+        branch_work = dict(work, commandId=uid(2003), kind='tow', target={'type':'branch','id':ga}, instructions='TOW ONLY')
+        branch_receipt = j(work_sql(branch_work))
+        check('same case can route a second distinct work to a branch', branch_receipt['owner']=='branch' and value(f"select note from motorist_work_requests where id='{branch_receipt['id']}'")=='TOW ONLY')
+        cmd(LT,'claim',request=branch_receipt['id'],rev=req_rev(branch_receipt['id']))
+        materialized=cmd(LT,'materialize',{},request=branch_receipt['id'],rev=req_rev(branch_receipt['id']))['request']
+        check('branch towing materialization publishes its own note', value(f"select fields->>'dispatchInstructions' from motorist_towing_orders where id='{materialized['execution']['ownerId']}'")=='TOW ONLY')
+        check('local branch lead cannot dispatch arbitrary central work', denied(work_sql(dict(work,commandId=uid(2004)),who=LB)))
+        check('different organization case is unavailable', denied(work_sql(dict(work,commandId=uid(2005)),source_case=uid(9998)),'P0002'))
+        for role in ['anon','authenticated']:
+            check(f'{role} cannot call case work RPC',denied('set role '+role+';'+work_sql(work)))
         print(json.dumps({'passed': len(checks), 'checks': checks}, ensure_ascii=False, indent=1))
     finally:
         subprocess.run(['pg_ctl', '-D', str(data), '-m', 'immediate', 'stop'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -129,6 +129,9 @@ describe("pristavovač deliveries", () => {
     await expect(commandDelivery(actor, GRANT, step)).rejects.toMatchObject({ status: 503 });
     mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "PT409" } });
     await expect(commandDelivery(actor, GRANT, step)).rejects.toMatchObject({ status: 409 });
+    // Another job already under way: a clear reason, not "the delivery changed".
+    mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "PT409", message: "Driver capacity conflict" } });
+    await expect(commandDelivery(actor, GRANT, step)).rejects.toMatchObject({ status: 409, code: "driver_busy", message: expect.stringContaining("inú prácu") });
   });
 
   it.each([[1, 2], [3, 3]])("does not confirm unrelated committed revision %s (current %s)", async (committedRevision, revision) => {

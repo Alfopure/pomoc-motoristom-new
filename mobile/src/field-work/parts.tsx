@@ -9,7 +9,7 @@ import type { PendingWork, WorkCommands, WorkCommandsView } from "./commands";
 export function Chip({ label, selected, onPress, disabled, accessibilityLabel, onCard }: { label: string; selected: boolean; onPress: () => void; disabled?: boolean; accessibilityLabel?: string; onCard?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ selected, disabled: Boolean(disabled) }} disabled={disabled}
     hitSlop={{ top: 4, bottom: 4 }} onPress={onPress} style={({ pressed }) => [s.chip, onCard && { backgroundColor: palette.fill }, selected && s.chipSelected, disabled && { opacity: 0.4 }, pressed && { opacity: 0.7 }]}>
-    <Text numberOfLines={1} style={[s.chipText, selected && { color: palette.card }]}>{label}</Text>
+    <Text style={[s.chipText, selected && { color: palette.card }]}>{label}</Text>
   </Pressable>;
 }
 
@@ -23,8 +23,8 @@ export function StorageNotice({ commands, state }: { commands: WorkCommands; sta
 }
 
 /** An unconfirmed step: retry the same command, or after a refusal read the current state and close it. */
-export function StepRecovery({ commands, record, busy, onResult, onReload }: {
-  commands: WorkCommands; record: PendingWork; busy: boolean; onResult: (result: unknown) => void; onReload: () => Promise<unknown>;
+export function StepRecovery({ commands, record, busy, onResult, onReload, onOpenBlocker }: {
+  commands: WorkCommands; record: PendingWork; busy: boolean; onResult: (result: unknown) => void; onReload: () => Promise<unknown>; onOpenBlocker?: (target: { kind: "operation" | "towing"; id: string }) => void;
 }) {
   return <View style={formLayout.notices}>
     <Text style={styles.label}>{"Krok: " + record.label}</Text>
@@ -33,11 +33,19 @@ export function StepRecovery({ commands, record, busy, onResult, onReload }: {
         : record.status === "rejected" ? "Server krok odmietol. Načítajte aktuálny stav a skontrolujte ho pred ďalším krokom."
           : "Potvrdenie kroku neprišlo. Krok už mohol byť uložený. Overte ho týmto tlačidlom; ďalší krok bude dostupný po vyriešení výsledku."}</Text>
     {record.message && record.status !== "confirmed" && <Text style={styles.muted}>{record.message}</Text>}
+    {record.conflict?.blocker && onOpenBlocker && <>
+      <Text style={styles.muted}>{(record.conflict.blocker.kind === "towing" ? "Odťah" : "Jazda") + (record.conflict.blocker.number ? " · " + record.conflict.blocker.number : "")}</Text>
+      <Button secondary label="Otvoriť rozpracovanú prácu" onPress={() => { if (record.conflict?.blocker) onOpenBlocker(record.conflict.blocker); }} />
+    </>}
     {record.status !== "rejected" && <Button label={busy ? "Overujem…" : "Overiť rovnaký krok"} disabled={busy} onPress={() => {
       void commands.retry(record.target).then(result => { if (result) onResult(result); });
     }} />}
     {record.status === "rejected" && <Button secondary label="Načítať aktuálny stav a uzavrieť krok" disabled={busy} onPress={() => {
-      void onReload().then(() => commands.dismiss(record.target));
+      void onReload().then(result => {
+        // Query refetch resolves even when its read failed; that is not a verified current state.
+        if (result && typeof result === "object" && "isError" in result && result.isError) return;
+        return commands.dismiss(record.target);
+      }).catch(() => undefined);
     }} />}
   </View>;
 }
@@ -49,13 +57,13 @@ export const fieldStyles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: space.m, paddingHorizontal: space.m, paddingVertical: 10, minHeight: 64, backgroundColor: palette.card },
   separator: { position: "absolute", top: 0, left: 60, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
   icon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
-  rowHead: { flexDirection: "row", alignItems: "center", gap: 6 },
+  rowHead: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6 },
   rowTitle: { ...type.rowTitle, color: palette.label, flexShrink: 1 },
   rowDetail: { ...type.subhead, color: palette.secondaryLabel },
   chevron: { fontSize: 20, color: palette.tertiaryLabel },
 });
 const s = StyleSheet.create({
-  chip: { minHeight: 36, borderRadius: 18, paddingHorizontal: 14, alignItems: "center", justifyContent: "center", backgroundColor: palette.card },
+  chip: { minHeight: 44, maxWidth: "100%", borderRadius: 22, paddingHorizontal: space.m, paddingVertical: space.s, alignItems: "center", justifyContent: "center", backgroundColor: palette.card },
   chipSelected: { backgroundColor: palette.label },
   chipText: { ...type.rowTitle, color: palette.label },
 });

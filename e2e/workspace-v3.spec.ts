@@ -53,6 +53,9 @@ async function boot(page: Page, width: number, api?: FixtureApi) {
     if (url.pathname === "/api/notes") return route.fulfill({ json: { notes: [] } });
     if (url.pathname === "/api/notes/colleagues") return route.fulfill({ json: { colleagues: [] } });
     if (api && url.pathname.startsWith("/api/cases/") && route.request().method() === "PATCH") api.writes.push({ path: url.pathname, body: route.request().postDataJSON() });
+    if (route.request().method() === "GET" && url.pathname === "/api/operations" && url.searchParams.get("caseId")) return route.fulfill({ json: { operations: [], totalCount: 0 } });
+    if (route.request().method() === "GET" && url.pathname === "/api/pobocky" && url.searchParams.get("caseId")) return route.fulfill({ json: { requests: [], totalCount: 0 } });
+    if (route.request().method() === "GET" && url.pathname === "/api/towing/workspace" && url.searchParams.get("sourceCaseId") && url.searchParams.get("view") === "office") return route.fulfill({ json: { orders: [], totalCount: 0, members: [], branches: [] } });
     if (url.pathname === "/api/version") return route.fulfill({ json: { version: "isolated-workspace" } });
     return route.fulfill({ status: 503, json: { error: "Isolated fixture: service unavailable" } });
   });
@@ -306,7 +309,7 @@ test("explicit case discard resets the mounted draft and cannot autosave it afte
   await guard.getByRole("button", { name: "Odísť bez uloženia", exact: true }).click();
   const afterDiscard = api.writes.length;
   await page.getByRole("navigation", { name: "Mobilná navigácia" }).getByRole("button", { name: "Prípady", exact: true }).click();
-  await page.getByTestId("dispatch-case-list").getByRole("button", { name: /^Otvoriť prípad / }).first().click();
+  await page.locator(".dispatch-workspace-upper").getByRole("button", { name: /^Otvoriť prípad / }).first().click();
   await expect(plate).toHaveValue(original);
   await page.clock.runFor(2_000);
   expect(JSON.stringify(api.writes.slice(afterDiscard))).not.toContain("DISCARD77");
@@ -317,9 +320,8 @@ test("explicit case discard resets the mounted draft and cannot autosave it afte
 test("completed case keeps its dirty editor when mobile map replaces the visible card", async ({ page }) => {
   const api: FixtureApi = { archivedCase: true, writesFail: true, writes: [] };
   const errors = await boot(page, 390, api);
-  await page.getByRole("button", { name: "Menu", exact: true }).click();
-  await page.getByRole("button", { name: "Prípady", exact: true }).last().click();
-  await page.getByRole("button", { name: "História (1)", exact: true }).click();
+  await page.getByRole("navigation", { name: "Mobilná navigácia" }).getByRole("button", { name: "Prípady", exact: true }).click();
+  await page.getByRole("button", { name: /^História/ }).filter({ visible: true }).click();
   await page.getByRole("button", { name: "Otvoriť prípad PM-2026-0514", exact: true }).click();
   const plate = page.getByLabel("EČV", { exact: true });
   await page.getByText("3. Vozidlo a incident", { exact: true }).click();
@@ -329,5 +331,126 @@ test("completed case keeps its dirty editor when mobile map replaces the visible
   await page.getByRole("button", { name: "Skryť mapu a zobraziť prípad", exact: true }).click();
   await expect(page.getByRole("heading", { name: "PM-2026-0514", exact: true })).toBeVisible();
   await expect(plate).toHaveValue("ARCHIVE77");
+  expect(errors).toEqual([]);
+});
+
+test("case overview collapses only its duplicate list and restores the prior manual choice", async ({ page }) => {
+  const errors = await boot(page, 1440);
+  const grid = page.locator(".dispatch-dashboard");
+  const tabs = page.locator(".workspace-center-tabs");
+  await tabs.getByRole("tab", { name: "Prehľad prípadov", exact: true }).click();
+  await expect(grid).toHaveAttribute("data-left-collapsed", "true");
+  await expect(page.getByTestId("dispatch-case-list")).toBeHidden();
+  await tabs.getByRole("tab", { name: "Mapa", exact: true }).click();
+  await expect(grid).toHaveAttribute("data-left-collapsed", "false");
+  await page.getByRole("button", { name: "Zbaliť panel prípadov", exact: true }).click();
+  await tabs.getByRole("tab", { name: "Prehľad prípadov", exact: true }).click();
+  await tabs.getByRole("tab", { name: "Poznámky", exact: true }).click();
+  await expect(grid).toHaveAttribute("data-left-collapsed", "true");
+  await tabs.getByRole("tab", { name: "Prehľad prípadov", exact: true }).click();
+  await page.getByRole("button", { name: "Obnoviť panel prípadov", exact: true }).click();
+  await expect(page.getByTestId("dispatch-case-list")).toBeVisible();
+  await tabs.getByRole("tab", { name: "Mapa", exact: true }).click();
+  await expect(grid).toHaveAttribute("data-left-collapsed", "false");
+  expect(errors).toEqual([]);
+});
+
+test("global menu leaves cases, tasks and notes in the local workspace", async ({ page }) => {
+  const errors = await boot(page, 1440);
+  const navigation = page.getByRole("navigation", { name: "Hlavná navigácia", exact: true });
+  for (const label of ["Prípady", "Úlohy", "Poznámky"]) await expect(navigation.getByRole("button", { name: label, exact: true })).toHaveCount(0);
+  await navigation.getByRole("button", { name: "Menu", exact: true }).click();
+  const menu = page.getByRole("dialog", { name: "Obrazovky aplikácie", exact: true });
+  for (const label of ["Prípady", "Úlohy", "Poznámky"]) await expect(menu.getByRole("button", { name: label, exact: true })).toHaveCount(0);
+  await expect(menu.getByRole("button", { name: "Nastavenia", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+for (const width of [390, 1440]) test(`overview opens the real case and returns to its filtered context at ${width}px`, async ({ page }) => {
+  const errors = await boot(page, width);
+  const tabs = page.locator(".workspace-center-tabs");
+  if (width < 1024) await page.getByRole("navigation", { name: "Mobilná navigácia", exact: true }).getByRole("button", { name: "Prípady", exact: true }).click();
+  else await tabs.getByRole("tab", { name: "Prehľad prípadov", exact: true }).click();
+  const directory = page.locator(".dispatch-workspace-upper");
+  const search = directory.getByRole("searchbox", { name: "Hľadať prípady v adresári", exact: true });
+  await search.fill("0517");
+  await directory.getByRole("button", { name: "Otvoriť prípad PM-2026-0517", exact: true }).click();
+  await expect(page.getByTestId("case-edit-form-main")).toBeVisible();
+  await expect(tabs.getByRole("tab", { name: "Prehľad prípadov", exact: true })).toHaveAttribute("aria-selected", "true");
+  if (width >= 1024) await expect(search).toBeVisible();
+  await page.getByRole("button", { name: width < 1024 ? "Späť na prípady" : "Späť", exact: true }).filter({ visible: true }).click();
+  await expect(search).toBeVisible();
+  await expect(search).toHaveValue("0517");
+  await expect(page.getByTestId("case-edit-form-main")).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("overview history scopes keep their explicit status while searching", async ({ page }) => {
+  const errors = await boot(page, 1440, { archivedCase: true, writesFail: false, writes: [] });
+  await page.locator(".workspace-center-tabs").getByRole("tab", { name: "Prehľad prípadov", exact: true }).click();
+  const directory = page.getByRole("region", { name: "Prehľad prípadov", exact: true });
+  const scopes = directory.getByRole("group", { name: "Rozsah prípadov", exact: true });
+  await scopes.getByRole("button", { name: /^História/ }).click();
+  const search = directory.getByRole("searchbox", { name: "Hľadať prípady v adresári", exact: true });
+  await search.fill("0514");
+  const archived = directory.getByRole("button", { name: "Otvoriť prípad PM-2026-0514", exact: true });
+  await expect(archived).toBeVisible();
+  await scopes.getByRole("button", { name: /^Aktívne/ }).click();
+  await expect(archived).toHaveCount(0);
+  await scopes.getByRole("button", { name: /^Všetky/ }).click();
+  await expect(archived).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("restored overview preferences open all cases and restore the saved sidebar choice on leaving", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("motorist:workspace:v3:00000000-0000-4000-8000-000000000001:00000000-0000-4000-8000-000000000002", JSON.stringify({ centerView: "table", leftCollapsed: false, desktopWorkspaceMode: "expanded" })));
+  const errors = await boot(page, 1440);
+  await expect(page.locator(".workspace-center-tabs").getByRole("tab", { name: "Prehľad prípadov", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".dispatch-dashboard")).toHaveAttribute("data-left-collapsed", "true");
+  await expect(page.locator("#dispatch-workspace-shell")).toHaveAttribute("data-workspace-mode", "collapsed");
+  await expect(page.getByRole("region", { name: "Prehľad prípadov", exact: true }).getByRole("button", { name: /^Všetky/ })).toHaveAttribute("aria-pressed", "true");
+  await page.locator(".workspace-center-tabs").getByRole("tab", { name: "Mapa", exact: true }).click();
+  await expect(page.locator(".dispatch-dashboard")).toHaveAttribute("data-left-collapsed", "false");
+  expect(errors).toEqual([]);
+});
+
+test("inline case draft survives repeat row selection and desktop-mobile-desktop resize", async ({ page }) => {
+  const errors = await boot(page, 1440, { writesFail: true, writes: [] });
+  const tabs = page.locator(".workspace-center-tabs");
+  await tabs.getByRole("tab", { name: "Prehľad prípadov", exact: true }).click();
+  const search = page.getByRole("searchbox", { name: "Hľadať prípady v adresári", exact: true });
+  await search.fill("0517");
+  const row = page.locator(".dispatch-workspace-upper").getByRole("button", { name: "Otvoriť prípad PM-2026-0517", exact: true });
+  await row.click();
+  const editor = page.getByTestId("case-edit-form-main");
+  await expect(editor).toBeVisible();
+  const plate = editor.getByLabel("EČV", { exact: true });
+  await plate.fill("RESIZE77");
+  await editor.evaluate(node => node.setAttribute("data-inline-draft", "retained"));
+  await row.click();
+  await expect(plate).toHaveValue("RESIZE77");
+  await expect(page.getByRole("dialog", { name: "Na karte sú neuložené zmeny", exact: true })).toHaveCount(0);
+  for (const width of [390, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(editor).toBeVisible();
+    await expect(plate).toHaveValue("RESIZE77");
+    await expect(editor).toHaveAttribute("data-inline-draft", "retained");
+    await expect(tabs.getByRole("tab", { name: "Prehľad prípadov", exact: true })).toHaveAttribute("aria-selected", "true");
+    if (width >= 1024) await expect(search).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("first overview entry preserves an active-case scope already narrowed by priority", async ({ page }) => {
+  const errors = await boot(page, 1440);
+  const list = page.getByTestId("dispatch-case-list");
+  await list.getByRole("button", { name: "Filtre", exact: true }).click();
+  await list.getByLabel("Priorita", { exact: true }).selectOption("urgent");
+  await page.locator(".workspace-center-tabs").getByRole("tab", { name: "Prehľad prípadov", exact: true }).click();
+  const directory = page.getByRole("region", { name: "Prehľad prípadov", exact: true });
+  await expect(directory.getByRole("button", { name: /^Aktívne/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(directory.getByLabel("Priorita", { exact: true })).toHaveValue("urgent");
+  await expect(directory.getByRole("button", { name: "Otvoriť prípad PM-2026-0517", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });

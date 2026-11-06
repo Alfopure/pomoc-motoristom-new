@@ -8,6 +8,25 @@
 .brand small { color: #a5adbb; }
 .header a[aria-current=page] { background: #303339; color: var(--accent); }
 .main { max-width: 1440px; margin: auto; padding: 32px 24px 60px; }
+.module { --accent: #fcd703; width: 100%; min-width: 0; color: #18181b; font-size: 14px; line-height: 1.5; }
+.moduleHeader { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding: 18px 20px; border: 1px solid #e4e4e7; border-radius: 12px; background: white; }
+.moduleIdentity { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.moduleIdentity > div { min-width: 0; }
+.moduleIcon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 44px; height: 44px; border-radius: 10px; background: #fff9d9; color: #785900; }
+.moduleTitle { margin: 0; font-size: 22px; font-weight: 750; letter-spacing: -.5px; }
+.moduleViews { display: flex; gap: 4px; padding: 4px; border: 1px solid #e4e4e7; border-radius: 9px; background: #f4f4f5; }
+.moduleViews button { min-height: 40px; padding: 8px 14px; border: 0; border-radius: 6px; background: transparent; color: #52525b; font: inherit; font-weight: 600; cursor: pointer; }
+.moduleViews button[aria-current=page] { background: white; color: #18181b; box-shadow: 0 1px 3px #18181b1a; }
+.moduleViews button:focus-visible { outline: 2px solid #a57900; outline-offset: 2px; }
+.moduleView { min-width: 0; }
+.moduleView[hidden] { display: none; }
+.embedded { min-width: 0; padding: 20px 12px 32px; }
+.embedded .title { font-size: 24px; letter-spacing: -.6px; }
+.embedded .stats { gap: 12px; margin: 20px 0; }
+.embedded .stat { padding: 14px 16px; }
+.embedded .stat strong { font-size: 24px; }
+.embedded .panel { margin-top: 16px; padding: 18px; }
+.embedded .panel h2 { font-size: 16px; margin-bottom: 16px; }
 .titleRow, .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .title { margin: 0; font-size: 30px; font-weight: 750; letter-spacing: -1px; }
 .muted { color: #666d78; }
@@ -69,3 +88,123 @@
 @media(max-width:900px) { .stats { grid-template-columns: repeat(2,minmax(0,1fr)); } .filters { grid-template-columns: repeat(2,minmax(0,1fr)); } .line { grid-template-columns: repeat(2,minmax(0,1fr)); } .line > :first-child { grid-column: 1 / -1; } }
 @media(max-width:600px) { .header { padding: 12px 16px; gap: 8px; } .header nav { gap: 0; } .header a,.header button { padding: 8px 10px; font-size: 12px; } .main { padding: 24px 16px 70px; } .title { font-size: 25px; } .grid,.grid3,.cards { grid-template-columns: minmax(0,1fr); } .panel { padding: 18px 16px; } .stat { padding: 14px; } .stat strong { font-size: 22px; } .filters { grid-template-columns: minmax(0,1fr); } .tableWrap { display: none; } .card { padding: 18px; } .actions > .button { flex: 1 1 auto; } }
 @media(min-width:601px) { .mobileRows { display: none; } }
+@media(max-width:600px) {
+  .moduleHeader { padding: 14px; gap: 12px; }
+  .moduleIdentity { align-items: flex-start; }
+  .moduleTitle { font-size: 20px; }
+  .moduleViews { width: 100%; }
+  .moduleViews button { flex: 1; }
+  .embedded { padding: 16px 4px 24px; }
+  .embedded .title { font-size: 22px; }
+  .embedded .panel { padding: 16px; }
+}
+/* The book owns compact desktop density; field work retains touch-size controls. */
+.book { min-width: 0; margin-top: 14px; }
+.bookStats { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; margin-bottom: 12px; }
+.bookStats > div { display: flex; align-items: center; gap: 7px; min-width: 0; border: 1px solid #e1e4e9; border-radius: 8px; background: white; padding: 10px 12px; font-size: 11px; color: #626975; }
+.bookStats svg { flex-shrink: 0; color: #747c89; }
+.bookStats strong { margin-left: auto; color: #202124; font-size: 16px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bookPanel { border: 1px solid #e1e4e9; border-radius: 10px; background: white; overflow: hidden; min-width: 0; }
+.bookFilters { padding: 10px 12px; }
+.quickViews { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+.quickViews button { border: 1px solid #dce0e5; border-radius: 6px; background: #fff; color: #515966; min-height: 30px; padding: 4px 9px; font: inherit; font-size: 11px; cursor: pointer; }
+.quickViews button[aria-pressed=true] { border-color: #535a66; box-shadow: inset 0 0 0 1px #535a66; color: #171b23; font-weight: 700; }
+.quickViews button[data-stage=active], .bookTable tr[data-stage=active], .bookCard[data-stage=active], .bookTable tr[data-stage=needs_changes], .bookCard[data-stage=needs_changes] { background: #fff3df; }
+.quickViews button[data-stage=review], .bookTable tr[data-stage=review], .bookCard[data-stage=review] { background: #f0f2f4; }
+.quickViews button[data-stage=ready], .bookTable tr[data-stage=ready], .bookCard[data-stage=ready] { background: #eaf3ff; }
+.quickViews button[data-stage=invoiced], .bookTable tr[data-stage=invoiced], .bookCard[data-stage=invoiced] { background: #eff8e8; }
+.quickViews button[data-stage=paid], .bookTable tr[data-stage=paid], .bookCard[data-stage=paid] { background: #ddf1dd; }
+.quickViews button[data-stage=cancelled], .bookTable tr[data-stage=cancelled], .bookCard[data-stage=cancelled] { background: #f7ecee; }
+.bookFilterGrid { display: grid; grid-template-columns: 1.6fr 1.2fr 1fr 1fr 1.1fr; gap: 8px; }
+.book .field { gap: 3px; font-size: 11px; }
+.book .field input, .book .field select { min-height: 34px; padding: 6px 8px; border-radius: 6px; font-size: 12px; }
+.book .button { min-height: 32px; padding: 5px 10px; border-radius: 6px; font-size: 11px; }
+.bookFilterActions { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.bookFilterActions .actions, .bookPagination .actions { margin: 0; gap: 6px; flex-shrink: 0; }
+.bookMore { min-width: 0; flex: 1; }
+.bookMore summary { cursor: pointer; font-size: 11px; min-height: 32px; padding-top: 7px; }
+.bookAdvanced { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; padding: 8px 0; }
+.bookMore[open] { flex-basis: 100%; }
+.bookFilterActions:has(.bookMore[open]) { flex-wrap: wrap; }
+.bookCaption { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 12px; border-top: 1px solid #eceef1; }
+.bookCaption h2 { margin: 0; font-size: 12px; }
+.bookCaption > span { font-size: 10px; color: #727986; }
+.book .tableWrap { max-width: 100%; }
+.bookTable { table-layout: fixed; min-width: 1080px; font-size: 12px; }
+.bookTable th { padding: 7px 8px; font-size: 10px; }
+.bookTable th:nth-child(1) { width: 9%; }
+.bookTable th:nth-child(2) { width: 12%; }
+.bookTable th:nth-child(3) { width: 13%; }
+.bookTable th:nth-child(4) { width: 12%; }
+.bookTable th:nth-child(5) { width: 17%; }
+.bookTable th:nth-child(6) { width: 10%; }
+.bookTable th:nth-child(7) { width: 13%; }
+.bookTable th:nth-child(8), .bookTable th:nth-child(9) { width: 7%; }
+.bookTable th:nth-child(10) { width: 32px; }
+.bookTable td { height: 43px; padding: 4px 8px; vertical-align: middle; border-bottom: 1px solid #dde2e4; line-height: 16px; }
+.bookTable td > small { font-size: 10px; color: #68717c; line-height: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cellPrimary, .orderLink { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.bookTable .orderLink { min-height: 16px; font-size: 12px; }
+.bookTable td > .button { min-height: 30px; width: 24px; padding: 0; display: flex; align-items: center; justify-content: center; }
+.bookTable tbody tr:hover { filter: brightness(.98); }
+.requesterChip { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; background: #fff1cf; color: #795800; vertical-align: middle; }
+.stageLabel { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.paymentText { font-size: 10px; }
+.paymentText[data-settled=true] { color: #246349; }
+.money { text-align: right !important; white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 11px; }
+.financialException { display: flex !important; align-items: center; gap: 3px; color: #982c3b !important; font-weight: 700; }
+.bookPagination { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px; font-size: 11px; color: #68717c; }
+.bookCard { margin: 8px; padding: 12px; border: 1px solid #dfe3e9; border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.bookCard h3 { margin: 7px 0; font-size: 14px; }
+.bookCard p { display: flex; align-items: center; gap: 5px; margin: 8px 0; }
+.bookCard .cardRoute { display: grid; grid-template-columns: 1fr; gap: 3px; }
+.bookCard > .button { margin-top: 10px; width: 100%; }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.detailContent { max-width: 1040px; margin-inline: auto; min-width: 0; }
+.detailContent .grid, .detailContent .grid3 { gap: 12px; }
+.detailContent .field input, .detailContent .field select { min-height: 38px; padding: 8px 10px; }
+.detailContent .panel { padding: 18px; margin-top: 14px; }
+.detailContent .panel h2 { margin-bottom: 12px; font-size: 16px; }
+.detailStatuses { display: flex; gap: 5px; flex-wrap: wrap; }
+.assignmentField { max-width: 340px; }
+@media(max-width:1100px) { .bookStats > div { flex-wrap: wrap; gap: 4px; }.bookStats strong { width: 100%; margin-left: 0; padding-left: 23px; }.bookFilterGrid { grid-template-columns: 1.4fr 1fr 1fr; }.bookAdvanced { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+@media(max-width:600px) {
+  .bookStats { grid-template-columns: repeat(2,minmax(0,1fr)); }.bookStats > div { padding: 8px; }.bookStats strong { font-size: 15px; }
+  .bookFilterGrid, .bookAdvanced { grid-template-columns: minmax(0,1fr); }.bookFilterActions { flex-wrap: wrap; }.bookMore { flex-basis: 100%; }
+  .book .field input, .book .field select, .book .button, .quickViews button { min-height: 44px; }.quickViews { gap: 6px; }.quickViews button { padding: 6px 9px; }
+  .bookCaption { flex-wrap: wrap; }.bookCaption > span { font-size: 11px; }.bookPagination { flex-wrap: wrap; }.bookPagination .actions { flex-wrap: wrap; }
+  .detailContent .field input, .detailContent .field select { min-height: 44px; }.detailContent .panel { padding: 14px; }
+}
+@media(pointer:coarse) { .book .button, .quickViews button, .book .field input, .book .field select { min-height: 44px; } }
+.detailContent { overflow-wrap: anywhere; }
+.detailContent .titleRow > div { min-width: 0; max-width: 100%; }
+.detailContent .route > div > span { min-width: 0; overflow-wrap: anywhere; }
+.detailContent .actions > a { max-width: 100%; }
+@media(min-width:901px) {
+  .main { padding-top: 20px; }
+  .main > .titleRow > div:first-child { display: flex; align-items: baseline; gap: 12px; }
+  .main > .titleRow .title { font-size: 26px; }
+  .main > .titleRow .subtitle { margin: 0; font-size: 12px; }
+  .bookStats > div { padding-block: 7px; }
+  .bookCaption { padding-block: 4px; }
+  .bookFilters { padding-block: 8px; }
+}
+.realizedList { display: grid; gap: 10px; margin-top: 12px; }
+.realizedItem { border: 1px solid #e3e6eb; border-radius: 8px; padding: 10px; display: grid; gap: 8px; }
+.realizedRow { display: grid; grid-template-columns: minmax(120px,1fr) minmax(140px,2fr) 85px 85px 40px; align-items: end; gap: 8px; }
+.realizedRow .button { padding-inline: 8px; }
+@media(max-width:700px) { .realizedRow { grid-template-columns: minmax(0,1fr) minmax(0,1fr); }.realizedRow > :nth-child(2) { grid-column: 1/-1; grid-row: 2; }.realizedRow > .button { grid-column: 2; grid-row: 1; justify-self: end; }.realizedRow > :first-child { grid-column: 1; grid-row: 1; } }
+.requesterChip { background: #edf0f4; color: #4c5461; }
+.requesterChip[data-requester-type=assistance] { background: #dfebff; color: #26548b; }
+.requesterChip[data-requester-type=selfpayer] { background: #fff1cf; color: #795800; }
+.bookTable tr[data-stage=cancelled] .stageLabel, .bookTable tr[data-stage=needs_changes] .stageLabel { color: #982c3b; }
+.bookFootnote { color: #68717c; font-size: 11px; margin: 8px 12px 0; }
+@media(min-width:1200px) {
+  .bookFilters { position: relative; }
+  .quickViews { padding-right: 225px; }
+  .bookFilterActions { display: contents; }
+  .bookFilterActions > .actions { position: absolute; top: 8px; right: 12px; }
+  .bookMore { display: block; margin-top: 4px; }
+  .bookMore summary { min-height: 24px; padding-top: 3px; }
+}
+@media(min-width:1200px) { .book { margin-top: 10px; } }

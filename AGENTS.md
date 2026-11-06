@@ -1,6 +1,6 @@
 <!-- BEGIN:nextjs-agent-rules -->
 
-# This is NOT the Next.js you know
+## This is NOT the Next.js you know
 
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
 
@@ -100,4 +100,4 @@ The short operating procedure and remaining environment work are in [the release
 
 ## Mobile UI standard
 
-Mobile screens follow [the mobile design standard](docs/mobile/design-standard.md): light mode only for now, compact tokens from `mobile/src/design/tokens.ts`, the shell in `mobile/src/shell/` (Prehľad · three of the user's modules · Moduly) and visible, labeled controls for every action (gestures are only shortcuts). A new mobile feature adds its manifest to `mobile/src/shell/modules.ts` and reuses the shared components; it does not introduce its own colors, font sizes, headers or navigation bar. Module visibility in the app is presentation only; the server keeps authorizing every request.
+Mobile screens follow [the mobile design standard](docs/mobile/design-standard.md): light mode only for now, compact tokens from `mobile/src/design/tokens.ts`, the shell in `mobile/src/shell/` (Prehľad · four of the user's modules · Moduly) and visible, labeled controls for every action (gestures are only shortcuts). A new mobile feature adds its manifest to `mobile/src/shell/modules.ts` and reuses the shared components; it does not introduce its own colors, font sizes, headers or navigation bar. Module visibility in the app is presentation only; the server keeps authorizing every request.

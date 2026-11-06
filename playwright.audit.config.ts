@@ -4,7 +4,7 @@ import chromium from "@sparticuz/chromium";
 /** Offline fixtures exercise the shipped browser modules. No application/provider credentials. */
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: ["diagnostic-errors.spec.ts", "startup-diagnostics.spec.ts", "telephony-quality-diagnostics.spec.ts", "monitor-phone-diagnostics.spec.ts", "recording-playback.spec.ts", "recording-policy.spec.ts", "call-journey.spec.ts"],
+  testMatch: ["diagnostic-errors.spec.ts", "startup-diagnostics.spec.ts", "telephony-quality-diagnostics.spec.ts", "monitor-phone-diagnostics.spec.ts", "web-delivery-handoff.spec.ts", "case-work.spec.ts", "case-work-overview.spec.ts", "case-workspace-preservation.spec.ts", "case-table-overview.spec.ts", "case-directory-overview.spec.ts", "workspace-provider-lifecycle.spec.ts", "recording-playback.spec.ts", "recording-policy.spec.ts", "call-journey.spec.ts"],
   fullyParallel: true,
   forbidOnly: true,
   retries: 0,

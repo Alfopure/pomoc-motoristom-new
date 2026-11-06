@@ -1,5 +1,5 @@
 import type {
-  MobileOperation, MobileOperationAction, MobileOperationEvidence, MobileOperationEvidenceInput, MobileOperationKind, MobileOperationStatus,
+  MobileFieldCash, MobileOperation, MobileOperationAction, MobileOperationEvidence, MobileOperationEvidenceInput, MobileOperationKind, MobileOperationStatus,
   MobileTowingAttachment, MobileTowingFields, MobileTowingOrder, MobileTowingStatus,
 } from "../../../src/lib/mobile-api";
 import type { TagTone } from "../design/detail";
@@ -7,7 +7,7 @@ import type { FieldWorkList } from "./api";
 
 /** Moja práca without any screen: labels, order of the list, the next step and what
  * a doklad or a submitted odťah still needs. The server re-checks all of it. */
-export const operationKindLabels: Record<MobileOperationKind, string> = { delivery: "Pristavenie", collection: "Odvoz vozidla", transfer: "Presun vozidla" };
+export const operationKindLabels: Record<MobileOperationKind, string> = { delivery: "Pristavenie náhradného vozidla", collection: "Vyzdvihnutie náhradného vozidla", transfer: "Presun vozidla" };
 export const operationStatusLabels: Record<MobileOperationStatus, string> = {
   assigned: "Pridelené", accepted: "Prijaté", en_route: "Na ceste", arrived: "Na mieste", collected: "Vozidlo prevzaté", completed: "Dokončené", cancelled: "Zrušené",
 };
@@ -36,8 +36,17 @@ export function isOpenOperation(operation: Pick<MobileOperation, "status">): boo
 }
 
 export type OperationStep = { action: Exclude<MobileOperationAction, "evidence">; label: string; confirm: string | null };
-/** One main step at a time: Prijať → Začať → Som na mieste → (Vozidlo prevzaté) → Dokončiť. */
+/** Delivery has three visible steps; collections and transfers retain their existing workflow. */
 export function nextOperationStep(operation: Pick<MobileOperation, "status" | "kind">): OperationStep | null {
+  if (operation.kind === "delivery") {
+    switch (operation.status) {
+      case "assigned": return { action: "accept", label: "Prijať", confirm: null };
+      case "accepted": return { action: "start", label: "Vyraziť", confirm: null };
+      case "en_route":
+      case "arrived": return { action: "complete", label: "Odovzdané", confirm: "Potvrdiť odovzdanie vozidla? Doklad odovzdania musí byť doplnený." };
+      default: return null;
+    }
+  }
   switch (operation.status) {
     case "assigned": return { action: "accept", label: "Prijať jazdu", confirm: null };
     case "accepted": return { action: "start", label: "Začať jazdu", confirm: null };
@@ -55,11 +64,11 @@ export const operationStepLabels: Record<MobileOperationAction, string> = {
 export function awaitsMember(item: WorkItem): boolean {
   return item.kind === "operation" ? item.operation.status === "assigned" : item.order.workStatus === "assigned" || item.order.workStatus === "needs_changes";
 }
-/** Position goes to dispatch from the executor's acceptance until the work ends. */
+/** New operations share position only after departure, until work ends. */
 export function sharesOperationPosition(operation: Pick<MobileOperation, "status">): boolean {
-  return ["accepted", "en_route", "arrived", "collected"].includes(operation.status);
+  return ["en_route", "arrived", "collected"].includes(operation.status);
 }
-/** The one operation the phone follows: the earliest accepted open work. */
+/** The one operation the phone follows: the earliest started open work. */
 export function trackedOperation(list: FieldWorkList | undefined | null): string | null {
   return workItems(list).find(item => item.kind === "operation" && sharesOperationPosition(item.operation))?.key.slice("operation:".length) ?? null;
 }
@@ -79,8 +88,15 @@ export function towingMissing(order: MobileTowingOrder): string[] {
   if (needsDestination(order) && !order.fields.destination?.trim()) missing.push("cieľ");
   if (!order.fields.photoException?.trim()) {
     if (!ready.some(item => item.kind === "work")) missing.push("fotka práce");
-    if (needsDestination(order) && !ready.some(item => item.kind === "handover")) missing.push("fotka odovzdania");
+    if ((needsDestination(order) || order.fields.realizedItems?.some(item => ["tow", "transport", "relocation"].includes(item.kind))) && !ready.some(item => item.kind === "handover")) missing.push("fotka odovzdania");
   }
+  for (const [index, item] of (order.fields.realizedItems ?? []).entries()) {
+    const label = "úkon " + (index + 1);
+    if (!item.description.trim() || !item.unit.trim() || !/^[0-9]{1,9}(\.[0-9]{1,3})?$/.test(item.quantity) || Number(item.quantity) <= 0) missing.push(label + ": opis, kladné množstvo a jednotka");
+    if (item.kind === "storage" && !item.parkingId) missing.push(label + ": konkrétne parkovisko");
+    if (["tow", "transport", "relocation"].includes(item.kind) && !item.destination?.trim()) missing.push(label + ": cieľ");
+  }
+  if ((order.fields.handoverRecipientName?.trim() || order.fields.handedOverAt) && (!order.fields.handoverRecipientName?.trim() || !order.fields.handedOverAt) && !order.fields.handoverException?.trim()) missing.push("príjemca a čas odovzdania alebo výnimka");
   if (order.attachments.some(item => item.status === "pending")) missing.push("dokončenie nahrávania príloh");
   return missing;
 }
@@ -138,4 +154,23 @@ export function termLabel(value: string | null): string {
 }
 export function isLate(value: string | null, now = Date.now()): boolean {
   return value !== null && Date.parse(value) < now;
+}
+
+/** Receipts are append-only within one own assignment, independently of order revision. */
+export function newerTowing(previous: MobileTowingOrder | undefined, next: MobileTowingOrder): MobileTowingOrder {
+  if (!previous || previous.id !== next.id) return next;
+  if (previous.assignmentGeneration > next.assignmentGeneration) return previous;
+  if (previous.assignmentGeneration < next.assignmentGeneration) return next;
+  const latest = previous.revision > next.revision ? previous : next;
+  if (!previous.payments?.length && !next.payments?.length) return latest;
+  const receipts = new Map([...(next.payments ?? []), ...(previous.payments ?? [])].map(receipt => [receipt.id, receipt]));
+  return { ...latest, payments: [...receipts.values()] };
+}
+/** Driver cash and each handover have their own revisions, outside order revisions. */
+export function newerCash(previous: MobileFieldCash | undefined, next: MobileFieldCash): MobileFieldCash {
+  if (!previous) return next;
+  const account = previous.account && (!next.account || previous.account.id === next.account.id && previous.account.revision > next.account.revision) ? previous.account : next.account;
+  const handovers = new Map(previous.handovers.map(item => [item.id, item]));
+  for (const item of next.handovers) { const current = handovers.get(item.id); if (!current || item.revision >= current.revision) handovers.set(item.id, item); }
+  return { account, handovers: [...handovers.values()] };
 }

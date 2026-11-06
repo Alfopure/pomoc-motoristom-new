@@ -1,3 +1,4 @@
+import { TOWING_BOOK_SORTS, TOWING_BOOK_STAGES, TOWING_BOOK_DATE_BASES, TOWING_REQUESTER_TYPES } from '@/domain/towing/book-query';
 import 'server-only';
 import { TOWING_COMMANDS, type TowingCommand, type TowingCommandResult, type TowingMember, type TowingOrder, type TowingWorkspace } from '@/domain/towing/types';
 import { actorRpcParams } from './auth';
@@ -31,11 +32,18 @@ export async function executeTowingCommand(actor: TowingMember, command: TowingC
 }
 export function workspaceFilters(url: URL) {
   const filters: Record<string, unknown> = {};
-  for (const key of ['orderId','sourceCaseId','branchId','driverId','fleetAssetId']) { const value = url.searchParams.get(key); if (value) filters[key] = uuid(value); }
+  for (const key of ['orderId','sourceCaseId','branchId','driverId','fleetAssetId','requesterId']) { const value = url.searchParams.get(key); if (value) filters[key] = uuid(value); }
   for (const key of ['query','search','workStatus','billingStatus','paymentStatus','dateFrom','dateTo','vehicle','requester']) {
     const value = url.searchParams.get(key); if (value) { if (value.length > 200) throw new TowingError('invalid_input',400,'Filter je príliš dlhý.'); filters[key] = value; }
   }
   for (const [alias, key] of [['status','workStatus'],['from','dateFrom'],['to','dateTo']] as const) { const value = url.searchParams.get(alias); if (value && !filters[key]) { if (value.length > 200) throw new TowingError('invalid_input',400,'Neplatný filter.'); filters[key] = value; } }
+  for (const [key, allowed] of [['sort', TOWING_BOOK_SORTS], ['stage', TOWING_BOOK_STAGES], ['dateBasis', TOWING_BOOK_DATE_BASES], ['requesterType', TOWING_REQUESTER_TYPES]] as const) {
+    const value = url.searchParams.get(key);
+    if (value) {
+      if (!(allowed as readonly string[]).includes(value)) throw new TowingError('invalid_input', 400, 'Neplatný filter knihy.');
+      filters[key] = value;
+    }
+  }
   for (const [key, fallback, max] of [['limit', 50, 50], ['offset', 0, 100000]] as const) {
     const raw = url.searchParams.get(key); const value = raw === null ? fallback : Number(raw);
     if (!Number.isSafeInteger(value) || value < (key === 'limit' ? 1 : 0) || value > max) throw new TowingError('invalid_input',400,'Neplatné stránkovanie.'); filters[key] = value;
@@ -76,18 +84,25 @@ export async function loadTowingWorkspace(actor: TowingMember, view: 'office' | 
 export function projectTowingDriverOrder(order: TowingOrder, actor: TowingMember): TowingOrder {
   const fields = { serviceType: order.fields.serviceType, subjectType: order.fields.subjectType,
     subjectDescription: order.fields.subjectDescription, pickup: order.fields.pickup };
-  for (const key of ['plate','vin','destination','contact','noContactReason','branchId','fleetAssetId','plannedAt','startedAt','finishedAt','startSource','driverNotes','performedQuantity','photoException','assistanceReference','parkingId','parkingName','parkingAddress','assistancePartnerName'] as const) {
+  for (const key of ['plate','vin','destination','contact','noContactReason','branchId','fleetAssetId','plannedAt','startedAt','finishedAt','startSource','odometer','paymentIntent','handoverRecipientName','handedOverAt','handoverException','realizedItems','dispatchInstructions','driverNotes','performedQuantity','photoException','assistanceReference','assistancePartnerId','requesterType','requesterId','parkingId','parkingName','parkingAddress','assistancePartnerName'] as const) {
     if (order.fields[key] !== undefined) Object.assign(fields, { [key]: order.fields[key] });
   }
   for (const key of ['requester', 'customer', 'owner', 'recipient'] as const) {
     const party = order.fields[key];
-    if (party) Object.assign(fields, { [key]: { name: party.name, ...(party.phone ? { phone: party.phone } : {}) } });
+    if (party) Object.assign(fields, { [key]: { name: party.name, ...(party.phone ? { phone: party.phone } : {}),
+      ...(key !== 'customer' && party.email ? { email: party.email } : {}),
+      ...(key !== 'customer' && party.address ? { address: party.address } : {}),
+      ...(key !== 'customer' && party.companyId ? { companyId: party.companyId } : {}) } });
+  }
+  if (order.fields.owner) {
+    const { name, phone, email, address, companyId } = order.fields.owner;
+    Object.assign(fields, { owner: { name, ...(phone ? { phone } : {}), ...(email ? { email } : {}), ...(address ? { address } : {}), ...(companyId ? { companyId } : {}) } });
   }
   return { id: order.id, number: order.number, sourceCaseId: null, revision: order.revision,
       assignmentGeneration: order.assignmentGeneration, driverId: order.driverId, workStatus: order.workStatus,
       billingStatus: order.billingStatus, paymentStatus: order.paymentStatus, fields,
       authorizedCollectionCents: order.authorizedCollectionCents, receivedCents: order.receivedCents, dueCents: order.dueCents,
       reconciliationRequired: order.reconciliationRequired, createdAt: order.createdAt, updatedAt: order.updatedAt, attachments: order.attachments,
-      payments: order.payments?.filter(payment => payment.driverId === actor.id).map(payment => ({id:payment.id,receiptId:payment.receiptId,amountCents:payment.amountCents,method:payment.method,driverId:payment.driverId,createdAt:payment.createdAt})) };
+      payments: order.payments?.filter(payment => payment.driverId === actor.id).map(payment => ({id:payment.id,receiptId:payment.receiptId,amountCents:payment.amountCents,method:payment.method,cashCategory:payment.cashCategory,driverId:payment.driverId,createdAt:payment.createdAt})) };
 
 }

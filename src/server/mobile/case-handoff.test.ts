@@ -40,6 +40,11 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("complete mobile handoff context", () => {
+  it("reads an app or link handoff without a recipient phone", async () => {
+    const { session, rpc } = fixture();
+    rpc.mockResolvedValue({ data: { preview: full, previewVersion, handoffs: [grant({ recipientPhone: "" })] }, error: null });
+    expect((await getMobileCaseHandoffs(session, caseId)).handoffs[0].recipientPhone).toBe("");
+  });
   it("uses only verified user client and explicit actor/org, preserving full V3 zero/false/null data", async () => {
     const { session, rpc } = fixture(); const result = await getMobileCaseHandoffs(session, caseId);
     expect(result.preview).toEqual(full); expect(result.previewVersion).toBe(previewVersion);
@@ -95,6 +100,12 @@ describe("mobile handoff command boundary", () => {
   });
   it("uses existing phone/text/date/default normalization exactly", () => {
     expect(parseMobileHandoffInput({ ...issue, recipientName: " Kolega ", recipientPhone: "0905 123 456", scheduledAt: "2026-10-11T12:00:00+02:00", hours: undefined })).toMatchObject({ recipientName: "Kolega", recipientPhone: "+421905123456", hours: 24, scheduledAt: "2026-10-11T10:00:00.000Z" });
+  });
+  it.each([undefined, "", " \t "])("allows app delivery without a phone (%j)", recipientPhone => {
+    expect(parseMobileHandoffInput({ ...issue, recipientPhone, recipientMemberId: id(21) })).toMatchObject({ recipientMemberId: id(21), recipientPhone: "" });
+  });
+  it.each(["1234", "invalid", "420777123456"])("still rejects a supplied invalid phone (%s)", recipientPhone => {
+    expect(() => parseMobileHandoffInput({ ...issue, recipientPhone, recipientMemberId: id(21) })).toThrow("telefónne číslo");
   });
   it("keeps a legacy confirmed replay saved without fabricating a new URL", async () => {
     const { session, rpc } = fixture(); rpc.mockResolvedValue({ data: receipt(), error: null });

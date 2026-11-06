@@ -2,6 +2,12 @@
 
 Modul je súčasťou existujúcej aplikácie: kancelária `/zakazky`, vodič `/vodic`, verejný offline shell `/vodic/offline`. Používa samostatné členstvá nad Supabase Auth; vodič ani samostatný fakturant nepotrebuje dispečerský profil. Zdrojový prípad sa kopíruje do zákazky ako snapshot, nemení sa.
 
+## Spoločné webové menu
+
+V dispečingu je modul v **Menu → Prevádzka → Kniha odťahov**. Dá sa pripnúť do hornej lišty alebo do skratiek mobilného webu rovnako ako ostatné moduly; odkaz na odťahy už nie je pod menom používateľa. Kancelárske a vodičské oprávnenia určuje existujúce aktívne odťahové členstvo rovnakého účtu a organizácie. Samotná rola správcu dispečingu členstvo nenahrádza. Používateľ iba s vodičským oprávnením vidí **Moje odťahy**; pri oboch oprávneniach prepína **Kancelária / Moje odťahy** vnútri knihy.
+
+Modul používa spoločnú hlavičku a pracovnú plochu. Prepnutie cez hlavné menu nenačíta nový dokument ani neodpojí telefón dispečingu. Navštívené pohľady zostávajú pripojené a zachovávajú rozpracované formuláre, filtre a identity nepotvrdených príkazov. Pred explicitným obnovením aplikácie alebo odhlásením sa neuložená práca vráti na obrazovku odťahov a vyžiada sa jej dokončenie. Samostatné adresy zostávajú použiteľné pre vodičov a účty bez prístupu k dispečingu; mobilná natívna aplikácia naďalej používa **Moja práca**.
+
 ## TEST a aktivácia
 
 - Kanonická adresa: https://test.dispecing.linkapomoci.sk/zakazky.

@@ -72,16 +72,16 @@ function MyTasksWorkspace({ store, queryKey, profileId, active, onOpenCase, onLe
   if (selected) return <TaskDetail key={selected} store={store} taskId={selected} queryKey={prefix} profileId={profileId} active={active} onBack={() => setSelected(null)} onOpenCase={onOpenCase} />;
   const items = [...new Map(query.data?.pages.flatMap(page => page.tasks).map(item => [item.id, item]) ?? []).values()];
   const canShow = !pendingRequest && !pendingSearch && !query.isError;
-  return <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}
+  return <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.content}
     refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isFetchingNextPage} onRefresh={() => { if (listActive && !pendingSearch) void query.refetch(); }} />}>
     <Text accessibilityRole="header" style={styles.heading}>Moje úlohy</Text>
     <Text style={styles.muted}>Úlohy naprieč prípadmi, ktoré riešite alebo kontrolujete.</Text>
     <View style={s.search}><Search size={16} color={colors.muted} accessible={false} />
       <TextInput accessibilityLabel="Hľadať úlohu podľa názvu" placeholder="Hľadať podľa názvu úlohy" placeholderTextColor={colors.muted} value={search} onChangeText={setSearch} maxLength={200} autoCorrect={false} style={s.searchInput} returnKeyType="search" />
-      <Pressable accessibilityRole="button" accessibilityLabel="Obnoviť úlohy" accessibilityState={{ disabled: !listActive || pendingSearch || query.isFetching }} hitSlop={8}
-        disabled={!listActive || pendingSearch || query.isFetching} onPress={() => { void query.refetch(); }} style={({ pressed }) => [s.refresh, pressed && { opacity: 0.6 }]}>
-        <RotateCw size={16} strokeWidth={2.2} color={!listActive || pendingSearch || query.isFetching ? colors.border : colors.ink} accessible={false} /></Pressable>
     </View>
+      <Pressable accessibilityRole="button" accessibilityLabel="Obnoviť úlohy" accessibilityState={{ disabled: !listActive || pendingSearch || query.isFetching }}
+        disabled={!listActive || pendingSearch || query.isFetching} onPress={() => { void query.refetch(); }} style={({ pressed }) => [s.refresh, pressed && { opacity: 0.6 }]}>
+        <RotateCw size={16} strokeWidth={2.2} color={colors.ink} accessible={false} /><Text style={styles.text}>{query.isFetching ? "Obnovujem…" : "Obnoviť"}</Text></Pressable>
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
       <Choice label="Priradené mne" selected={view === "assigned"} onPress={() => setView("assigned")} />
       <Choice label="Na kontrolu" selected={view === "review"} onPress={() => setView("review")} />
@@ -97,7 +97,7 @@ function MyTasksWorkspace({ store, queryKey, profileId, active, onOpenCase, onLe
   </ScrollView>;
 }
 const s = StyleSheet.create({
-  search: { minHeight: 38, borderRadius: 19, backgroundColor: "rgba(118,118,128,0.12)", flexDirection: "row", alignItems: "center", gap: 7, paddingLeft: 12, paddingRight: 4 },
-  searchInput: { flex: 1, minHeight: 38, fontSize: 16, color: colors.ink, paddingVertical: 0 },
-  refresh: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center" },
+  search: { minHeight: 48, borderRadius: 16, backgroundColor: "rgba(118,118,128,0.12)", flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12 },
+  searchInput: { flex: 1, minWidth: 0, minHeight: 48, fontSize: 16, color: colors.ink, paddingVertical: 8 },
+  refresh: { minHeight: 44, maxWidth: "100%", alignSelf: "flex-end", flexDirection: "row", gap: 8, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 22, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
 });

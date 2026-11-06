@@ -3,7 +3,7 @@ import type { TowingMember, TowingWorkspace } from '@/domain/towing/types';
 
 const mocks = vi.hoisted(() => ({ rpc: vi.fn(), from: vi.fn(), select: vi.fn(), eq: vi.fn(), in: vi.fn() }));
 vi.mock('./client', () => ({ towingAdmin: () => mocks }));
-import { loadTowingWorkspace, projectTowingDriverOrder } from './service';
+import { loadTowingWorkspace, projectTowingDriverOrder, workspaceFilters } from './service';
 
 const actor: TowingMember = { id: 'member', userId: 'user', organizationId: 'organization', displayName: 'Fixture', roles: ['manager','driver'], capabilities: ['operate','price','drive'], active: true, version: 1 };
 function workspace(view: 'office' | 'driver' = 'office'): TowingWorkspace {
@@ -50,18 +50,27 @@ describe('persisted office pricing date', () => {
 
 
 describe('driver operational contacts', () => {
-  it('retains minimal customer and requester contacts and assistance reference without billing identity', () => {
+  it('retains operational requester contacts but keeps customer billing identity and office notes private', () => {
     const order = workspace('driver').orders[0];
-    order.fields.requester = { name: 'Synthetic requester', phone: '+421900000000', email: 'private@example.invalid', companyId: 'private' };
+    order.fields.requester = { name: 'Synthetic requester', phone: '+421900000000', email: 'contact@example.invalid', companyId: '12345678', taxId: 'private' };
     order.fields.customer = { name: 'Synthetic customer', phone: '+421900000001', address: 'private address', taxId: 'private' };
     order.fields.assistanceReference = 'SYNTHETIC-REF';
     order.fields.assistancePartnerName = 'Synthetic assistance';
     order.officeNotes = 'Internal only';
     const result = projectTowingDriverOrder(order, actor);
-    expect(result.fields.requester).toEqual({ name: 'Synthetic requester', phone: '+421900000000' });
+    expect(result.fields.requester).toEqual({ name: 'Synthetic requester', phone: '+421900000000', email: 'contact@example.invalid', companyId: '12345678' });
     expect(result.fields.customer).toEqual({ name: 'Synthetic customer', phone: '+421900000001' });
     expect(result.fields.assistanceReference).toBe('SYNTHETIC-REF');
     expect(result.fields.assistancePartnerName).toBe('Synthetic assistance');
     expect(result).not.toHaveProperty('officeNotes');
+  });
+});
+
+describe('book filter boundary', () => {
+  it('passes explicit query semantics and keeps the page bounded', () => {
+    expect(workspaceFilters(new URL('https://fixture.invalid?sort=driver_asc&stage=active&dateBasis=dispatch&requesterType=unknown&limit=50'))).toEqual({ sort: 'driver_asc', stage: 'active', dateBasis: 'dispatch', requesterType: 'unknown', limit: 50, offset: 0 });
+  });
+  it.each(['sort=sql', 'stage=paid_or_active', 'dateBasis=finished', 'requesterType=partner', 'limit=51', 'requesterId=bad'])('rejects unsupported filter %s', query => {
+    expect(() => workspaceFilters(new URL(`https://fixture.invalid?${query}`))).toThrow();
   });
 });

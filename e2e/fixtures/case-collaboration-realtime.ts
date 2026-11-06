@@ -14,3 +14,10 @@ export function createSupabaseBrowserClient() {
     removeChannel(channel: { topic: string }) { listeners.delete(channel.topic); },
   };
 }
+
+// The fixture has no remote auth handshake; join after the current microtask.
+export function afterRealtimeAuth(_client: object, join: () => void) {
+  let cancelled = false;
+  queueMicrotask(() => { if (!cancelled) join(); });
+  return () => { cancelled = true; };
+}

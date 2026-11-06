@@ -31,6 +31,7 @@ async function boot(page: Page, options: { sender?: boolean; existing?: boolean;
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== "https://handoff.test") { external.push(url.origin); return route.abort(); }
     if (!url.pathname.startsWith("/api/")) return route.fulfill({ contentType: "text/html", body: `<!doctype html><html lang="sk"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style><body><div id="root"></div><script>${script}</script></body></html>` });
+    if (url.pathname === `/api/cases/${caseId}/work`) return route.fulfill({ json: { actorKey: 'fixture:sender', canOperateTowing: false, pickup: '', destination: '', groups: [], people: [], branches: [], fleet: [], cycles: [] } });
     if (request.method() === "GET") reads.push(url.pathname);
     if (url.pathname === "/api/public/handoffs/session") { sessions.push(request.method()); return options.sessionStatus ? route.fulfill({ status: options.sessionStatus, json: { error: "Dočasne nedostupné" } }) : route.fulfill({ json: { handoff: server.grant } }); }
     if (url.pathname === "/api/public/handoffs/current") {
@@ -81,12 +82,14 @@ async function boot(page: Page, options: { sender?: boolean; existing?: boolean;
 test("enhanced sender recovers the identical link after reload and extends without rotation or SMS", async ({ page }) => {
   const trace = await boot(page, { sender: true, enhanced: true });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await page.getByLabel("Stredisko alebo kolega").fill("Peter");
   await page.getByLabel("Telefón príjemcu odkazu").fill("+421907987654");
   await page.getByRole("button", { name: "Vytvoriť odkaz pre kolegu" }).click();
   const initial = await page.getByLabel("Odkaz pre Peter", { exact: true }).inputValue();
   await page.reload();
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await page.getByRole("button", { name: "Získať rovnaký odkaz" }).click();
   await expect(page.getByLabel("Odkaz pre Peter", { exact: true })).toHaveValue(initial);
   await page.getByRole("button", { name: "Predĺžiť platnosť bez zmeny odkazu" }).click();
@@ -99,6 +102,7 @@ test("enhanced sender recovers the identical link after reload and extends witho
 test("enhanced lost issue response replays one command and restores its original link", async ({ page }) => {
   const trace = await boot(page, { sender: true, enhanced: true, lostIssue: true });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await page.getByLabel("Stredisko alebo kolega").fill("Peter");
   await page.getByLabel("Telefón príjemcu odkazu").fill("+421907987654");
   await page.getByRole("button", { name: "Vytvoriť odkaz pre kolegu" }).click();
@@ -169,6 +173,7 @@ test("sender issues explicitly, keeps uncertain command through style changes, a
   const trace = await boot(page, { sender: true, lostIssue: true, width: 1280 });
   expect(trace.reads).toHaveLength(0);
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await page.getByLabel("Stredisko alebo kolega").fill("Peter · Bratislava");
   await page.getByLabel("Telefón príjemcu odkazu").fill("+421907987654");
   await page.getByLabel("Pokyny pre kolegu", { exact: true }).fill("Zavolať pri príchode.");
@@ -193,6 +198,7 @@ test("sender issues explicitly, keeps uncertain command through style changes, a
 test("existing publication fields survive refresh and local edits survive reload of context", async ({ page }) => {
   const trace = await boot(page, { sender: true, existing: true, width: 768 });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   const instructions = page.getByLabel("Pokyny pre kolegu", { exact: true });
   await expect(instructions).toHaveValue(published.instructions!);
   await expect(page.getByLabel("Dohodnutý čas", { exact: true })).not.toHaveValue("");
@@ -209,6 +215,7 @@ test("existing publication fields survive refresh and local edits survive reload
 test("renewing a link keeps the existing SMS draft and requires explicit append", async ({ page }) => {
   const trace = await boot(page, { sender: true, existing: true, width: 1280 });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await page.getByRole("button", { name: "Obnoviť odkaz", exact: true }).click();
   await page.getByRole("button", { name: "Otvoriť SMS pre kolegu" }).click();
   let dialog = page.getByRole("dialog");
@@ -231,6 +238,7 @@ test("background read never blocks a command and its delayed response cannot rep
   });
   const trace = await boot(page, { sender: true, existing: true });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue(published.instructions!);
   let count = 0, release: (() => Promise<void>) | undefined;
   await page.route(`https://handoff.test/api/cases/${caseId}/handoffs`, async route => {
@@ -252,6 +260,7 @@ test("background read never blocks a command and its delayed response cannot rep
 test("revoked internal case access clears displayed private data and the bearer link", async ({ page }) => {
   const trace = await boot(page, { sender: true, existing: true });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await page.getByRole("button", { name: "Obnoviť odkaz", exact: true }).click();
   await expect(page.getByRole("button", { name: "Otvoriť SMS pre kolegu" })).toBeVisible();
   trace.revokeInternal();
@@ -275,6 +284,7 @@ test("two clients see an accepted handoff automatically while preserving sender 
   const server = { grant: structuredClone(base), active: true };
   const sender = await boot(page, { sender: true, server });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   const instructions = page.getByLabel("Pokyny pre kolegu", { exact: true });
   await expect(instructions).toHaveValue(published.instructions!);
   await instructions.fill("Rozpracovaný miestny pokyn");
@@ -355,6 +365,7 @@ test("recipient expiry clears the card and stops polling", async ({ page }) => {
 test("hidden sender stops reads and coalesces a burst on return while keeping its draft", async ({ page }) => {
   const trace = await boot(page, { sender: true, existing: true });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue(published.instructions!);
   await page.getByLabel("Pokyny pre kolegu", { exact: true }).fill("Zachovaný pokyn");
   await page.getByRole("button", { name: "Prepnúť aktívny panel" }).click();
@@ -377,6 +388,7 @@ test("hidden sender stops reads and coalesces a burst on return while keeping it
 test("read failures back off to 60 then 120 seconds without blocking commands", async ({ page }) => {
   const trace = await boot(page, { sender: true, existing: true });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue(published.instructions!);
   let failedReads = 0;
   await page.route(`https://handoff.test/api/cases/${caseId}/handoffs`, async route => {
@@ -389,6 +401,7 @@ test("read failures back off to 60 then 120 seconds without blocking commands", 
   await expect(page.getByRole("button", { name: "Zverejniť tento výber údajov" })).toBeEnabled();
   await page.clock.runFor(59_000); expect(failedReads).toBe(1);
   await page.clock.runFor(2_000); await expect.poll(() => failedReads).toBe(2);
+  await expect(page.getByRole("button", { name: "Skúsiť znova načítať" })).toBeEnabled();
   await page.clock.runFor(119_000); expect(failedReads).toBe(2);
   await page.clock.runFor(2_000); await expect.poll(() => failedReads).toBe(3);
   expect(trace.internal).toHaveLength(0);
@@ -433,6 +446,7 @@ test("failed initial session exchange is never replayed automatically", async ({
 test("sender keeps an uncertain issue error and command intact after successful context polling", async ({ page }) => {
   const trace = await boot(page, { sender: true, lostIssue: true });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await page.getByLabel("Stredisko alebo kolega").fill("Peter");
   await page.getByLabel("Telefón príjemcu odkazu").fill("+421907987654");
   await page.getByLabel("Pokyny pre kolegu", { exact: true }).fill("Miestne pokyny");
@@ -451,6 +465,7 @@ test("sender keeps an uncertain issue error and command intact after successful 
 test("next background read is scheduled after completion and concurrent resume events do not duplicate it", async ({ page }) => {
   await boot(page, { sender: true, existing: true });
   await page.getByRole("button", { name: /Odovzdať prípad/ }).click();
+  await page.getByText("Externý odkaz a pôvodné odovzdania", { exact: true }).click();
   await expect(page.getByLabel("Pokyny pre kolegu", { exact: true })).toHaveValue(published.instructions!);
   let reads = 0, release: (() => Promise<void>) | undefined;
   await page.route(`https://handoff.test/api/cases/${caseId}/handoffs`, async route => {

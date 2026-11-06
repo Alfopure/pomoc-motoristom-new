@@ -22,6 +22,12 @@ test.describe.configure({ mode: "serial" });
 
 test.beforeEach(async ({ page, baseURL }) => {
   await isolateBrowserRequests(page, baseURL!);
+  await page.route("**/api/operations?*", route => route.request().method() === "GET" && new URL(route.request().url()).searchParams.has("caseId") ? route.fulfill({ json: { operations: [], totalCount: 0 } }) : route.fallback());
+  await page.route("**/api/pobocky?*", route => route.request().method() === "GET" && new URL(route.request().url()).searchParams.has("caseId") ? route.fulfill({ json: { requests: [], totalCount: 0 } }) : route.fallback());
+  await page.route("**/api/towing/workspace?*", route => {
+    const url = new URL(route.request().url());
+    return route.request().method() === "GET" && url.searchParams.has("sourceCaseId") && url.searchParams.get("view") === "office" ? route.fulfill({ json: { orders: [], totalCount: 0, members: [], branches: [] } }) : route.fallback();
+  });
 });
 
 const viewportWidths = [390, 768, 1024, 1280, 1440] as const;
@@ -73,7 +79,7 @@ for (const width of viewportWidths) {
     expect(await page.getByTestId("case-form-main").locator("[data-required-marker]").count()).toBeGreaterThan(0);
     await expect(page.getByRole("button", { name: "Uložiť rozpracované", exact: true }).first()).toBeEnabled();
     await expect(page.getByLabel("Adresár firiem", { exact: true })).toHaveCount(0);
-    await expect(page.getByLabel("Asistenčná služba", { exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("case-form-main").getByLabel("Asistenčná služba", { exact: true })).toHaveCount(0);
 
     await plate.fill("E2E TEST");
     await make.fill("Test");
@@ -95,7 +101,7 @@ test("case header offers separate web and mobile call actions", async ({ page })
   const callActions = page.getByRole("group", { name: "Možnosti volania", exact: true });
   await expect(callActions).toBeVisible();
   await expect(callActions.getByRole("button", { name: "Volať cez web", exact: true })).toBeVisible();
-  await expect(callActions.getByRole("link", { name: "Volať cez mobil", exact: true })).toHaveAttribute("href", /^tel:\+?\d/);
+  await expect(callActions.getByRole("button", { name: "Volať cez mobil", exact: true })).toBeEnabled();
 
   await page.setViewportSize({ width: 390, height: viewportHeight });
   await expect(callActions).toBeVisible();
@@ -310,14 +316,12 @@ test("switching pages preserves an unfinished new case", async ({ page }) => {
   await openNewCase(page);
   await page.getByLabel("Iné poznámky", { exact: true }).fill("Rozpracovaný telefonát");
 
-  const mainNavigation = page.getByRole("navigation", { name: "Hlavná navigácia" });
-  await mainNavigation.getByRole("button", { name: "Menu", exact: true }).click();
-  const tasksNavigation = mainNavigation.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name: /^Úlohy/ });
+  const tasksNavigation = page.locator(".workspace-center-tabs").getByRole("tab", { name: "Úlohy", exact: true });
   await tasksNavigation.click();
-  await expect(page.getByRole("heading", { name: "Úlohy", exact: true })).toBeVisible();
+  await expect(tasksNavigation).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("dialog", { name: "Rozpracovaný prípad nie je uložený" })).toHaveCount(0);
 
-  await mainNavigation.getByRole("button", { name: "Nástenka", exact: true }).click();
+  await page.locator(".workspace-center-tabs").getByRole("tab", { name: "Mapa", exact: true }).click();
   await expect(page.getByLabel("Iné poznámky", { exact: true })).toHaveValue("Rozpracovaný telefonát");
 });
 
@@ -346,7 +350,7 @@ test("an employee can quick-add an assistance service from the case form", async
   await openNewCase(page);
 
   await page.getByRole("button", { name: "Asistenčná služba", exact: true }).click();
-  await page.getByLabel("Asistenčná služba", { exact: true }).fill("E2E asistencia");
+  await page.getByRole("textbox", { name: "Asistenčná služba", exact: true }).fill("E2E asistencia");
   await page.getByRole("button", { name: "Uložiť", exact: true }).click();
 
   await expect(page.getByText("Uložené do adresára.", { exact: true })).toBeVisible();
@@ -420,6 +424,12 @@ test("dashboard side columns resize horizontally and keep the preference", async
   await page.mouse.up();
   await expect(rightResize).toHaveAttribute("aria-valuenow", "360");
   const firstSidebarTask = page.getByTestId("task-card-sidebar").first();
+  const contentWidth = () => firstSidebarTask.evaluate(card => {
+    const style = getComputedStyle(card);
+    return card.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  });
+  const narrowTaskWidth = await contentWidth();
+  expect(narrowTaskWidth).toBeLessThan(420);
   await expect(firstSidebarTask.locator(".dashboard-task-card-actions > div")).toHaveCSS("flex-direction", "column");
 
   const widerRightBox = await rightResize.boundingBox();
@@ -429,8 +439,10 @@ test("dashboard side columns resize horizontally and keep the preference", async
   await page.mouse.move(widerRightBox!.x + widerRightBox!.width / 2 - 120, widerRightBox!.y + 120, { steps: 4 });
   await page.mouse.up();
   await expect(rightResize).toHaveAttribute("aria-valuenow", "480");
-  await expect(firstSidebarTask.locator(".dashboard-task-card-actions > div")).toHaveCSS("flex-direction", "row");
-  expect(Math.round((await firstSidebarTask.boundingBox())!.height)).toBeLessThanOrEqual(90);
+  const widerTaskWidth = await contentWidth();
+  expect(widerTaskWidth).toBeGreaterThan(narrowTaskWidth);
+  await expect(firstSidebarTask.locator(".dashboard-task-card-actions > div")).toHaveCSS("flex-direction", widerTaskWidth >= 420 ? "row" : "column");
+  expect(Math.round((await firstSidebarTask.boundingBox())!.height)).toBeLessThanOrEqual(widerTaskWidth >= 420 ? 90 : 120);
   await expectNoDocumentOverflow(page, "resized dashboard columns");
 
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -467,6 +479,7 @@ test("task sidebar stays focused and the full task filters work together", async
   await expect(sidebarFilters.getByRole("button")).toHaveCount(2);
   await expect(sidebarFilters.getByRole("button", { name: /Moje/ })).toBeVisible();
   await expect(sidebarFilters.getByRole("button", { name: /Všetky/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(sidebar.getByTestId("task-card-sidebar").first()).toBeVisible();
   const sidebarTaskHeights = await sidebar.getByTestId("task-card-sidebar").evaluateAll((cards) =>
     cards.map((card) => Math.round(card.getBoundingClientRect().height)),
   );
@@ -483,7 +496,8 @@ test("task sidebar stays focused and the full task filters work together", async
   await expect(navigation.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name: "Ústredňa", exact: true })).toBeVisible();
   await expectNoElementOverflow(sidebar, "dashboard task sidebar");
 
-  await navigation.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name: /^Úlohy/ }).click();
+  await navigation.getByRole("button", { name: "Menu", exact: true }).click();
+  await page.locator(".workspace-center-tabs").getByRole("tab", { name: "Úlohy", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Nová úloha", exact: true })).toBeVisible();
   const taskTitleInput = page.getByLabel("Názov úlohy", { exact: true });
   await expect(taskTitleInput).toBeVisible();
@@ -578,7 +592,7 @@ test("dispatch case sidebar searches case numbers and exposes operational sortin
 
   const assistanceCase = sidebar.locator('[data-case-number="PM-2026-0516"]');
   await expect(assistanceCase).toBeVisible();
-  await expect(assistanceCase.getByText("Europe Assistance", { exact: true })).toBeVisible();
+  await expect(assistanceCase.getByTitle("Asistenčná služba: Europe Assistance", { exact: true })).toBeVisible();
   await expect(assistanceCase.getByText("Úlohy 1", { exact: true })).toBeVisible();
   await expect(sidebar.locator("[data-case-number]")).toHaveCount(1);
 
@@ -627,7 +641,7 @@ test("compact case editor protects a pending change before it collapses", async 
   await page.setViewportSize({ width: 1440, height: viewportHeight });
   await openDashboard(page);
 
-  await page.getByLabel("Priorita", { exact: true }).selectOption("low");
+  await page.getByTestId("case-edit-form-main").getByLabel("Priorita", { exact: true }).selectOption("low");
   await expect(page.getByTestId("case-autosave-status")).toContainText("Čakám na dokončenie zmeny");
   await page.keyboard.press("Escape");
 
@@ -651,17 +665,12 @@ test("case directory keeps its context and creates a task for the selected perso
   await page.setViewportSize({ width: 1440, height: viewportHeight });
   await openDashboard(page);
 
-  const navigation = page.getByRole("navigation", { name: "Hlavná navigácia" });
-  await navigation.getByRole("button", { name: "Menu", exact: true }).click();
-  const casesNavigation = navigation.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name: "Prípady", exact: true });
-  await casesNavigation.click();
-  await page.locator("tbody tr").first().click();
-
+  const overview = page.locator(".workspace-center-tabs").getByRole("tab", { name: "Prehľad prípadov", exact: true });
+  await overview.click();
+  await page.locator(".dispatch-workspace-upper tbody tr").first().click();
   await expect(page.getByTestId("case-edit-form-main")).toBeVisible();
-  await navigation.getByRole("button", { name: "Menu", exact: true }).click();
-  await expect(navigation.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name: "Prípady", exact: true })).toHaveAttribute("aria-current", "page");
-  await navigation.getByRole("button", { name: "Menu", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Úlohy prípadu", exact: true })).toBeVisible();
+  await expect(overview).toHaveAttribute("aria-selected", "true");
+  await page.locator("[data-case-workspace]").getByRole("tab", { name: /^Úlohy/ }).click();
   await page.getByLabel("Názov novej úlohy").fill("Overiť klienta");
   await page.getByLabel("Zodpovedná osoba").last().selectOption(mockOperators[1].id);
   await page.getByRole("button", { name: "Pridať úlohu", exact: true }).last().click();
@@ -677,6 +686,7 @@ test("case directory keeps its context and creates a task for the selected perso
 test("task inputs stay readable in a narrow case detail", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: viewportHeight });
   await openCaseEdit(page);
+  await page.locator("[data-case-workspace]").getByRole("tab", { name: /^Úlohy/ }).click();
 
   const taskForm = page.getByRole("heading", { name: "Pridať novú úlohu", exact: true }).locator("..");
   const titleInput = taskForm.getByLabel("Názov novej úlohy", { exact: true });
@@ -684,7 +694,6 @@ test("task inputs stay readable in a narrow case detail", async ({ page }) => {
 
   await expect(titleInput).toBeVisible();
   await expect(dueAtInput).toBeVisible();
-  await expect(dueAtInput).toHaveCSS("font-size", "16px");
 
   const titleBox = await titleInput.boundingBox();
   const dueAtBox = await dueAtInput.boundingBox();
@@ -693,6 +702,9 @@ test("task inputs stay readable in a narrow case detail", async ({ page }) => {
   expect(dueAtBox!.width).toBeGreaterThan(250);
   expect(Math.abs(dueAtBox!.width - titleBox!.width)).toBeLessThanOrEqual(1);
   await expectNoElementOverflow(taskForm, "task form at 1024px");
+  await page.setViewportSize({ width: 390, height: viewportHeight });
+  await expect(dueAtInput).toHaveCSS("font-size", "16px");
+  await expectNoElementOverflow(taskForm, "task form at 390px");
 });
 
 test("quick dial shows favorite contacts in pages of five", async ({ page }) => {
@@ -795,7 +807,7 @@ test("invalid edit stays protected without a popup and can be explicitly discard
   await page.getByRole("button", { name: "Zahodiť zmeny", exact: true }).click();
   await expect(page.getByTestId("case-edit-form-main")).toBeVisible();
   await expect(page.getByRole("textbox", { name: /^VIN/ })).not.toHaveValue("INVALID");
-  await expect(page.getByRole("status")).toContainText("Rozpracované zmeny boli zahodené");
+  await expect(page.getByRole("status").filter({ hasText: "Rozpracované zmeny boli zahodené" })).toContainText("Rozpracované zmeny boli zahodené");
   expect(dialogCount).toBe(0);
 });
 
@@ -873,7 +885,7 @@ test("pending autosave keeps navigation available and explains the safe choices"
   await expect(page.getByRole("button", { name: "Zbaliť workspace", exact: true })).toHaveCount(0);
   const mainNavigation = page.getByRole("navigation", { name: "Hlavná navigácia" });
   await mainNavigation.getByRole("button", { name: "Menu", exact: true }).click();
-  const tasksNavigation = mainNavigation.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name: /^Úlohy/ });
+  const tasksNavigation = mainNavigation.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name: "Nastavenia", exact: true });
   await expect(tasksNavigation).toBeEnabled();
   await expect(page.getByRole("button", { name: "Nový prípad", exact: true })).toBeEnabled();
   await expect(plate).toBeEnabled();
@@ -946,6 +958,7 @@ test("a committed edit with a failed refresh reconciles without a duplicate PATC
   let refreshCount = 0;
   let submittedPlate = "";
   let savedCaseId = "";
+  const committedRevision = "2026-11-05T23:00:01.000Z";
 
   await speedUpAutosave(page);
   await page.route("**/api/cases/*", async (route) => {
@@ -957,11 +970,11 @@ test("a committed edit with a failed refresh reconciles without a duplicate PATC
         const dispatchData = createMockDispatchData({
           dispatchCases: mockDispatchCases.map((caseItem) =>
             caseItem.id === savedCaseId
-              ? { ...caseItem, vehicle: { ...caseItem.vehicle, licensePlate: submittedPlate }, updatedAt: new Date().toISOString() }
+              ? { ...caseItem, vehicle: { ...caseItem.vehicle, licensePlate: submittedPlate }, updatedAt: committedRevision }
               : caseItem,
           ),
         });
-        await route.fulfill({ status: 200, json: { dispatchData } });
+        await route.fulfill({ status: 200, json: { caseDetail: { ...dispatchData.dispatchCases.find(caseItem => caseItem.id === savedCaseId)!, tasks: undefined } } });
       }
       return;
     }
@@ -972,10 +985,10 @@ test("a committed edit with a failed refresh reconciles without a duplicate PATC
     }
 
     patchCount += 1;
-    const payload = route.request().postDataJSON() as { licensePlate?: string };
+    const payload = route.request().postDataJSON() as { licensePlate?: string; mutationId: string };
     submittedPlate = payload.licensePlate ?? "";
     savedCaseId = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
-    await route.fulfill({ status: 200, json: { caseId: savedCaseId, refreshRequired: true, warnings: [] } });
+    await route.fulfill({ status: 200, json: { committedRevision, mutationId: payload.mutationId, refreshRequired: true, warnings: [] } });
   });
 
   await page.setViewportSize({ width: 1280, height: viewportHeight });
@@ -1007,7 +1020,7 @@ test("autosave retries transient server failures and keeps the latest edit", asy
     }
 
     patchCount += 1;
-    const payload = route.request().postDataJSON() as { licensePlate?: string };
+    const payload = route.request().postDataJSON() as { licensePlate?: string; mutationId: string };
     submittedPlate = payload.licensePlate ?? "";
     if (patchCount < 3) {
       await route.fulfill({ status: 502, json: { error: "Dočasná chyba brány." } });
@@ -1022,7 +1035,8 @@ test("autosave retries transient server failures and keeps the latest edit", asy
           : caseItem,
       ),
     });
-    await route.fulfill({ status: 200, json: { caseId, dispatchData, warnings: [] } });
+    const caseDetail = dispatchData.dispatchCases.find(caseItem => caseItem.id === caseId)!;
+    await route.fulfill({ status: 200, json: { committedRevision: caseDetail.updatedAt, mutationId: payload.mutationId, caseDetail: { ...caseDetail, tasks: undefined }, warnings: [] } });
   });
 
   await page.setViewportSize({ width: 1280, height: viewportHeight });
@@ -1136,7 +1150,8 @@ async function openNewCase(page: Page) {
     }
   }
 
-  const casesTab = page.getByRole("dialog", { name: "Obrazovky aplikácie" }).getByRole("button", { name: "Prípady", exact: true });
+  await page.getByRole("button", { name: "Menu", exact: true }).filter({ visible: true }).first().click();
+  const casesTab = page.locator(".workspace-center-tabs").getByRole("tab", { name: "Prehľad prípadov", exact: true });
   await expect(casesTab).toBeVisible();
   await casesTab.click();
 

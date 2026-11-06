@@ -186,7 +186,8 @@ try {
     await page.getByRole('button', { name: /Odovzdať prípad/ }).click();
     stage = 'select app recipient';
     await page.getByRole('combobox', { name: 'Príjemca odovzdania', exact: true }).selectOption(fixtures.recipient.memberId);
-    await page.getByRole('textbox', { name: /^Telefón pristavovača/ }).fill(fixtures.contact.phone);
+    // App identity is sufficient; a phone is only needed when explicitly composing SMS.
+    check(await page.getByRole('button', { name: 'Odovzdať do aplikácie', exact: true }).isEnabled());
     stage = 'issue handoff from web';
     const issuedResponse = page.waitForResponse(response => new URL(response.url()).pathname === handoffPath && response.request().method() === 'POST');
     await page.getByRole('button', { name: 'Odovzdať do aplikácie', exact: true }).click();

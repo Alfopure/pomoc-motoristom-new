@@ -1,5 +1,7 @@
 The office and driver screens use only the towing DTOs and `client.ts` adapter. Server pages verify the feature flag and towing membership before rendering. The driver screen never loads the dispatch repository or telephony.
 
+Dispatch users enter through the shared **Kniha odťahov** module in the operations menu. `Home` supplies independently authorized office/driver access for the same user and organization. `TowingModule` embeds the existing workspace without a second header or main landmark. Visited office/driver workspaces remain mounted across local navigation to retain form state and unconfirmed command identifiers. Standalone routes remain available to field-only accounts and for offline preparation. The module is loaded only after selection; hidden, unvisited views do not fetch their workspaces.
+
 Inputs save explicitly. Command identifiers remain stable after an unconfirmed reply; a matching server acknowledgement clears the attempt. Payments, corrections, handovers and document versions get fresh identifiers only after a confirmed operation. Conflicts preserve edited order fields and require a deliberate comparison before saving against a newer revision. Provider acceptance is displayed only for the explicit `accepted` delivery state.
 
 Run the synthetic browser harnesses after the normal production build, which supplies the actual CSS for the offline layout test:

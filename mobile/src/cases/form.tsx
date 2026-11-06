@@ -2,6 +2,7 @@ import { Pressable, StyleSheet, Text } from "react-native";
 import { ChevronDown } from "lucide-react-native";
 import type { MobileCaseCreateInput, MobileCaseJobType, MobileCasePriority } from "../../../src/lib/mobile-api";
 import { colors } from "../ui";
+import { MIN_TOUCH, palette, radius, space, type } from "../design/tokens";
 
 export const priorities: { value: MobileCasePriority; label: string }[] = [
   { value: "urgent", label: "Horí" }, { value: "high", label: "Vysoká" }, { value: "normal", label: "Bežná" }, { value: "low", label: "Nízka" },
@@ -23,22 +24,22 @@ export const fields: { key: CaseFieldKey; label: string; max: number; multiline?
   { key: "note", label: "Poznámka", max: 10000, multiline: true, section: "Problém", placeholder: "Doplňujúce informácie" },
 ];
 export function Choice({ label, selected, onPress, disabled }: { label: string; selected: boolean; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ selected, disabled: Boolean(disabled) }} onPress={onPress} disabled={disabled} hitSlop={{ top: 4, bottom: 4 }}
+  return <Pressable accessibilityRole="button" accessibilityState={{ selected, disabled: Boolean(disabled) }} onPress={onPress} disabled={disabled}
     style={({ pressed }) => [formStyles.choice, selected && formStyles.selected, disabled && { opacity: 0.6 }, pressed && !selected && { opacity: 0.7 }]}>
     <Text style={[formStyles.label, selected && { color: colors.white }]}>{label}</Text>
   </Pressable>;
 }
 /** Opens a picker; filled when a value is chosen, so active filters stand out. */
 export function MenuChip({ label, active, onPress, disabled }: { label: string; active: boolean; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ disabled: Boolean(disabled) }} onPress={onPress} disabled={disabled} hitSlop={{ top: 4, bottom: 4 }}
+  return <Pressable accessibilityRole="button" accessibilityState={{ disabled: Boolean(disabled) }} onPress={onPress} disabled={disabled}
     style={({ pressed }) => [formStyles.choice, formStyles.menu, active && formStyles.selected, disabled && { opacity: 0.6 }, pressed && { opacity: 0.7 }]}>
-    <Text numberOfLines={1} style={[formStyles.label, { flexShrink: 1 }, active && { color: colors.white }]}>{label}</Text>
+    <Text style={[formStyles.label, { flexShrink: 1 }, active && { color: colors.white }]}>{label}</Text>
     <ChevronDown size={15} strokeWidth={2.4} color={active ? colors.white : colors.ink} accessible={false} />
   </Pressable>;
 }
 const formStyles = StyleSheet.create({
-  menu: { flexDirection: "row", alignItems: "center", gap: 4, maxWidth: "100%" },
-  choice: { borderRadius: 18, paddingHorizontal: 12, paddingVertical: 8, minHeight: 36, justifyContent: "center", backgroundColor: colors.white, borderWidth: StyleSheet.hairlineWidth, borderColor: "rgba(60,60,67,0.22)" },
-  label: { fontSize: 14, lineHeight: 18, fontWeight: "600", color: colors.ink },
+  menu: { flexDirection: "row", alignItems: "center", gap: space.xs, maxWidth: "100%" },
+  choice: { borderRadius: radius.xl, paddingHorizontal: space.m, paddingVertical: space.s, minHeight: MIN_TOUCH, minWidth: MIN_TOUCH, justifyContent: "center", backgroundColor: palette.card, borderWidth: StyleSheet.hairlineWidth, borderColor: palette.separator },
+  label: { ...type.subhead, fontWeight: "600", color: colors.ink },
   selected: { backgroundColor: colors.ink, borderColor: colors.ink },
 });

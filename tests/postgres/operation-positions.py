@@ -96,19 +96,49 @@ with tempfile.TemporaryDirectory(prefix='pm-oppos-pg-') as temp:
         check('unknown operation is not found', denied(position_sql(P, uid(999)), 'P0002'))
         step(P, 'accept', op)
         check('another member gets no position into this work', position(Q, op) == {'stored': False, 'active': False} and stored(op) == 0)
-        check('own accepted operation stores the reading', position(P, op) == {'stored': True, 'active': True} and stored(op) == 1)
+        check('acceptance alone does not store GPS', position(P, op) == {'stored': False, 'active': False})
+        step(P, 'start', op)
+        check('predeparture buffered second is never stored', position(P, op, recorded=at(-1)) == {'stored': False, 'active': True})
+        check('own departed operation stores the reading', position(P, op) == {'stored': True, 'active': True} and stored(op) == 1)
         check('readings closer than 10 s are throttled', position(P, op, recorded=at(2)) == {'stored': False, 'active': True} and stored(op) == 1)
         check('a stale reading is not stored', position(P, op, recorded=at(-20 * 60)) == {'stored': False, 'active': True})
         check('a reading from the future is not stored', position(P, op, recorded=at(10 * 60)) == {'stored': False, 'active': True})
         check('coordinates out of range are rejected', denied(position_sql(P, op, lat=123.0), '22023'))
         check('unknown input keys are rejected', denied(position_sql(P, op, extra={'speed': 3}), '22023'))
         check('a string latitude is rejected', denied(position_sql(P, op, extra={'lat': '48.1'}), '22023'))
-        step(P, 'start', op)
         check('en route keeps storing', position(P, op, recorded=at(15)) == {'stored': True, 'active': True} and stored(op) == 2)
         check('only the assigned member is recorded', value(f"select string_agg(distinct member_id::text, ',') from motorist_operation_positions where operation_id='{op}'") == P)
         step(P, 'arrive', op)
         step(P, 'complete', op)
         check('completed operation stops the phone', position(P, op, recorded=at(30)) == {'stored': False, 'active': False} and stored(op) == 2)
+
+        # Delivery completes atomically from driving, with validated handover evidence.
+        delivered = op_cmd(OFFICE, 'create', payload={'kind': 'delivery', 'from': 'Sklad', 'to': 'Klient'})['operation']['id']
+        step(OFFICE, 'assign', delivered, {'assigneeId': P})
+        step(P, 'accept', delivered)
+        step(P, 'start', delivered)
+        finish = {'commandId': uid(2900), 'operationId': delivered, 'action': 'complete', 'expectedRevision': rev(delivered), 'payload': {}}
+        finish_sql = lambda: "select public.motorist_operations_command('%s','%s','%s'::jsonb)" % (P, ORG, json.dumps(finish))
+        check('delivery cannot finish without handover evidence', denied(finish_sql(), '22023'))
+        check('refused completion leaves the delivery driving', value(f"select status from motorist_logistics_executions where operation_id='{delivered}'") == 'en_route')
+        bad_evidence = {'commandId': uid(2899), 'operationId': delivered, 'action': 'evidence', 'expectedRevision': rev(delivered),
+            'payload': {'stage': 'handover', 'source': 'observed', 'observedAt': at(), 'note': '', 'person': 'Klient'}}
+        bad_sql = "select public.motorist_operations_command('%s','%s','%s'::jsonb)" % (P, ORG, json.dumps(bad_evidence))
+        check('handover still requires kilometres fuel photo or an explicit exception', denied(bad_sql, '22023') and value(f"select count(*) from motorist_operation_evidence where operation_id='{delivered}'") == '0')
+        step(P, 'evidence', delivered, {'stage': 'handover', 'source': 'exception', 'observedAt': at(), 'note': '', 'missingReason': 'Klient odmietol fotografie a údaje'})
+        finish['expectedRevision'] = rev(delivered)
+        receipt = j(finish_sql())
+        check('delivery completes directly from en_route with one revision', receipt['operation']['status'] == 'completed' and rev(delivered) == finish['expectedRevision'] + 1)
+        check('the same completion command replays without another write', j(finish_sql()) == receipt and rev(delivered) == finish['expectedRevision'] + 1)
+        check('three-step completion invents no arrival event', value(f"select count(*) from motorist_operation_events where operation_id='{delivered}' and action='arrive'") == '0')
+        check('completed delivery immediately stops GPS', position(P, delivered) == {'stored': False, 'active': False})
+
+        office_started = op_cmd(OFFICE, 'create', payload={'kind': 'transfer', 'from': 'Office start', 'to': 'Destination'})['operation']['id']
+        step(OFFICE, 'assign', office_started, {'assigneeId': P})
+        step(OFFICE, 'start', office_started)
+        check('office start rejects predeparture points',position(P,office_started,recorded=at(-1)) == {'stored': False, 'active': True})
+        check('office start permits postdeparture points',position(P,office_started) == {'stored': True, 'active': True})
+        step(OFFICE, 'cancel', office_started, {'reason':'Fixture cleanup'})
 
         # Reassignment before start: the former assignee stops; the new one starts from their own step.
         op2 = op_cmd(OFFICE, 'create', payload={'kind': 'delivery', 'from': 'Sklad', 'to': 'Klient'})['operation']['id']
@@ -118,8 +148,10 @@ with tempfile.TemporaryDirectory(prefix='pm-oppos-pg-') as temp:
         check('former assignee is told to stop after reassignment', position(P, op2) == {'stored': False, 'active': False})
         check('new assignee before own acceptance is not tracked', position(Q, op2) == {'stored': False, 'active': False})
         step(Q, 'accept', op2)
-        check('a reading from before the own acceptance is not stored', position(Q, op2, recorded=at(-5 * 60)) == {'stored': False, 'active': True})
-        check('the new assignee is tracked after acceptance', position(Q, op2) == {'stored': True, 'active': True})
+        check('acceptance by the new assignee still sends no GPS', position(Q, op2) == {'stored': False, 'active': False})
+        step(Q, 'start', op2)
+        check('a reading from before own departure is not stored', position(Q, op2, recorded=at(-5 * 60)) == {'stored': False, 'active': True})
+        check('the new assignee is tracked after departure', position(Q, op2) == {'stored': True, 'active': True})
 
         # Work that came through a legacy app delivery stays in Pristavenia: no operation positions there.
         op3 = op_cmd(OFFICE, 'create', payload={'kind': 'delivery', 'from': 'Sklad', 'to': 'Klient 3'})['operation']['id']

@@ -1,5 +1,8 @@
-import type { MobileBranchCommand, MobileOperationCommand, MobileTowingCommand } from "../../../src/lib/mobile-api";
+import type { TowingCreateInput } from "../../../src/domain/towing/creation";
+import type { TowingCommand } from "../../../src/domain/towing/types";
+import type { MobileBranchCommand, MobileFieldCashCommand, MobileOperationCommand, MobileTowingCommand, MobileWorkConflict } from "../../../src/lib/mobile-api";
 import { draftDate, draftId, draftKeys, draftObject } from "../drafts/port";
+import { FieldWorkConflictError } from "./api";
 import { MobileApiError } from "../lib/api";
 import type { StorageDriver } from "../lib/session-storage";
 
@@ -7,10 +10,10 @@ import type { StorageDriver } from "../lib/session-storage";
  * intent (target, command id, expected revision, payload) is stored on the phone
  * before sending; an uncertain answer is retried with the same command id, which the
  * server replays. A restored intent is never sent automatically. */
-export type WorkTarget = { kind: "operation" | "towing" | "branch"; id: string };
-export type WorkCommand = MobileOperationCommand | MobileTowingCommand | MobileBranchCommand;
+export type WorkTarget = { kind: "operation" | "towing" | "branch" | "cash" | "towing-create" | "towing-office"; id: string };
+export type WorkCommand = MobileOperationCommand | MobileTowingCommand | MobileBranchCommand | MobileFieldCashCommand | TowingCreateInput | TowingCommand;
 export type WorkIntent = { target: WorkTarget; command: WorkCommand; label: string; createdAt: string };
-export type PendingWork = WorkIntent & { status: "sending" | "uncertain" | "rejected" | "confirmed"; message: string | null };
+export type PendingWork = WorkIntent & { status: "sending" | "uncertain" | "rejected" | "confirmed"; message: string | null; conflict?: MobileWorkConflict };
 export type WorkCommandsView = { ready: boolean; enabled: boolean; busy: boolean; error: string | null; pending: readonly PendingWork[] };
 export type WorkCommandScope = { environment: "test" | "production"; apiOrigin: string; projectUrl: string; userId: string; memberId: string };
 type Options = { current: () => boolean; clock?: () => number };
@@ -30,15 +33,40 @@ export function workCommandsKey(scope: WorkCommandScope): string {
 export function parseWorkIntent(value: unknown): WorkIntent {
   const v = draftObject(value); draftKeys(v, ["target", "command", "label", "createdAt"]);
   const t = draftObject(v.target); draftKeys(t, ["kind", "id"]);
-  check(["operation", "towing", "branch"].includes(t.kind as string) && draftId(t.id) && draftDate(v.createdAt) && typeof v.label === "string" && v.label.length <= 100);
+  check(["operation", "towing", "branch", "cash", "towing-create", "towing-office"].includes(t.kind as string) && draftId(t.id) && draftDate(v.createdAt) && typeof v.label === "string" && v.label.length <= 100);
   const c = draftObject(v.command);
-  check(draftId(c.commandId) && positive(c.expectedRevision) && draftObject(c.payload));
+  if (t.kind === "towing-create") {
+    draftKeys(c, ["commandId", "targetId", "mode", "fields"], ["driverId", "completed", "officeNotes"]);
+    check(draftId(c.commandId) && c.targetId === t.id && ["self", "office"].includes(c.mode as string) && draftObject(c.fields));
+    check(c.mode !== "self" || !("driverId" in c || "completed" in c || "officeNotes" in c));
+    check(c.driverId === undefined || draftId(c.driverId));
+    check(c.completed === undefined || typeof c.completed === "boolean");
+    check(c.officeNotes === undefined || typeof c.officeNotes === "string" && c.officeNotes.length <= 10000);
+    return copy(v) as WorkIntent;
+  }
+  if (t.kind === "towing-office") {
+    draftKeys(c, ["commandId", "targetId", "type", "payload"], ["expectedRevision", "assignmentGeneration"]);
+    check(draftId(c.commandId) && c.targetId === t.id && ["update_order", "assign", "start", "submit", "return", "cancel", "receive_payment", "collect_cash", "accept_handover", "reject_handover", "cancel_handover"].includes(c.type as string)
+      && (c.type === "collect_cash" ? c.expectedRevision === 0 : positive(c.expectedRevision)) && draftObject(c.payload));
+    return copy(v) as WorkIntent;
+  }
+  check(draftId(c.commandId) && (t.kind === "cash" ? c.expectedRevision === 0 : positive(c.expectedRevision)) && draftObject(c.payload));
   if (t.kind === "operation") {
     draftKeys(c, ["commandId", "action", "expectedRevision", "payload"]);
     check(["accept", "start", "arrive", "collect", "complete", "evidence"].includes(c.action as string));
   } else if (t.kind === "towing") {
     draftKeys(c, ["commandId", "type", "expectedRevision", "assignmentGeneration", "payload"]);
-    check(["start", "update_order", "submit", "abandon_attachment"].includes(c.type as string) && positive(c.assignmentGeneration));
+    check(["start", "update_order", "submit", "abandon_attachment", "receive_payment"].includes(c.type as string) && positive(c.assignmentGeneration));
+    if (c.type === "receive_payment") {
+      const p = draftObject(c.payload); draftKeys(p, ["receiptId", "amountCents", "method"], ["accountRevision", "cashCategory"]);
+      check(draftId(p.receiptId) && Number.isSafeInteger(p.amountCents) && (p.amountCents as number)>0 && ["cash", "card"].includes(p.method as string)
+        && (p.method !== "cash" || positive(p.accountRevision)) && (p.accountRevision === undefined || positive(p.accountRevision)));
+    }
+  } else if (t.kind === "cash") {
+    draftKeys(c, ["commandId", "type", "handoverId", "expectedRevision", "payload"]);
+    check(c.type === "propose_handover" && draftId(c.handoverId));
+    const p = draftObject(c.payload); draftKeys(p, ["amountCents", "accountRevision"], ["cashBreakdown"]);
+    check(Number.isSafeInteger(p.amountCents) && (p.amountCents as number)>0 && Number.isSafeInteger(p.accountRevision) && (p.accountRevision as number)>0);
   } else {
     draftKeys(c, ["commandId", "action", "requestId", "expectedRevision", "payload"]);
     check(["claim", "release", "materialize", "operate", "reopen"].includes(c.action as string) && c.requestId === t.id);
@@ -91,6 +119,7 @@ export class WorkCommands {
           const s = draftObject(v.scope); draftKeys(s, ["environment", "apiOrigin", "projectUrl", "userId", "memberId"]);
           check(v.version === 1 && workCommandsKey(s as WorkCommandScope) === this.key && Array.isArray(v.records) && v.records.length <= MAX_RECORDS);
           records = (v.records as unknown[]).map(parseWorkIntent);
+          check(records.every(item => item.target.kind !== "cash" || item.target.id === this.scope.memberId));
           check(new Set(records.map(item => targetKey(item.target))).size === records.length && new Set(records.map(item => item.command.commandId)).size === records.length);
         }
         this.update({ ready: true, pending: records.map(item => ({ ...item, status: "uncertain", message: null })) });
@@ -105,6 +134,7 @@ export class WorkCommands {
       let intent: WorkIntent;
       try {
         intent = parseWorkIntent({ target, command, label, createdAt: new Date(this.clock()).toISOString() });
+        check(intent.target.kind !== "cash" || intent.target.id === this.scope.memberId);
         await this.persist([...this.view.pending, intent]);
       } catch { this.update({ error: "Krok sa nepodarilo bezpečne uložiť v telefóne. Neodoslal sa. Skúste to znova." }); return null; }
       const record: PendingWork = { ...intent, status: "uncertain", message: null };
@@ -136,7 +166,7 @@ export class WorkCommands {
       if (!this.current()) { this.replace({ ...record, status: "uncertain" }); return null; }
       // Only an explicit refusal lets the person close the intent after a fresh read.
       const rejected = failure instanceof MobileApiError && [400, 403, 404, 409, 422].includes(failure.status);
-      this.replace({ ...record, status: rejected ? "rejected" : "uncertain",
+      this.replace({ ...record, status: rejected ? "rejected" : "uncertain", conflict: failure instanceof FieldWorkConflictError ? failure.conflict : undefined,
         message: failure instanceof MobileApiError ? failure.message : "Spojenie sa prerušilo. Výsledok kroku zatiaľ nie je potvrdený." });
       return null;
     }

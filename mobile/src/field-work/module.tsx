@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Alert, Linking, Pressable, ScrollView, Text, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { randomUUID } from "expo-crypto";
-import { Camera, Car, ClipboardCheck, Clock, MapPin, Navigation, Phone, Truck } from "lucide-react-native";
-import type { MobileOperation, MobileOperationEvidenceInput, MobileTowingAttachment, MobileTowingCommand, MobileTowingDriverFields, MobileTowingOrder } from "../../../src/lib/mobile-api";
+import { Camera, Car, ClipboardCheck, MapPin, Navigation, Phone, Truck } from "lucide-react-native";
+import type { MobileFieldCash, MobileOperation, MobileOperationEvidenceInput, MobileTowingAttachment, MobileTowingCommand, MobileTowingDriverFields, MobileTowingOrder } from "../../../src/lib/mobile-api";
 import { MobileApiError } from "../lib/api";
 import { dialable, formatNumber } from "../lib/display";
 import { useAndroidBack } from "../lib/use-android-back";
@@ -24,8 +24,13 @@ import { targetKey, type WorkTarget } from "./commands";
 import {
   attachmentKindLabels, emptyEvidence, evidencePayload, evidenceProblem, isLate, isOpenOperation, nextOperationStep, nextTowingStep, operationKindLabels,
   operationStatusLabels, operationStatusTones, serviceLabels, sharesOperationPosition, sourceLabels, stageLabels, termLabel, towingMissing,
-  towingStatusLabels, towingStatusTones, workItems, type EvidenceDraft, type WorkItem,
+  towingStatusLabels, towingStatusTones, newerCash, newerTowing, workItems, type EvidenceDraft, type WorkItem,
 } from "./model";
+import { requestWorkNavigation } from "./work-navigation";
+import { CashPanel, TowWorkFields } from "./CashPanel";
+import { TowingCreate } from "./towing-create";
+import { TowingTimeField } from "./towing-form";
+import { TowingOperationalEditor } from "./towing-operational-editor";
 import { Chip, StepRecovery, StorageNotice, fieldStyles as s } from "./parts";
 import type { FieldWorkSession } from "./session";
 
@@ -38,31 +43,59 @@ function openUrl(url: () => string, onError: (message: string) => void) {
 const call = (phone: string | null, onError: (message: string) => void) => { if (phone) openUrl(() => "tel:" + phone.replace(/[^\d+]/g, ""), onError); };
 const navigate = (place: string | null, onError: (message: string) => void) => { if (place?.trim()) openUrl(() => directionsUrl(place), onError); };
 
+function askWorkDiscard(discard: () => void, keep: () => void) {
+  Alert.alert("Zahodiť neuložené zmeny?", "Rozpracované údaje na tejto karte sa zahodia. Nepotvrdené odoslané kroky zostanú uložené.", [
+    { text: "Zostať na karte", style: "cancel", onPress: keep }, { text: "Zahodiť zmeny", style: "destructive", onPress: discard },
+  ], { cancelable: true, onDismiss: keep });
+}
 /** Moja práca: own jazdy, odvozy, presuny and odťahy sorted by term, each with its
  * steps, doklady and photos. The shell's top bar leads back from a detail. */
 export function WorkModule({ session, active, visible, openRequest }: { session: FieldWorkSession | null; active: boolean; visible: boolean; openRequest: WorkOpenRequest | null }) {
   const [selected, setSelected] = useState<WorkTarget | null>(null);
+  const [creating, setCreating] = useState(false);
   const [handled, setHandled] = useState<number | null>(null);
-  if (openRequest && openRequest.nonce !== handled) { setHandled(openRequest.nonce); setSelected({ kind: openRequest.kind, id: openRequest.id }); }
-  const back = () => setSelected(null);
+  const [dirty, setDirty] = useState(false);
+  const [incoming, setIncoming] = useState<WorkTarget | null>(null);
+  const open = (target: WorkTarget | null) => {
+    if (target?.kind === "towing-create") { setCreating(true); return; }
+    setCreating(false);
+    if (selected?.kind === target?.kind && selected?.id === target?.id) return;
+    requestWorkNavigation(dirty, () => { setDirty(false); setSelected(target); }, askWorkDiscard);
+  };
+  if (openRequest && openRequest.nonce !== handled) {
+    setHandled(openRequest.nonce);
+    setCreating(false);
+    if (selected?.kind !== openRequest.kind || selected.id !== openRequest.id) {
+      const target: WorkTarget = { kind: openRequest.kind, id: openRequest.id };
+      if (dirty) setIncoming(target); else setSelected(target);
+    }
+  }
+  useEffect(() => {
+    if (incoming) requestWorkNavigation(true, () => { setDirty(false); setSelected(incoming); setIncoming(null); },
+      (discard, keep) => askWorkDiscard(discard, () => { keep(); setIncoming(null); }));
+  }, [incoming]);
+  const back = () => open(null);
   useShellBack(visible && selected !== null, "Moja práca", back);
   useAndroidBack(active && visible && selected !== null, back);
   if (!session) return <View style={styles.content}><Loading label="Overujem prístup k práci…" /></View>;
-  if (selected?.kind === "operation") return <OperationDetail key={selected.id} session={session} id={selected.id} active={active && visible} />;
-  if (selected?.kind === "towing") return <TowingDetail key={selected.id} session={session} id={selected.id} active={active && visible} />;
-  return <WorkList session={session} active={active && visible} onOpen={setSelected} />;
+  if (creating && session.capabilities.includes("drive")) return <TowingCreate session={session} active={active} visible={visible} onBack={() => setCreating(false)} onCreated={id => { setCreating(false); setSelected({ kind: "towing", id }); }} />;
+  if (selected?.kind === "cash") return <CashDetail session={session} active={active && visible} onDirtyChange={setDirty} />;
+  if (selected?.kind === "operation") return <OperationDetail key={selected.id} session={session} id={selected.id} active={active && visible} onOpenBlocker={open} />;
+  if (selected?.kind === "towing") return <TowingDetail key={selected.id} session={session} id={selected.id} active={active && visible} onOpenBlocker={open} onDirtyChange={setDirty} />;
+  return <WorkList session={session} active={active && visible} onOpen={open} onCreate={() => setCreating(true)} />;
 }
 
-function WorkList({ session, active, onOpen }: { session: FieldWorkSession; active: boolean; onOpen: (target: WorkTarget) => void }) {
+function WorkList({ session, active, onOpen, onCreate }: { session: FieldWorkSession; active: boolean; onOpen: (target: WorkTarget) => void; onCreate: () => void }) {
   const now = useDeliveryTime(active);
   const commands = useSyncExternalStore(session.commands.subscribe, session.commands.snapshot, session.commands.snapshot);
   const query = session.list, usable = canUseDeliveryCache(query.error);
   const items = usable ? workItems(query.data) : [];
-  const pending = commands.pending.filter(item => item.target.kind !== "branch");
+  const pending = commands.pending.filter(item => item.target.kind !== "branch" && item.target.kind !== "towing-office" && (item.target.kind !== "towing-create" || (item.command as { mode?: string }).mode === "self"));
   const uploads = useUploads(session.uploads).uploads;
   return <ScrollView contentContainerStyle={formLayout.content}>
     <View style={formLayout.head}><Text accessibilityRole="header" style={styles.heading}>Moja práca</Text></View>
     <StorageNotice commands={session.commands} state={commands} />
+    {session.capabilities.includes("drive") && <View style={formLayout.actions}><Button primary label="Nový odťah" onPress={onCreate} /><Button secondary label="Moja pokladňa" onPress={() => onOpen({ kind: "cash", id: session.memberId })} /></View>}
     {pending.length > 0 && <>
       <SectionHeader title="Nepotvrdené kroky" detail={String(pending.length)} />
       <View style={formLayout.actions}>{pending.map(record => <Button key={targetKey(record.target)} secondary label={"Overiť krok: " + record.label} onPress={() => onOpen(record.target)} />)}</View>
@@ -88,6 +121,32 @@ function WorkList({ session, active, onOpen }: { session: FieldWorkSession; acti
   </ScrollView>;
 }
 
+function useFieldCash(session: FieldWorkSession, active: boolean) {
+  return useQuery({ queryKey: [...session.key, "work-cash", session.memberId], enabled: session.capabilities.includes("drive"),
+    queryFn: ({ signal }) => session.api.cash(signal), structuralSharing: (previous, next) => newerCash(previous as MobileFieldCash | undefined, next as MobileFieldCash), refetchInterval: active ? 30_000 : false });
+}
+function CashDetail({ session, active, onDirtyChange }: { session: FieldWorkSession; active: boolean; onDirtyChange: (dirty: boolean) => void }) {
+  const queryClient = useQueryClient(), query = useFieldCash(session, active);
+  const commands = useSyncExternalStore(session.commands.subscribe, session.commands.snapshot, session.commands.snapshot);
+  const target: WorkTarget = { kind: "cash", id: session.memberId }, pending = commands.pending.find(item => targetKey(item.target) === targetKey(target));
+  const applied = (value: unknown) => { queryClient.setQueryData<MobileFieldCash>([...session.key, "work-cash", session.memberId], previous => newerCash(previous, value as MobileFieldCash)); void query.refetch(); };
+  const cash = canUseDeliveryCache(query.error) ? query.data ?? null : null;
+  const busy = !commands.enabled || !commands.ready || commands.busy || Boolean(pending) || query.isPending || query.isError;
+  return <ScrollView contentContainerStyle={formLayout.content} keyboardShouldPersistTaps="handled">
+    <DetailHeader title="Moja pokladňa" subtitle="Iba vaša hotovosť a vlastné odovzdania" />
+    <StorageNotice commands={session.commands} state={commands} />
+    {pending && <StepRecovery commands={session.commands} record={pending} busy={commands.busy || !commands.enabled} onResult={applied} onReload={() => query.refetch()} />}
+    {query.isError && <ErrorNotice message="Pokladňu sa nepodarilo overiť." onRetry={() => { void query.refetch(); }} />}
+    {query.isPending ? <Loading label="Načítavam vašu pokladňu…" /> : <CashPanel cash={cash} busy={busy} onDirtyChange={onDirtyChange} onReceive={async () => false} onPropose={async (amountCents, cashBreakdown) => {
+      if (busy || !cash?.account) return false;
+      const result = await session.commands.start<MobileFieldCash>(target, { commandId: randomUUID(), handoverId: randomUUID(), type: "propose_handover", expectedRevision: 0,
+        payload: { amountCents, accountRevision: cash.account.revision, ...(cashBreakdown ? { cashBreakdown } : {}) } }, "Odovzdať hotovosť");
+      if (result) applied(result); else void query.refetch();
+      return Boolean(result);
+    }} />}
+  </ScrollView>;
+}
+
 export function workTitle(item: WorkItem): string {
   if (item.kind === "operation") return operationKindLabels[item.operation.kind] + (item.operation.vehicle ? " · " + item.operation.vehicle : "");
   const f = item.order.fields;
@@ -100,6 +159,8 @@ export function WorkRow({ item, first, now, onOpen }: { item: WorkItem; first: b
   const late = isLate(item.at, now) && (item.kind === "towing" ? item.order.workStatus === "assigned" : item.operation.status === "assigned" || item.operation.status === "accepted");
   const Icon = item.kind === "towing" ? Truck : Car;
   const title = workTitle(item);
+  const assistance = item.kind === "operation" ? [item.operation.assistance?.name, item.operation.assistance?.reference]
+    : [item.order.fields.assistancePartnerName || item.order.fields.requesterName, item.order.fields.assistanceReference];
   return <Pressable accessibilityRole="button" accessibilityLabel={"Otvoriť " + title + ", " + status.text + ", " + termLabel(item.at)}
     onPress={() => onOpen(item.kind === "operation" ? { kind: "operation", id: item.operation.id } : { kind: "towing", id: item.order.id })}
     style={({ pressed }) => [s.row, pressed && { backgroundColor: "#ECECF0" }]}>
@@ -109,14 +170,15 @@ export function WorkRow({ item, first, now, onOpen }: { item: WorkItem; first: b
     <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
       <Text numberOfLines={2} style={s.rowTitle}>{title}</Text>
       <View style={s.rowHead}><Tag text={status.text} tone={status.tone} />{late && <Tag text="Po termíne" tone="red" />}
-        <Text numberOfLines={1} style={[s.rowDetail, { flexShrink: 1 }]}>{termLabel(item.at)}</Text></View>
+        <Text style={[s.rowDetail, { flexShrink: 1 }]}>{termLabel(item.at)}</Text></View>
+      {assistance.some(Boolean) ? <Text numberOfLines={2} style={s.rowDetail}>{assistance.filter(Boolean).join(" · ")}</Text> : null}
       {route.some(Boolean) ? <Text numberOfLines={2} style={s.rowDetail}>{route.filter(Boolean).join(" → ")}</Text> : null}
     </View>
     <Text style={s.chevron}>›</Text>
   </Pressable>;
 }
 
-function OperationDetail({ session, id, active }: { session: FieldWorkSession; id: string; active: boolean }) {
+function OperationDetail({ session, id, active, onOpenBlocker }: { session: FieldWorkSession; id: string; active: boolean; onOpenBlocker: (target: WorkTarget) => void }) {
   const queryClient = useQueryClient();
   const detailKey = useMemo(() => [...session.key, "operation", id], [session.key, id]);
   const query = useQuery({ queryKey: detailKey, queryFn: ({ signal }) => session.api.operation(id, signal), refetchInterval: active ? 15_000 : false,
@@ -133,7 +195,8 @@ function OperationDetail({ session, id, active }: { session: FieldWorkSession; i
     const next = result as MobileOperation;
     queryClient.setQueryData<MobileOperation>(detailKey, previous => newer(previous, next));
     void queryClient.invalidateQueries({ queryKey: [...session.key, "work"] });
-    if (sharesOperationPosition(next) && (action === "accept" || action === "start")) void session.tracker.follow(next.id, true);
+    if (sharesOperationPosition(next) && action === "start") void session.tracker.follow(next.id, true);
+    if (next.status === "completed" || next.status === "cancelled") void session.tracker.follow(null);
   }
   async function run(action: "accept" | "start" | "arrive" | "collect" | "complete" | "evidence", label: string, payload: Record<string, never> | MobileOperationEvidenceInput = {}): Promise<boolean> {
     if (!operation || blocked) return false;
@@ -144,17 +207,18 @@ function OperationDetail({ session, id, active }: { session: FieldWorkSession; i
     return false;
   }
   const recovery = <><StorageNotice commands={session.commands} state={commands} />
-    {pending && <StepRecovery commands={session.commands} record={pending} busy={commands.busy || !commands.enabled} onResult={result => applied(result, (pending.command as { action?: string }).action)} onReload={() => query.refetch()} />}</>;
+    {pending && <StepRecovery commands={session.commands} record={pending} onOpenBlocker={onOpenBlocker} busy={commands.busy || !commands.enabled} onResult={result => applied(result, (pending.command as { action?: string }).action)} onReload={() => query.refetch()} />}</>;
   if (query.isPending) return <ScrollView contentContainerStyle={styles.content}>{recovery}<Loading label="Načítavam jazdu…" /></ScrollView>;
   if (!operation) return <ScrollView contentContainerStyle={styles.content}>{recovery}
     <ErrorNotice message={errorText(query.error, "Jazdu sa nepodarilo načítať.")} onRetry={() => { void query.refetch(); }} /></ScrollView>;
   const step = nextOperationStep(operation), open = isOpenOperation(operation), phone = operation.customer?.phone || null;
   const confirmStep = () => {
     if (!step) return;
+    if (step.action === "complete" && operation.kind === "delivery" && operation.evidenceState !== "complete") { setEvidenceOpen(true); return; }
     if (!step.confirm) { void run(step.action, step.label); return; }
     Alert.alert(step.label, step.confirm, [{ text: "Späť", style: "cancel" }, { text: step.label, onPress: () => { void run(step.action, step.label); } }]);
   };
-  return <ScrollView contentContainerStyle={formLayout.content} keyboardShouldPersistTaps="handled">
+  return <ScrollView contentContainerStyle={formLayout.content} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" automaticallyAdjustKeyboardInsets>
     <DetailHeader title={operationKindLabels[operation.kind] + (operation.vehicle ? " · " + operation.vehicle : "")} subtitle={[operation.from, operation.to].filter(Boolean).join(" → ") || null}
       tags={<Tag text={operationStatusLabels[operation.status]} tone={operationStatusTones[operation.status]} />}
       meta={[operation.caseNumber ? "Prípad " + operation.caseNumber : null, termLabel(operation.scheduledAt)].filter(Boolean).join(" · ")} />
@@ -163,14 +227,20 @@ function OperationDetail({ session, id, active }: { session: FieldWorkSession; i
       {error && <ErrorNotice message={error} />}
       {query.isError && <ErrorNotice message="Údaje sa nepodarilo obnoviť. Zobrazený je posledný načítaný stav." onRetry={() => { void query.refetch(); }} />}
     </View>}
+    <Group>
+      <InfoRow first label="Asistenčná služba" value={operation.assistance?.name ?? null} empty="Nevyplnená" />
+      <InfoRow label="Číslo prípadu asistenčky" value={operation.assistance?.reference ?? null} empty="Nevyplnené" />
+      <InfoRow label="Interné číslo prípadu" value={operation.caseNumber} empty="Samostatná jazda" />
+    </Group>
     {open && <ActionBar actions={[
       { icon: Phone, label: "Zavolať", accessibilityLabel: "Zavolať klientovi", disabled: !dialable(phone), onPress: () => call(phone, setError) },
       { icon: MapPin, label: "Odkiaľ", accessibilityLabel: "Navigovať na miesto vyzdvihnutia", disabled: !operation.from.trim(), onPress: () => navigate(operation.from, setError) },
       { icon: Navigation, label: "Kam", accessibilityLabel: "Navigovať do cieľa", disabled: !operation.to.trim(), onPress: () => navigate(operation.to, setError) },
       { icon: ClipboardCheck, label: "Doklad", accessibilityLabel: "Doplniť doklad", disabled: blocked, onPress: () => setEvidenceOpen(true) },
     ]} />}
-    {step && !pending && !evidenceOpen && <View style={formLayout.actions}><Button primary label={step.label} disabled={blocked} onPress={confirmStep} /></View>}
-    {operation.status === "assigned" && !pending && <Text style={s.note}>Po prijatí aplikácia požiada o polohu a počas jazdy ju posiela dispečingu.</Text>}
+    {operation.instructions ? <Group><InfoRow first label="Pokyny" value={operation.instructions} /></Group> : null}
+    {step && !pending && !evidenceOpen && <View style={formLayout.actions}>{step.action === "complete" && operation.kind === "delivery" && operation.evidenceState !== "complete" && <Text style={styles.muted}>Pred potvrdením odovzdania doplňte doklad: osobu, kilometre, palivo a fotografiu, alebo dôvod chýbajúcich údajov.</Text>}<Button primary label={step.label} disabled={blocked} onPress={confirmStep} /></View>}
+    {(operation.status === "assigned" || operation.status === "accepted") && !pending && <Text style={s.note}>Poloha sa začne posielať dispečingu až po vyrazení.</Text>}
     {open && sharesOperationPosition(operation) && <Text style={s.note}>{positionNote(location, session.tracker.mode)}</Text>}
     {open && sharesOperationPosition(operation) && (location.status === "off" || location.status === "error") && <View style={formLayout.actions}>
       <Button secondary label="Zdieľať polohu s dispečerom" onPress={() => { void session.tracker.follow(operation.id, true); }} /></View>}
@@ -184,8 +254,6 @@ function OperationDetail({ session, id, active }: { session: FieldWorkSession; i
       <InfoRow label="Odkiaľ" value={operation.from || null} empty="Neuvedené" />
       <InfoRow label="Kam" value={operation.to || null} empty="Neuvedené" />
       <InfoRow label="Vozidlo" value={operation.vehicle} empty="Vozidlo ešte nie je určené" />
-      <InfoRow label="Prípad" value={operation.caseNumber} empty="Samostatná jazda" />
-      <InfoRow label="Pokyny" value={operation.instructions} empty="Bez pokynov" />
     </Group>
     {operation.customer && <>
       <SectionHeader title="Kontakt" />
@@ -268,7 +336,7 @@ function EvidenceForm({ session, operation, disabled, onSubmit, onClose }: {
   </>;
 }
 
-type DriverField = keyof MobileTowingDriverFields;
+type DriverField = "startedAt" | "finishedAt" | "driverNotes" | "performedQuantity" | "photoException" | "destination";
 const TEXT_FIELDS: readonly { key: Exclude<DriverField, "startedAt" | "finishedAt">; label: string; multiline?: boolean }[] = [
   { key: "destination", label: "Cieľ", multiline: true }, { key: "performedQuantity", label: "Vykonané (množstvo, km, hodiny)" },
   { key: "driverNotes", label: "Poznámky k práci", multiline: true }, { key: "photoException", label: "Prečo chýbajú fotky (ak chýbajú)", multiline: true },
@@ -293,15 +361,24 @@ function UploadPanel({ upload, busy, onResume, onDiscard }: { upload: PendingUpl
   </View>;
 }
 
-function TowingDetail({ session, id, active }: { session: FieldWorkSession; id: string; active: boolean }) {
+function TowingDetail({ session, id, active, onOpenBlocker, onDirtyChange }: { session: FieldWorkSession; id: string; active: boolean; onOpenBlocker: (target: WorkTarget) => void; onDirtyChange: (dirty: boolean) => void }) {
   const queryClient = useQueryClient();
+  const cashQuery = useFieldCash(session, active);
+  const options = useQuery({ queryKey: [...session.key, "towing-options"], queryFn: ({ signal }) => session.api.towingOptions(signal), staleTime: 300_000 });
   const detailKey = useMemo(() => [...session.key, "towing", id], [session.key, id]);
   const query = useQuery({ queryKey: detailKey, queryFn: ({ signal }) => session.api.towing(id, signal), refetchInterval: active ? 20_000 : false,
-    structuralSharing: (previous, next) => newer(previous as MobileTowingOrder | undefined, next as MobileTowingOrder) });
+    structuralSharing: (previous, next) => newerTowing(previous as MobileTowingOrder | undefined, next as MobileTowingOrder) });
   const commands = useSyncExternalStore(session.commands.subscribe, session.commands.snapshot, session.commands.snapshot);
   const target: WorkTarget = { kind: "towing", id };
   const pending = commands.pending.find(item => targetKey(item.target) === targetKey(target));
   const [edits, setEdits] = useState<MobileTowingDriverFields>({});
+  const [structuredDirty, setStructuredDirty] = useState(false);
+  const [paymentDirty, setPaymentDirty] = useState(false);
+  const [operationalDirty, setOperationalDirty] = useState(false);
+  const [startValid, setStartValid] = useState(true), [endValid, setEndValid] = useState(true);
+  const workTimesValid = startValid && endValid;
+  const edited = structuredDirty || paymentDirty || operationalDirty || Object.entries(edits).some(([key, value]) => value !== query.data?.fields[key as DriverField]);
+  useEffect(() => { onDirtyChange(edited); }, [edited, onDirtyChange]);
   const [error, setError] = useState<string | null>(null);
   const [left, setLeft] = useState<"submitted" | "gone" | null>(null);
   const uploads = useUploads(session.uploads);
@@ -310,10 +387,16 @@ function TowingDetail({ session, id, active }: { session: FieldWorkSession; id: 
   const order = query.data && canUseDeliveryCache(query.error) ? query.data : undefined;
   // An upload the server already shows ready needs no local copy any more.
   useEffect(() => { if (order) void session.uploads?.settle(order); }, [order, session.uploads, uploads.ready]);
-  function applied(result: unknown, type?: MobileTowingCommand["type"]) {
+  function applied(result: unknown, type?: MobileTowingCommand["type"], payload?: MobileTowingCommand["payload"]) {
     const next = (result as { order: MobileTowingOrder | null }).order;
     void queryClient.invalidateQueries({ queryKey: [...session.key, "work"] });
-    if (next) { queryClient.setQueryData<MobileTowingOrder>(detailKey, previous => newer(previous, next)); setEdits({}); }
+    if (next) {
+      queryClient.setQueryData<MobileTowingOrder>(detailKey, previous => newerTowing(previous, next));
+      if (type === "update_order" && payload && "fields" in payload) {
+        const written = payload.fields;
+        setEdits(current => Object.fromEntries(Object.entries(current).filter(([key, value]) => !(key in written) || value !== written[key as DriverField])));
+      }
+    }
     // Gone from the driver's list: handed over after Odovzdať, otherwise reassigned or cancelled meanwhile.
     else setLeft(type === "submit" ? "submitted" : "gone");
   }
@@ -322,7 +405,7 @@ function TowingDetail({ session, id, active }: { session: FieldWorkSession; id: 
     setError(null);
     const result = await session.commands.start<{ order: MobileTowingOrder | null }>(target,
       { commandId: randomUUID(), type, expectedRevision: order.revision, assignmentGeneration: order.assignmentGeneration, payload }, label);
-    if (result) applied(result, type); else void query.refetch();
+    if (result) { applied(result, type, payload); void cashQuery.refetch(); } else { void query.refetch(); void cashQuery.refetch(); }
     return Boolean(result);
   }
   const abandon = (attachment: MobileTowingAttachment) => Alert.alert("Zahodiť nedokončenú prílohu?", attachment.name + "\n\nPríloha sa nenahrala celá; po zahodení ju môžete pridať znova.", [
@@ -356,8 +439,8 @@ function TowingDetail({ session, id, active }: { session: FieldWorkSession; id: 
   const panel = local && <UploadPanel upload={local} busy={uploads.busy || !uploads.enabled || commands.busy || Boolean(pending)} onResume={() => resume(local)} onDiscard={() => discard(local)} />;
   const recovery = <><StorageNotice commands={session.commands} state={commands} />
     {uploads.error && <View style={formLayout.notices}><ErrorNotice message={uploads.error} onRetry={!uploads.ready ? () => { void session.uploads?.load(); } : undefined} /></View>}
-    {pending && <StepRecovery commands={session.commands} record={pending} busy={commands.busy || !commands.enabled}
-      onResult={result => applied(result, (pending.command as MobileTowingCommand).type)} onReload={() => query.refetch()} />}</>;
+    {pending && <StepRecovery commands={session.commands} record={pending} onOpenBlocker={onOpenBlocker} busy={commands.busy || !commands.enabled}
+      onResult={result => applied(result, (pending.command as MobileTowingCommand).type, (pending.command as MobileTowingCommand).payload)} onReload={() => query.refetch()} />}</>;
   if (left) return <ScrollView contentContainerStyle={styles.content}>
     <Text accessibilityRole="header" style={styles.subheading}>{left === "submitted" ? "Zákazka je odovzdaná kancelárii" : "Zákazka už nie je vo vašom zozname"}</Text>
     <Text style={styles.muted}>{left === "submitted" ? "Kancelária ju skontroluje. Ak ju vráti na doplnenie, znova sa objaví v Mojej práci."
@@ -373,7 +456,7 @@ function TowingDetail({ session, id, active }: { session: FieldWorkSession; id: 
     if (!step.confirm) { void run(step.type, step.label); return; }
     Alert.alert(step.label, step.confirm, [{ text: "Späť", style: "cancel" }, { text: step.label, onPress: () => { void run(step.type, step.label); } }]);
   };
-  return <ScrollView contentContainerStyle={formLayout.content} keyboardShouldPersistTaps="handled">
+  return <ScrollView contentContainerStyle={formLayout.content} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" automaticallyAdjustKeyboardInsets>
     <DetailHeader title={serviceLabels[f.serviceType] + " · " + order.number} subtitle={[f.subjectDescription, f.plate].filter(Boolean).join(" · ") || null}
       tags={<Tag text={towingStatusLabels[order.workStatus]} tone={towingStatusTones[order.workStatus]} />} meta={f.plannedAt ? "Termín " + termLabel(f.plannedAt) : "Bez termínu"} />
     {recovery}
@@ -382,17 +465,31 @@ function TowingDetail({ session, id, active }: { session: FieldWorkSession; id: 
       {error && <ErrorNotice message={error} />}
       {query.isError && <ErrorNotice message="Údaje sa nepodarilo obnoviť. Zobrazený je posledný načítaný stav." onRetry={() => { void query.refetch(); }} />}
     </View>}
+    <Group>
+      <InfoRow first label="Objednávateľ" value={f.requesterName ?? null} empty="Nevyplnený" />
+      <InfoRow label="Asistenčná služba" value={f.assistancePartnerName} empty="Nevyplnená" />
+      <InfoRow label="Číslo prípadu asistenčky" value={f.assistanceReference} empty="Nevyplnené" />
+    </Group>
     <ActionBar actions={[
       { icon: Phone, label: "Zavolať", accessibilityLabel: "Zavolať kontaktu zákazky", disabled: !dialable(phone), onPress: () => call(phone, setError) },
       { icon: MapPin, label: "Nakládka", accessibilityLabel: "Navigovať na miesto nakládky", disabled: !f.pickup.trim(), onPress: () => navigate(f.pickup, setError) },
       { icon: Navigation, label: "Cieľ", accessibilityLabel: "Navigovať do cieľa", disabled: !f.destination?.trim(), onPress: () => navigate(f.destination, setError) },
       { icon: Camera, label: "Fotka", accessibilityLabel: "Pridať fotku práce", disabled: blocked || Boolean(local) || !uploads.ready, onPress: () => choose("work") },
     ]} />
+    {f.dispatchInstructions ? <Group><InfoRow first label="Pokyny" value={f.dispatchInstructions} /></Group> : null}
     {!pending && <View style={formLayout.actions}>
       {missing.length > 0 && <Text style={styles.muted}>{"Pred odovzdaním doplňte: " + missing.join(", ") + "."}</Text>}
-      <Button primary label={step.label} disabled={blocked || missing.length > 0 || changed.length > 0} onPress={confirmStep} />
-      {changed.length > 0 && <Text style={styles.muted}>Najprv uložte zmenené údaje.</Text>}
+      <Button primary label={step.label} disabled={blocked || missing.length > 0 || changed.length > 0 || structuredDirty || operationalDirty || !workTimesValid} onPress={confirmStep} />
+      {(changed.length > 0 || structuredDirty || operationalDirty) && <Text style={styles.muted}>Najprv uložte zmenené údaje.</Text>}
     </View>}
+    <TowWorkFields key={order.id + ":" + order.assignmentGeneration} fields={f} onDirtyChange={setStructuredDirty} parking={canUseDeliveryCache(options.error) ? options.data?.parking : undefined} busy={blocked} onSave={fields => run("update_order", "Uložiť vykonané úkony", { fields })} />
+    {cashQuery.isError && <ErrorNotice message="Pokladňu sa nepodarilo overiť. Pred príjmom platby ju obnovte." onRetry={() => { void cashQuery.refetch(); }} />}
+    <CashPanel key={order.id + ":payment"} onDirtyChange={setPaymentDirty} order={order} cash={cashQuery.data ?? null}
+      busy={blocked || cashQuery.isPending || cashQuery.isError || commands.pending.some(item => item.target.kind === "cash")}
+      onPropose={async () => false} onReceive={async ({ amountCents, method, cashCategory }) => run("receive_payment", "Potvrdiť prijatú platbu", {
+        receiptId: randomUUID(), amountCents, method, ...(cashCategory ? { cashCategory } : {}), ...(method === "cash" ? { accountRevision: cashQuery.data?.account?.revision ?? 1 } : {}),
+      })} />
+    <TowingOperationalEditor session={session} order={order} disabled={blocked} onDirtyChange={setOperationalDirty} onSave={fields => run("update_order", "Uložiť údaje zadania", { fields })} />
     <SectionHeader title="Zákazka" />
     <Group>
       <InfoRow first label="Nakládka" value={f.pickup || null} />
@@ -400,19 +497,16 @@ function TowingDetail({ session, id, active }: { session: FieldWorkSession; id: 
       <InfoRow label="Termín" value={termLabel(f.plannedAt)} />
       <InfoRow label="Vozidlo / predmet" value={[f.subjectDescription, f.plate, f.vin].filter(Boolean).join(" · ") || null} />
       <InfoRow label="Kontakt" value={f.customer?.name ?? null} detail={phone ? formatNumber(phone) : f.noContactReason} empty="Bez kontaktu" />
-      {f.assistancePartnerName || f.assistanceReference ? <InfoRow label="Asistenčná služba" value={f.assistancePartnerName} detail={f.assistanceReference} /> : null}
       {f.parkingName ? <InfoRow label="Parkovisko" value={f.parkingName} detail={f.parkingAddress} /> : null}
     </Group>
     {order.workStatus !== "assigned" && <>
       <FormSection title="Priebeh práce" footer="Ceny a fakturáciu vedie kancelária na webe.">
-        <Field label="Začiatok práce" value={value("startedAt") ? termLabel(value("startedAt")) : ""} placeholder="Nezaznamenaný" editable={false}
-          action={<FieldAction icon={Clock} label="Teraz" accessibilityLabel="Začiatok práce teraz" disabled={blocked} onPress={() => setEdits(e => ({ ...e, startedAt: new Date().toISOString() }))} />} />
-        <Field label="Koniec práce" value={value("finishedAt") ? termLabel(value("finishedAt")) : ""} placeholder="Nezaznamenaný" editable={false}
-          action={<FieldAction icon={Clock} label="Teraz" accessibilityLabel="Koniec práce teraz" disabled={blocked} onPress={() => setEdits(e => ({ ...e, finishedAt: new Date().toISOString() }))} />} />
+        <TowingTimeField label="Začiatok práce" value={value("startedAt") ?? undefined} disabled={blocked} onValidityChange={setStartValid} onChange={next => setEdits(e => ({ ...e, startedAt: next ?? null }))} />
+        <TowingTimeField label="Koniec práce" value={value("finishedAt") ?? undefined} disabled={blocked} onValidityChange={setEndValid} onChange={next => setEdits(e => ({ ...e, finishedAt: next ?? null }))} />
         {TEXT_FIELDS.map(item => <Field key={item.key} label={item.label} value={value(item.key)} multiline={item.multiline} maxLength={2000} editable={!blocked}
           onChangeText={text => setEdits(e => ({ ...e, [item.key]: text.trim() ? text : null }))} />)}
       </FormSection>
-      <View style={formLayout.actions}><Button label="Uložiť údaje" disabled={blocked || changed.length === 0}
+      <View style={formLayout.actions}><Button label="Uložiť údaje" disabled={blocked || changed.length === 0 || !workTimesValid}
         onPress={() => { void run("update_order", "Uložiť údaje zákazky", { fields: Object.fromEntries(changed.map(key => [key, edits[key] ?? null])) }); }} /></View>
     </>}
     <SectionHeader title="Fotky a sken" detail={String(order.attachments.length)} />

@@ -8,7 +8,7 @@ import type { CaseStatusSelection } from "./case-status-filter";
 export function CaseStatusFilter({ filters, onChange, searching = false }: { filters: CaseFilters; onChange: (filters: CaseFilters) => void; searching?: boolean }) {
   return <div className="min-w-0">
     <label className="grid gap-1 text-xs font-semibold text-zinc-600">Stav
-      <select aria-label="Stav" value={filters.status} disabled={searching} onChange={event => onChange({ ...filters, status: event.target.value as CaseStatusSelection, statusTouched: true })} className="h-11 w-full min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-base text-zinc-900 disabled:bg-zinc-50 lg:h-9 lg:text-xs">
+      <select aria-label="Stav" value={filters.status} onChange={event => onChange({ ...filters, status: event.target.value as CaseStatusSelection, statusTouched: true })} className="h-11 w-full min-w-0 rounded-md border border-zinc-200 bg-white px-2 text-base text-zinc-900 disabled:bg-zinc-50 lg:h-9 lg:text-xs">
         <option value="active">Aktívne stavy</option><option value="all">Všetky stavy</option><option value="closed">Ukončené stavy</option><option value="selected">Vybrať viac stavov…</option>
         {(Object.keys(caseStatusLabels) as CaseStatus[]).map(status => <option key={status} value={status}>{caseStatusLabels[status]}</option>)}
       </select>

@@ -2,7 +2,33 @@
 
 ## Source of truth
 
-**Status: Draft · 26. 10. 2026.** Návrh webového modulu **Pristavenia a odvozy** v existujúcom dispečingu. Dokument pokrýva tento modul a jeho väzby; neurčuje nový dizajn celej aplikácie. Ide o produktový návrh, nie hotovú implementáciu ani overenie živého nasadenia.
+**Mobilný dizajn: Active · 4. 11. 2026.** Platí [mobilný štandard](docs/mobile/design-standard.md), [audit a realizačný plán](docs/mobile/redesign-plan-2026-11-04.md) a [33 preštudovaných primárnych zdrojov](docs/mobile/ux-ui-sources-2026-11-04.md). Mobilná časť pokrýva spoločný dizajnový systém, navigáciu a existujúce moduly Expo aplikácie. Overenia a stav vydania sú v pláne; tento status sám nepotvrdzuje natívnu akceptáciu.
+
+Status: **Draft**, 2026-11-05. Tento doplnok pokrýva klientské odovzdávanie práce, pobočkový tok, logistické a odťahové mobilné karty, knihu zásahov `/zakazky` a použiteľnosť súvisiacich obrazoviek. Funkčný rozsah vrátane kratšieho pristavenia, blokovania, oznámení, polohy a PZP určuje [spoločný realizačný plán](docs/plans/eros-kniha-zasahov-2026-11-05.md). Braňovo napojenie je odložené. Nejde o redizajn celej aplikácie.
+
+Podklady: majiteľom priložený DOCX „Appka pre odťahovku – Eros (1)“, všetky tri vložené obrázky, prepis stretnutia, [mobilný štandard](docs/mobile/design-standard.md), existujúce komponenty a syntetické browserové zobrazenie skutočného `TowingWorkspace`. Excelový obrázok určuje hustotu, obsah a farby riadkov. Mobilný obrázok určuje hierarchiu karty, nie značku Allianz alebo novú navigáciu.
+
+**Rozsah aktualizácie:** nasledujúci podklad z 26. 10. zostáva zachovaný pre širšiu logistiku, návraty, flotilu a väzby partnerov. Jeho tvrdenia o vtedajšej implementácii sú historické. Pri klientskych požiadavkách, knihe zásahov a nových terénnych doplneniach platia označené doplnky z 5. 11. a spoločný realizačný plán; neprepisujú ostatné schválené hranice.
+
+### Aktívne spresnenie 5. 11. 2026 — prehľad práce v prípade a odovzdanie
+
+Podkladom je nový screenshot majiteľa `d07180ee.../image.png`. Jeden odťah sa zobrazoval ako veľká logistická karta a potom opäť ako zákazka. Prehľad aj karta Práca a jazdy teraz používajú jednu zachovanú prevádzkovú časť: dva rovnaké stĺpce Odťah / Pristavenie, zhodná hierarchia stav → príjemca → trasa → termín. Projekcie sa spájajú iba podľa identity výkonu, nie podľa rovnakého druhu práce. Číselníky a oprávnenia zostávajú serverové; výpadok jedného zdroja neukryje oprávnené údaje iného.
+
+V odovzdaní sa podľa aktuálne uloženého typu prípadu predvyplnia odťah a pristavenie samostatne. Nové termíny sú aktuálny miestny dátum a minúta pri otvorení/pridaní; sú iba predvyplnením pred vedomým odoslaním. Ručne zvolené termíny a neisté už odoslané príkazy sa nemenia. Širší bočný panel má na notebooku dve rovnocenné karty, na mobile jeden stĺpec. Hlavné výbery sú príjemca a termín; obsiahle pôvodné správy jázd/zákaziek sa otvárajú na vyžiadanie a po otvorení zostávajú pripojené kvôli rozpracovaniu.
+
+Overenie: dual-default po zmene typov v skrytom paneli, lokálny čas otvorenia, zachovanie manuálneho času a frozen retry; jedna karta pre odťah + jeho projekciu + materializovanú požiadavku; rozdielne výkony zostávajú rozdielne. Pri 1440/1024 px dva stĺpce pri dostupnej šírke aspoň 720 px, pri 768/390/320 px čitateľné skladanie podľa kontajnera bez pretečenia stránky. Min. 44 px mobilné ovládanie, ikony doplnené názvami. Bez nových databázových operácií alebo zmeny finančných pravidiel.
+
+### Aktívne spresnenie 5. 11. 2026 — jeden prehľad prípadov na nástenke
+
+Screenshot majiteľa `cd5c858e.../image.png` nahrádza samostatné globálne vstupy Prípady, Úlohy a Poznámky lokálnymi záložkami nástenky Mapa · Úlohy · Poznámky · **Prehľad prípadov**. Interný identifikátor `table` zostáva kompatibilný. Pri otvorení prehľadu sa ľavý duplicitný zoznam automaticky zbalí; používateľ ho môže obnoviť. Odchod obnoví predchádzajúcu šírku, ak používateľ medzitým nezvolil inú. Riadok otvára rovnaký prípad priamo v pracovnej ploche, zachová výber, filtre a tabuľku; na mobile existuje jasný návrat.
+
+Prehľad má kompaktné riadky, malý základ stĺpcov, viditeľné hľadanie a rýchle rozsahy Aktívne / História / Všetky. Rozšírené filtre a výber/poradie stĺpcov sa otvárajú na požiadanie. Používateľom zvolený stav platí aj pri hľadaní. Dátumový rozsah znamená kalendárne dni založenia v Europe/Bratislava. Staršie ukončené prípady pochádzajú z existujúceho oprávneného snapshotu; počet načítaných záznamov sa nevydáva za nezávislé neobmedzené databázové sčítanie. Nezavádza sa nový produkt prenájmov ani čítanie inej aplikácie.
+
+Prístupnosť: označené ovládanie, aria-sort a tlačidlo otvorenia prípadu, zmena poradia stĺpcov aj klávesnicou, aspoň 44 px mobilné ciele, vodorovné posúvanie iba vo vnútri tabuľky. Zlúčenie nesmie stratiť rozpracované poznámky/úlohy, editor prípadu, identitu zápisu ani živú telefóniu.
+
+### Historický východiskový návrh — 26. 10. 2026
+
+**Webová logistika: Draft · 26. 10. 2026.** Návrh webového modulu **Pristavenia a odvozy** v existujúcom dispečingu. Dokument pokrýva tento modul a jeho väzby; neurčuje nový dizajn celej aplikácie. Ide o produktový návrh, nie hotovú implementáciu ani overenie živého nasadenia.
 
 Technický realizačný kontrakt bol dopracovaný cez [RALPLAN a sekvenčne schválený architektom aj kritikom](docs/plans/spolocna-aplikacia-20261026.md). Určuje aj dve spresnenia UX: pridelený front jázd sa odlišuje od potvrdenej časovej kapacity; po fyzickom dokončení starším mobilom môže rovnaký úkon na webe zobrazovať „Vykonané · dôkazy čakajú“, kým sa oprávnene doplní evidencia. Prenajaté auto možno plánovať na vyzdvihnutie; voľnosť SWHouse je podmienkou až nového použitia a pripravenosti.
 
@@ -26,9 +52,17 @@ Podkladom je lokálny checkout `f62ea2a` a tieto existujúce časti:
 
 ## Brand
 
+**Mobil:** pokojný pracovný nástroj Linky pomoci, svetlý podklad, žltá značka, jednotné Lucide ikony. Čitateľnosť má prednosť pred dekoráciou; Liquid Glass iba v navigácii a ovládačoch.
+
 Pracovný nástroj Pomoc motoristom: vecný, úsporný, čitateľný pri telefonovaní. Dôveru vytvára jasný zodpovedný človek, čas poslednej zmeny, overiteľný priebeh a poctivé označenie neznámych údajov. Zachovať vizuálny jazyk dispečingu.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+Praktická, prehľadná pracovná aplikácia. Zachovať existujúcu žltú `#FCD703`, tmavú navigáciu, svetlé plochy a ikony Lucide. Dôveru vytvára správny kontakt, jednoznačný stav, jasne pomenované peniaze a potvrdený výsledok úkonu. Vyhnúť sa veľkým prázdnym kartám, mnohým sýtym farbám v jednej bunke a nelícujúcim formulárom.
+
 ## Product goals
+
+**Mobil:** naliehavé veci pred metrikami, rýchlo nájsť správny modul a ďalší krok, celé názvy a adresy, ovládanie pri veľkom písme. Nemeniť funkčný rozsah rolí, hovorov ani rozpracovaných zápisov.
 
 - Dispečer na jednej obrazovke zistí, čo treba pristaviť alebo odviezť, kedy, odkiaľ, kam a kto to vykoná.
 - Údaje prípadu, klienta a flotily sa využijú bez opakovaného prepisovania. Všetky pohľady otvárajú ten istý úkon.
@@ -41,7 +75,17 @@ Pracovný nástroj Pomoc motoristom: vecný, úsporný, čitateľný pri telefon
 
 Prvá verzia pokrýva web. Nové mobilné funkcie, automatické optimalizovanie trás, automatické posielanie SMS, úplné riadenie prenájmov, digitálne podpisy a sťahovanie dát inej aplikácie sú ďalšie samostatné rozsahy.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+Na notebooku vidieť približne 12–14 celých zásahov pri 1440 × 900 bez zmenšenia písma na úroveň Excelového obrázka. Z jedného prípadu pohodlne zadať viac prác. Vodič má v mobile rýchlo rozlíšiť svoje 1–5 zadaní a doplniť potrebné údaje.
+
+Klientsky prevádzkový základ sa prijíma samostatne: pobočka/človek dostane vlastnú prácu a pokyn, pristavovač vidí asistenčku a jej referenciu, blokovaná jazda má zrozumiteľnú cestu k riešeniu a centrála vidí potvrdený priebeh. Kratší postup, poloha a náhradná cesta PZP majú vlastné kritériá v spoločnom pláne; dokončenie samotnej knihy neuzavrie tieto úlohy.
+
+Mimo rozsahu: Braňovo napojenie, nový účtovný systém, integrácia terminálu, nová hlavná navigácia, nový cron. Samotná farebná zmena neukladá stav platby ani fakturácie.
+
 ## Personas and jobs
+
+**Mobil:** dispečer rieši prípady a hovory; vodič/pristavovač vykonáva vlastnú prácu v teréne; miestny dispečer preberá a prideľuje požiadavky. Jednotná kostra zobrazuje iba ich existujúce povolené moduly.
 
 | Používateľ | Potrebuje |
 | --- | --- |
@@ -52,7 +96,19 @@ Prvá verzia pokrýva web. Nové mobilné funkcie, automatické optimalizovanie 
 
 Rozsah pobočiek a práv sa overuje na serveri. Právo pristavovať (`deliver`) a viesť odťahovku (`drive`) zostáva odlíšené. Používateľ môže mať obe.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+- Dispečer: rýchlo založiť aj neúplný zásah, prideliť človeka a techniku, sledovať priebeh.
+- Vodič: vidieť vlastnú prácu, kontaktovať klienta, navigovať, doplniť údaje a podklady, potvrdiť skutočné prijatie platby a odovzdať zásah.
+- Kontrolór/naceňujúci: preveriť podklady, upraviť položky výkonu a schváliť cenu.
+- Fakturácia: vybrať pripravené zákazky, evidovať externú faktúru, získať zákazkový list.
+- Konateľ: filtrovať zásahy a vidieť oddelene výkony, faktúry, platby a hotovosť vodičov.
+
 ## Information architecture
+
+**Webové odťahy · 5. 11. 2026:** v skupine Prevádzka je **Kniha odťahov** vedľa Výjazdy a odvozy. Je to jeden kancelársky modul pre zákazky, kontrolu, nacenenie, doklady a financie. Člen s oprávnením vodiča má pohľad **Moje odťahy**; pri kombinovaných oprávneniach prepína pohľady vnútri modulu. Viditeľnosť určuje aktuálne členstvo odťahov rovnakého používateľa a organizácie, nie samotná rola správcu dispečingu. Odkaz na odťahy už nepatrí do menu účtu. Používajú sa existujúce pripínateľné skratky, hlavička a pracovná plocha dispečingu bez druhej hlavičky či odhlásenia. Po prvej návšteve zostávajú oba otvorené pohľady pripojené, aby prepnutie modulu nestratilo formulár ani identitu nepotvrdeného príkazu. Samostatné adresy `/zakazky`, `/vodic` a príprava offline zostávajú vstupmi pre terénne účty. Toto rozhodnutie nemení proces podľa Erosovho zadania ani účtovné oprávnenia; živá a terénna akceptácia sa uvádza samostatne.
+
+**Mobil:** zachovať Prehľad · tri používateľove moduly · Moduly. Prehľad: živý hovor → Treba riešiť → Vaša práca → Telefón. Moduly: hľadanie a povolené moduly s celým názvom/popismi → úprava lišty → účet a prístupy. Nastavenie modulu má viditeľnú akciu Možnosti.
 
 Do prevádzkovej skupiny spoločnej navigácie pri **Flotile** pridať **Pristavenia a odvozy**. Použiť rovnakú hlavičku, účet, telefóniu podľa oprávnenia a návrat na prípad. Pri prepnutí modulu sa zachová rozpracovaný hovor a stav prípadu. Konkrétnu URL určí implementácia podľa navigácie dispečingu; hlboký odkaz musí otvoriť rovnaký úkon po obnovení stránky.
 
@@ -113,7 +169,15 @@ Klientovo samostatné vrátenie sa eviduje bez pridelenej jazdy vodiča. Nedoroz
 
 Ilustračný prípad: v pondelok ide poškodené auto do servisu a pristavovač doručí klientovi náhradné auto. Odťah aj pristavenie sú samostatné súvisiace výkony. V Návratoch je viditeľné dohodnúť piatkové vyzdvihnutie. Klient vo štvrtok predĺži prenájom: upraví sa ten istý návrat a vodič dostane viditeľnú zmenu. Po vyzdvihnutí sa osobitne potvrdí doručenie a kontrola auta. Pôvodný asistenčný prípad môže byť medzičasom uzavretý; otvorená logistika zostáva dostupná.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+Zachovať existujúce `/zakazky`, `/vodic`, `/moje-jazdy`, pobočkový front a mobilnú kostru. „Kniha zásahov“ je prehľad odťahových zákaziek. Logistika preberá hustotu a ovládanie, zachováva vlastný model pristavení/návratov/presunov. Odťah a jeho logistická projekcia nie sú dva účtovateľné výkony.
+
+Kniha: kompaktná hlavička → malé súčty → rýchle pohľady podľa fázy → hlavné filtre → tabuľka → stránkovanie. Detail: identita/stav → kontakt/trasa → Údaje · Fotografie · Nacenenie · Úhrady · Doklady · História. Založenie a zadávanie práce používajú rovnaké poradie základných údajov.
+
 ## Design principles
+
+**Mobil:** skutočné dotykové plochy aspoň 44 bodov, stav textom aj farbou, jedna výrazná hlavná akcia, gestá len ako skratky. Rozloženie sa prispôsobí priestoru a systémovému písmu; nezmenšuje dôležitý text, aby sa vošiel.
 
 - Prípad je spoločný kontext; úkon je samostatne vykonateľná práca. Pridelenie, prijatie a vykonanie sú rôzne udalosti.
 - Prevádzkový stav, stav prenájmu, dostupnosť vozidla a finančné vyrovnanie sa zobrazujú oddelene.
@@ -122,11 +186,41 @@ Ilustračný prípad: v pondelok ide poškodené auto do servisu a pristavovač 
 - Zmenu relevantnú pre už pridelenú prácu musí vodič vidieť s označením zmeny. Zachovať náhľad toho, čo je mu sprístupnené.
 - Najprv termín, zodpovednosť a problém, až potom doplnkové metriky a mapa.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+1. Hustota cez menšie medzery a spojenie príbuzných údajov, nie cez nečitateľné písmo.
+2. Jedna dominantná farba riadka vyjadruje fázu; text a ikona vysvetľujú význam.
+3. Ikona dopĺňa viditeľný názov akcie. Stavový čip nevyzerá ako výber, ak hodnotu nemožno meniť.
+4. Jedna hlavná akcia v aktuálnom kontexte; pridelenie, uloženie, vrátenie a storno sú oddelené úkony.
+5. Výbery majú šírku podľa obsahu. Kontakty, adresy a pokyny nie sú natlačené do úzkych stĺpcov.
+6. Zachovať rozpracovaný vstup, filtre a pozíciu zoznamu pri otvorení detailu aj po konflikte.
+
 ## Visual language
+
+**Mobil:** `mobile/src/design/tokens.ts` vlastní farby, písmo, zaoblenie a rozostupy. Nadpis 32, detail 24, číslo 30, riadok/telo 16, podnadpis 14, sekcia 15, metadáta 13, štítok 12, navigácia 11 bodov. Tabuľka tokenov v mobilnom štandarde je záväzná. Biele nepriehľadné skupiny na systémovom podklade, plynulé rohy; existujúci natívny sklenený povrch má čitateľnú náhradu.
 
 Použiť existujúci `dispatch-app-shell`: systémové písmo a kompaktnú hustotu, neutrálny svetlý podklad, dnešné vstupy, tlačidlá a ikony Lucide. Návrh nepridáva vlastnú paletu ani paralelný systém tokenov. Farba dopĺňa text stavu; červená označuje problém alebo meškanie, nie bežnú rozpracovanosť. Minimálna animácia, stabilné riadky počas obnovy.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+Desktop: telo 12–13 px/16–18 px, sekundárny text 11–12 px/14–16 px, nadpis 24–26 px; čísla súm tabulárne. Škála medzier 4/8/12/16/24 px. Tabuľkové riadky 40–44 px pri bežnom obsahu, najviac dva stručné riadky údajov; dlhé údaje sú celé dostupné v detaile a cez klávesnicu. Filtre 32–36 px, hlavné formulárové polia 36–40 px. Dotykový režim a mobil zachovávajú plochy aspoň 44 px a mobilné tokeny.
+
+| Fáza | Podklad riadka | Text/ikona |
+|---|---|---|
+| Vytvorené | biely | Nepridelené · kruh |
+| Pridelené/prebieha | jemná oranžová `#FFF3DF` | Pridelené/Prebieha · vodič/hodiny |
+| Dokončené vodičom | sivá `#F0F2F4` | Na kontrolu · kontrolný zoznam |
+| Schválené | modrá `#EAF3FF` | Na fakturáciu · doklad |
+| Vyfakturované | svetlozelená `#EFF8E8` | Vyfakturované · doklad |
+| Uzavreté a uhradené | výraznejšia svetlozelená `#DDF1DD` | Zaplatené · potvrdenie |
+
+Odtiene sú návrh; kontrast sa overí pri implementácii. Vrátenie na doplnenie, finančná výnimka, čiastočná platba, preplatok a storno majú samostatný textový štítok. Žiadne falošné zelené „hotovo“ pri platbe vopred a stále rozbehnutej práci. Pravidlá odvodenia fázy sú v pláne.
+
+Objednávateľ dostane malý farebný štítok, napr. AWP modrý, Europ Assistance červený, Samoplatca jantárový; svetlý podklad neprebíja farbu riadka. Platba má malú ikonu aj text. Ikony 14–16 px v tabuľke a 16–20 px pri akciách; nevkladať ikonu ku každému slovu.
+
 ## Components
+
+**Mobil:** rozšíriť existujúce Group/Row, Field/FormSection, DetailHeader/InfoRow/ActionBar, Sheet, Segmented a DockTabBar. Rozloženie riešia spoločné `columnsForWidth`/`gridItemWidth`; nevytvárať druhý dizajnový systém. Dlhé detaily a akcie sa zalomia. Spodná lišta má pevné **Prehľad** a **Moduly** a najviac **štyri vlastné moduly** (spolu šesť položiek). Zachovať skôr uložené poradie; rozšírenie nepridáva práva k modulom. Pri väčšom písme sa viac ako tri položky rozložia do dvoch riadkov; rastie výška aj priestor pod obsahom, názvy sa nezmenšujú.
 
 - Opätovne použiť spôsob navigácie dispečingu, jeho tabuľky, filtre, formuláre adries, dialóg SMS, otvorenie prípadu a detail auta. Zdieľanú logiku vyčleniť podľa potreby, nekopírovať celý `DispatchConsole`.
 - Existujúce `CaseHandoffPanel` a `HandoffSummary` sú východisko pre pridelenie, náhľad a históriu; nepredstierajú hotové plánovanie odvozov.
@@ -135,15 +229,43 @@ Použiť existujúci `dispatch-app-shell`: systémové písmo a kompaktnú husto
 - Pre pristavovača rovnaká webová aplikácia zobrazí **Moje jazdy**: iba vlastné úkony, kontakty a povolené kroky. Otvorenie nenačíta celý dispečerský dataset ani telefóniu.
 - Denné počítadlá vychádzajú z rovnakého filtrovaného zdroja ako zoznam. Dôvod nepripravenosti auta je dostupný aj textom.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+Použiť existujúce `Button`, `Field`, `Select`, `TextArea`, `Panel` v `src/components/towing/primitives.tsx`, CSS Modules v `towing.module.css`, existujúce ikony a peniaze z `src/domain/towing/money.ts`. Rozšíriť iba potrebné kompaktné varianty. Návrhové desktopové hodnoty vlastnia tieto existujúce štýly, nie ďalšia paralelná tokenová knižnica.
+
+Tabuľka: pevná hlavička, názvy a šípky radenia, sumy vpravo, sémantické `table/th/td`, jeden dominantný stav, voliteľné sekundárne stĺpce. Nové odvodenie fázy a pravidlá filtrov majú čistý typovaný model. Výber z dlhého katalógu je vyhľadateľný combobox; malé voľby ostávajú natívnym selectom alebo segmentom. Najprv vyhodnotiť existujúce prvky, bez novej závislosti.
+
+Mobil používa výlučne `mobile/src/design/`, jeho tokeny a `mobile/src/shell/`. Karta: dátum/termín + stav → vozidlo/EČV → objednávateľ/referencia → trasa → označená akcia. Vlastná spodná lišta podľa cudzieho screenshotu sa nepridáva.
+
 ## Accessibility
+
+**Mobil:** VoiceOver názvy obsahujú stav/termín/podnadpis, významové textové tóny a odznaky majú cieľ kontrastu 4,5 : 1. Obsah podporuje systémové písmo; dock rastie do 2× a má Large Content Viewer. Rešpektovať Reduce Motion/Transparency. Webová automatická skúška nenahrádza natívne VoiceOver/TalkBack ani overenie systémového skla.
 
 Návrhový cieľ je WCAG 2.2 AA; splnenie sa preverí pri implementácii. Tabuľka má hlavičky, stavové štítky text a ovládacie prvky dostupné názvy. Celý postup pridelenia a zmeny termínu funguje klávesnicou. Detail spravuje fokus a po zatvorení ho vráti na pôvodný riadok. Presúvanie v pláne má alternatívu cez tlačidlo a formulár. Zmeny stavu sa oznámia bez odoberania fokusu; rešpektovať obmedzený pohyb.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+Cieľ WCAG 2.2 AA pre web. Farbu vždy dopĺňa text; ikony majú názov alebo dostupný popis. Radenie oznamuje `aria-sort`; výber funguje cez klávesnicu, Escape a návrat fokusu. Výber v tabuľke nesmie omylom spustiť otvorenie riadka. Mobilný štandard je prísnejší pre dotyk: aspoň 44 px.
+
+Overiť kontrast textu, viditeľný focus, 200 % priblíženie a zväčšené mobilné písmo. Kompaktné webové tlačidlá majú aspoň 24 × 24 px aj s odstupmi, dôležité akcie väčšie. Pravidlá: [veľkosť cieľov](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html), [použitie farby](https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html).
+
 ## Responsive behavior
+
+**Mobil:** overiť 320, 390, 768 bodov; mriežka sa riadi nameranou vnútornou šírkou a fontScale, pri menšej ploche/veľkom písme prejde do jedného stĺpca. Dock má max. 560 bodov a je centrovaný vo svojom rodičovi. Pri klávesnici ustúpi dock; terénne formuláre prispôsobia insets a mapa počas písania dôvodu ustúpi.
 
 Priorita je desktopový web: od približne 1280 px tabuľka a detail vedľa seba; na menšom okne detail prekryje pracovnú plochu. Pod existujúcou hranicou 1024 px použiť jednu plochu a kompaktné karty s rovnakým obsahom. Telefón pristavovača používa responzívny web, nejde o zmenu natívnej aplikácie. Hlavné kroky majú viditeľný text a dostatočné dotykové plochy.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+- Od 1280 px: kompaktná kancelárska tabuľka, približne 9–10 zoskupených stĺpcov, filtre na najviac dvoch riadkoch. Bez vodorovného posuvu celej stránky.
+- 1024–1279 px: schovať voliteľné sekundárne stĺpce; ak treba, posúva sa iba tabuľka. Dátum, vozidlo, objednávateľ, trasa a stav ostávajú dostupné.
+- 768–1023 px: redukovaná tabuľka alebo kompaktné karty podľa overenia obsahu; detail na celú dostupnú šírku. Nepoužiť 600 px ako jedinú hranicu.
+- 320–767 px a natívny mobil: karty, jeden stĺpec formulára, tlačidlá s textom, žiadny miniatúrny Excel. Telefón/trasa a hlavný krok sú pred rozsiahlymi doplnkami.
+- Rýchla úprava používa panel najviac 620 px podľa overeného prototypu; úplný detail s financiami a prílohami má obsah približne 880–1040 px a zachová existujúce funkcie. Polia sa neroztiahnu na 1400 px. Na úzkej obrazovke sa panel rozšíri na dostupnú šírku a plný detail je samostatná čitateľná plocha.
+
 ## Interaction states
+
+**Mobil:** načítanie a chyba sa nikdy nevydávajú za vybavenú prácu. Prázdny stav až po úspešnej odpovedi príslušného zdroja vrátane frontu pobočky. Obnova má viditeľný stav; neisté zápisy, potvrdenia hovorov a obnova konceptov zostávajú v existujúcich modeloch.
 
 - **Nové / Naplánované → Pridelené · čaká na prijatie → Prijaté → Na ceste → Na mieste → Dokončené.** Pri pristavení posledná akcia znie **Auto odovzdané klientovi**. Pri vyzdvihnutí sa medzi príchodom ku klientovi a dokončením eviduje **Auto prevzaté → Doručené do cieľa**. Krok kontroly auta je samostatný.
 - **Problém** je viditeľné upozornenie s dôvodom, vlastníkom a ďalším krokom; nestratí sa informácia, v akej fáze problém vznikol. Odmietnutie pridelenia ponechá samotný úkon otvorený na nové pridelenie.
@@ -153,15 +275,31 @@ Priorita je desktopový web: od približne 1280 px tabuľka a detail vedľa seba
 - Chýbajúcu a starú GPS/obsadenosť označiť. Pri poruche zdroja nepovažovať prázdnu odpoveď za voľné vozidlá. Odhadovaný koniec jazdy nie je potvrdená dostupnosť vodiča.
 - Prvá webová verzia nevykonáva offline zápisy. Chyba pripojenia jasne ukáže, čo je posledný známy stav a čo sa nepodarilo potvrdiť.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+Pri načítaní zachovať posledný potvrdený zoznam s označením obnovy. Prázdny filter ukáže „Žiadne zásahy“ a vymazanie filtrov. Neistý zápis sa overuje rovnakým identifikátorom. Konflikt zachová koncept; zmena filtra nesmie prepisovať rozpracovaný detail.
+
+Rozlišovať „výsledok uložený“, „platba potvrdená serverom“, „e-mail prijatý poskytovateľom“ a „doručené príjemcovi“. Pri offline platebnom zápise zobraziť čakanie; nepočítať nepotvrdený príjem do potvrdenej držby hotovosti. Neaktívne historické možnosti ostávajú pomenované, no neponúkajú sa ako nové aktívne voľby.
+
 ## Content voice
+
+**Mobil:** krátka vecná slovenčina, konkrétne Zavolať/Vybrať číslo/Pokračovať. Zachovať celé názvy modulov; skratka Pristav. je iba v úzkej navigácii, dostupný názov je celý. Súradnice a formuláre majú trvalé viditeľné popisy.
 
 Používať slovenské prevádzkové názvy: **Pristavenie**, **Vyzdvihnutie od klienta**, **Presun medzi pobočkami**, **Odťah poškodeného vozidla**. V detaile byť presnejší než všeobecné „odvoz“. Rozlíšiť **Dohodnuté**, **Odhad**, **Zatiaľ neurčené**. Časy zobrazovať v `Europe/Bratislava`. Žiadne technické názvy databázových tabuliek alebo interné prepínače v používateľskom postupe.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+Slovenčina, krátke konkrétne pomenovania. „Objednávateľ“, „Asistenčná služba“, „Číslo prípadu asistenčky“, „Nákladka/Nakládka“ zjednotiť na **Nakládka**, „Vykládka“, „Zásahové vozidlo“, „Plánovaný termín“, „Skutočný začiatok“, „Na kontrolu“, „Na fakturáciu“.
+
+„Spôsob úhrady“ opisuje dohodu; „Prijatá platba“ skutočný príjem. „Schválené výkony“, „Vyfakturované“ a „Prijaté platby“ sú tri odlišné súčty. Neznáma suma je „—“, nie 0 €. V aplikácii sa nezobrazujú implementačné názvy RPC ani interné technické príčiny.
+
 ## Implementation constraints
+
+**Mobil:** Expo 57 / React Native 0.86.3 / React 19.2.3, existujúce závislosti. Preštudované verziované API; žiadny upgrade ani zmena serverových oprávnení, providerov alebo databázy. Natívne OTA sú vypnuté: nový dizajn na iPhone potrebuje nový overený TEST build; Vercel build ho nenahrádza.
 
 ### Rozsah a kompatibilita
 
-Existujúci framework je Next.js 16.3.8 / React 19.2.4. Pred kódovaním treba prečítať relevantné lokálne návody Next.js a oficiálne skills pre príslušný framework. Tento návrh nepridáva závislosti, migrácie, provider zápisy, worker, listener ani cron. Prípadná implementácia prejde bežným postupom cez stabilný TEST; produkcia zostáva samostatne schvaľovaná podľa `AGENTS.md`.
+Historický podklad bol vytvorený pre Next.js 16.3.8 / React 19.2.4; aktuálny `package.json` k 5. 11. obsahuje Next.js 16.4.1 / React 19.2.4. Pred kódovaním treba prečítať relevantné lokálne návody Next.js a oficiálne skills pre príslušný framework. Tento návrh nepridáva závislosti, migrácie, provider zápisy, worker, listener ani cron. Prípadná implementácia prejde bežným postupom cez stabilný TEST; produkcia zostáva samostatne schvaľovaná podľa `AGENTS.md`.
 
 ### Dátové hranice, ktoré treba pri implementácii zachovať
 
@@ -195,7 +333,27 @@ Ide o lokálne etapy logistického modulu; ich zaradenie medzi Final CD, Erosove
 - Súbeh pridelení, chyby siete, nepovolený prístup a zrušenie majú overiteľný výsledok a históriu. Filtre a rozpracovaný hovor prežijú prepnutie modulu.
 - Overiť desktop aj úzky web, ovládanie klávesnicou a autentifikovaný tok oboch rolí na identifikovanom stabilnom TEST commite. Existujúce testy a build brána sa použijú primerane zmenenému správaniu.
 
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+Repo používa Next 16.4.1, React 19.2.4, CSS Modules a Lucide; [lokálne Next návody](node_modules/next/dist/docs/01-app/01-getting-started/11-css.md) sú prvý zdroj. Zachovať komponentové hranice a nezavádzať tabuľkovú knižnicu. Filtrovanie, radenie a súčty sa vyhodnocujú na serveri nad rovnakou oprávnenou množinou, nie iba nad načítanými 50 riadkami.
+
+Rešpektovať samostatné stavy výkonu/fakturácie/platby, existujúce oprávnenia, identitu príkazov a verzie dokladov. AWP evidenčný výkon sa nesmie zmeniť na nové vyslanie vodiča. Výbery čítajú existujúce katalogy; názvy z dokumentu sa pred konfiguráciou porovnajú s existujúcimi záznamami.
+
+Snímky: 1440/1280/1024/768 a 390/320 px; navyše husté dáta, dlhé názvy, otvorené výbery, finančné výnimky, prázdne filtre a detail. Rozlíšiť koncept, syntetické overenie skutočného komponentu a živé TEST prijatie.
+
 ## Open questions
+
+### Doplnenie 6. 11. 2026 — vlastný odťah a odťahová kancelária
+
+Logistický modul sa volá **Pristavenia a návraty**. Odťahový vodič má **Moje odťahy** a akciu **Nový odťah**; zmiešaný terénny modul ostáva **Moja práca**. **Kniha odťahov** je samostatný modul odťahovej kancelárie aj pre účet bez hlavného dispečingu. Používa rovnaký mobilný shell, manifest, formulárové komponenty a tokeny.
+
+Vlastný odťah má pevne určeného prihláseného odťahovkára; pristavovač bez odťahovej roly ho nevytvára. Pobočka, technika a objednávateľ sa vyberajú z existujúcich katalógov, s vyhľadávaním a čitateľným názvom. Čas navrhnutý pri vytvorení je plán; skutočný čas výkonu sa potvrdzuje osobitne. Spätná evidencia má ručný dátum/čas a nevytvára dnešný GPS priebeh.
+
+Majiteľ potvrdil, že **B peniaze** a **Iná hotovosť** označujú tú istú kategóriu: príjem bez externej faktúry, ktorý drží vodič do fyzického prevzatia majiteľom alebo oprávnenou kanceláriou. V rozhraní používať **Iná hotovosť (bez faktúry)**. Zobraziť ju v rozpise jednej pokladne spolu s celkovou hotovosťou, rezerváciami a odovzdaniami. Príjem a následný presun držby sú odlišné udalosti. Potvrdenka, držiteľ, opravy a prevzatie zostávajú dohľadateľné; historicky nerozlíšené peniaze sa neodhadujú podľa dnešnej dohody na zákazke.
+
+Rozpracovaný formulár sa zachová pre konkrétny účet. Neisté vytvorenie alebo finančná operácia sa obnovuje rovnakým identifikátorom; používateľ musí vidieť, ktorý výsledok ešte nie je potvrdený. Podľa zadania je funkčné a zariadeniové skúšanie tejto dodávky odložené.
+
+**Mobil:** smerovanie a vizuálny rozsah vyplývajú z požiadavky majiteľa. Fyzická skúška iPhone/Android, VoiceOver a živé audio zostávajú samostatným dôkazom; nezamieňať výskumné odporúčanie s certifikáciou Apple.
 
 Nejasnosti neblokujú tento produktový návrh; pred implementáciou sa uzavrú len tie, ktoré menia daný rozsah.
 
@@ -205,3 +363,10 @@ Nejasnosti neblokujú tento produktový návrh; pred implementáciou sa uzavrú 
 - [ ] **Majiteľ:** má prvá verzia zahŕňať aj presuny áut nesúvisiace s asistenčným prípadom? Návrh ich podporuje ako samostatnú logistickú prácu; príprava dokumentu ich neimplementuje.
 - [ ] **Majiteľ:** aké práva majú jednotlivé pobočky a externí pristavovači? Predpoklad: pristavovač len vlastné úkony, koordinátor iba výslovne povolený rozsah.
 - [ ] **Majiteľ:** patria do ďalšej etapy aj nájomné protokoly a podpisy, alebo iba záznam vykonania a kontroly? Existujúca samostatná poľská aplikácia zostáva mimo rozsahu.
+
+### Doplnenie 5. 11. 2026 — kniha zásahov a terén
+
+- [ ] Majiteľ/Eros: význam „Iné – hotovosť bez dokladu“. Návrh zatiaľ eviduje skutočnú hotovosť a samostatný zámer fakturácie; výber sám nezruší povinnosti existujúceho toku.
+- [ ] Majiteľ/Eros: presná identifikácia fyzickej osoby na zákazkovom liste. Rodné číslo z dokumentu nepatrí do zoznamu, push ani všeobecných projekcií; formulár a povolený prístup treba určiť pred touto časťou implementácie.
+- [ ] Prevádzka: ktoré adresy parkovísk, kontakty a technika už sú nakonfigurované. Neznáme položky neblokujú redizajn ani vývoj na fixture dátach.
+- [ ] Majiteľ: finálny názov logistického prehľadu a začiatok zdieľania polohy pri prijatí vs. vyrazení. Súčasné pravidlá sa nemenia iba podľa nejednoznačného prepisu.

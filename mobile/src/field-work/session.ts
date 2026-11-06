@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useSyncExternalStore } from "react";
-import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { MobileBranchCommand, MobileOperationCommand, MobileTowingCommand } from "../../../src/lib/mobile-api";
+import type { TowingCreateInput } from "../../../src/domain/towing/creation";
+import type { TowingCommand } from "../../../src/domain/towing/types";
+import type { MobileBranchCommand, MobileFieldCashCommand, MobileOperationCommand, MobileTowingCommand } from "../../../src/lib/mobile-api";
 import { MobileApiError, type MobileTransport } from "../lib/api";
 import type { MobileConfig } from "../lib/config";
 import { createDeliveryCommandStorage } from "../delivery/command-storage";
@@ -13,6 +15,7 @@ import type { LocationSharing, SharingState } from "../delivery/sharing";
 import { DeliveryTracker } from "../delivery/tracker";
 import type { FieldModules } from "../shell/modules";
 import { createFieldWorkApi, type BranchSnapshot, type FieldWorkApi, type FieldWorkList } from "./api";
+import { cacheWorkReceipt } from "./receipt-cache";
 import { WorkCommands, type WorkIntent } from "./commands";
 import { trackedOperation, towingMultipart } from "./model";
 import { createUploadFiles } from "./upload-files";
@@ -20,7 +23,7 @@ import { TowingUploads, towingUploadsKey } from "./uploads";
 
 /** Moja práca and Pobočka of the signed-in field member, for as long as the account:
  * the work list, the stored steps and towing uploads, and the position during an
- * accepted jazda (in the native app also in the background, otherwise while the app is
+ * started jazda (in the native app also in the background, otherwise while the app is
  * open). Built on the verified field identity of the delivery session. */
 export type FieldWorkSession = {
   api: FieldWorkApi; key: readonly string[]; memberId: string; modules: FieldModules; capabilities: readonly string[];
@@ -45,8 +48,9 @@ const quiet = () => () => undefined, off = () => OFF;
 export function useFieldWork({ delivery, config, client, userId, liveUser, active, writable }: {
   delivery: DeliverySession; config: MobileConfig; client: SupabaseClient; userId: string; liveUser: () => string | null; active: boolean; writable: boolean;
 }): FieldWorkSession | null {
+  const queryClient = useQueryClient();
   const memberId = delivery.memberId;
-  const { work, branch } = delivery.modules;
+  const { work, branch, towingOffice } = delivery.modules;
   const api = useMemo(() => memberId ? createFieldWorkApi(config, memberId, async () => {
     if (liveUser() !== userId) throw new MobileApiError("Prihlásenie sa zmenilo. Otvorte svoj účet znova.", 401);
     const { data } = await client.auth.getSession();
@@ -59,11 +63,33 @@ export function useFieldWork({ delivery, config, client, userId, liveUser, activ
     refetchInterval: active ? 30_000 : false });
   const scope = useMemo(() => memberId ? { environment: config.environment, apiOrigin: config.apiOrigin, projectUrl: config.supabaseUrl, userId, memberId } : null,
     [config, userId, memberId]);
-  const commands = useMemo(() => api && scope && (work || branch) ? new WorkCommands(createDeliveryCommandStorage(), scope,
-    (intent: WorkIntent) => intent.target.kind === "operation" ? api.operationCommand(intent.target.id, intent.command as MobileOperationCommand)
-      : intent.target.kind === "towing" ? api.towingCommand(intent.target.id, intent.command as MobileTowingCommand)
-        : api.branchCommand(intent.command as MobileBranchCommand), { current: () => liveUser() === userId }) : null,
-  [api, scope, work, branch, liveUser, userId]);
+  const commands = useMemo(() => api && scope && (work || branch || towingOffice) ? new WorkCommands(createDeliveryCommandStorage(), scope,
+    async (intent: WorkIntent) => {
+      if (intent.target.kind === "towing-create") {
+        const result = await api.createTowing(intent.command as TowingCreateInput);
+        await queryClient.invalidateQueries({ queryKey: [...key, "work"] });
+        await queryClient.invalidateQueries({ queryKey: [...key, "towing-office"] });
+        return result;
+      }
+      if (intent.target.kind === "towing-office") {
+        const result = await api.towingOfficeCommand(intent.command as TowingCommand);
+        await queryClient.invalidateQueries({ queryKey: [...key, "towing-office"] });
+        return result;
+      }
+      if (intent.target.kind === "operation") return api.operationCommand(intent.target.id, intent.command as MobileOperationCommand);
+      if (intent.target.kind === "towing") {
+        const result = await api.towingCommand(intent.target.id, intent.command as MobileTowingCommand);
+        await cacheWorkReceipt(queryClient, key, scope.memberId, { kind: "towing", id: intent.target.id, ...result }, () => liveUser() === userId);
+        return result;
+      }
+      if (intent.target.kind === "cash") {
+        const cash = await api.cashCommand(intent.command as MobileFieldCashCommand);
+        await cacheWorkReceipt(queryClient, key, scope.memberId, { kind: "cash", cash }, () => liveUser() === userId);
+        return cash;
+      }
+      return api.branchCommand(intent.command as MobileBranchCommand);
+    }, { current: () => liveUser() === userId }) : null,
+  [api, scope, work, branch, towingOffice, liveUser, userId, queryClient, key]);
   useLayoutEffect(() => { commands?.setActive(writable); return () => { commands?.setActive(false); }; }, [commands, writable]);
   useEffect(() => { if (commands && writable) void commands.load(); }, [commands, writable]);
   useEffect(() => () => commands?.dispose(), [commands]);

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Plus } from "lucide-react";
 import type { TowingCommand, TowingWorkspace } from "@/domain/towing/types";
 import { towingClient } from "@/components/towing/client";
 import { Button, Notice, Panel, Select } from "@/components/towing/primitives";
@@ -8,11 +9,12 @@ import { orderTitle, workLabels } from "@/components/towing/model";
 import styles from "@/components/towing/towing.module.css";
 
 /** A case owns several deliberate towing intents; retries keep the original order identity. */
-export function CaseTowingOrdersPanel({ caseId, caseNumber }: { caseId: string; caseNumber?: string }) {
-  return <CaseTowingOrders key={caseId} caseId={caseId} caseNumber={caseNumber} />;
+export function CaseTowingOrdersPanel({ caseId, caseNumber, embedded = false, refreshToken = 0 }: { caseId: string; caseNumber?: string; embedded?: boolean; refreshToken?: number }) {
+  return <CaseTowingOrders key={caseId} caseId={caseId} caseNumber={caseNumber} embedded={embedded} refreshToken={refreshToken} />;
 }
 
-function CaseTowingOrders({ caseId, caseNumber }: { caseId: string; caseNumber?: string }) {
+function CaseTowingOrders({ caseId, caseNumber, embedded, refreshToken }: { caseId: string; caseNumber?: string; embedded: boolean; refreshToken: number }) {
+  const [createOpen, setCreateOpen] = useState(!embedded);
   const [workspace, setWorkspace] = useState<TowingWorkspace | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -30,7 +32,7 @@ function CaseTowingOrders({ caseId, caseNumber }: { caseId: string; caseNumber?:
     alive.current = true;
     void load().catch(cause => { if (alive.current) setError(cause instanceof Error ? cause.message : "Odťahy sa nepodarilo načítať."); }).finally(() => { if (alive.current) setLoading(false); });
     return () => { alive.current = false; };
-  }, [load]);
+  }, [load, refreshToken]);
   const create = async () => {
     if (!workspace || running.current) return;
     running.current = true; setBusy(true); setError("");
@@ -56,7 +58,7 @@ function CaseTowingOrders({ caseId, caseNumber }: { caseId: string; caseNumber?:
       if (alive.current) setError(cause instanceof Error ? cause.message : "Založenie odťahu sa nepodarilo potvrdiť. Zopakujte rovnaký pokus.");
     } finally { running.current = false; if (alive.current) setBusy(false); }
   };
-  return <Panel title={`Odťahy${caseNumber ? ` · ${caseNumber}` : ""}`}>
+  const content = <>
     {loading && <p role="status">Načítavam prepojené zákazky…</p>}
     {error && <Notice kind="error">{error}</Notice>}
     {workspace && <>
@@ -64,9 +66,18 @@ function CaseTowingOrders({ caseId, caseNumber }: { caseId: string; caseNumber?:
       {workspace.orders.map(order => <div className={styles.row} key={order.id}><span><strong>{order.number}</strong> · {orderTitle(order)} · {workLabels[order.workStatus]}</span><a className={styles.button} href={`/zakazky?orderId=${encodeURIComponent(order.id)}`} target="_blank" rel="noreferrer">Otvoriť zákazku</a></div>)}
       {(workspace.totalCount ?? 0) > workspace.orders.length && <p>Zobrazených je prvých 50 zákaziek. Úplný zoznam je v knihe odťahov.</p>}
       {createdId && <Notice kind="success">Návrh odťahu je uložený. <a href={`/zakazky?orderId=${encodeURIComponent(createdId)}`} target="_blank" rel="noreferrer">Otvoriť, doplniť a prideliť vodiča</a></Notice>}
+      <div hidden={!createOpen}>
       {workspace.actor.capabilities.includes("operate") && <Select label="Spôsob vykonania nového odťahu" value={origin} disabled={busy || Boolean(error)} onChange={event => setOrigin(event.target.value as typeof origin)}><option value="local">Lokálny výkon · pridelenie vodičovi</option><option value="awp_record_only">AWP · iba evidencia, bez pridelenia vodiča</option></Select>}
-      <div className={styles.actions}>{workspace.actor.capabilities.includes("operate") && <Button primary disabled={busy || loading} onClick={() => void create()}>{busy ? "Potvrdzujem založenie…" : error ? "Zopakovať rovnaké založenie" : workspace.orders.length || createdId ? "Zadať ďalší odťah" : "Zadať odťah"}</Button>}<Button disabled={busy || loading} onClick={() => { setLoading(true); setError(""); void load().catch(cause => setError(cause instanceof Error ? cause.message : "Odťahy nie sú dostupné.")).finally(() => setLoading(false)); }}>Obnoviť zoznam</Button></div>
+      </div>
+      <div className={styles.actions}>{workspace.actor.capabilities.includes("operate") && createOpen && <Button primary disabled={busy || loading} onClick={() => void create()}>{busy ? "Potvrdzujem založenie…" : error ? "Zopakovať rovnaké založenie" : workspace.orders.length || createdId ? "Zadať ďalší odťah" : "Zadať odťah"}</Button>}<Button disabled={busy || loading} onClick={() => { setLoading(true); setError(""); void load().catch(cause => setError(cause instanceof Error ? cause.message : "Odťahy nie sú dostupné.")).finally(() => setLoading(false)); }}>Obnoviť zoznam</Button></div>
       <p className={styles.footer}>Údaje prípadu sa skopírujú do samostatného návrhu. Zákazka sa otvorí v novej karte; pridelenie a fyzický začiatok sú samostatné kroky.</p>
     </>}
-  </Panel>;
+  </>;
+  if (!embedded) return <Panel title={`Odťahy${caseNumber ? ` · ${caseNumber}` : ""}`}>{content}</Panel>;
+  return <section className="case-towing-embedded grid min-w-0 gap-3 border-t border-zinc-200 pt-4" aria-label="Odťahy prípadu">
+    <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-semibold text-zinc-900">Odťahy</h3><p className="mt-1 text-xs text-zinc-500">Samostatné zákazky prepojené s týmto prípadom.</p></div>
+      {workspace?.actor.capabilities.includes("operate") && <Button disabled={busy || loading} aria-expanded={createOpen} onClick={() => setCreateOpen(value => !value)}><Plus size={15} aria-hidden="true" />{createOpen ? "Zavrieť nový odťah" : "Pridať odťah"}</Button>}
+    </div>
+    {content}
+  </section>;
 }

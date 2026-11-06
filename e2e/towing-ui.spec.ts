@@ -110,6 +110,7 @@ test("office saves an incomplete draft and applies combined filters server-side"
   await expect(page.getByRole("status").first()).toContainText("Návrh zákazky je uložený");
   const create = commands.find(command => command.type === "create_order")!;
   expect(create.expectedRevision).toBeUndefined(); expect(create.payload.fields).toMatchObject({ subjectType: "machine", pickup: "" });
+  await page.getByText("Ďalšie filtre a obdobie", { exact: true }).click();
   await page.getByLabel("Stav výkonu", { exact: true }).selectOption("draft");
   await page.getByLabel("Pobočka", { exact: true }).selectOption(branchId);
   await page.getByRole("button", { name: "Použiť filtre" }).click();
@@ -178,7 +179,8 @@ test("manager records an unknown receipt exception without inventing a receipt U
 
 
 test("saving driver notes preserves assignment start provenance; editing the start explicitly stays conflict-free", async ({ page }) => {
-  const workspace = fixture("driver"); const { commands } = await mount(page, workspace);
+  const workspace = fixture("driver"); workspace.orders[0].fields.startSource = "assignment";
+  const { commands } = await mount(page, workspace);
   await page.getByRole("button", { name: "Otvoriť zákazku" }).click();
   await page.getByLabel("Poznámka vodiča", { exact: true }).fill("Poznámka bez zmeny začiatku");
   await page.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
@@ -186,7 +188,7 @@ test("saving driver notes preserves assignment start provenance; editing the sta
   await expect(page.getByRole("alert")).toHaveCount(0);
   expect(commands[0].payload.fields).toEqual({ driverNotes: "Poznámka bez zmeny začiatku" });
   expect(workspace.orders[0].fields.startSource).toBe("assignment");
-  await page.getByLabel("Skutočný začiatok · prevzatý z pridelenia", { exact: true }).fill("2026-10-13T09:15");
+  await page.getByLabel("Skutočný začiatok · potvrďte skutočný čas", { exact: true }).fill("2026-10-13T09:15");
   await page.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
   await expect(page.getByLabel("Skutočný začiatok", { exact: true })).toHaveValue("2026-10-13T09:15");
   await expect(page.getByRole("alert")).toHaveCount(0);
@@ -285,4 +287,110 @@ test("newer server price and tax date preserve the local draft until an explicit
   await page.getByRole("button", { name: "Uložiť nacenenie" }).click();
   await expect(page.getByRole("button", { name: "Schváliť cenu a pripraviť" })).toBeEnabled();
   expect(commands[1].expectedRevision).toBe(2); expect(commands[1].payload.taxDate).toBe("2026-09-02");
+});
+
+test("dense book keeps independent phases, whole-result totals and server filters", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const workspace = fixture("office", 16);
+  workspace.totalCount = 125;
+  workspace.summary = { approvedCents: 999900, invoicedCents: 800000, receivedCents: 700000, dueCents: 999900 };
+  workspace.orders[0].billingStatus = "invoiced"; workspace.orders[0].paymentStatus = "paid";
+  workspace.orders[1].workStatus = "submitted"; workspace.orders[1].billingStatus = "invoiced"; workspace.orders[1].paymentStatus = "paid";
+  workspace.orders[2].workStatus = "cancelled"; workspace.orders[2].reconciliationRequired = true;
+  const { queries } = await mount(page, workspace);
+  const rows = page.locator("tbody tr");
+  await expect(rows.nth(0)).toHaveAttribute("data-stage", "active");
+  await expect(rows.nth(1)).toHaveAttribute("data-stage", "paid");
+  await expect(rows.nth(2)).toHaveAttribute("data-stage", "cancelled");
+  await expect(rows.nth(2)).toContainText("Finančná výnimka");
+  const bounds = await rows.first().boundingBox();
+  expect(bounds!.height).toBeGreaterThanOrEqual(40); expect(bounds!.height).toBeLessThanOrEqual(44);
+  const visibleRows = await rows.evaluateAll(elements => elements.filter(element => { const rect = element.getBoundingClientRect(); return rect.top >= 0 && rect.bottom <= window.innerHeight; }).length);
+  expect(bounds!.y).toBeLessThanOrEqual(384);
+  expect(visibleRows).toBeGreaterThanOrEqual(12);
+  await page.screenshot({ path: ".context/towing-book-dense-1440.png", fullPage: false });
+  await expect(page.getByText("1–16 z 125", { exact: true })).toBeVisible();
+  await page.getByLabel("Objednávateľ", { exact: true }).fill("Europ Assistance");
+  await page.getByLabel("Usporiadanie", { exact: true }).selectOption("amount_desc");
+  await page.getByText("Ďalšie filtre a obdobie", { exact: true }).click();
+  await page.getByLabel("Obdobie podľa", { exact: true }).selectOption("dispatch");
+  await page.getByLabel("Dátum do", { exact: true }).fill("2026-11-05");
+  await page.getByRole("button", { name: "Použiť filtre" }).click();
+  await expect.poll(() => queries.at(-1)?.searchParams.get("requester")).toBe("Europ Assistance");
+  expect(queries.at(-1)?.searchParams.get("sort")).toBe("amount_desc");
+  expect(queries.at(-1)?.searchParams.get("dateBasis")).toBe("dispatch");
+  expect(queries.at(-1)?.searchParams.get("to")).toBe("2026-11-05");
+  await page.getByRole("button", { name: "Na fakturáciu", exact: true }).click();
+  await expect.poll(() => queries.at(-1)?.searchParams.get("stage")).toBe("ready");
+});
+
+test("book contains wide rows and preserves usable mobile cards", async ({ page }) => {
+  const workspace = fixture("office", 16);
+  workspace.orders[0].fields.subjectDescription = "Veľmi dlhý názov vozidla a rozšírené pracovné podrobnosti ".repeat(5);
+  workspace.orders[0].fields.pickup = "Extrémnedlháadresabezmedzier".repeat(20);
+  await mount(page, workspace);
+  for (const width of [1440, 1280, 1024, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    if (width > 600) {
+      const bounds = await page.locator("tbody tr").first().boundingBox();
+      expect(bounds!.height).toBeLessThanOrEqual(44);
+    } else {
+      await expect(page.locator("article").first()).toBeVisible();
+      const button = await page.locator("article").first().getByRole("button").boundingBox();
+      expect(button!.height).toBeGreaterThanOrEqual(44);
+    }
+    await page.screenshot({ path: `.context/towing-book-${width}.png`, fullPage: true });
+  }
+  await page.locator("article").first().getByRole("button").click();
+  await expect(page.getByLabel("Značka / model")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect(page.getByLabel("Dôvod vrátenia / storna")).not.toBeVisible();
+  await page.getByText("Vrátenie, storno a dôvod zmeny", { exact: true }).click();
+  await expect(page.getByLabel("Dôvod vrátenia / storna")).toBeVisible();
+});
+
+test("operational items and agreed payment remain separate from explicit price takeover", async ({ page }) => {
+  const workspace = fixture("office");
+  const { commands } = await mount(page, workspace);
+  await page.getByRole("button", { name: "Otvoriť Z-2026-0001", exact: true }).first().click();
+  await page.getByLabel("Dohodnutá forma úhrady", { exact: true }).selectOption("cash_terminal");
+  await page.getByLabel("Stav tachometra (km)").fill("123456");
+  await page.getByLabel("Pridať realizovaný úkon", { exact: true }).selectOption("transport");
+  await page.getByLabel("Úkon 1: množstvo", { exact: true }).fill("20");
+  await page.getByLabel("Úkon 1: jednotka", { exact: true }).fill("km");
+  await page.getByLabel("Úkon 1: cieľ", { exact: true }).fill("Servis Žilina");
+  await page.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
+  await expect(page.getByRole("status").first()).toContainText("Údaje zákazky sú uložené");
+  const fields = commands.find(command => command.type === "update_order")!.payload.fields as TowingOrder["fields"];
+  expect(fields.paymentIntent).toBe("cash_terminal");
+  expect(fields.realizedItems).toHaveLength(1);
+  expect(fields.realizedItems![0]).not.toHaveProperty("unitPrice");
+  await page.getByRole("tab", { name: "Nacenenie", exact: true }).click();
+  await page.getByRole("button", { name: "Prevziať realizačné položky", exact: true }).click();
+  await expect(page.getByLabel("Položka 1", { exact: true })).toHaveValue("Preprava");
+  await expect(page.getByLabel("Množstvo", { exact: true })).toHaveValue("20");
+  await expect(page.getByLabel("Cena bez dane (€)", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Prevziať realizačné položky", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Uložiť nacenenie", exact: true })).toBeDisabled();
+  expect(commands.some(command => command.type === "receive_payment")).toBe(false);
+});
+
+
+test("driver can supplement vehicle and owner without accessing office finance", async ({ page }) => {
+  const { commands } = await mount(page, fixture("driver"));
+  await page.getByRole("button", { name: "Otvoriť zákazku", exact: true }).click();
+  await page.getByLabel("EČV (ak má)", { exact: true }).fill("ba123xy");
+  await page.getByLabel("Majiteľ: Meno / firma", { exact: true }).fill("Testovací majiteľ");
+  await page.getByLabel("Dohodnutá forma úhrady", { exact: true }).selectOption("partner_invoice");
+  await page.getByLabel("Stav tachometra (km)").fill("125000");
+  await page.getByLabel("Komu bolo vozidlo odovzdané", { exact: true }).fill("Testovací servis");
+  await page.getByLabel("Čas odovzdania vozidla", { exact: true }).fill("2026-10-13T12:00");
+  await page.getByRole("button", { name: "Uložiť údaje", exact: true }).click();
+  await expect(page.getByRole("status").first()).toContainText("Údaje zákazky sú uložené");
+  const fields = commands.find(command => command.type === "update_order")!.payload.fields;
+  expect(fields).toMatchObject({ plate: "BA123XY", owner: { name: "Testovací majiteľ" }, odometer: "125000", paymentIntent: "partner_invoice", handoverRecipientName: "Testovací servis", handedOverAt: "2026-10-13T12:00:00.000Z" });
+  expect(fields).not.toHaveProperty("officeNotes");
+  await expect(page.getByRole("tab", { name: "Nacenenie", exact: true })).toHaveCount(0);
+  expect(commands.some(command => command.type === "receive_payment")).toBe(false);
 });

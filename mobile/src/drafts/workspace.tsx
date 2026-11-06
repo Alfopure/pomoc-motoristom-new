@@ -378,7 +378,7 @@ function LocalDrafts({ vault, onResume, onDiscarded, needsReset, deferReset }: {
 function DraftAction({ label, accessibilityLabel, onPress, disabled, danger }: { label: string; accessibilityLabel: string; onPress: () => void; disabled?: boolean; danger?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress}
     hitSlop={{ top: 6, bottom: 6 }} style={({ pressed }) => [account.action, danger && { backgroundColor: palette.redSoft }, disabled && { opacity: 0.4 }, pressed && { opacity: 0.6 }]}>
-    <Text numberOfLines={1} maxFontSizeMultiplier={1.3} style={[account.actionLabel, danger && { color: palette.redText }]}>{label}</Text>
+    <Text style={[account.actionLabel, danger && { color: palette.redText }]}>{label}</Text>
   </Pressable>;
 }
 const account = StyleSheet.create({
@@ -390,11 +390,11 @@ const account = StyleSheet.create({
   chevron: { fontSize: 20, color: palette.tertiaryLabel },
   note: { ...type.caption, fontWeight: "400", color: palette.secondaryLabel, paddingHorizontal: 20, paddingTop: space.s },
   draft: { gap: space.s, paddingHorizontal: space.m, paddingVertical: 10, backgroundColor: palette.card },
-  draftHead: { flexDirection: "row", alignItems: "baseline", gap: space.s },
+  draftHead: { flexDirection: "row", flexWrap: "wrap", alignItems: "baseline", gap: space.s },
   draftActions: { flexDirection: "row", flexWrap: "wrap", gap: space.s },
   time: { ...type.caption, color: palette.secondaryLabel, fontVariant: ["tabular-nums"] },
   separator: { position: "absolute", top: 0, left: space.m, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: palette.separator },
   draftTitle: { ...type.rowTitle, color: palette.label, flex: 1 },
-  action: { minHeight: 32, borderRadius: 16, paddingHorizontal: 12, alignItems: "center", justifyContent: "center", backgroundColor: palette.brandSoft },
-  actionLabel: { fontSize: 13, lineHeight: 17, fontWeight: "600", color: palette.brandInk },
+  action: { minHeight: 44, maxWidth: "100%", borderRadius: 22, paddingHorizontal: space.m, paddingVertical: space.s, alignItems: "center", justifyContent: "center", backgroundColor: palette.brandSoft },
+  actionLabel: { ...type.subhead, fontWeight: "600", color: palette.brandInk },
 });

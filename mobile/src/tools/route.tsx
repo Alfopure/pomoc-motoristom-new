@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Linking, Text, TextInput, View } from "react-native";
+import { Linking, Text, View } from "react-native";
+import { Field } from "../design/form";
 import type { MobileToolRoute } from "../../../src/lib/mobile-tools";
 import type { MobileCasePlaceSelection } from "../../../src/lib/mobile-api";
 import { formatDrivingDistance, formatDrivingDuration, MAX_ROUTE_INTERMEDIATES } from "../../../src/lib/driving-route";
@@ -67,13 +68,13 @@ export function RouteStopFields({ stop, title, active, change, pick, children }:
   const [coordinates, setCoordinates] = useState(false), [lat, setLat] = useState(""), [lng, setLng] = useState("");
   const [error, setError] = useState<string | null>(null);
   return <Card><Text style={styles.subheading}>{title}</Text>
-    <TextInput accessibilityLabel={`${title} – adresa`} placeholder="Adresa alebo názov miesta" value={stop.address} maxLength={500} editable={active} style={styles.input} onChangeText={text => { setError(null); change(editStop(stop, text)); }} />
+    <Field label="Adresa" accessibilityLabel={`${title} – adresa`} placeholder="Adresa alebo názov miesta…" value={stop.address} maxLength={500} editable={active} multiline onChangeText={text => { setError(null); change(editStop(stop, text)); }} />
     {stop.selection && <Text style={styles.muted}>Potvrdený bod: {stop.selection.lat.toFixed(6)}, {stop.selection.lng.toFixed(6)}{stop.selection.provider === "approximate" ? " · približná poloha telefónu" : ""}</Text>}
     <Button label={`${title} – vybrať na mape`} secondary disabled={!active} onPress={pick} />
     <Button label={coordinates ? "Skryť súradnice" : "Zadať súradnice"} secondary disabled={!active} onPress={() => setCoordinates(value => !value)} />
     {coordinates && <>
-      <TextInput accessibilityLabel={`${title} – zemepisná šírka`} placeholder="Zemepisná šírka, napr. 48.1486" value={lat} editable={active} maxLength={24} style={styles.input} onChangeText={value => { setLat(value); setError(null); change(editStop(stop, stop.address)); }} />
-      <TextInput accessibilityLabel={`${title} – zemepisná dĺžka`} placeholder="Zemepisná dĺžka, napr. 17.1077" value={lng} editable={active} maxLength={24} style={styles.input} onChangeText={value => { setLng(value); setError(null); change(editStop(stop, stop.address)); }} />
+      <Field label="Zemepisná šírka" accessibilityLabel={`${title} – zemepisná šírka`} placeholder="Napr. 48.1486" value={lat} editable={active} maxLength={24} autoCorrect={false} autoCapitalize="none" onChangeText={value => { setLat(value); setError(null); change(editStop(stop, stop.address)); }} />
+      <Field label="Zemepisná dĺžka" accessibilityLabel={`${title} – zemepisná dĺžka`} placeholder="Napr. 17.1077" value={lng} editable={active} maxLength={24} autoCorrect={false} autoCapitalize="none" onChangeText={value => { setLng(value); setError(null); change(editStop(stop, stop.address)); }} />
       <Button label="Potvrdiť súradnice" disabled={!active} onPress={() => { try { change(confirmCoordinates(stop, lat, lng)); setError(null); } catch (caught) { setError(caught instanceof Error ? caught.message : "Skontrolujte súradnice."); } }} />
     </>}
     {error && <Text accessibilityRole="alert" style={styles.text}>{error}</Text>}{children}

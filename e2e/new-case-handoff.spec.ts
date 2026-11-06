@@ -89,6 +89,8 @@ async function boot(page: Page, options: { failure?: Failure; holdCreate?: boole
         url: `${origin}/handoff#token=${"a".repeat(43)}`, delivery: { memberId, status: "sent" },
       } });
     }
+    if (url.pathname === "/api/towing/workspace" && request.method() === "GET")
+      return route.fulfill({ json: { actor: { capabilities: [] }, orders: [], members: [], branches: [] } });
     unexpected.push(`${request.method()} ${url.pathname}`);
     return route.fulfill({ status: 503, json: { error: "Unexpected request in isolated browser regression" } });
   });
@@ -143,12 +145,12 @@ test("rejected case creation never opens or sends a handoff", async ({ page }) =
   expectIsolated(trace);
 });
 
-for (const failure of ["lost-ack", "committed-error", "malformed-success"] as const) test(`${failure} disables both save paths instead of creating another case`, async ({ page }) => {
+for (const failure of ["lost-ack", "committed-error", "malformed-success"] as const) test(`${failure} keeps the original save retry and disables creating a new handoff`, async ({ page }) => {
   const trace = await boot(page, { failure });
   await page.getByRole("button", { name: "Uložiť a odovzdať", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Výsledok uloženia nie je potvrdený.");
   await expect(page.getByRole("button", { name: "Uložiť a odovzdať", exact: true })).toBeDisabled();
-  await expect(ordinarySave(page)).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Overiť pôvodné uloženie", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: /Odovzdať prípad/ })).toHaveCount(0);
   expect(trace.creates).toHaveLength(1);
   expect(trace.handoffs).toHaveLength(0);

@@ -1,3 +1,4 @@
+import { FieldWorkConflictError } from "./api";
 import { describe, expect, it, vi } from "vitest";
 import { MobileApiError } from "../lib/api";
 import { memoryStorage } from "../lib/session-storage";
@@ -41,6 +42,14 @@ describe("stored work steps", () => {
     await expect(restored.retry({ kind: "operation", id: OP })).resolves.toEqual({ ok: true });
     expect(send.mock.calls[1][0]).toMatchObject({ command: { commandId: id(11) } });
   });
+  it("keeps verified conflict links only in the live refusal, outside stored intents", async () => {
+    const conflict = { kind: "physical" as const, blocker: { kind: "towing" as const, id: id(22), number: "OT-22" } };
+    const { commands, storage } = await ready(async () => { throw new FieldWorkConflictError("Dokončite rozpracovanú zákazku", "work_refused", conflict); });
+    await commands.start({ kind: "operation", id: OP }, accept(20), "Začať jazdu");
+    expect(commands.snapshot().pending[0]).toMatchObject({ status: "rejected", conflict });
+    expect(await storage.getItem(workCommandsKey(scope))).not.toContain("OT-22");
+    expect(await storage.getItem(workCommandsKey(scope))).not.toContain("conflict");
+  });
   it("lets a refused step be closed only after it was refused", async () => {
     const send = vi.fn().mockRejectedValueOnce(new MobileApiError("Jazda sa medzitým zmenila.", 409)).mockRejectedValueOnce(new MobileApiError("down", 503));
     const { commands } = await ready(send);
@@ -51,6 +60,32 @@ describe("stored work steps", () => {
     await commands.start({ kind: "operation", id: OP }, accept(14), "Prijať jazdu");
     await commands.dismiss({ kind: "operation", id: OP });
     expect(commands.snapshot().pending).toHaveLength(1);
+  });
+  it("retries a lost receipt with the same receipt and command IDs and blocks completion", async () => {
+    const send = vi.fn().mockRejectedValueOnce(new MobileApiError("timeout", 0)).mockResolvedValueOnce({ order: null });
+    const { commands, storage } = await ready(send);
+    const target = { kind: "towing" as const, id: OP };
+    const payment = { commandId: id(30), type: "receive_payment" as const, expectedRevision: 7, assignmentGeneration: 2,
+      payload: { receiptId: id(31), amountCents: 1234, method: "card" as const } };
+    await commands.start(target, payment, "Prijatá platba");
+    expect(commands.pendingFor(target)).toMatchObject({ status: "uncertain", command: payment });
+    expect(await commands.start(target, { ...payment, commandId: id(32), type: "submit", payload: {} }, "Odovzdať zákazku")).toBeNull();
+    const restored = await ready(send, storage);
+    expect(send).toHaveBeenCalledTimes(1);
+    await restored.commands.retry(target);
+    expect(send.mock.calls[0][0].command).toEqual(send.mock.calls[1][0].command);
+    expect(restored.commands.pendingFor(target)).toBeUndefined();
+  });
+  it("persists a handover proposal with fixed IDs and never targets another member", async () => {
+    const send = vi.fn().mockRejectedValue(new MobileApiError("offline", 0));
+    const { commands } = await ready(send);
+    const command = { commandId: id(33), handoverId: id(34), type: "propose_handover" as const, expectedRevision: 0 as const, payload: { amountCents: 3000, accountRevision: 4 } };
+    await commands.start({ kind: "cash", id: MEMBER }, command, "Odovzdať hotovosť");
+    await commands.retry({ kind: "cash", id: MEMBER });
+    expect(send.mock.calls[0][0].command).toEqual(send.mock.calls[1][0].command);
+    const other = await ready(send);
+    expect(await other.commands.start({ kind: "cash", id: OP }, command, "Cudzia pokladňa")).toBeNull();
+    expect(other.commands.snapshot().pending).toEqual([]);
   });
   it("refuses malformed or mismatched stored intents", () => {
     const base = { target: { kind: "towing", id: OP }, label: "Začať prácu", createdAt: "2026-10-28T08:00:00Z" };

@@ -27,7 +27,7 @@ test("360px offline work survives reload and foreground sync orders fields, phot
     if (url.pathname === "/api/towing/access") return route.fulfill({ json: { actor: state.actor, order: state.orders[0], cashAccount: state.cashAccounts[0], lease: { issuedAt: Date.now(), expiresAt: Date.now() + 43200000 } } });
     if (url.pathname === "/api/towing/commands") {
       const command = route.request().postDataJSON() as TowingCommand; commands.push(command); phases.push(command.type);
-      if (command.type === "update_order") { state.orders[0].fields = { ...state.orders[0].fields, ...command.payload.fields as object }; state.orders[0].revision++; }
+      if (command.type === "update_order") { state.orders[0].fields = { ...state.orders[0].fields, ...command.payload.fields as object }; if (Object.hasOwn(command.payload.fields as object, "startedAt")) state.orders[0].fields.startSource = "manual"; state.orders[0].revision++; }
       if (command.type === "receive_payment") { state.orders[0].receivedCents += Number(command.payload.amountCents); state.cashAccounts[0].balanceCents += Number(command.payload.amountCents); state.cashAccounts[0].revision++; }
       if (command.type === "submit") { const problems = towingCompletionProblems(state.orders[0]); if (problems.length) return route.fulfill({ status: 400, json: { error: problems.join(" ") } }); state.orders[0].workStatus = "submitted"; state.orders[0].revision++; }
       return route.fulfill({ json: { commandId: command.commandId, targetId: command.targetId, revision: state.orders[0].revision } });
@@ -42,6 +42,7 @@ test("360px offline work survives reload and foreground sync orders fields, phot
     await expect(page.getByRole("heading", { name: "Z-TEST-0001 · Testovacie vozidlo" })).toBeVisible();
   };
   await boot();
+  await page.getByRole("textbox", { name: "Začiatok", exact: true }).fill("2026-10-13T09:15");
   await page.getByRole("textbox", { name: "Poznámka k výkonu", exact: true }).fill("Práca uložená bez signálu.");
   await page.getByRole("textbox", { name: "Koniec", exact: true }).fill("2026-10-13T11:00");
   await expect(page.getByRole("button", { name: "Pripraviť dokončenie", exact: true })).toBeDisabled();
@@ -65,7 +66,7 @@ test("360px offline work survives reload and foreground sync orders fields, phot
   await expect(page.getByText("Všetky odoslané záznamy sú potvrdené.", { exact: true })).toBeVisible();
   expect(phases).toEqual(["update_order", "upload", "receive_payment", "submit"]);
   expect(state.orders[0].receivedCents).toBe(2000);
-  expect(commands.find(command => command.type === "update_order")?.payload.fields).toEqual({ driverNotes: "Práca uložená bez signálu.", finishedAt: "2026-10-13T11:00:00.000Z" });
-  expect(state.orders[0].fields.startSource).toBe("assignment");
+  expect(commands.find(command => command.type === "update_order")?.payload.fields).toEqual({ startedAt: "2026-10-13T09:15:00.000Z", driverNotes: "Práca uložená bez signálu.", finishedAt: "2026-10-13T11:00:00.000Z" });
+  expect(state.orders[0].fields.startSource).toBe("manual");
   expect(commands.find(command => command.type === "submit")?.payload.receiptIds).toEqual([commands.find(command => command.type === "receive_payment")?.payload.receiptId]);
 });

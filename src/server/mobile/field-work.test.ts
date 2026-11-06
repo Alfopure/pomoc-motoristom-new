@@ -56,6 +56,9 @@ beforeEach(() => {
   vi.stubEnv("MOTORIST_TOWING_ENABLED", "true");
   mocks.user.mockResolvedValue({ userId: USER, email: undefined, organizationId: ORG, expectedOrganization: null });
   mocks.legacy.clear();
+  const cases = { select: vi.fn(), eq: vi.fn(), in: vi.fn().mockResolvedValue({ data: [], error: null }) };
+  cases.select.mockReturnValue(cases); cases.eq.mockReturnValue(cases);
+  mocks.from.mockReturnValue(cases);
 });
 afterEach(() => vi.unstubAllEnvs());
 
@@ -83,8 +86,52 @@ describe("Moja práca: operations", () => {
     // Without the context RPC (migration not applied) Moja práca says so instead of guessing.
     rpcs({ motorist_operations_workspace: () => workspace([operation()]), motorist_field_operations_context: () => { throw { code: "PGRST202" }; } });
     await expect(work.loadFieldOperations(actor)).rejects.toMatchObject({ status: 503, code: "work_unavailable" });
-    expect(mocks.rpc).toHaveBeenCalledWith("motorist_operations_workspace", { p_user_id: USER, p_organization_id: ORG, p_filters: { view: "open", limit: 100, mine: true } });
+    expect(mocks.rpc).toHaveBeenCalledWith("motorist_operations_workspace", { p_user_id: USER, p_organization_id: ORG, p_filters: { view: "open", limit: 50, offset: 0, mine: true } });
     expect(await work.loadFieldOperations({ ...actor, capabilities: ["drive"] })).toBeNull();
+  });
+  it("adds assistance from the authorized operation's case without exposing the case DTO", async () => {
+    const query = mocks.from();
+    query.in.mockResolvedValue({ data: [{ id: id(20), assistance_name: "Allianz", assistance_case_reference: "AS-42", privateNote: "Do not expose", assistance_reference: "OLD" }], error: null });
+    rpcs({ motorist_operations_workspace: () => workspace([operation()]) });
+    const result = await work.readFieldOperation(actor, OP);
+    expect(result).toMatchObject({ caseNumber: "PM-2026-7", assistance: { name: "Allianz", reference: "AS-42" } });
+    expect(query.select).toHaveBeenCalledWith("id,assistance_name:customer_details->>assistanceServiceName,assistance_case_reference:customer_details->>assistanceReference,assistance_reference");
+    expect(query.eq).toHaveBeenCalledWith("organization_id", ORG);
+    expect(query.in).toHaveBeenCalledWith("id", [id(20)]);
+    expect(JSON.stringify(result)).not.toContain("Do not expose");
+    expect(JSON.stringify(result)).not.toContain(id(20));
+    query.in.mockResolvedValue({ data: [{ id: id(20), assistance_name: null, assistance_case_reference: null, assistance_reference: "LEGACY-9" }], error: null });
+    expect(await work.readFieldOperation(actor, OP)).toMatchObject({ assistance: { name: null, reference: "LEGACY-9" } });
+    expect(work.projectOperation(operation({ status: "completed" }), MEMBER, null, { name: "A", reference: "AS-42" })).toMatchObject({ assistance: null });
+  });
+  it("loads the second authorized page within the existing 100-operation bound", async () => {
+    rpcs({ motorist_operations_workspace: args => ({ ...workspace([operation({ id: (args.p_filters as Record<string, unknown>).offset === 50 ? OTHER : OP })]), totalCount: 51 }) });
+    expect((await work.loadFieldOperations(actor))?.map(op => op.id)).toEqual([OP, OTHER]);
+    expect(mocks.rpc).toHaveBeenCalledWith("motorist_operations_workspace", expect.objectContaining({ p_filters: { view: "open", limit: 50, offset: 50, mine: true } }));
+  });
+  it("opens only a verified physical blocker after a real refusal and keeps planned conflicts separate", async () => {
+    const handlers = {
+      motorist_operations_workspace: () => workspace([operation()]),
+      motorist_operations_command: () => { throw { code: "PT409", message: "Driver physically busy" }; },
+      motorist_towing_workspace: () => ({ view: "driver", orders: [towingOrder()], members: [] }),
+    };
+    rpcs(handlers);
+    const response = await commandRoute(bearer({ commandId: CMD, action: "start", expectedRevision: 4, payload: {} }), { params: Promise.resolve({ id: OP }) });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "work_refused", conflict: { kind: "physical", blocker: { kind: "towing", id: ORDER, number: "OT-2026-0005" } } });
+    rpcs({ ...handlers, motorist_towing_workspace: () => ({ view: "driver", orders: [towingOrder({ driverId: OTHER })], members: [] }) });
+    await expect(work.commandFieldOperation(actor, OP, { commandId: CMD, action: "start", expectedRevision: 4, payload: {} })).rejects.toMatchObject({ conflict: { kind: "physical", blocker: null } });
+    rpcs({ ...handlers, motorist_operations_command: () => { throw { code: "PT409", message: "Capacity conflict" }; } });
+    await expect(work.commandFieldOperation(actor, OP, { commandId: CMD, action: "start", expectedRevision: 4, payload: {} })).rejects.toMatchObject({ conflict: { kind: "schedule", blocker: null } });
+  });
+  it("resolves a towing start blocked by an accessible active logistics operation", async () => {
+    rpcs({
+      motorist_operations_workspace: () => workspace([operation({ status: "en_route", startedAt: at })]),
+      motorist_towing_workspace: () => ({ view: "driver", orders: [towingOrder({ workStatus: "assigned" })], members: [] }),
+      motorist_towing_command: () => { throw { code: "PT409", message: "Driver capacity conflict" }; },
+    });
+    await expect(work.commandFieldTowing(actor, ORDER, { commandId: CMD, type: "start", expectedRevision: 7, assignmentGeneration: 2, payload: {} }))
+      .rejects.toMatchObject({ status: 409, code: "work_refused", conflict: { kind: "physical", blocker: { kind: "operation", id: OP, number: "PM-2026-7" } } });
   });
   it("accepts only field steps and complete evidence", () => {
     expect(work.readOperationCommand({ commandId: CMD, action: "accept", expectedRevision: 4, payload: {} })).toEqual({ commandId: CMD, action: "accept", expectedRevision: 4, payload: {} });
@@ -128,6 +175,15 @@ describe("Moja práca: operations", () => {
     const evidence = { stage: "handover", source: "reported", observedAt: "2026-10-28T08:00:00Z", person: "Ján", note: "", photoReference: null, odometer: null, fuel: null, missingReason: "Bez dokladu" };
     await expect(work.commandFieldOperation(actor, OP, { commandId: CMD, action: "evidence", expectedRevision: 4, payload: evidence })).rejects.toMatchObject({ status: 403 });
     expect(mocks.rpc).not.toHaveBeenCalledWith("motorist_operations_command", expect.anything());
+  });
+  it("sends delivery completion once without a synthetic arrival and explains missing evidence", async () => {
+    rpcs({ motorist_operations_workspace: () => workspace([operation({ kind: "delivery", status: "en_route" })]),
+      motorist_operations_command: () => { throw { code: "22023", message: "Handover evidence required" }; } });
+    await expect(work.commandFieldOperation(actor, OP, { commandId: CMD, action: "complete", expectedRevision: 4, payload: {} }))
+      .rejects.toMatchObject({ status: 400, code: "work_refused", message: expect.stringContaining("doklad odovzdania") });
+    const writes = mocks.rpc.mock.calls.filter(([name]) => name === "motorist_operations_command");
+    expect(writes).toHaveLength(1);
+    expect(writes[0][1].p_command).toMatchObject({ action: "complete", expectedRevision: 4 });
   });
   it("records positions through the operation RPC only", async () => {
     rpcs({ motorist_operation_position: () => ({ stored: true, active: true }) });
@@ -210,21 +266,59 @@ describe("Moja práca: towing", () => {
     const started = work.projectTowingOrder(towingOrder({}, { startedAt: "2026-10-28 08:00:00.123456+00" }), MEMBER);
     expect(started.fields.startedAt).toBe("2026-10-28T08:00:00.123Z");
   });
-  it("projects the driver's own order without finance or other parties", () => {
+  it("projects only own receipts and the authorized collection amounts", () => {
+    const own = { id: id(80), receiptId: id(81), amountCents: 2500, method: "card", driverId: MEMBER, createdAt: at };
+    const order = work.projectTowingOrder(towingOrder({ payments: [own, { ...own, id: id(82), driverId: OTHER }] }), MEMBER);
+    expect(order).toMatchObject({ authorizedCollectionCents: 15000, dueCents: 15000, payments: [{ id: id(80), receiptId: id(81), amountCents: 2500, method: "card" }] });
+    expect(order.payments).toHaveLength(1);
+    expect(JSON.stringify(order)).not.toContain(OTHER);
+    expect(order).not.toHaveProperty("receivedCents");
+  });
+  it("accepts exact cash/card receipts only, with current assignment and cash account revision", async () => {
+    const body = { commandId: CMD, type: "receive_payment", expectedRevision: 7, assignmentGeneration: 2, payload: { receiptId: id(83), amountCents: 1234, method: "cash", accountRevision: 3 } };
+    expect(work.readTowingCommand(body)).toEqual(body);
+    expect(work.readTowingCommand({ ...body, payload: { receiptId: id(83), amountCents: 1234, method: "card" } })).toMatchObject({ payload: { method: "card" } });
+    for (const payload of [{ ...body.payload, method: "bank" }, { ...body.payload, amountCents: 12.34 }, { ...body.payload, amountCents: 0 }, { ...body.payload, accountRevision: undefined }, { ...body.payload, driverId: OTHER }]) {
+      expect(() => work.readTowingCommand({ ...body, payload })).toThrow();
+    }
+    rpcs({ motorist_towing_command: () => { throw { code: "42501", message: "Towing access denied" }; } });
+    await expect(work.commandFieldTowing(actor, ORDER, body)).rejects.toMatchObject({ status: 403 });
+  });
+  it("validates realized items and keeps payment intent independent from receipts", () => {
+    const fields = { paymentIntent: "cash_other", owner: { name: "Ján", address: "Adresa", companyId: "123" }, odometer: "123456", realizedItems: [
+      { id: id(84), kind: "tow", description: "Odťah", quantity: "12.5", unit: "km", destination: "Servis" },
+      { id: id(85), kind: "repair", description: "Oprava", quantity: "1", unit: "ks" },
+    ] };
+    const command = work.readTowingCommand({ commandId: CMD, type: "update_order", expectedRevision: 7, assignmentGeneration: 2, payload: { fields } });
+    expect(command.payload).toEqual({ fields });
+    expect(command.type).toBe("update_order");
+    for (const patch of [{ realizedItems: [fields.realizedItems[0], fields.realizedItems[0]] }, { owner: { name: "Ján", taxId: "private" } }, { paymentIntent: "paid" }, { authorizedCollectionCents: 1 }]) {
+      expect(() => work.readTowingCommand({ ...command, payload: { fields: { ...fields, ...patch } } })).toThrow();
+    }
+  });
+  it("shows dispatch instructions as read-only work context", () => {
+    expect(work.projectTowingOrder(towingOrder({}, { dispatchInstructions: "Kľúče na recepcii" }), MEMBER).fields).toMatchObject({ dispatchInstructions: "Kľúče na recepcii" });
+    expect(() => work.readTowingCommand({ commandId: CMD, type: "update_order", expectedRevision: 7, assignmentGeneration: 2, payload: { fields: { dispatchInstructions: "Zmena" } } })).toThrow();
+  });
+  it("projects own operational contacts without office finance or another driver's order", () => {
     const order = work.projectTowingOrder(towingOrder(), MEMBER);
     expect(order).toMatchObject({ id: ORDER, number: "OT-2026-0005", revision: 7, assignmentGeneration: 2, workStatus: "in_progress",
-      fields: { pickup: "D1 km 120", destination: "Servis Žilina", customer: { name: "Mária", phone: "+421900333444" }, startSource: "manual" } });
+      fields: { requesterName: "Asistencia s.r.o.", requester: { name: "Asistencia s.r.o.", phone: "+421" }, pickup: "D1 km 120", destination: "Servis Žilina", customer: { name: "Mária", phone: "+421900333444" }, startSource: "manual" } });
     expect(order.attachments.map(item => item.id)).toEqual([id(40)]);
     const json = JSON.stringify(order);
-    for (const secret of ["Cents", "payments", "Asistencia s.r.o.", "billing"]) expect(json).not.toContain(secret);
+    for (const secret of ["receivedCents", "reconciliationRequired", "billing", "officeNotes", "taxId"]) expect(json).not.toContain(secret);
     expect(() => work.projectTowingOrder(towingOrder({ driverId: OTHER }), MEMBER)).toThrow();
     expect(() => work.projectTowingOrder(towingOrder({ workStatus: "submitted" }), MEMBER)).toThrow();
   });
-  it("lets a driver write only their own fields", () => {
+  it("accepts complete operational fields but denies office fields and missing own assignment", () => {
     const base = { commandId: CMD, type: "update_order", expectedRevision: 7, assignmentGeneration: 2 };
     expect(work.readTowingCommand({ ...base, payload: { fields: { finishedAt: "2026-10-28T09:00:00Z", driverNotes: " hotovo ", photoException: "" } } }).payload)
       .toEqual({ fields: { finishedAt: "2026-10-28T09:00:00Z", driverNotes: "hotovo", photoException: null } });
-    expect(() => work.readTowingCommand({ ...base, payload: { fields: { pickup: "iné" } } })).toThrow();
+    expect(work.readTowingCommand({ ...base, payload: { fields: { pickup: " iné ", contact: "+421900111222", branchId: id(90), requester: { name: "Partner", email: "contact@example.invalid" } } } }).payload)
+      .toEqual({ fields: { pickup: "iné", contact: "+421900111222", branchId: id(90), requester: { name: "Partner", email: "contact@example.invalid" } } });
+    for (const fields of [{ officeNotes: "Private" }, { authorizedCollectionCents: 1000 }, { customer: { name: "Billing identity" } }, { requester: { name: "Partner", taxId: "Private" } }, { branchId: OTHER + "/other" }]) {
+      expect(() => work.readTowingCommand({ ...base, payload: { fields } })).toThrow();
+    }
     expect(() => work.readTowingCommand({ ...base, payload: { fields: { startedAt: "2026-10-28T10:00:00Z", finishedAt: "2026-10-28T09:00:00Z" } } })).toThrow();
     expect(() => work.readTowingCommand({ ...base, type: "receive_payment", payload: {} })).toThrow();
     expect(() => work.readTowingCommand({ ...base, type: "submit", assignmentGeneration: undefined, payload: {} })).toThrow();
@@ -251,6 +345,26 @@ describe("Moja práca: towing", () => {
     vi.stubEnv("MOTORIST_TOWING_ENABLED", "");
     await expect(work.readFieldTowing(actor, ORDER)).rejects.toMatchObject({ status: 503, code: "towing_unavailable" });
     expect(await work.loadFieldTowing(actor)).toBeNull();
+  });
+});
+
+describe("own mobile cash", () => {
+  const account = { id: id(90), driverId: MEMBER, balanceCents: 15000, reservedCents: 5000, revision: 3 };
+  const handover = { id: id(91), driverId: MEMBER, amountCents: 5000, status: "pending", revision: 1, createdAt: at };
+  it("filters other members and office accounts even for a dual-role actor", async () => {
+    rpcs({ motorist_towing_workspace: () => ({ view: "driver", orders: [], cashAccounts: [account, { ...account, id: id(92), driverId: null }, { ...account, id: id(93), driverId: OTHER }], handovers: [handover, { ...handover, id: id(94), driverId: OTHER }] }) });
+    const result = await work.loadFieldCash({ ...actor, capabilities: [...actor.capabilities, "cash"] });
+    expect(result.account).toEqual({ id: account.id, balanceCents: 15000, reservedCents: 5000, revision: 3 });
+    expect(result.handovers).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain(OTHER);
+    await expect(work.loadFieldCash({ ...actor, capabilities: ["deliver"] })).rejects.toMatchObject({ status: 403 });
+  });
+  it("proposes only own handovers using stable IDs and exact account revision", async () => {
+    const command = { commandId: CMD, handoverId: handover.id, type: "propose_handover", expectedRevision: 0, payload: { amountCents: 5000, accountRevision: 3 } };
+    rpcs({ motorist_towing_command: () => ({ commandId: CMD, targetId: handover.id, revision: 1 }), motorist_towing_workspace: () => ({ view: "driver", orders: [], cashAccounts: [account], handovers: [handover] }) });
+    await expect(work.commandFieldCash(actor, command)).resolves.toMatchObject({ commandId: CMD, revision: 1, cash: { account: { revision: 3 } } });
+    expect(mocks.rpc).toHaveBeenCalledWith("motorist_towing_command", expect.objectContaining({ p_command: { commandId: CMD, type: "propose_handover", targetId: handover.id, expectedRevision: 0, payload: command.payload } }));
+    for (const bad of [{ ...command, payload: { ...command.payload, driverId: OTHER } }, { ...command, type: "accept_handover" }, { ...command, payload: { ...command.payload, amountCents: 50.1 } }]) expect(() => work.readCashCommand(bad)).toThrow();
   });
 });
 
